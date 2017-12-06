@@ -15,6 +15,14 @@ pub trait Summary: Clone + Eq + fmt::Debug {
     fn accumulate<'a, T: IntoIterator<Item=&'a Self>>(summaries: T) -> Self where Self: 'a + Sized;
 }
 
+pub trait Dimension: Default + Ord {
+    type Summary: Summary;
+
+    fn from_summary(summary: &Self::Summary) -> Self;
+
+    fn accumulate(&self, other: &Self) -> Self;
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct Tree<T: TreeItem>(Arc<Node<T>>);
 
@@ -49,7 +57,7 @@ impl<T: TreeItem> From<T> for Tree<T> {
     }
 }
 
-impl<T: TreeItem> Tree<T> {
+impl<'a, T: TreeItem> Tree<T> {
     fn new(node: Node<T>) -> Self {
         Tree(Arc::new(node))
     }
@@ -58,8 +66,16 @@ impl<T: TreeItem> Tree<T> {
         Self::new(Node::Empty)
     }
 
+    pub fn from_items<ItemsType: IntoIterator<Item=T>>(items: ItemsType) -> Self {
+        let mut tree = Self::empty();
+        for item in items.into_iter() {
+            tree = Self::concat(tree, Self::from(item));
+        }
+        tree
+    }
+
     fn from_children(children: Vec<Self>) -> Self {
-        let summary = T::Summary::accumulate(children.iter().map(|tree| tree.get_summary()));
+        let summary = T::Summary::accumulate(children.iter().map(|tree| tree.summary()));
         let height = children[0].height() + 1;
         Self::new(Node::Internal { summary, children, height })
     }
@@ -94,7 +110,7 @@ impl<T: TreeItem> Tree<T> {
 
         match left_height.cmp(&right_height) {
             Ordering::Less => {
-                let right_children = right.get_children();
+                let right_children = right.children();
                 if left_height == right_height - 1 && !left.underflowing() {
                     Tree::merge_nodes(&[left], right_children)
                 } else {
@@ -103,23 +119,23 @@ impl<T: TreeItem> Tree<T> {
                     if new_left.height() == right_height - 1 {
                         Tree::merge_nodes(&[new_left], right_children)
                     } else {
-                        Tree::merge_nodes(new_left.get_children(), right_children)
+                        Tree::merge_nodes(new_left.children(), right_children)
                     }
                 }
             },
             Ordering::Equal => {
-                if left_height == 1 { // leaf nodes
+                if left_height == 1 { // Both left and right are leaves.
                     Tree::from_children(vec![left, right])
                 } else {
-                    if left.get_child_count() + right.get_child_count() <= MAX_CHILDREN {
-                        Tree::merge_nodes(left.get_children(), right.get_children())
+                    if left.underflowing() || right.underflowing() {
+                        Tree::merge_nodes(left.children(), right.children())
                     } else {
                         Tree::from_children(vec![left, right])
                     }
                 }
             },
             Ordering::Greater => {
-                let left_children = left.get_children();
+                let left_children = left.children();
                 if right_height == left_height - 1 && !right.underflowing() {
                     Tree::merge_nodes(left_children, &[right])
                 } else {
@@ -128,9 +144,31 @@ impl<T: TreeItem> Tree<T> {
                     if new_right.height() == left_height - 1 {
                         Tree::merge_nodes(left_children, &[new_right])
                     } else {
-                        Tree::merge_nodes(left_children, new_right.get_children())
+                        Tree::merge_nodes(left_children, new_right.children())
                     }
                 }
+            }
+        }
+    }
+
+    pub fn get<D: Dimension<Summary=T::Summary>>(&self, target: D) -> Option<&T> {
+        self.get_internal(D::default(), target)
+    }
+
+    fn get_internal<D: Dimension<Summary=T::Summary>>(&self, mut current_pos: D, target: D) -> Option<&T> {
+        match self.0.as_ref() {
+            &Node::Empty => None,
+            &Node::Leaf {ref value, ..} => Some(value),
+            &Node::Internal {ref children, ..} => {
+                for ref child in children {
+                    let next_pos = current_pos.accumulate(&D::from_summary(&child.summary()));
+                    if next_pos > target {
+                        return child.get_internal(current_pos, target);
+                    } else {
+                        current_pos = next_pos;
+                    }
+                }
+                None
             }
         }
     }
@@ -143,21 +181,14 @@ impl<T: TreeItem> Tree<T> {
         }
     }
 
-    fn get_children(&self) -> &[Tree<T>] {
+    fn children(&self) -> &[Tree<T>] {
         match self.0.as_ref() {
             &Node::Internal { ref children, .. } => children.as_slice(),
             _ => panic!("Requested children of a non-internal node")
         }
     }
 
-    fn get_child_count(&self) -> usize {
-        match self.0.as_ref() {
-            &Node::Internal { ref children, .. } => children.len(),
-            _ => 0
-        }
-    }
-
-    fn get_summary(&self) -> &T::Summary {
+    fn summary(&self) -> &T::Summary {
         match self.0.as_ref() {
             &Node::Empty => panic!("Requested a summary of an empty node"),
             &Node::Leaf { ref summary, .. } => summary,
@@ -191,6 +222,18 @@ mod tests {
         }
     }
 
+    impl Dimension for usize {
+        type Summary = usize;
+
+        fn from_summary(summary: &Self::Summary) -> Self {
+            *summary
+        }
+
+        fn accumulate(&self, other: &Self) -> Self {
+            *self + *other
+        }
+    }
+
     #[test]
     fn concat() {
         assert_eq!(
@@ -212,5 +255,14 @@ mod tests {
             Tree::concat(Tree::concat(Tree::from(1), Tree::from(2)), Tree::from(3)),
             Tree::concat(Tree::from(1), Tree::concat(Tree::from(2), Tree::from(3)))
         );
+    }
+
+    #[test]
+    fn get() {
+        let tree = Tree::from_items(vec![1, 2, 3, 4, 5]);
+        assert_eq!(*tree.get(0).unwrap(), 1);
+        assert_eq!(*tree.get(2).unwrap(), 3);
+        assert_eq!(*tree.get(4).unwrap(), 5);
+        assert_eq!(tree.get(5), None);
     }
 }
