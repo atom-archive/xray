@@ -5,7 +5,7 @@ use std::clone::Clone;
 const MIN_CHILDREN: usize = 2;
 const MAX_CHILDREN: usize = 4;
 
-pub trait TreeItem: Clone + Eq + fmt::Debug {
+pub trait Item: Clone + Eq + fmt::Debug {
     type Summary: Summary;
 
     fn summarize(&self) -> Self::Summary;
@@ -15,7 +15,7 @@ pub trait Summary: Clone + Eq + fmt::Debug {
     fn accumulate(&mut self, other: &Self);
 }
 
-pub trait Dimension: Default + Ord {
+pub trait Dimension: Default + Ord + Clone + fmt::Debug {
     type Summary: Summary;
 
     fn from_summary(summary: &Self::Summary) -> Self;
@@ -24,10 +24,10 @@ pub trait Dimension: Default + Ord {
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct Tree<T: TreeItem>(Arc<Node<T>>);
+pub struct Tree<T: Item>(Arc<Node<T>>);
 
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum Node<T: TreeItem> {
+pub enum Node<T: Item> {
     Empty,
     Leaf {
         summary: T::Summary,
@@ -40,7 +40,13 @@ pub enum Node<T: TreeItem> {
     }
 }
 
-impl<T: TreeItem> From<T> for Tree<T> {
+pub struct Iter<'a, T: 'a + Item> {
+    tree: &'a Tree<T>,
+    started: bool,
+    stack: Vec<(&'a Tree<T>, usize)>,
+}
+
+impl<T: Item> From<T> for Tree<T> {
     fn from(value: T) -> Self {
         Tree(Arc::new(Node::Leaf {
             summary: value.summarize(),
@@ -49,7 +55,7 @@ impl<T: TreeItem> From<T> for Tree<T> {
     }
 }
 
-impl<T: TreeItem> Extend<T> for Tree<T> {
+impl<T: Item> Extend<T> for Tree<T> {
     fn extend<I: IntoIterator<Item=T>>(&mut self, items: I) {
         for item in items.into_iter() {
             self.push(Self::from(item));
@@ -57,7 +63,7 @@ impl<T: TreeItem> Extend<T> for Tree<T> {
     }
 }
 
-impl<'a, T: TreeItem> Tree<T> {
+impl<'a, T: Item> Tree<T> {
     pub fn new() -> Self {
         Tree(Arc::new(Node::Empty))
     }
@@ -75,6 +81,10 @@ impl<'a, T: TreeItem> Tree<T> {
             summary.accumulate(child.summary());
         }
         summary
+    }
+
+    fn iter(&self) -> Iter<T> {
+        Iter::new(self)
     }
 
     // This should only be called on the root.
@@ -115,6 +125,8 @@ impl<'a, T: TreeItem> Tree<T> {
     }
 
     fn push_recursive(&mut self, other: Tree<T>) -> Option<Tree<T>> {
+        self.summary_mut().accumulate(other.summary());
+
         let self_height = self.height();
         let other_height = other.height();
 
@@ -141,16 +153,51 @@ impl<'a, T: TreeItem> Tree<T> {
                         let mut all_children = children.iter().chain(new_children.iter()).cloned();
                         (all_children.by_ref().take(midpoint).collect(), all_children.collect())
                     };
+                    *summary = Self::summarize_children(&left_children);
                     *children = left_children;
-                    *summary = Self::summarize_children(children);
                     Some(Tree::from_children(right_children))
                 } else {
-                    summary.accumulate(&Self::summarize_children(new_children));
                     children.extend(new_children.iter().cloned());
                     None
                 }
             },
             _ => panic!("Tried to append children to a non-internal node")
+        }
+    }
+
+    pub fn splice<D: Dimension<Summary=T::Summary>, I: IntoIterator<Item=T>>(&mut self, start: &D, end: &D, new_items: I) {
+        let mut result = Self::new();
+        self.append_subsequence(&mut result, &D::default(), start);
+        result.extend(new_items);
+        self.append_subsequence(&mut result, end, &D::from_summary(self.summary()));
+        *self = result;
+    }
+
+    fn append_subsequence<D: Dimension<Summary=T::Summary>>(&self, result: &mut Self, start: &D, end: &D) {
+        self.append_subsequence_recursive(result, &D::default(), start, end);
+    }
+
+    fn append_subsequence_recursive<D: Dimension<Summary=T::Summary>>(&self, result: &mut Self, node_start: &D, start: &D, end: &D) {
+        match self.0.as_ref() {
+            &Node::Empty => (),
+            &Node::Leaf {..} => {
+                if *start <= *node_start && *node_start < *end {
+                    result.push(self.clone());
+                }
+            }
+            &Node::Internal {ref summary, ref children, ..} => {
+                let node_end = node_start.accumulate(&D::from_summary(summary));
+                if *start <= *node_start && node_end <= *end {
+                    result.push(self.clone());
+                } else if *node_start < *end || *start < node_end {
+                    let mut child_start = node_start.clone();
+                    for ref child in children {
+                        child.append_subsequence_recursive(result, &child_start, start, end);
+                        child_start = child_start.accumulate(&D::from_summary(child.summary()));
+                    }
+                }
+            }
+
         }
     }
 
@@ -176,12 +223,19 @@ impl<'a, T: TreeItem> Tree<T> {
         }
     }
 
-
     fn summary(&self) -> &T::Summary {
         match self.0.as_ref() {
             &Node::Empty => panic!("Requested a summary of an empty node"),
             &Node::Leaf { ref summary, .. } => summary,
             &Node::Internal { ref summary, .. } => summary,
+        }
+    }
+
+    fn summary_mut(&mut self) -> &mut T::Summary {
+        match Arc::make_mut(&mut self.0) {
+            &mut Node::Empty => panic!("Requested a summary of an empty node"),
+            &mut Node::Leaf { ref mut summary, .. } => summary,
+            &mut Node::Internal { ref mut summary, .. } => summary,
         }
     }
 
@@ -196,6 +250,13 @@ impl<'a, T: TreeItem> Tree<T> {
         match Arc::make_mut(&mut self.0) {
             &mut Node::Internal { ref mut children, .. } => children.last_mut().unwrap(),
             _ => panic!("Requested last child of a non-internal node")
+        }
+    }
+
+    fn value(&self) -> &T {
+        match self.0.as_ref() {
+            &Node::Leaf { ref value, .. } => value,
+            _ => panic!("Requested value of a non-leaf node")
         }
     }
 
@@ -215,11 +276,58 @@ impl<'a, T: TreeItem> Tree<T> {
     }
 }
 
+impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.started {
+            while self.stack.len() > 1 {
+                self.stack.pop();
+                let (tree, index) = {
+                    let &mut (tree, ref mut index) = self.stack.last_mut().unwrap();
+                    *index += 1;
+                    (tree, *index)
+                };
+                if let Some(child) = tree.children().get(index) {
+                    return self.descend_to_first_item(child);
+                }
+            }
+            None
+        } else {
+            self.started = true;
+            self.descend_to_first_item(self.tree)
+        }
+    }
+}
+
+impl<'a, T: 'a + Item> Iter<'a, T> {
+    fn new(tree: &'a Tree<T>) -> Self {
+        Iter {
+            tree,
+            started: false,
+            stack: Vec::with_capacity(tree.height() as usize)
+        }
+    }
+
+    fn descend_to_first_item(&mut self, mut tree: &'a Tree<T>) -> Option<&'a T> {
+        loop {
+            self.stack.push((tree, 0));
+            match tree.0.as_ref() {
+                &Node::Empty => return None,
+                &Node::Leaf {ref value, ..} => return Some(value),
+                &Node::Internal { ref children, ..} => {
+                    tree = &children[0];
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    impl TreeItem for u16 {
+    impl Item for u16 {
         type Summary = usize;
 
         fn summarize(&self) -> usize {
@@ -245,39 +353,43 @@ mod tests {
         }
     }
 
+    impl<T: super::Item> Tree<T> {
+        fn items(&self) -> Vec<T> {
+            self.iter().cloned().collect()
+        }
+    }
+
     #[test]
-    fn push() {
+    fn extend_and_push() {
         let mut tree1 = Tree::new();
-        tree1.push(Tree::new());
-        assert_eq!(tree1, Tree::new());
+        tree1.extend((1..20));
 
-        tree1.push(Tree::from(1));
-        assert_eq!(tree1, Tree::from(1));
+        let mut tree2 = Tree::new();
+        tree2.extend((1..50));
 
-        tree1.push(Tree::from(2));
+        tree1.push(tree2);
 
-        // let mut tree2 = Tree:
+        assert_eq!(
+            tree1.items(),
+            (1..20).chain(1..50).collect::<Vec<u16>>()
+        );
+    }
 
-        // assert_eq!(
-        //     Tree::concat(Tree::new(), Tree::from(1)),
-        //     Tree::from(1)
-        // );
-        //
-        // assert_eq!(
-        //     Tree::concat(Tree::from(1), Tree::new()),
-        //     Tree::from(1)
-        // );
-        //
-        // assert_eq!(
-        //     Tree::concat(Tree::concat(Tree::from(1), Tree::from(2)), Tree::from(3)),
-        //     Tree::concat(Tree::from(1), Tree::concat(Tree::from(2), Tree::from(3)))
-        // );
+    #[test]
+    fn splice() {
+        let mut tree = Tree::new();
+        tree.extend(0..10);
+        tree.splice(&2, &8, 20..23);
+        assert_eq!(
+            tree.items(),
+            vec![0, 1, 20, 21, 22, 8, 9]
+        );
     }
 
     #[test]
     fn get() {
         let mut tree = Tree::new();
-        tree.extend(vec![1, 2, 3, 4, 5, 6, 7]);
+        tree.extend((1..8));
         assert_eq!(*tree.get(0).unwrap(), 1);
         assert_eq!(*tree.get(2).unwrap(), 3);
         assert_eq!(*tree.get(4).unwrap(), 5);
