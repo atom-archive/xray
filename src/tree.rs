@@ -87,6 +87,10 @@ impl<'a, T: Item> Tree<T> {
         Iter::new(self)
     }
 
+    fn len<D: Dimension<Summary=T::Summary>>(&self) -> D {
+        D::from_summary(self.summary())
+    }
+
     // This should only be called on the root.
     fn push(&mut self, other: Tree<T>) {
         let self_height = self.height();
@@ -384,6 +388,29 @@ mod tests {
             tree.items(),
             vec![0, 1, 20, 21, 22, 8, 9]
         );
+    }
+
+    #[test]
+    fn random_splice() {
+        use rand::{self, Rng};
+        let mut rng = rand::thread_rng();
+
+        let mut tree = Tree::<u16>::new();
+        let count = rng.gen_range(0, 100);
+        tree.extend(rng.gen_iter().take(count));
+
+        for i in (0..100) {
+            let end = rng.gen_range(0, tree.len::<usize>() + 1);
+            let start = rng.gen_range(0, end + 1);
+            let count = rng.gen_range(0, 100);
+            let new_items = rng.gen_iter().take(count).collect::<Vec<u16>>();
+            let mut original_tree_items = tree.items();
+
+            tree.splice(&start, &end, new_items.clone());
+            original_tree_items.splice(start..end, new_items);
+
+            assert_eq!(tree.items(), original_tree_items);
+        }
     }
 
     #[test]
