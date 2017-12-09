@@ -1,6 +1,7 @@
-use std::fmt;
-use std::sync::Arc;
 use std::clone::Clone;
+use std::fmt;
+use std::ops::Range;
+use std::sync::Arc;
 
 const MIN_CHILDREN: usize = 2;
 const MAX_CHILDREN: usize = 4;
@@ -92,7 +93,8 @@ impl<'a, T: Item> Tree<T> {
     }
 
     // This should only be called on the root.
-    fn push(&mut self, other: Tree<T>) {
+    pub fn push<S: Into<Tree<T>>>(&mut self, other: S) {
+        let other = other.into();
         let self_height = self.height();
         let other_height = other.height();
 
@@ -169,11 +171,11 @@ impl<'a, T: Item> Tree<T> {
         }
     }
 
-    pub fn splice<D: Dimension<Summary=T::Summary>, I: IntoIterator<Item=T>>(&mut self, start: &D, end: &D, new_items: I) {
+    pub fn splice<D: Dimension<Summary=T::Summary>, I: IntoIterator<Item=T>>(&mut self, old_range: Range<&D>, new_items: I) {
         let mut result = Self::new();
-        self.append_subsequence(&mut result, &D::default(), start);
+        self.append_subsequence(&mut result, &D::default(), old_range.start);
         result.extend(new_items);
-        self.append_subsequence(&mut result, end, &D::from_summary(self.summary()));
+        self.append_subsequence(&mut result, old_range.end, &D::from_summary(self.summary()));
         *self = result;
     }
 
@@ -383,7 +385,7 @@ mod tests {
     fn splice() {
         let mut tree = Tree::new();
         tree.extend(0..10);
-        tree.splice(&2, &8, 20..23);
+        tree.splice(&2..&8, 20..23);
         assert_eq!(
             tree.items(),
             vec![0, 1, 20, 21, 22, 8, 9]
@@ -399,14 +401,14 @@ mod tests {
         let count = rng.gen_range(0, 100);
         tree.extend(rng.gen_iter().take(count));
 
-        for i in (0..100) {
+        for i in 0..100 {
             let end = rng.gen_range(0, tree.len::<usize>() + 1);
             let start = rng.gen_range(0, end + 1);
             let count = rng.gen_range(0, 100);
             let new_items = rng.gen_iter().take(count).collect::<Vec<u16>>();
             let mut original_tree_items = tree.items();
 
-            tree.splice(&start, &end, new_items.clone());
+            tree.splice(&start..&end, new_items.clone());
             original_tree_items.splice(start..end, new_items);
 
             assert_eq!(tree.items(), original_tree_items);
