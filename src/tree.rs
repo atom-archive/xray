@@ -122,7 +122,7 @@ impl<'a, T: Item> Tree<T> {
 
         // At this point, we know that other isn't taller than self and isn't empty.
         // Therefore, we're pushing a leaf onto a leaf, so we reassign root to an internal node.
-        if self_height == 1 {
+        if self_height == 0 {
             *self = Self::from_children(vec![self.clone(), other]);
             return;
         }
@@ -285,9 +285,8 @@ impl<'a, T: Item> Tree<T> {
 
     fn height(&self) -> u16 {
         match self.0.as_ref() {
-            &Node::Empty => 1,
-            &Node::Leaf { .. } => 1,
-            &Node::Internal { height, ..} => height
+            &Node::Internal { height, ..} => height,
+            _ => 0
         }
     }
 }
@@ -297,7 +296,7 @@ impl<'a, T: 'a + Item> Iter<'a, T> {
         Iter {
             tree,
             started: false,
-            stack: Vec::with_capacity((tree.height() - 1) as usize)
+            stack: Vec::with_capacity(tree.height() as usize)
         }
     }
 
