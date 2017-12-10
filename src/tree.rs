@@ -288,6 +288,29 @@ impl<'a, T: Item> Tree<T> {
     }
 }
 
+impl<'a, T: 'a + Item> Iter<'a, T> {
+    fn new(tree: &'a Tree<T>) -> Self {
+        Iter {
+            tree,
+            started: false,
+            stack: Vec::with_capacity((tree.height() - 1) as usize)
+        }
+    }
+
+    fn descend_to_first_item(&mut self, mut tree: &'a Tree<T>) -> Option<&'a T> {
+        loop {
+            match tree.0.as_ref() {
+                &Node::Empty => return None,
+                &Node::Leaf {ref value, ..} => return Some(value),
+                &Node::Internal { ref children, ..} => {
+                    self.stack.push((tree, 0));
+                    tree = &children[0];
+                }
+            }
+        }
+    }
+}
+
 impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
     type Item = &'a T;
 
@@ -309,29 +332,6 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
         } else {
             self.started = true;
             self.descend_to_first_item(self.tree)
-        }
-    }
-}
-
-impl<'a, T: 'a + Item> Iter<'a, T> {
-    fn new(tree: &'a Tree<T>) -> Self {
-        Iter {
-            tree,
-            started: false,
-            stack: Vec::with_capacity((tree.height() - 1) as usize)
-        }
-    }
-
-    fn descend_to_first_item(&mut self, mut tree: &'a Tree<T>) -> Option<&'a T> {
-        loop {
-            match tree.0.as_ref() {
-                &Node::Empty => return None,
-                &Node::Leaf {ref value, ..} => return Some(value),
-                &Node::Internal { ref children, ..} => {
-                    self.stack.push((tree, 0));
-                    tree = &children[0];
-                }
-            }
         }
     }
 }
