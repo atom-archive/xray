@@ -132,6 +132,16 @@ impl tree::Summary for FragmentSummary {
     }
 }
 
+impl Default for FragmentSummary {
+    fn default() -> Self {
+        FragmentSummary {
+            min_id: FragmentId::min_value(),
+            extent: 0,
+            newline_count: 0
+        }
+    }
+}
+
 impl FragmentId {
     fn min_value() -> Self {
         FragmentId(vec![0 as u16])

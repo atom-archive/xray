@@ -12,12 +12,16 @@ pub trait Item: Clone + Eq + fmt::Debug {
     fn summarize(&self) -> Self::Summary;
 }
 
-pub trait Summary: Clone + Eq + fmt::Debug {
+pub trait Summary: Default + Eq + Clone + fmt::Debug {
     fn accumulate(&mut self, other: &Self);
 }
 
-pub trait Dimension: Default + Ord + Clone + fmt::Debug {
+pub trait Dimension: Ord + Clone + fmt::Debug {
     type Summary: Summary;
+
+    fn default() -> Self {
+        Self::from_summary(&Self::Summary::default())
+    }
 
     fn from_summary(summary: &Self::Summary) -> Self;
 
