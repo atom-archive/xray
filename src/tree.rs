@@ -95,19 +95,18 @@ impl<'a, T: Item> Tree<T> {
     // This should only be called on the root.
     pub fn push<S: Into<Tree<T>>>(&mut self, other: S) {
         let other = other.into();
-        let self_height = self.height();
-        let other_height = other.height();
 
-        // Other is empty.
-        if other_height == 0 {
+        if other.is_empty() {
             return;
         }
 
-        // Self is empty.
-        if self_height == 0 {
+        if self.is_empty() {
             *self = other;
             return;
         }
+
+        let self_height = self.height();
+        let other_height = other.height();
 
         // Other is a taller tree, push its children one at a time
         if self_height < other_height {
@@ -273,9 +272,16 @@ impl<'a, T: Item> Tree<T> {
         }
     }
 
+    fn is_empty(&self) -> bool {
+        match self.0.as_ref() {
+            &Node::Empty => true,
+            _ => false
+        }
+    }
+
     fn height(&self) -> u16 {
         match self.0.as_ref() {
-            &Node::Empty => 0,
+            &Node::Empty => 1,
             &Node::Leaf { .. } => 1,
             &Node::Internal { height, ..} => height
         }
@@ -312,7 +318,7 @@ impl<'a, T: 'a + Item> Iter<'a, T> {
         Iter {
             tree,
             started: false,
-            stack: Vec::with_capacity(tree.height() as usize)
+            stack: Vec::with_capacity((tree.height() - 1) as usize)
         }
     }
 
