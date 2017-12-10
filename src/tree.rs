@@ -287,8 +287,7 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.started {
-            while self.stack.len() > 1 {
-                self.stack.pop();
+            while self.stack.len() > 0 {
                 let (tree, index) = {
                     let &mut (tree, ref mut index) = self.stack.last_mut().unwrap();
                     *index += 1;
@@ -296,6 +295,8 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
                 };
                 if let Some(child) = tree.children().get(index) {
                     return self.descend_to_first_item(child);
+                } else {
+                    self.stack.pop();
                 }
             }
             None
@@ -317,11 +318,11 @@ impl<'a, T: 'a + Item> Iter<'a, T> {
 
     fn descend_to_first_item(&mut self, mut tree: &'a Tree<T>) -> Option<&'a T> {
         loop {
-            self.stack.push((tree, 0));
             match tree.0.as_ref() {
                 &Node::Empty => return None,
                 &Node::Leaf {ref value, ..} => return Some(value),
                 &Node::Internal { ref children, ..} => {
+                    self.stack.push((tree, 0));
                     tree = &children[0];
                 }
             }
