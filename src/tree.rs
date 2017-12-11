@@ -386,28 +386,37 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         }
     }
 
+    pub fn seek<D: Dimension<Summary=T::Summary>>(&mut self, pos: &D) {
+        self.seek_internal(pos, None);
+    }
+
     pub fn build_prefix<D: Dimension<Summary=T::Summary>>(&mut self, end: &D) -> Tree<T> {
-        self.reset();
-
         let mut prefix = Tree::new();
-        let mut subtree = self.tree;
+        self.seek_internal(end, Some(&mut prefix));
+        prefix
+    }
 
+    fn seek_internal<D: Dimension<Summary=T::Summary>>(&mut self, pos: &D, mut prefix: Option<&mut Tree<T>>) {
+        self.reset();
+        self.did_seek = true;
+
+        let mut subtree = self.tree;
         loop {
             match subtree.0.as_ref() {
                 &Node::Internal {ref summary, ref children, ..} => {
                     let subtree_start = D::from_summary(&self.summary);
                     let subtree_end = subtree_start.accumulate(&D::from_summary(summary));
-                    if *end >= subtree_end {
+                    if *pos >= subtree_end {
                         self.summary.accumulate(summary);
-                        prefix.push(subtree.clone());
-                        break;
+                        prefix.as_mut().map(|prefix| prefix.push(subtree.clone()));
+                        return;
                     } else {
                         let mut child_start = subtree_start.clone();
                         for (index, child) in children.iter().enumerate() {
                             let child_end = child_start.accumulate(&D::from_summary(child.summary()));
-                            if *end >= child_end {
+                            if *pos >= child_end {
                                 self.summary.accumulate(child.summary());
-                                prefix.push(child.clone());
+                                prefix.as_mut().map(|prefix| prefix.push(child.clone()));
                                 child_start = child_end;
                             } else {
                                 self.stack.push((subtree, index));
@@ -417,12 +426,9 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                         }
                     }
                 },
-                _ => break
+                _ => return
             }
         }
-
-        self.did_seek = true;
-        prefix
     }
 
     fn descend_to_first_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) -> Option<(&'tree T, &'a T::Summary)> {
@@ -575,10 +581,10 @@ mod tests {
         tree.extend(vec![1, 2, 3, 4, 5, 6]);
         let mut cursor = tree.cursor();
 
-        // Calling next without seeking (by building a prefix) yields the first element
+        // Calling next without building a prefix yields the first element
         assert_eq!(cursor.next(), Some((&1, &IntegersSummary {count: 0, sum: 0})));
 
-        // Calling next after seeking (by building a prefix) yields the element after the last prefix
+        // Calling next after building a prefix yields the element after the last prefix
         assert_eq!(cursor.build_prefix(&Sum(4)).items(), [1, 2]);
         assert_eq!(cursor.next(), Some((&3, &IntegersSummary {count: 2, sum: 3})));
         assert_eq!(cursor.next(), Some((&4, &IntegersSummary {count: 3, sum: 6})));
