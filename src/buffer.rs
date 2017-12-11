@@ -2,26 +2,37 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use super::tree::{self, Tree};
 
-type ReplicaId = u32;
-type SequenceNumber = u32;
+type ReplicaId = usize;
+type LocalTimestamp = usize;
+type LamportTimestamp = usize;
 
 pub struct Buffer {
     replica_id: ReplicaId,
-    countuence_number: SequenceNumber,
+    local_clock: LocalTimestamp,
+    lamport_clock: LamportTimestamp,
     fragments: Tree<Fragment>
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub struct Position {
+    insertion_id: SpliceId,
+    offset: usize,
+    replica_id: ReplicaId,
+    lamport_timestamp: LamportTimestamp
 }
 
 #[derive(Eq, PartialEq, Debug)]
 struct Insertion {
     id: SpliceId,
+    start: Position,
     text: Vec<u16>,
     newline_offsets: Vec<usize>
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 struct SpliceId {
-    replica: ReplicaId,
-    count: SequenceNumber
+    replica_id: ReplicaId,
+    local_timestamp: LocalTimestamp
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -35,7 +46,7 @@ struct Fragment {
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct FragmentSummary {
-    min_id: FragmentId,
+    max_id: Option<FragmentId>,
     extent: usize,
     newline_count: usize
 }
@@ -43,25 +54,20 @@ struct FragmentSummary {
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct FragmentId (Vec<u16>);
 
-trait FindInsertionIndex<T: Ord> {
-    fn find_insertion_index(&self, x: &T) -> usize;
-}
-
 impl Buffer {
     fn new(replica_id: ReplicaId) {
         assert!(replica_id > 0);
         let mut fragments = Tree::<Fragment>::new();
 
-        // Start sentinel.
+        // Push start sentinel.
         fragments.push(Fragment::new(FragmentId::min_value(), Insertion {
-            id: SpliceId { replica: 0, count: 0 },
-            text: vec![],
-            newline_offsets: vec![]
-        }));
-
-        // End sentinel.
-        fragments.push(Fragment::new(FragmentId::max_value(), Insertion {
-            id: SpliceId { replica: 0, count: 1 },
+            id: SpliceId { replica_id: 0, local_timestamp: 0 },
+            start: Position {
+                insertion_id: SpliceId { replica_id: 0, local_timestamp: 0},
+                offset: 0,
+                replica_id: 0,
+                lamport_timestamp: 0
+            },
             text: vec![],
             newline_offsets: vec![]
         }));
@@ -69,7 +75,7 @@ impl Buffer {
 }
 
 impl Insertion {
-    fn new(id: SpliceId, text: Vec<u16>) -> Self {
+    fn new(id: SpliceId, start: Position, text: Vec<u16>) -> Self {
         let newline_offsets = text.iter().enumerate().filter_map(|(offset, c)| {
             if *c == (b'\n' as u16) {
                 Some(offset)
@@ -80,13 +86,14 @@ impl Insertion {
 
         Self {
             id,
+            start,
             text,
             newline_offsets
         }
     }
 
-    fn with_string(id: SpliceId, s: &str) -> Self {
-        Self::new(id, s.encode_utf16().collect())
+    fn with_string(id: SpliceId, start: Position, s: &str) -> Self {
+        Self::new(id, start, s.encode_utf16().collect())
     }
 
     fn len(&self) -> usize {
@@ -94,8 +101,8 @@ impl Insertion {
     }
 
     fn newline_count_in_offset_range(&self, start: usize, end: usize) -> usize {
-        let newlines_start = self.newline_offsets.find_insertion_index(&start);
-        let newlines_end = self.newline_offsets.find_insertion_index(&end);
+        let newlines_start = find_insertion_index(&self.newline_offsets, &start);
+        let newlines_end = find_insertion_index(&self.newline_offsets, &end);
         newlines_end - newlines_start
     }
 }
@@ -118,7 +125,7 @@ impl tree::Item for Fragment {
 
     fn summarize(&self) -> Self::Summary {
         FragmentSummary {
-            min_id: self.id.clone(),
+            max_id: Some(self.id.clone()),
             extent: self.end_offset - self.start_offset,
             newline_count: self.insertion.newline_count_in_offset_range(self.start_offset, self.end_offset)
         }
@@ -135,7 +142,7 @@ impl tree::Summary for FragmentSummary {
 impl Default for FragmentSummary {
     fn default() -> Self {
         FragmentSummary {
-            min_id: FragmentId::min_value(),
+            max_id: None,
             extent: 0,
             newline_count: 0
         }
@@ -152,12 +159,10 @@ impl FragmentId {
     }
 }
 
-impl<T: Ord> FindInsertionIndex<T> for Vec<T> {
-    fn find_insertion_index(&self, x: &T) -> usize {
-        match self.binary_search(x) {
-            Ok(index) => index,
-            Err(index) => index
-        }
+fn find_insertion_index<T: Ord>(v: &Vec<T>, x: &T) -> usize {
+    match v.binary_search(x) {
+        Ok(index) => index,
+        Err(index) => index
     }
 }
 
@@ -167,8 +172,9 @@ mod tests {
 
     #[test]
     fn insertion_newline_counting() {
-        let id = SpliceId { replica: 1, count: 0 };
-        let ins = Insertion::with_string(id, "The\nQuick\nBrown\nFox");
+        let id = SpliceId { replica_id: 1, local_timestamp: 0 };
+        let start = Position { insertion_id: id.clone(), offset: 0, replica_id: 0, lamport_timestamp: 0};
+        let ins = Insertion::with_string(id, start, "The\nQuick\nBrown\nFox");
         assert_eq!(ins.newline_count_in_offset_range(3, 15), 2);
         assert_eq!(ins.newline_count_in_offset_range(3, 16), 3);
         assert_eq!(ins.newline_count_in_offset_range(4, 16), 2);
