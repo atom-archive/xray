@@ -47,13 +47,14 @@ pub enum Node<T: Item> {
 
 pub struct Iter<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
-    started: bool,
+    did_next: bool,
     stack: Vec<(&'a Tree<T>, usize)>,
 }
 
 struct Cursor<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
-    started: bool,
+    did_seek: bool,
+    did_next: bool,
     stack: Vec<(&'a Tree<T>, usize)>,
     summary: T::Summary
 }
@@ -283,7 +284,7 @@ impl<'a, T: 'a + Item> Iter<'a, T> {
     fn new(tree: &'a Tree<T>) -> Self {
         Iter {
             tree,
-            started: false,
+            did_next: false,
             stack: Vec::with_capacity(tree.height() as usize)
         }
     }
@@ -306,7 +307,7 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.started {
+        if self.did_next {
             while self.stack.len() > 0 {
                 let (tree, index) = {
                     let &mut (tree, ref mut index) = self.stack.last_mut().unwrap();
@@ -321,7 +322,7 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
             }
             None
         } else {
-            self.started = true;
+            self.did_next = true;
             self.descend_to_first_item(self.tree)
         }
     }
@@ -331,20 +332,22 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
     fn new(tree: &'tree Tree<T>) -> Self {
         Self {
             tree,
-            started: false,
+            did_seek: false,
+            did_next: false,
             stack: Vec::with_capacity(tree.height() as usize),
             summary: T::Summary::default()
         }
     }
 
     fn reset(&mut self) {
-        self.started = false;
+        self.did_seek = false;
+        self.did_next = false;
         self.stack.truncate(0);
         self.summary = T::Summary::default();
     }
 
     pub fn next(&mut self) -> Option<(&'tree T, &T::Summary)> {
-        if self.started {
+        if self.did_next {
             while self.stack.len() > 0 {
                 let (prev_subtree, index) = {
                     let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
@@ -362,15 +365,22 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
             }
             None
         } else {
-            self.started = true;
+            self.did_next = true;
             if let Some(&(subtree, index)) = self.stack.last() {
                 Some((&subtree.children()[index].value(), &self.summary))
             } else {
                 match self.tree.0.as_ref() {
+                    &Node::Internal {..} => {
+                        if self.did_seek {
+                            None
+                        } else {
+                            self.descend_to_first_item(self.tree)
+                        }
+                    }
                     &Node::Leaf { ref value, .. } => {
                         Some((value, &self.summary))
-                    },
-                    _ => None
+                    }
+                    &Node::Empty => None
                 }
             }
         }
@@ -411,10 +421,13 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
             }
         }
 
+        self.did_seek = true;
         prefix
     }
 
     fn descend_to_first_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) -> Option<(&'tree T, &'a T::Summary)> {
+        self.did_seek = true;
+
         loop {
             match tree.0.as_ref() {
                 &Node::Empty => return None,
@@ -493,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn extend_and_push() {
+    fn test_extend_and_push() {
         let mut tree1 = Tree::new();
         tree1.extend((1..20));
 
@@ -543,28 +556,35 @@ mod tests {
     }
 
     #[test]
-    fn cursor() {
+    fn cursor_build_prefix() {
+        // Empty tree
         let tree = Tree::<u16>::new();
         let mut cursor = tree.cursor();
         assert_eq!(cursor.build_prefix(&Sum(0)), Tree::new());
         assert_eq!(cursor.next(), None);
 
+        // Single-element tree
         let mut tree = Tree::<u16>::new();
         tree.extend(vec![1]);
         let mut cursor = tree.cursor();
         assert_eq!(cursor.build_prefix(&Sum(0)), Tree::new());
         assert_eq!(cursor.next(), Some((&1, &IntegersSummary {count: 0, sum: 0})));
 
+        // Multiple-element tree
         let mut tree = Tree::new();
         tree.extend(vec![1, 2, 3, 4, 5, 6]);
         let mut cursor = tree.cursor();
+
+        // Calling next without seeking (by building a prefix) yields the first element
+        assert_eq!(cursor.next(), Some((&1, &IntegersSummary {count: 0, sum: 0})));
+
+        // Calling next after seeking (by building a prefix) yields the element after the last prefix
         assert_eq!(cursor.build_prefix(&Sum(4)).items(), [1, 2]);
         assert_eq!(cursor.next(), Some((&3, &IntegersSummary {count: 2, sum: 3})));
         assert_eq!(cursor.next(), Some((&4, &IntegersSummary {count: 3, sum: 6})));
         assert_eq!(cursor.next(), Some((&5, &IntegersSummary {count: 4, sum: 10})));
         assert_eq!(cursor.next(), Some((&6, &IntegersSummary {count: 5, sum: 15})));
         assert_eq!(cursor.next(), None);
-
         assert_eq!(cursor.build_prefix(&tree.len::<Sum>()).items(), tree.items());
         assert_eq!(cursor.next(), None);
     }
