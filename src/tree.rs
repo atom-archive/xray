@@ -337,6 +337,12 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         }
     }
 
+    fn reset(&mut self) {
+        self.started = false;
+        self.stack.truncate(0);
+        self.summary = T::Summary::default();
+    }
+
     pub fn next(&mut self) -> Option<(&'tree T, &T::Summary)> {
         if self.started {
             while self.stack.len() > 0 {
@@ -371,7 +377,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
     }
 
     pub fn build_prefix<D: Dimension<Summary=T::Summary>>(&mut self, end: &D) -> Tree<T> {
-        // self.reset();
+        self.reset();
 
         let mut prefix = Tree::new();
         let mut subtree = self.tree;
@@ -559,7 +565,6 @@ mod tests {
         assert_eq!(cursor.next(), Some((&6, &IntegersSummary {count: 5, sum: 15})));
         assert_eq!(cursor.next(), None);
 
-        let mut cursor = tree.cursor();
         assert_eq!(cursor.build_prefix(&tree.len::<Sum>()).items(), tree.items());
         assert_eq!(cursor.next(), None);
     }
