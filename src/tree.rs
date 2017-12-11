@@ -347,40 +347,50 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
     }
 
     pub fn next(&mut self) -> Option<(&'tree T, &T::Summary)> {
-        if self.did_next {
-            while self.stack.len() > 0 {
-                let (prev_subtree, index) = {
-                    let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
-                    if prev_subtree.height() == 1 {
-                        self.summary.accumulate(prev_subtree.children()[*index].summary());
+        if self.did_seek {
+            if self.did_next {
+                while self.stack.len() > 0 {
+                    let (prev_subtree, index) = {
+                        let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
+                        if prev_subtree.height() == 1 {
+                            self.summary.accumulate(prev_subtree.children()[*index].summary());
+                        }
+                        *index += 1;
+                        (prev_subtree, *index)
+                    };
+                    if let Some(child) = prev_subtree.children().get(index) {
+                        return self.descend_to_first_item(child);
+                    } else {
+                        self.stack.pop();
                     }
-                    *index += 1;
-                    (prev_subtree, *index)
-                };
-                if let Some(child) = prev_subtree.children().get(index) {
-                    return self.descend_to_first_item(child);
+                }
+                None
+            } else {
+                self.did_next = true;
+                if let Some(&(subtree, index)) = self.stack.last() {
+                    Some((&subtree.children()[index].value(), &self.summary))
                 } else {
-                    self.stack.pop();
+                    match self.tree.0.as_ref() {
+                        &Node::Leaf { ref value, .. } => Some((value, &self.summary)),
+                        _ => None
+                    }
                 }
             }
-            None
         } else {
-            self.did_next = true;
-            if let Some(&(subtree, index)) = self.stack.last() {
-                Some((&subtree.children()[index].value(), &self.summary))
-            } else {
-                match self.tree.0.as_ref() {
-                    &Node::Internal {..} => {
-                        if self.did_seek {
-                            None
-                        } else {
-                            self.descend_to_first_item(self.tree)
-                        }
-                    }
-                    &Node::Leaf { ref value, .. } => {
-                        Some((value, &self.summary))
-                    }
-                    &Node::Empty => None
+            self.descend_to_first_item(self.tree)
+        }
+    }
+
+    fn descend_to_first_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) -> Option<(&'tree T, &'a T::Summary)> {
+        self.did_seek = true;
+
+        loop {
+            match tree.0.as_ref() {
+                &Node::Empty => return None,
+                &Node::Leaf {ref value, ..} => return Some((value, &self.summary)),
+                &Node::Internal { ref children, ..} => {
+                    self.stack.push((tree, 0));
+                    tree = &children[0];
                 }
             }
         }
@@ -427,21 +437,6 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                     }
                 },
                 _ => return
-            }
-        }
-    }
-
-    fn descend_to_first_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) -> Option<(&'tree T, &'a T::Summary)> {
-        self.did_seek = true;
-
-        loop {
-            match tree.0.as_ref() {
-                &Node::Empty => return None,
-                &Node::Leaf {ref value, ..} => return Some((value, &self.summary)),
-                &Node::Internal { ref children, ..} => {
-                    self.stack.push((tree, 0));
-                    tree = &children[0];
-                }
             }
         }
     }
