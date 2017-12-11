@@ -166,7 +166,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn insertion__newline_counting() {
+    fn insertion_newline_counting() {
         let id = SpliceId { replica: 1, count: 0 };
         let ins = Insertion::with_string(id, "The\nQuick\nBrown\nFox");
         assert_eq!(ins.newline_count_in_offset_range(3, 15), 2);
