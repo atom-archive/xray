@@ -440,6 +440,21 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
             }
         }
     }
+
+    pub fn build_suffix(&mut self) -> Tree<T> {
+        if !self.did_seek {
+            return self.tree.clone()
+        }
+
+        let mut suffix = Tree::new();
+        while let Some((subtree, index)) = self.stack.pop() {
+            let start = if subtree.height() == 1 { index } else { index + 1 };
+            for i in start..subtree.children().len() {
+                suffix.push(subtree.children()[i].clone());
+            }
+        }
+        suffix
+    }
 }
 
 #[cfg(test)]
@@ -557,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_build_prefix() {
+    fn cursor() {
         // Empty tree
         let tree = Tree::<u16>::new();
         let mut cursor = tree.cursor();
@@ -588,5 +603,15 @@ mod tests {
         assert_eq!(cursor.next(), None);
         assert_eq!(cursor.build_prefix(&tree.len::<Sum>()).items(), tree.items());
         assert_eq!(cursor.next(), None);
+
+        // Suffixes are built from the cursor's current element to the end
+        cursor.seek(&Count(3));
+        assert_eq!(cursor.build_suffix().items(), [4, 5, 6]);
+        assert_eq!(cursor.next(), None);
+        assert_eq!(cursor.build_suffix().items(), []);
+
+        // Calling build suffix without seeking yields the entire tree
+        let mut cursor = tree.cursor();
+        assert_eq!(cursor.build_suffix().items(), tree.items());
     }
 }
