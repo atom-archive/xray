@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::iter;
 use std::ops::{AddAssign, Range};
 use std::sync::Arc;
 use super::tree::{self, Tree};
@@ -63,7 +64,7 @@ pub struct FragmentSummary {
     newline_count: usize
 }
 
-#[derive(Eq, PartialEq, Clone, Debug)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
 struct FragmentId(Vec<u16>);
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -276,20 +277,25 @@ impl FragmentId {
     }
 
     fn between(left: &Self, right: &Self) -> Self {
-        let mut last_level = 0;
-        for (left_value, right_value) in left.0.iter().zip(right.0.iter()) {
-            if right_value - left_value > 1 { break }
-            last_level += 1
+        Self::between_with_max(left, right, u16::max_value())
+    }
+
+    fn between_with_max(left: &Self, right: &Self, max_value: u16) -> Self {
+        let mut new_entries = Vec::new();
+
+        let left_entries = left.0.iter().cloned().chain(iter::repeat(0));
+        let right_entries = right.0.iter().cloned().chain(iter::repeat(max_value));
+        for (l, r) in left_entries.zip(right_entries) {
+            let interval = r - l;
+            if interval > 1 {
+                new_entries.push(l + interval / 2);
+                break
+            } else {
+                new_entries.push(l);
+            }
         }
 
-        let mut new_values = Vec::with_capacity(last_level + 1);
-        new_values.extend(left.0.iter().take(last_level).cloned());
-
-        let lower_bound = *left.0.get(last_level).unwrap_or(&u16::min_value());
-        let upper_bound = *right.0.get(last_level).unwrap_or(&u16::max_value());
-        new_values.push(lower_bound + ((upper_bound - lower_bound) / 2));
-
-        FragmentId(new_values)
+        FragmentId(new_entries)
     }
 }
 
@@ -323,5 +329,26 @@ mod tests {
         assert_eq!(text.newline_count_in_range(3, 15), 2);
         assert_eq!(text.newline_count_in_range(3, 16), 3);
         assert_eq!(text.newline_count_in_range(4, 16), 2);
+    }
+
+    #[test]
+    fn random_fragment_ids() {
+        for seed in 0..10 {
+            use rand::{self, Rng, SeedableRng, StdRng};
+            let mut rng = StdRng::from_seed(&[seed]);
+
+            let mut ids = vec![FragmentId(vec![0]), FragmentId(vec![4])];
+            for _i in 0..100 {
+                let index = rng.gen_range::<usize>(1, ids.len());
+
+                let left = ids[index - 1].clone();
+                let right = ids[index].clone();
+                ids.insert(index, FragmentId::between_with_max(&left, &right, 4));
+
+                let mut sorted_ids = ids.clone();
+                sorted_ids.sort();
+                assert_eq!(ids, sorted_ids);
+            }
+        }
     }
 }
