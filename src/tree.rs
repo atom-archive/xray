@@ -46,7 +46,7 @@ pub struct Iter<'a, T: 'a + Item> {
     stack: Vec<(&'a Tree<T>, usize)>,
 }
 
-struct Cursor<'a, T: 'a + Item> {
+pub struct Cursor<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
     did_seek: bool,
     did_next: bool,
@@ -93,11 +93,11 @@ impl<'a, T: Item> Tree<T> {
         summary
     }
 
-    fn iter(&self) -> Iter<T> {
+    pub fn iter(&self) -> Iter<T> {
         Iter::new(self)
     }
 
-    fn cursor(&self) -> Cursor<T> {
+    pub fn cursor(&self) -> Cursor<T> {
         Cursor::new(self)
     }
 
