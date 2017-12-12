@@ -42,14 +42,14 @@ pub enum Node<T: Item> {
 
 pub struct Iter<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
-    did_next: bool,
+    advance_on_next: bool,
     stack: Vec<(&'a Tree<T>, usize)>,
 }
 
 pub struct Cursor<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
     did_seek: bool,
-    did_next: bool,
+    advance_on_next: bool,
     stack: Vec<(&'a Tree<T>, usize)>,
     prev_leaf: Option<&'a Tree<T>>,
     summary: T::Summary
@@ -297,7 +297,7 @@ impl<'a, T: 'a + Item> Iter<'a, T> {
     fn new(tree: &'a Tree<T>) -> Self {
         Iter {
             tree,
-            did_next: false,
+            advance_on_next: false,
             stack: Vec::with_capacity(tree.height() as usize)
         }
     }
@@ -320,7 +320,7 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.did_next {
+        if self.advance_on_next {
             while self.stack.len() > 0 {
                 let (tree, index) = {
                     let &mut (tree, ref mut index) = self.stack.last_mut().unwrap();
@@ -335,7 +335,7 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
             }
             None
         } else {
-            self.did_next = true;
+            self.advance_on_next = true;
             self.descend_to_first_item(self.tree)
         }
     }
@@ -346,7 +346,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         Self {
             tree,
             did_seek: false,
-            did_next: false,
+            advance_on_next: false,
             stack: Vec::with_capacity(tree.height() as usize),
             prev_leaf: None,
             summary: T::Summary::default()
@@ -355,7 +355,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
 
     fn reset(&mut self) {
         self.did_seek = false;
-        self.did_next = false;
+        self.advance_on_next = false;
         self.stack.truncate(0);
         self.prev_leaf = None;
         self.summary = T::Summary::default();
@@ -363,46 +363,47 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
 
     pub fn next(&mut self) -> (Option<&'tree T>, Option<&'tree T>, &T::Summary) {
         if self.did_seek {
-            if self.did_next {
-                while self.stack.len() > 0 {
-                    let (prev_subtree, index) = {
-                        let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
-                        if prev_subtree.height() == 1 {
-                            let prev_leaf = &prev_subtree.children()[*index];
-                            self.prev_leaf = Some(prev_leaf);
-                            self.summary += prev_leaf.summary();
+            match self.tree.0.as_ref() {
+                &Node::Internal { .. } => {
+                    if self.advance_on_next {
+                        while self.stack.len() > 0 {
+                            let (prev_subtree, index) = {
+                                let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
+                                if prev_subtree.height() == 1 {
+                                    let prev_leaf = &prev_subtree.children()[*index];
+                                    self.prev_leaf = Some(prev_leaf);
+                                    self.summary += prev_leaf.summary();
+                                }
+                                *index += 1;
+                                (prev_subtree, *index)
+                            };
+                            if let Some(child) = prev_subtree.children().get(index) {
+                                return self.descend_to_first_item(child);
+                            } else {
+                                self.stack.pop();
+                            }
                         }
-                        *index += 1;
-                        (prev_subtree, *index)
-                    };
-                    if let Some(child) = prev_subtree.children().get(index) {
-                        return self.descend_to_first_item(child);
+                        (self.prev_element(), None, &self.summary)
                     } else {
-                        self.stack.pop();
+                        self.advance_on_next = true;
+                        let cur_element = self.stack.last().map(|&(subtree, index)| {
+                            subtree.children()[index].value()
+                        });
+                        (self.prev_element(), cur_element, &self.summary)
                     }
-                }
-                (self.prev_element(), None, &self.summary)
-            } else {
-                self.did_next = true;
-                if let Some(&(subtree, index)) = self.stack.last() {
-                    let cur_element = Some(subtree.children()[index].value());
-                    (self.prev_element(), cur_element, &self.summary)
-                } else {
-                    match self.tree.0.as_ref() {
-                        &Node::Internal { .. } => {
-                            (self.prev_element(), None, &self.summary)
-                        },
-                        &Node::Leaf { ref value, .. } => {
-                            let prev_element = self.prev_element();
-                            self.prev_leaf = Some(self.tree);
-                            (prev_element, Some(value), &self.summary)
-                        },
-                        &Node::Empty => (None, None, &self.summary)
+                },
+                &Node::Leaf { ref value, ref summary, .. } => {
+                    if self.advance_on_next {
+                        (Some(value), None, summary)
+                    } else {
+                        self.advance_on_next = true;
+                        (None, Some(value), &self.summary)
                     }
-                }
+                },
+                &Node::Empty => (None, None, &self.summary)
             }
         } else {
-            self.did_next = true;
+            self.advance_on_next = true;
             self.descend_to_first_item(self.tree)
         }
     }
@@ -464,8 +465,18 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                             }
                         }
                     }
-                },
-                _ => return
+                }
+                &Node::Leaf {ref summary, ..} => {
+                    let subtree_end = D::from_summary(&self.summary) + &D::from_summary(summary);
+                    if *pos >= subtree_end {
+                        self.advance_on_next = true;
+                        self.prev_leaf = Some(subtree);
+                        self.summary += summary;
+                        prefix.as_mut().map(|prefix| prefix.push(subtree.clone()));
+                    }
+                    return;
+                }
+                &Node::Empty => return
             }
         }
     }
@@ -631,7 +642,9 @@ mod tests {
         let mut cursor = tree.cursor();
         assert_eq!(cursor.build_prefix(&Sum(0)), Tree::new());
         assert_eq!(cursor.next(), (None, Some(&1), &IntegersSummary::default()));
-        assert_eq!(cursor.next(), (Some(&1), None, &IntegersSummary::default()));
+        assert_eq!(cursor.next(), (Some(&1), None, &IntegersSummary {count: 1, sum: 1}));
+        assert_eq!(cursor.build_prefix(&Sum(1)).items(), [1]);
+        assert_eq!(cursor.next(), (Some(&1), None, &IntegersSummary {count: 1, sum: 1}));
 
         // Multiple-element tree
         let mut tree = Tree::new();
