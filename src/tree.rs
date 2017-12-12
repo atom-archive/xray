@@ -33,6 +33,7 @@ pub enum Node<T: Item> {
         value: T
     },
     Internal {
+        rightmost_leaf: Tree<T>,
         summary: T::Summary,
         children: Vec<Tree<T>>,
         height: u16
@@ -50,6 +51,7 @@ struct Cursor<'a, T: 'a + Item> {
     did_seek: bool,
     did_next: bool,
     stack: Vec<(&'a Tree<T>, usize)>,
+    prev_leaf: Option<&'a Tree<T>>,
     summary: T::Summary
 }
 
@@ -77,8 +79,9 @@ impl<'a, T: Item> Tree<T> {
 
     fn from_children(children: Vec<Self>) -> Self {
         let summary = Self::summarize_children(&children);
+        let rightmost_leaf = children.last().unwrap().rightmost_leaf().unwrap().clone();
         let height = children[0].height() + 1;
-        Tree(Arc::new(Node::Internal { summary, children, height }))
+        Tree(Arc::new(Node::Internal { rightmost_leaf, summary, children, height }))
     }
 
     fn summarize_children(children: &[Tree<T>]) -> T::Summary {
@@ -141,6 +144,7 @@ impl<'a, T: Item> Tree<T> {
 
     fn push_recursive(&mut self, other: Tree<T>) -> Option<Tree<T>> {
         *self.summary_mut() += other.summary();
+        *self.rightmost_leaf_mut() = other.rightmost_leaf().unwrap().clone();
 
         let self_height = self.height();
         let other_height = other.height();
@@ -212,6 +216,21 @@ impl<'a, T: Item> Tree<T> {
                     }
                 }
             }
+        }
+    }
+
+    fn rightmost_leaf(&self) -> Option<&Tree<T>> {
+        match self.0.as_ref() {
+            &Node::Empty => None,
+            &Node::Leaf { .. } => Some(self),
+            &Node::Internal { ref rightmost_leaf, .. } => Some(rightmost_leaf)
+        }
+    }
+
+    fn rightmost_leaf_mut(&mut self) -> &mut Tree<T> {
+        match Arc::make_mut(&mut self.0) {
+            &mut Node::Internal { ref mut rightmost_leaf, .. } => rightmost_leaf,
+            _ => panic!("Requested a mutable reference to the rightmost leaf of a non-internal node"),
         }
     }
 
@@ -329,6 +348,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
             did_seek: false,
             did_next: false,
             stack: Vec::with_capacity(tree.height() as usize),
+            prev_leaf: None,
             summary: T::Summary::default()
         }
     }
@@ -337,17 +357,20 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         self.did_seek = false;
         self.did_next = false;
         self.stack.truncate(0);
+        self.prev_leaf = None;
         self.summary = T::Summary::default();
     }
 
-    pub fn next(&mut self) -> Option<(&'tree T, &T::Summary)> {
+    pub fn next(&mut self) -> (Option<&'tree T>, Option<&'tree T>, &T::Summary) {
         if self.did_seek {
             if self.did_next {
                 while self.stack.len() > 0 {
                     let (prev_subtree, index) = {
                         let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
                         if prev_subtree.height() == 1 {
-                            self.summary += prev_subtree.children()[*index].summary();
+                            let prev_leaf = &prev_subtree.children()[*index];
+                            self.prev_leaf = Some(prev_leaf);
+                            self.summary += prev_leaf.summary();
                         }
                         *index += 1;
                         (prev_subtree, *index)
@@ -358,30 +381,43 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                         self.stack.pop();
                     }
                 }
-                None
+                (self.prev_element(), None, &self.summary)
             } else {
                 self.did_next = true;
                 if let Some(&(subtree, index)) = self.stack.last() {
-                    Some((&subtree.children()[index].value(), &self.summary))
+                    let cur_element = Some(subtree.children()[index].value());
+                    (self.prev_element(), cur_element, &self.summary)
                 } else {
                     match self.tree.0.as_ref() {
-                        &Node::Leaf { ref value, .. } => Some((value, &self.summary)),
-                        _ => None
+                        &Node::Internal { .. } => {
+                            (self.prev_element(), None, &self.summary)
+                        },
+                        &Node::Leaf { ref value, .. } => {
+                            let prev_element = self.prev_element();
+                            self.prev_leaf = Some(self.tree);
+                            (prev_element, Some(value), &self.summary)
+                        },
+                        &Node::Empty => (None, None, &self.summary)
                     }
                 }
             }
         } else {
+            self.did_next = true;
             self.descend_to_first_item(self.tree)
         }
     }
 
-    fn descend_to_first_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) -> Option<(&'tree T, &'a T::Summary)> {
+    fn descend_to_first_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) -> (Option<&'tree T>, Option<&'tree T>, &'a T::Summary) {
         self.did_seek = true;
 
         loop {
             match tree.0.as_ref() {
-                &Node::Empty => return None,
-                &Node::Leaf {ref value, ..} => return Some((value, &self.summary)),
+                &Node::Empty => {
+                    return (None, None, &self.summary);
+                }
+                &Node::Leaf {ref value, ..} => {
+                    return (self.prev_element(), Some(value), &self.summary);
+                },
                 &Node::Internal { ref children, ..} => {
                     self.stack.push((tree, 0));
                     tree = &children[0];
@@ -407,9 +443,10 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         let mut subtree = self.tree;
         loop {
             match subtree.0.as_ref() {
-                &Node::Internal {ref summary, ref children, ..} => {
+                &Node::Internal {ref rightmost_leaf, ref summary, ref children, ..} => {
                     let subtree_end = D::from_summary(&self.summary) + &D::from_summary(summary);
                     if *pos >= subtree_end {
+                        self.prev_leaf = Some(rightmost_leaf);
                         self.summary += summary;
                         prefix.as_mut().map(|prefix| prefix.push(subtree.clone()));
                         return;
@@ -417,6 +454,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                         for (index, child) in children.iter().enumerate() {
                             let child_end = D::from_summary(&self.summary) + &D::from_summary(child.summary());
                             if *pos >= child_end {
+                                self.prev_leaf = child.rightmost_leaf();
                                 self.summary += child.summary();
                                 prefix.as_mut().map(|prefix| prefix.push(child.clone()));
                             } else {
@@ -444,7 +482,14 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                 suffix.push(subtree.children()[i].clone());
             }
         }
+
+        self.prev_leaf = self.tree.rightmost_leaf();
+        self.summary = self.tree.summary().clone();
         suffix
+    }
+
+    fn prev_element(&self) -> Option<&'tree T> {
+        self.prev_leaf.map(|leaf| leaf.value())
     }
 }
 
@@ -578,14 +623,15 @@ mod tests {
         let tree = Tree::<u16>::new();
         let mut cursor = tree.cursor();
         assert_eq!(cursor.build_prefix(&Sum(0)), Tree::new());
-        assert_eq!(cursor.next(), None);
+        assert_eq!(cursor.next(), (None, None, &IntegersSummary::default()));
 
         // Single-element tree
         let mut tree = Tree::<u16>::new();
         tree.extend(vec![1]);
         let mut cursor = tree.cursor();
         assert_eq!(cursor.build_prefix(&Sum(0)), Tree::new());
-        assert_eq!(cursor.next(), Some((&1, &IntegersSummary {count: 0, sum: 0})));
+        assert_eq!(cursor.next(), (None, Some(&1), &IntegersSummary::default()));
+        assert_eq!(cursor.next(), (Some(&1), None, &IntegersSummary::default()));
 
         // Multiple-element tree
         let mut tree = Tree::new();
@@ -593,22 +639,25 @@ mod tests {
         let mut cursor = tree.cursor();
 
         // Calling next without building a prefix yields the first element
-        assert_eq!(cursor.next(), Some((&1, &IntegersSummary {count: 0, sum: 0})));
+        assert_eq!(cursor.next(), (None, Some(&1), &IntegersSummary {count: 0, sum: 0}));
 
         // Calling next after building a prefix yields the element after the last prefix
         assert_eq!(cursor.build_prefix(&Sum(4)).items(), [1, 2]);
-        assert_eq!(cursor.next(), Some((&3, &IntegersSummary {count: 2, sum: 3})));
-        assert_eq!(cursor.next(), Some((&4, &IntegersSummary {count: 3, sum: 6})));
-        assert_eq!(cursor.next(), Some((&5, &IntegersSummary {count: 4, sum: 10})));
-        assert_eq!(cursor.next(), Some((&6, &IntegersSummary {count: 5, sum: 15})));
-        assert_eq!(cursor.next(), None);
+        assert_eq!(cursor.next(), (Some(&2), Some(&3), &IntegersSummary {count: 2, sum: 3}));
+        assert_eq!(cursor.next(), (Some(&3), Some(&4), &IntegersSummary {count: 3, sum: 6}));
+        assert_eq!(cursor.next(), (Some(&4), Some(&5), &IntegersSummary {count: 4, sum: 10}));
+        assert_eq!(cursor.next(), (Some(&5), Some(&6), &IntegersSummary {count: 5, sum: 15}));
+        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
+        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
         assert_eq!(cursor.build_prefix(&tree.len::<Sum>()).items(), tree.items());
-        assert_eq!(cursor.next(), None);
+        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
+        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
 
         // Suffixes are built from the cursor's current element to the end
         cursor.seek(&Count(3));
         assert_eq!(cursor.build_suffix().items(), [4, 5, 6]);
-        assert_eq!(cursor.next(), None);
+        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
+        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
         assert_eq!(cursor.build_suffix().items(), []);
 
         // Calling build suffix without seeking yields the entire tree
