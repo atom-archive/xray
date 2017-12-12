@@ -1,23 +1,19 @@
 use std::clone::Clone;
 use std::fmt;
-use std::ops::Range;
+use std::ops::{AddAssign, Range};
 use std::sync::Arc;
 
 const MIN_CHILDREN: usize = 2;
 const MAX_CHILDREN: usize = 4;
 
 pub trait Item: Clone + Eq + fmt::Debug {
-    type Summary: Summary;
+    type Summary: for<'a> AddAssign<&'a Self::Summary> + Default + Eq + Clone + fmt::Debug;
 
     fn summarize(&self) -> Self::Summary;
 }
 
-pub trait Summary: Default + Eq + Clone + fmt::Debug {
-    fn accumulate(&mut self, other: &Self);
-}
-
 pub trait Dimension: Ord + Clone + fmt::Debug {
-    type Summary: Summary;
+    type Summary: Default + Eq + Clone + fmt::Debug;
 
     fn default() -> Self {
         Self::from_summary(&Self::Summary::default())
@@ -91,7 +87,7 @@ impl<'a, T: Item> Tree<T> {
         let mut iter = children.iter();
         let mut summary = iter.next().unwrap().summary().clone();
         for ref child in iter {
-            summary.accumulate(child.summary());
+            summary += child.summary();
         }
         summary
     }
@@ -146,7 +142,7 @@ impl<'a, T: Item> Tree<T> {
     }
 
     fn push_recursive(&mut self, other: Tree<T>) -> Option<Tree<T>> {
-        self.summary_mut().accumulate(other.summary());
+        *self.summary_mut() += other.summary();
 
         let self_height = self.height();
         let other_height = other.height();
@@ -353,7 +349,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                     let (prev_subtree, index) = {
                         let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
                         if prev_subtree.height() == 1 {
-                            self.summary.accumulate(prev_subtree.children()[*index].summary());
+                            self.summary += prev_subtree.children()[*index].summary();
                         }
                         *index += 1;
                         (prev_subtree, *index)
@@ -417,7 +413,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                     let subtree_start = D::from_summary(&self.summary);
                     let subtree_end = subtree_start.accumulate(&D::from_summary(summary));
                     if *pos >= subtree_end {
-                        self.summary.accumulate(summary);
+                        self.summary += summary;
                         prefix.as_mut().map(|prefix| prefix.push(subtree.clone()));
                         return;
                     } else {
@@ -425,7 +421,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                         for (index, child) in children.iter().enumerate() {
                             let child_end = child_start.accumulate(&D::from_summary(child.summary()));
                             if *pos >= child_end {
-                                self.summary.accumulate(child.summary());
+                                self.summary += child.summary();
                                 prefix.as_mut().map(|prefix| prefix.push(child.clone()));
                                 child_start = child_end;
                             } else {
@@ -484,8 +480,8 @@ mod tests {
         }
     }
 
-    impl Summary for IntegersSummary {
-        fn accumulate(&mut self, other: &Self) {
+    impl<'a> AddAssign<&'a Self> for IntegersSummary {
+        fn add_assign(&mut self, other: &Self) {
             self.count += other.count;
             self.sum += other.sum;
         }

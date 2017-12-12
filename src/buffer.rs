@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ops::AddAssign;
 use std::sync::Arc;
 use super::tree::{self, Tree};
 
@@ -133,8 +134,8 @@ impl tree::Item for Fragment {
     }
 }
 
-impl tree::Summary for FragmentSummary {
-    fn accumulate(&mut self, other: &Self) {
+impl<'a> AddAssign<&'a FragmentSummary> for FragmentSummary {
+    fn add_assign(&mut self, other: &Self) {
         self.extent += other.extent;
         self.newline_count += other.newline_count;
     }
