@@ -15,11 +15,11 @@ pub trait Item: Clone + Eq + fmt::Debug {
 pub trait Dimension: for<'a> Add<&'a Self, Output=Self> + Ord + Clone + fmt::Debug {
     type Summary: Default + Eq + Clone + fmt::Debug;
 
+    fn from_summary(summary: &Self::Summary) -> Self;
+
     fn default() -> Self {
         Self::from_summary(&Self::Summary::default())
     }
-
-    fn from_summary(summary: &Self::Summary) -> Self;
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
