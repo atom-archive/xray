@@ -25,7 +25,12 @@ pub struct Position {
 struct Insertion {
     id: SpliceId,
     start: Position,
-    text: Vec<u16>,
+    text: Text
+}
+
+#[derive(Eq, PartialEq, Debug)]
+struct Text {
+    characters: Vec<u16>,
     newline_offsets: Vec<usize>
 }
 
@@ -68,15 +73,14 @@ impl Buffer {
                 replica_id: 0,
                 lamport_timestamp: 0
             },
-            text: vec![],
-            newline_offsets: vec![]
+            text: Text::new(vec![])
         }));
     }
 }
 
-impl Insertion {
-    fn new(id: SpliceId, start: Position, text: Vec<u16>) -> Self {
-        let newline_offsets = text.iter().enumerate().filter_map(|(offset, c)| {
+impl Text {
+    fn new(characters: Vec<u16>) -> Self {
+        let newline_offsets = characters.iter().enumerate().filter_map(|(offset, c)| {
             if *c == (b'\n' as u16) {
                 Some(offset)
             } else {
@@ -84,32 +88,29 @@ impl Insertion {
             }
         }).collect();
 
-        Self {
-            id,
-            start,
-            text,
-            newline_offsets
-        }
-    }
-
-    fn with_string(id: SpliceId, start: Position, s: &str) -> Self {
-        Self::new(id, start, s.encode_utf16().collect())
+        Self { characters, newline_offsets }
     }
 
     fn len(&self) -> usize {
-        self.text.len()
+        self.characters.len()
     }
 
-    fn newline_count_in_offset_range(&self, start: usize, end: usize) -> usize {
+    fn newline_count_in_range(&self, start: usize, end: usize) -> usize {
         let newlines_start = find_insertion_index(&self.newline_offsets, &start);
         let newlines_end = find_insertion_index(&self.newline_offsets, &end);
         newlines_end - newlines_start
     }
 }
 
+impl<'a> From<&'a str> for Text {
+    fn from(s: &'a str) -> Self {
+        Self::new(s.encode_utf16().collect())
+    }
+}
+
 impl Fragment {
     fn new(id: FragmentId, ins: Insertion) -> Self {
-        let end_offset = ins.len();
+        let end_offset = ins.text.len();
         Self {
             id,
             insertion: Arc::new(ins),
@@ -127,7 +128,7 @@ impl tree::Item for Fragment {
         FragmentSummary {
             max_id: Some(self.id.clone()),
             extent: self.end_offset - self.start_offset,
-            newline_count: self.insertion.newline_count_in_offset_range(self.start_offset, self.end_offset)
+            newline_count: self.insertion.text.newline_count_in_range(self.start_offset, self.end_offset)
         }
     }
 }
@@ -171,12 +172,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn insertion_newline_counting() {
-        let id = SpliceId { replica_id: 1, local_timestamp: 0 };
-        let start = Position { insertion_id: id.clone(), offset: 0, replica_id: 0, lamport_timestamp: 0};
-        let ins = Insertion::with_string(id, start, "The\nQuick\nBrown\nFox");
-        assert_eq!(ins.newline_count_in_offset_range(3, 15), 2);
-        assert_eq!(ins.newline_count_in_offset_range(3, 16), 3);
-        assert_eq!(ins.newline_count_in_offset_range(4, 16), 2);
+    fn text() {
+        let text = Text::from("The\nQuick\nBrown\nFox");
+        assert_eq!(text.newline_count_in_range(3, 15), 2);
+        assert_eq!(text.newline_count_in_range(3, 16), 3);
+        assert_eq!(text.newline_count_in_range(4, 16), 2);
     }
 }
