@@ -1,6 +1,6 @@
 use std::clone::Clone;
 use std::fmt;
-use std::ops::{AddAssign, Range};
+use std::ops::{Add, AddAssign, Range};
 use std::sync::Arc;
 
 const MIN_CHILDREN: usize = 2;
@@ -12,7 +12,7 @@ pub trait Item: Clone + Eq + fmt::Debug {
     fn summarize(&self) -> Self::Summary;
 }
 
-pub trait Dimension: Ord + Clone + fmt::Debug {
+pub trait Dimension: for<'a> Add<&'a Self, Output=Self> + Ord + Clone + fmt::Debug {
     type Summary: Default + Eq + Clone + fmt::Debug;
 
     fn default() -> Self {
@@ -20,8 +20,6 @@ pub trait Dimension: Ord + Clone + fmt::Debug {
     }
 
     fn from_summary(summary: &Self::Summary) -> Self;
-
-    fn accumulate(&self, other: &Self) -> Self;
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -191,26 +189,26 @@ impl<'a, T: Item> Tree<T> {
     }
 
     fn append_subsequence<D: Dimension<Summary=T::Summary>>(&self, result: &mut Self, start: &D, end: &D) {
-        self.append_subsequence_recursive(result, &D::default(), start, end);
+        self.append_subsequence_recursive(result, D::default(), start, end);
     }
 
-    fn append_subsequence_recursive<D: Dimension<Summary=T::Summary>>(&self, result: &mut Self, node_start: &D, start: &D, end: &D) {
+    fn append_subsequence_recursive<D: Dimension<Summary=T::Summary>>(&self, result: &mut Self, node_start: D, start: &D, end: &D) {
         match self.0.as_ref() {
             &Node::Empty => (),
             &Node::Leaf {..} => {
-                if *start <= *node_start && *node_start < *end {
+                if *start <= node_start && node_start < *end {
                     result.push(self.clone());
                 }
             }
             &Node::Internal {ref summary, ref children, ..} => {
-                let node_end = node_start.accumulate(&D::from_summary(summary));
-                if *start <= *node_start && node_end <= *end {
+                let node_end = node_start.clone() + &D::from_summary(summary);
+                if *start <= node_start && node_end <= *end {
                     result.push(self.clone());
-                } else if *node_start < *end || *start < node_end {
+                } else if node_start < *end || *start < node_end {
                     let mut child_start = node_start.clone();
                     for ref child in children {
-                        child.append_subsequence_recursive(result, &child_start, start, end);
-                        child_start = child_start.accumulate(&D::from_summary(child.summary()));
+                        child.append_subsequence_recursive(result, child_start.clone(), start, end);
+                        child_start = child_start + &D::from_summary(child.summary());
                     }
                 }
             }
@@ -410,20 +408,17 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         loop {
             match subtree.0.as_ref() {
                 &Node::Internal {ref summary, ref children, ..} => {
-                    let subtree_start = D::from_summary(&self.summary);
-                    let subtree_end = subtree_start.accumulate(&D::from_summary(summary));
+                    let subtree_end = D::from_summary(&self.summary) + &D::from_summary(summary);
                     if *pos >= subtree_end {
                         self.summary += summary;
                         prefix.as_mut().map(|prefix| prefix.push(subtree.clone()));
                         return;
                     } else {
-                        let mut child_start = subtree_start.clone();
                         for (index, child) in children.iter().enumerate() {
-                            let child_end = child_start.accumulate(&D::from_summary(child.summary()));
+                            let child_end = D::from_summary(&self.summary) + &D::from_summary(child.summary());
                             if *pos >= child_end {
                                 self.summary += child.summary();
                                 prefix.as_mut().map(|prefix| prefix.push(child.clone()));
-                                child_start = child_end;
                             } else {
                                 self.stack.push((subtree, index));
                                 subtree = child;
@@ -493,9 +488,14 @@ mod tests {
         fn from_summary(summary: &Self::Summary) -> Self {
             Count(summary.count)
         }
+    }
 
-        fn accumulate(&self, other: &Self) -> Self {
-            Count(self.0 + other.0)
+    impl<'a> Add<&'a Self> for Count {
+        type Output = Self;
+
+        fn add(mut self, other: &Self) -> Self {
+            self.0 += other.0;
+            self
         }
     }
 
@@ -505,9 +505,14 @@ mod tests {
         fn from_summary(summary: &Self::Summary) -> Self {
             Sum(summary.sum)
         }
+    }
 
-        fn accumulate(&self, other: &Self) -> Self {
-            Sum(self.0 + other.0)
+    impl<'a> Add<&'a Self> for Sum {
+        type Output = Self;
+
+        fn add(mut self, other: &Self) -> Self {
+            self.0 += other.0;
+            self
         }
     }
 
