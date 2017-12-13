@@ -116,29 +116,19 @@ impl Buffer {
                 let (prev_fragment, cur_fragment, summary) = cursor.next();
 
                 if let Some(prev_fragment) = prev_fragment {
-                    if new_text.is_some() {
-                        let new_fragment_id = match cur_fragment {
-                            Some(ref cur_fragment) => FragmentId::between(&prev_fragment.id, &cur_fragment.id),
-                            None => FragmentId::between(&prev_fragment.id, &FragmentId::max_value())
-                        };
-
-                        inserted_fragments.push(Fragment::new(new_fragment_id, Insertion {
-                            id: ChangeId {
-                                replica_id: self.replica_id,
-                                local_timestamp: self.local_clock
-                            },
-                            start: Position {
-                                insertion_id: prev_fragment.insertion.id,
-                                offset: prev_fragment.end_offset,
-                                replica_id: self.replica_id,
-                                lamport_timestamp: self.lamport_clock
-                            },
-                            text: new_text.take().unwrap()
-                        }));
+                    if summary.extent < old_range.start {
+                        let (left, right) = cur_fragment.unwrap().split(old_range.start - summary.extent, prev_fragment);
+                        let insertion = new_text.take().map(|text| {
+                            self.build_insertion(&left, Some(&right), text)
+                        });
+                        inserted_fragments.push(left);
+                        insertion.map(|insertion| inserted_fragments.push(insertion));
+                        inserted_fragments.push(right)
+                    } else if new_text.is_some() {
+                        inserted_fragments.push(self.build_insertion(prev_fragment, cur_fragment, new_text.take().unwrap()));
                     }
 
-                    debug_assert!(summary.extent <= old_range.end);
-                    if summary.extent == old_range.end {
+                    if summary.extent >= old_range.end {
                         break;
                     }
                 } else {
@@ -155,6 +145,27 @@ impl Buffer {
         self.fragments = updated_fragments;
         self.local_clock += 1;
         self.lamport_clock += 1;
+    }
+
+    fn build_insertion(&self, prev_fragment: &Fragment, next_fragment: Option<&Fragment>, text: Text) -> Fragment {
+        let new_fragment_id = match next_fragment {
+            Some(next_fragment) => FragmentId::between(&prev_fragment.id, &next_fragment.id),
+            None => FragmentId::between(&prev_fragment.id, &FragmentId::max_value())
+        };
+
+        Fragment::new(new_fragment_id, Insertion {
+            id: ChangeId {
+                replica_id: self.replica_id,
+                local_timestamp: self.local_clock
+            },
+            start: Position {
+                insertion_id: prev_fragment.insertion.id,
+                offset: prev_fragment.end_offset,
+                replica_id: self.replica_id,
+                lamport_timestamp: self.lamport_clock
+            },
+            text
+        })
     }
 }
 
@@ -224,7 +235,30 @@ impl Fragment {
     }
 
     fn get_code_unit(&self, offset: usize) -> Option<u16> {
-        self.insertion.text.code_units.get(self.start_offset + offset).cloned()
+        if offset < self.end_offset - self.start_offset {
+            Some(self.insertion.text.code_units[self.start_offset + offset].clone())
+        } else {
+            None
+        }
+    }
+
+    fn split(&self, relative_offset: usize, prev_fragment: &Fragment) -> (Self, Self) {
+        let left = Self {
+            id: FragmentId::between(&prev_fragment.id, &self.id),
+            insertion: self.insertion.clone(),
+            start_offset: self.start_offset,
+            end_offset: self.start_offset + relative_offset,
+            deletions: HashSet::new()
+        };
+        let right = Self {
+            id: self.id.clone(),
+            insertion: self.insertion.clone(),
+            start_offset: left.end_offset,
+            end_offset: self.end_offset,
+            deletions: HashSet::new()
+        };
+
+        (left, right)
     }
 }
 
@@ -321,6 +355,8 @@ mod tests {
         assert_eq!(buffer.get_text(), "abcdef");
         buffer.edit(0..0, "ghi");
         assert_eq!(buffer.get_text(), "ghiabcdef");
+        buffer.edit(5..5, "jkl");
+        assert_eq!(buffer.get_text(), "ghiabjklcdef");
     }
 
     #[test]
