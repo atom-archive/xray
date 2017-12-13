@@ -38,7 +38,7 @@ struct Insertion {
 }
 
 #[derive(Eq, PartialEq, Debug)]
-struct Text {
+pub struct Text {
     code_units: Vec<u16>,
     newline_offsets: Vec<usize>
 }
@@ -115,8 +115,6 @@ impl Buffer {
             loop {
                 let (prev_fragment, cur_fragment, summary) = cursor.next();
 
-                // println!("==========\n{:?}\n{:?}\n{:?}", prev_fragment, cur_fragment, summary);
-
                 if let Some(prev_fragment) = prev_fragment {
                     if new_text.is_some() {
                         let new_fragment_id = match cur_fragment {
@@ -140,14 +138,11 @@ impl Buffer {
                     }
 
                     debug_assert!(summary.extent <= old_range.end);
-
-                    // println!("{:?} {:?}", summary.extent, old_range.end);
-
                     if summary.extent == old_range.end {
                         break;
                     }
                 } else {
-                    debug_assert!(cur_fragment.is_some());
+                    inserted_fragments.push(cur_fragment.unwrap().clone());
                     continue;
                 }
             }
@@ -174,14 +169,15 @@ impl<'a> Iterator for Iter<'a> {
             }
         }
 
-        if let Some(fragment) = self.fragment_iter.next() {
-            let result = fragment.get_code_unit(0);
-            self.fragment_offset = 0;
-            self.fragment = Some(fragment);
-            result
-        } else {
-            None
+        while let Some(fragment) = self.fragment_iter.next() {
+            if let Some(result) = fragment.get_code_unit(0) {
+                self.fragment_offset = 0;
+                self.fragment = Some(fragment);
+                return Some(result);
+            }
         }
+
+        None
     }
 }
 
@@ -319,8 +315,12 @@ mod tests {
     #[test]
     fn buffer_edit() {
         let mut buffer = Buffer::new(1);
-        buffer.edit(0..0, "abcdef");
+        buffer.edit(0..0, "abc");
+        assert_eq!(buffer.get_text(), "abc");
+        buffer.edit(3..3, "def");
         assert_eq!(buffer.get_text(), "abcdef");
+        buffer.edit(0..0, "ghi");
+        assert_eq!(buffer.get_text(), "ghiabcdef");
     }
 
     #[test]
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn random_fragment_ids() {
         for seed in 0..10 {
-            use rand::{self, Rng, SeedableRng, StdRng};
+            use rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut ids = vec![FragmentId(vec![0]), FragmentId(vec![4])];
