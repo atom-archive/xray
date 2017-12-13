@@ -105,7 +105,7 @@ impl<'a, T: Item> Tree<T> {
         Cursor::new(self)
     }
 
-    fn len<D: Dimension<Summary=T::Summary>>(&self) -> D {
+    pub fn len<D: Dimension<Summary=T::Summary>>(&self) -> D {
         D::from_summary(self.summary())
     }
 
