@@ -282,7 +282,7 @@ impl<'a, T: 'a + Item> Iter<'a, T> {
         }
     }
 
-    fn descend_to_first_item(&mut self, mut tree: &'a Tree<T>) -> Option<&'a T> {
+    fn seek_to_first_item(&mut self, mut tree: &'a Tree<T>) -> Option<&'a T> {
         if tree.is_empty() {
             None
         } else {
@@ -311,7 +311,7 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
                     (tree, *index)
                 };
                 if let Some(child) = tree.children().get(index) {
-                    return self.descend_to_first_item(child);
+                    return self.seek_to_first_item(child);
                 } else {
                     self.stack.pop();
                 }
@@ -319,7 +319,7 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
             None
         } else {
             self.did_start = true;
-            self.descend_to_first_item(self.tree)
+            self.seek_to_first_item(self.tree)
         }
     }
 }
@@ -344,6 +344,13 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         self.summary = T::Summary::default();
     }
 
+    pub fn peek(&mut self) -> (Option<&'tree T>, Option<&'tree T>, &T::Summary) {
+        let cur_element = self.stack.last().map(|&(subtree, index)| {
+            subtree.children()[index].value()
+        });
+        (self.prev_element(), cur_element, &self.summary)
+    }
+
     pub fn next(&mut self) -> (Option<&'tree T>, Option<&'tree T>, &T::Summary) {
         if self.did_seek {
             if self.did_start {
@@ -359,7 +366,8 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                         (prev_subtree, *index)
                     };
                     if let Some(child) = prev_subtree.children().get(index) {
-                        return self.descend_to_first_item(child);
+                        self.seek_to_first_item(child);
+                        return self.peek();
                     } else {
                         self.stack.pop();
                     }
@@ -367,18 +375,16 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                 (self.prev_element(), None, &self.summary)
             } else {
                 self.did_start = true;
-                let cur_element = self.stack.last().map(|&(subtree, index)| {
-                    subtree.children()[index].value()
-                });
-                (self.prev_element(), cur_element, &self.summary)
+                self.peek()
             }
         } else {
             self.did_start = true;
-            self.descend_to_first_item(self.tree)
+            self.seek_to_first_item(self.tree);
+            self.peek()
         }
     }
 
-    fn descend_to_first_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) -> (Option<&'tree T>, Option<&'tree T>, &'a T::Summary) {
+    fn seek_to_first_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) {
         self.did_seek = true;
 
         loop {
@@ -387,8 +393,8 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                     self.stack.push((tree, 0));
                     tree = &children[0];
                 }
-                &Node::Leaf {ref value, ..} => {
-                    return (self.prev_element(), Some(value), &self.summary);
+                &Node::Leaf { .. } => {
+                    break;
                 }
             }
         }
