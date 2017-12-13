@@ -55,20 +55,10 @@ pub struct Cursor<'a, T: 'a + Item> {
     summary: T::Summary
 }
 
-impl<T: Item> From<T> for Tree<T> {
-    fn from(value: T) -> Self {
-        let leaf = Tree(Arc::new(Node::Leaf {
-            summary: value.summarize(),
-            value: value
-        }));
-        Tree::from_children(vec![leaf])
-    }
-}
-
 impl<T: Item> Extend<T> for Tree<T> {
     fn extend<I: IntoIterator<Item=T>>(&mut self, items: I) {
         for item in items.into_iter() {
-            self.push(Self::from(item));
+            self.push(item);
         }
     }
 }
@@ -108,9 +98,14 @@ impl<'a, T: Item> Tree<T> {
         D::from_summary(self.summary())
     }
 
-    // This should only be called on the root.
-    pub fn push<S: Into<Tree<T>>>(&mut self, other: S) {
-        let other = other.into();
+    pub fn push(&mut self, item: T) {
+        self.push_tree(Tree(Arc::new(Node::Leaf {
+            summary: item.summarize(),
+            value: item
+        })))
+    }
+
+    pub fn push_tree(&mut self, other: Self) {
         if other.is_empty() { return }
 
         let self_height = self.height();
@@ -119,7 +114,7 @@ impl<'a, T: Item> Tree<T> {
         // Other is a taller tree, push its children one at a time
         if self_height < other_height {
             for other_child in other.children().iter().cloned() {
-                self.push(other_child);
+                self.push_tree(other_child);
             }
             return;
         }
@@ -190,7 +185,7 @@ impl<'a, T: Item> Tree<T> {
             &Node::Internal {ref summary, ref children, ..} => {
                 let node_end = node_start.clone() + &D::from_summary(summary);
                 if *start <= node_start && node_end <= *end {
-                    result.push(self.clone());
+                    result.push_tree(self.clone());
                 } else if node_start < *end || *start < node_end {
                     let mut child_start = node_start.clone();
                     for ref child in children {
@@ -201,7 +196,7 @@ impl<'a, T: Item> Tree<T> {
             }
             &Node::Leaf {..} => {
                 if *start <= node_start && node_start < *end {
-                    result.push(self.clone());
+                    result.push_tree(self.clone());
                 }
             }
         }
@@ -421,7 +416,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                     if *pos >= subtree_end {
                         self.summary += summary;
                         self.prev_leaf = rightmost_leaf.as_ref();
-                        prefix.as_mut().map(|prefix| prefix.push(subtree.clone()));
+                        prefix.as_mut().map(|prefix| prefix.push_tree(subtree.clone()));
                         return;
                     } else {
                         for (index, child) in children.iter().enumerate() {
@@ -429,7 +424,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                             if *pos >= child_end {
                                 self.summary += child.summary();
                                 self.prev_leaf = child.rightmost_leaf();
-                                prefix.as_mut().map(|prefix| prefix.push(child.clone()));
+                                prefix.as_mut().map(|prefix| prefix.push_tree(child.clone()));
                             } else {
                                 self.stack.push((subtree, index));
                                 subtree = child;
@@ -445,7 +440,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                         self.did_start = true;
                         self.prev_leaf = Some(subtree);
                         self.summary += summary;
-                        prefix.as_mut().map(|prefix| prefix.push(subtree.clone()));
+                        prefix.as_mut().map(|prefix| prefix.push_tree(subtree.clone()));
                     }
                     return;
                 }
@@ -462,7 +457,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
             while let Some((subtree, index)) = self.stack.pop() {
                 let start = if subtree.height() == 1 { index } else { index + 1 };
                 for i in start..subtree.children().len() {
-                    suffix.push(subtree.children()[i].clone());
+                    suffix.push_tree(subtree.children()[i].clone());
                 }
             }
             suffix
@@ -559,7 +554,7 @@ mod tests {
         let mut tree2 = Tree::new();
         tree2.extend((1..50));
 
-        tree1.push(tree2);
+        tree1.push_tree(tree2);
 
         assert_eq!(
             tree1.items(),
