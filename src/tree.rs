@@ -27,7 +27,9 @@ pub struct Tree<T: Item>(Arc<Node<T>>);
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Node<T: Item> {
-    Empty,
+    Empty {
+        summary: T::Summary
+    },
     Leaf {
         summary: T::Summary,
         value: T
@@ -74,7 +76,9 @@ impl<T: Item> Extend<T> for Tree<T> {
 
 impl<'a, T: Item> Tree<T> {
     pub fn new() -> Self {
-        Tree(Arc::new(Node::Empty))
+        Tree(Arc::new(Node::Empty {
+            summary: T::Summary::default()
+        }))
     }
 
     fn from_children(children: Vec<Self>) -> Self {
@@ -164,7 +168,7 @@ impl<'a, T: Item> Tree<T> {
 
     fn append_children(&mut self, new_children: &[Tree<T>]) -> Option<Tree<T>> {
         match Arc::make_mut(&mut self.0) {
-            &mut Node::Internal { ref mut summary, ref mut children, .. } => {
+            &mut Node::Internal { ref mut rightmost_leaf, ref mut summary, ref mut children, .. } => {
                 let child_count = children.len() + new_children.len();
                 if child_count > MAX_CHILDREN {
                     let midpoint = (child_count + child_count % 2) / 2;
@@ -172,6 +176,7 @@ impl<'a, T: Item> Tree<T> {
                         let mut all_children = children.iter().chain(new_children.iter()).cloned();
                         (all_children.by_ref().take(midpoint).collect(), all_children.collect())
                     };
+                    *rightmost_leaf = left_children.last().unwrap().rightmost_leaf().unwrap().clone();
                     *summary = Self::summarize_children(&left_children);
                     *children = left_children;
                     Some(Tree::from_children(right_children))
@@ -198,7 +203,7 @@ impl<'a, T: Item> Tree<T> {
 
     fn append_subsequence_recursive<D: Dimension<Summary=T::Summary>>(&self, result: &mut Self, node_start: D, start: &D, end: &D) {
         match self.0.as_ref() {
-            &Node::Empty => (),
+            &Node::Empty {..} => (),
             &Node::Leaf {..} => {
                 if *start <= node_start && node_start < *end {
                     result.push(self.clone());
@@ -221,7 +226,7 @@ impl<'a, T: Item> Tree<T> {
 
     fn rightmost_leaf(&self) -> Option<&Tree<T>> {
         match self.0.as_ref() {
-            &Node::Empty => None,
+            &Node::Empty { .. } => None,
             &Node::Leaf { .. } => Some(self),
             &Node::Internal { ref rightmost_leaf, .. } => Some(rightmost_leaf)
         }
@@ -236,7 +241,7 @@ impl<'a, T: Item> Tree<T> {
 
     fn summary(&self) -> &T::Summary {
         match self.0.as_ref() {
-            &Node::Empty => panic!("Requested a summary of an empty node"),
+            &Node::Empty { ref summary } => summary,
             &Node::Leaf { ref summary, .. } => summary,
             &Node::Internal { ref summary, .. } => summary,
         }
@@ -244,7 +249,7 @@ impl<'a, T: Item> Tree<T> {
 
     fn summary_mut(&mut self) -> &mut T::Summary {
         match Arc::make_mut(&mut self.0) {
-            &mut Node::Empty => panic!("Requested a summary of an empty node"),
+            &mut Node::Empty { .. } => panic!("Requested a summary of an empty node"),
             &mut Node::Leaf { ref mut summary, .. } => summary,
             &mut Node::Internal { ref mut summary, .. } => summary,
         }
@@ -280,7 +285,7 @@ impl<'a, T: Item> Tree<T> {
 
     fn is_empty(&self) -> bool {
         match self.0.as_ref() {
-            &Node::Empty => true,
+            &Node::Empty { .. } => true,
             _ => false
         }
     }
@@ -305,9 +310,9 @@ impl<'a, T: 'a + Item> Iter<'a, T> {
     fn descend_to_first_item(&mut self, mut tree: &'a Tree<T>) -> Option<&'a T> {
         loop {
             match tree.0.as_ref() {
-                &Node::Empty => return None,
-                &Node::Leaf {ref value, ..} => return Some(value),
-                &Node::Internal { ref children, ..} => {
+                &Node::Empty { .. } => return None,
+                &Node::Leaf { ref value, .. } => return Some(value),
+                &Node::Internal { ref children, .. } => {
                     self.stack.push((tree, 0));
                     tree = &children[0];
                 }
@@ -400,7 +405,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                         (None, Some(value), &self.summary)
                     }
                 },
-                &Node::Empty => (None, None, &self.summary)
+                &Node::Empty { .. } => (None, None, &self.summary)
             }
         } else {
             self.advance_on_next = true;
@@ -413,7 +418,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
 
         loop {
             match tree.0.as_ref() {
-                &Node::Empty => {
+                &Node::Empty { .. } => {
                     return (None, None, &self.summary);
                 }
                 &Node::Leaf {ref value, ..} => {
@@ -476,7 +481,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                     }
                     return;
                 }
-                &Node::Empty => return
+                &Node::Empty { .. } => return
             }
         }
     }
@@ -486,13 +491,26 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
             return self.tree.clone()
         }
 
-        let mut suffix = Tree::new();
-        while let Some((subtree, index)) = self.stack.pop() {
-            let start = if subtree.height() == 1 { index } else { index + 1 };
-            for i in start..subtree.children().len() {
-                suffix.push(subtree.children()[i].clone());
-            }
-        }
+        let suffix = match self.tree.0.as_ref() {
+            &Node::Internal { .. } => {
+                let mut suffix = Tree::new();
+                while let Some((subtree, index)) = self.stack.pop() {
+                    let start = if subtree.height() == 1 { index } else { index + 1 };
+                    for i in start..subtree.children().len() {
+                        suffix.push(subtree.children()[i].clone());
+                    }
+                }
+                suffix
+            },
+            &Node::Leaf { .. } => {
+                if self.advance_on_next {
+                    Tree::new()
+                } else {
+                    self.tree.clone()
+                }
+            },
+            &Node::Empty { ..} => Tree::new()
+        };
 
         self.prev_leaf = self.tree.rightmost_leaf();
         self.summary = self.tree.summary().clone();
@@ -606,30 +624,52 @@ mod tests {
     }
 
     #[test]
-    fn random_splice() {
-        use rand::{self, Rng};
-        let mut rng = rand::thread_rng();
+    fn random_splices_and_cursor_operations() {
+        for seed in 0..100 {
+            use rand::{Rng, SeedableRng, StdRng};
+            let mut rng = StdRng::from_seed(&[seed]);
 
-        let mut tree = Tree::<u16>::new();
-        let count = rng.gen_range(0, 100);
-        tree.extend(rng.gen_iter().take(count));
+            let mut tree = Tree::<u16>::new();
+            let count = rng.gen_range(0, 10);
+            tree.extend(rng.gen_iter().take(count));
 
-        for _i in 0..100 {
-            let end = rng.gen_range(0, tree.len::<Count>().0 + 1);
-            let start = rng.gen_range(0, end + 1);
-            let count = rng.gen_range(0, 100);
-            let new_items = rng.gen_iter().take(count).collect::<Vec<u16>>();
-            let mut original_tree_items = tree.items();
+            for _i in 0..100 {
+                let end = rng.gen_range(0, tree.len::<Count>().0 + 1);
+                let start = rng.gen_range(0, end + 1);
+                let count = rng.gen_range(0, 3);
+                let new_items = rng.gen_iter().take(count).collect::<Vec<u16>>();
+                let mut reference_items = tree.items();
 
-            tree.splice(&Count(start)..&Count(end), new_items.clone());
-            original_tree_items.splice(start..end, new_items);
+                tree.splice(&Count(start)..&Count(end), new_items.clone());
+                reference_items.splice(start..end, new_items);
 
-            assert_eq!(tree.items(), original_tree_items);
+                assert_eq!(tree.items(), reference_items);
+
+                let mut cursor = tree.cursor();
+                let suffix_start = rng.gen_range(0, tree.len::<Count>().0 + 1);
+                let prefix_end = rng.gen_range(0, suffix_start + 1);
+
+                let prefix_items = cursor.build_prefix(&Count(prefix_end)).items();
+                assert_eq!(prefix_items, reference_items[0..prefix_end].to_vec());
+
+                // Scan to the start of the suffix if we aren't already there
+                if suffix_start > prefix_end {
+                    for i in prefix_end..suffix_start + 1 {
+                        let (prev_item, cur_item, summary) = cursor.next();
+                        assert_eq!(cur_item, reference_items.get(i));
+                        assert_eq!(prev_item, if i > 0 { reference_items.get(i - 1) } else { None });
+                        assert_eq!(summary.count, i);
+                    }
+                }
+
+                let suffix_items = cursor.build_suffix().items();
+                assert_eq!(suffix_items, reference_items[suffix_start..].to_vec());
+            }
         }
     }
 
     #[test]
-    fn cursor() {
+    fn cursor_operations() {
         // Empty tree
         let tree = Tree::<u16>::new();
         let mut cursor = tree.cursor();
@@ -645,6 +685,8 @@ mod tests {
         assert_eq!(cursor.next(), (Some(&1), None, &IntegersSummary {count: 1, sum: 1}));
         assert_eq!(cursor.build_prefix(&Sum(1)).items(), [1]);
         assert_eq!(cursor.next(), (Some(&1), None, &IntegersSummary {count: 1, sum: 1}));
+        cursor.seek(&Sum(0));
+        assert_eq!(cursor.build_suffix().items(), [1]);
 
         // Multiple-element tree
         let mut tree = Tree::new();
