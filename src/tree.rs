@@ -27,31 +27,29 @@ pub struct Tree<T: Item>(Arc<Node<T>>);
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Node<T: Item> {
-    Empty {
-        summary: T::Summary
+    Internal {
+        rightmost_leaf: Option<Tree<T>>,
+        summary: T::Summary,
+        children: Vec<Tree<T>>,
+        height: u16
     },
     Leaf {
         summary: T::Summary,
         value: T
-    },
-    Internal {
-        rightmost_leaf: Tree<T>,
-        summary: T::Summary,
-        children: Vec<Tree<T>>,
-        height: u16
     }
 }
 
 pub struct Iter<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
-    advance_on_next: bool,
+    did_start: bool,
     stack: Vec<(&'a Tree<T>, usize)>,
 }
 
+#[derive(Debug)]
 pub struct Cursor<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
     did_seek: bool,
-    advance_on_next: bool,
+    did_start: bool,
     stack: Vec<(&'a Tree<T>, usize)>,
     prev_leaf: Option<&'a Tree<T>>,
     summary: T::Summary
@@ -59,10 +57,11 @@ pub struct Cursor<'a, T: 'a + Item> {
 
 impl<T: Item> From<T> for Tree<T> {
     fn from(value: T) -> Self {
-        Tree(Arc::new(Node::Leaf {
+        let leaf = Tree(Arc::new(Node::Leaf {
             summary: value.summarize(),
             value: value
-        }))
+        }));
+        Tree::from_children(vec![leaf])
     }
 }
 
@@ -76,22 +75,22 @@ impl<T: Item> Extend<T> for Tree<T> {
 
 impl<'a, T: Item> Tree<T> {
     pub fn new() -> Self {
-        Tree(Arc::new(Node::Empty {
-            summary: T::Summary::default()
-        }))
+        Self::from_children(vec![])
     }
 
     fn from_children(children: Vec<Self>) -> Self {
         let summary = Self::summarize_children(&children);
-        let rightmost_leaf = children.last().unwrap().rightmost_leaf().unwrap().clone();
-        let height = children[0].height() + 1;
+        let rightmost_leaf = children.last().and_then(|last_child| {
+            last_child.rightmost_leaf().cloned()
+        });
+        let height = children.get(0).map(|c| c.height()).unwrap_or(0) + 1;
+
         Tree(Arc::new(Node::Internal { rightmost_leaf, summary, children, height }))
     }
 
     fn summarize_children(children: &[Tree<T>]) -> T::Summary {
-        let mut iter = children.iter();
-        let mut summary = iter.next().unwrap().summary().clone();
-        for ref child in iter {
+        let mut summary = T::Summary::default();
+        for ref child in children {
             summary += child.summary();
         }
         summary
@@ -112,15 +111,7 @@ impl<'a, T: Item> Tree<T> {
     // This should only be called on the root.
     pub fn push<S: Into<Tree<T>>>(&mut self, other: S) {
         let other = other.into();
-
-        if other.is_empty() {
-            return;
-        }
-
-        if self.is_empty() {
-            *self = other;
-            return;
-        }
+        if other.is_empty() { return }
 
         let self_height = self.height();
         let other_height = other.height();
@@ -133,13 +124,6 @@ impl<'a, T: Item> Tree<T> {
             return;
         }
 
-        // At this point, we know that other isn't taller than self and isn't empty.
-        // Therefore, we're pushing a leaf onto a leaf, so we reassign root to an internal node.
-        if self_height == 0 {
-            *self = Self::from_children(vec![self.clone(), other]);
-            return;
-        }
-
         // Self is an internal node. Pushing other could cause the root to split.
         if let Some(split) = self.push_recursive(other) {
             *self = Self::from_children(vec![self.clone(), split])
@@ -148,7 +132,7 @@ impl<'a, T: Item> Tree<T> {
 
     fn push_recursive(&mut self, other: Tree<T>) -> Option<Tree<T>> {
         *self.summary_mut() += other.summary();
-        *self.rightmost_leaf_mut() = other.rightmost_leaf().unwrap().clone();
+        *self.rightmost_leaf_mut() = other.rightmost_leaf().cloned();
 
         let self_height = self.height();
         let other_height = other.height();
@@ -168,7 +152,7 @@ impl<'a, T: Item> Tree<T> {
 
     fn append_children(&mut self, new_children: &[Tree<T>]) -> Option<Tree<T>> {
         match Arc::make_mut(&mut self.0) {
-            &mut Node::Internal { ref mut rightmost_leaf, ref mut summary, ref mut children, .. } => {
+            &mut Node::Internal { ref mut children, ref mut summary, ref mut rightmost_leaf, .. } => {
                 let child_count = children.len() + new_children.len();
                 if child_count > MAX_CHILDREN {
                     let midpoint = (child_count + child_count % 2) / 2;
@@ -176,16 +160,16 @@ impl<'a, T: Item> Tree<T> {
                         let mut all_children = children.iter().chain(new_children.iter()).cloned();
                         (all_children.by_ref().take(midpoint).collect(), all_children.collect())
                     };
-                    *rightmost_leaf = left_children.last().unwrap().rightmost_leaf().unwrap().clone();
-                    *summary = Self::summarize_children(&left_children);
                     *children = left_children;
+                    *summary = Self::summarize_children(children);
+                    *rightmost_leaf = children.last().unwrap().rightmost_leaf().cloned();
                     Some(Tree::from_children(right_children))
                 } else {
                     children.extend(new_children.iter().cloned());
                     None
                 }
-            },
-            _ => panic!("Tried to append children to a non-internal node")
+            }
+            &mut Node::Leaf { .. } => panic!("Tried to append children to a leaf node")
         }
     }
 
@@ -203,12 +187,6 @@ impl<'a, T: Item> Tree<T> {
 
     fn append_subsequence_recursive<D: Dimension<Summary=T::Summary>>(&self, result: &mut Self, node_start: D, start: &D, end: &D) {
         match self.0.as_ref() {
-            &Node::Empty {..} => (),
-            &Node::Leaf {..} => {
-                if *start <= node_start && node_start < *end {
-                    result.push(self.clone());
-                }
-            }
             &Node::Internal {ref summary, ref children, ..} => {
                 let node_end = node_start.clone() + &D::from_summary(summary);
                 if *start <= node_start && node_end <= *end {
@@ -221,18 +199,22 @@ impl<'a, T: Item> Tree<T> {
                     }
                 }
             }
+            &Node::Leaf {..} => {
+                if *start <= node_start && node_start < *end {
+                    result.push(self.clone());
+                }
+            }
         }
     }
 
     fn rightmost_leaf(&self) -> Option<&Tree<T>> {
         match self.0.as_ref() {
-            &Node::Empty { .. } => None,
-            &Node::Leaf { .. } => Some(self),
-            &Node::Internal { ref rightmost_leaf, .. } => Some(rightmost_leaf)
+            &Node::Internal { ref rightmost_leaf, .. } => rightmost_leaf.as_ref(),
+            &Node::Leaf { .. } => Some(self)
         }
     }
 
-    fn rightmost_leaf_mut(&mut self) -> &mut Tree<T> {
+    fn rightmost_leaf_mut(&mut self) -> &mut Option<Tree<T>> {
         match Arc::make_mut(&mut self.0) {
             &mut Node::Internal { ref mut rightmost_leaf, .. } => rightmost_leaf,
             _ => panic!("Requested a mutable reference to the rightmost leaf of a non-internal node"),
@@ -241,59 +223,57 @@ impl<'a, T: Item> Tree<T> {
 
     fn summary(&self) -> &T::Summary {
         match self.0.as_ref() {
-            &Node::Empty { ref summary } => summary,
-            &Node::Leaf { ref summary, .. } => summary,
             &Node::Internal { ref summary, .. } => summary,
+            &Node::Leaf { ref summary, .. } => summary,
         }
     }
 
     fn summary_mut(&mut self) -> &mut T::Summary {
         match Arc::make_mut(&mut self.0) {
-            &mut Node::Empty { .. } => panic!("Requested a summary of an empty node"),
-            &mut Node::Leaf { ref mut summary, .. } => summary,
             &mut Node::Internal { ref mut summary, .. } => summary,
+            &mut Node::Leaf { ref mut summary, .. } => summary,
         }
     }
 
     fn children(&self) -> &[Tree<T>] {
         match self.0.as_ref() {
             &Node::Internal { ref children, .. } => children.as_slice(),
-            _ => panic!("Requested children of a non-internal node")
+            &Node::Leaf { .. } => panic!("Requested children of a leaf node")
         }
     }
 
     fn last_child_mut(&mut self) -> &mut Tree<T> {
         match Arc::make_mut(&mut self.0) {
             &mut Node::Internal { ref mut children, .. } => children.last_mut().unwrap(),
-            _ => panic!("Requested last child of a non-internal node")
+            &mut Node::Leaf { .. } => panic!("Requested last child of a leaf node")
         }
     }
 
     fn value(&self) -> &T {
         match self.0.as_ref() {
+            &Node::Internal { .. } => panic!("Requested value of an internal node"),
             &Node::Leaf { ref value, .. } => value,
-            _ => panic!("Requested value of a non-leaf node")
         }
     }
 
     fn underflowing(&self) -> bool {
         match self.0.as_ref() {
             &Node::Internal { ref children, ..} => children.len() < MIN_CHILDREN,
-            _ => false
+            &Node::Leaf { .. } => false
         }
     }
 
     fn is_empty(&self) -> bool {
         match self.0.as_ref() {
-            &Node::Empty { .. } => true,
-            _ => false
+            &Node::Internal { ref children, ..} => children.len() == 0,
+            &Node::Leaf { .. } => false
         }
     }
 
     fn height(&self) -> u16 {
         match self.0.as_ref() {
             &Node::Internal { height, ..} => height,
-            _ => 0
+            &Node::Leaf { .. } => 0
         }
     }
 }
@@ -302,19 +282,22 @@ impl<'a, T: 'a + Item> Iter<'a, T> {
     fn new(tree: &'a Tree<T>) -> Self {
         Iter {
             tree,
-            advance_on_next: false,
+            did_start: false,
             stack: Vec::with_capacity(tree.height() as usize)
         }
     }
 
     fn descend_to_first_item(&mut self, mut tree: &'a Tree<T>) -> Option<&'a T> {
-        loop {
-            match tree.0.as_ref() {
-                &Node::Empty { .. } => return None,
-                &Node::Leaf { ref value, .. } => return Some(value),
-                &Node::Internal { ref children, .. } => {
-                    self.stack.push((tree, 0));
-                    tree = &children[0];
+        if tree.is_empty() {
+            None
+        } else {
+            loop {
+                match tree.0.as_ref() {
+                    &Node::Internal { ref children, .. } => {
+                        self.stack.push((tree, 0));
+                        tree = &children[0];
+                    }
+                    &Node::Leaf { ref value, .. } => return Some(value),
                 }
             }
         }
@@ -325,7 +308,7 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.advance_on_next {
+        if self.did_start {
             while self.stack.len() > 0 {
                 let (tree, index) = {
                     let &mut (tree, ref mut index) = self.stack.last_mut().unwrap();
@@ -340,7 +323,7 @@ impl<'a, T: 'a + Item> Iterator for Iter<'a, T> where Self: 'a {
             }
             None
         } else {
-            self.advance_on_next = true;
+            self.did_start = true;
             self.descend_to_first_item(self.tree)
         }
     }
@@ -351,7 +334,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         Self {
             tree,
             did_seek: false,
-            advance_on_next: false,
+            did_start: false,
             stack: Vec::with_capacity(tree.height() as usize),
             prev_leaf: None,
             summary: T::Summary::default()
@@ -360,7 +343,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
 
     fn reset(&mut self) {
         self.did_seek = false;
-        self.advance_on_next = false;
+        self.did_start = false;
         self.stack.truncate(0);
         self.prev_leaf = None;
         self.summary = T::Summary::default();
@@ -368,47 +351,34 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
 
     pub fn next(&mut self) -> (Option<&'tree T>, Option<&'tree T>, &T::Summary) {
         if self.did_seek {
-            match self.tree.0.as_ref() {
-                &Node::Internal { .. } => {
-                    if self.advance_on_next {
-                        while self.stack.len() > 0 {
-                            let (prev_subtree, index) = {
-                                let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
-                                if prev_subtree.height() == 1 {
-                                    let prev_leaf = &prev_subtree.children()[*index];
-                                    self.prev_leaf = Some(prev_leaf);
-                                    self.summary += prev_leaf.summary();
-                                }
-                                *index += 1;
-                                (prev_subtree, *index)
-                            };
-                            if let Some(child) = prev_subtree.children().get(index) {
-                                return self.descend_to_first_item(child);
-                            } else {
-                                self.stack.pop();
-                            }
+            if self.did_start {
+                while self.stack.len() > 0 {
+                    let (prev_subtree, index) = {
+                        let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
+                        if prev_subtree.height() == 1 {
+                            let prev_leaf = &prev_subtree.children()[*index];
+                            self.prev_leaf = Some(prev_leaf);
+                            self.summary += prev_leaf.summary();
                         }
-                        (self.prev_element(), None, &self.summary)
+                        *index += 1;
+                        (prev_subtree, *index)
+                    };
+                    if let Some(child) = prev_subtree.children().get(index) {
+                        return self.descend_to_first_item(child);
                     } else {
-                        self.advance_on_next = true;
-                        let cur_element = self.stack.last().map(|&(subtree, index)| {
-                            subtree.children()[index].value()
-                        });
-                        (self.prev_element(), cur_element, &self.summary)
+                        self.stack.pop();
                     }
-                },
-                &Node::Leaf { ref value, ref summary, .. } => {
-                    if self.advance_on_next {
-                        (Some(value), None, summary)
-                    } else {
-                        self.advance_on_next = true;
-                        (None, Some(value), &self.summary)
-                    }
-                },
-                &Node::Empty { .. } => (None, None, &self.summary)
+                }
+                (self.prev_element(), None, &self.summary)
+            } else {
+                self.did_start = true;
+                let cur_element = self.stack.last().map(|&(subtree, index)| {
+                    subtree.children()[index].value()
+                });
+                (self.prev_element(), cur_element, &self.summary)
             }
         } else {
-            self.advance_on_next = true;
+            self.did_start = true;
             self.descend_to_first_item(self.tree)
         }
     }
@@ -418,15 +388,12 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
 
         loop {
             match tree.0.as_ref() {
-                &Node::Empty { .. } => {
-                    return (None, None, &self.summary);
-                }
-                &Node::Leaf {ref value, ..} => {
-                    return (self.prev_element(), Some(value), &self.summary);
-                },
                 &Node::Internal { ref children, ..} => {
                     self.stack.push((tree, 0));
                     tree = &children[0];
+                }
+                &Node::Leaf {ref value, ..} => {
+                    return (self.prev_element(), Some(value), &self.summary);
                 }
             }
         }
@@ -452,16 +419,16 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                 &Node::Internal {ref rightmost_leaf, ref summary, ref children, ..} => {
                     let subtree_end = D::from_summary(&self.summary) + &D::from_summary(summary);
                     if *pos >= subtree_end {
-                        self.prev_leaf = Some(rightmost_leaf);
                         self.summary += summary;
+                        self.prev_leaf = rightmost_leaf.as_ref();
                         prefix.as_mut().map(|prefix| prefix.push(subtree.clone()));
                         return;
                     } else {
                         for (index, child) in children.iter().enumerate() {
                             let child_end = D::from_summary(&self.summary) + &D::from_summary(child.summary());
                             if *pos >= child_end {
-                                self.prev_leaf = child.rightmost_leaf();
                                 self.summary += child.summary();
+                                self.prev_leaf = child.rightmost_leaf();
                                 prefix.as_mut().map(|prefix| prefix.push(child.clone()));
                             } else {
                                 self.stack.push((subtree, index));
@@ -472,49 +439,37 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                     }
                 }
                 &Node::Leaf {ref summary, ..} => {
+                    // TODO? Can we push the child unconditionally?
                     let subtree_end = D::from_summary(&self.summary) + &D::from_summary(summary);
                     if *pos >= subtree_end {
-                        self.advance_on_next = true;
+                        self.did_start = true;
                         self.prev_leaf = Some(subtree);
                         self.summary += summary;
                         prefix.as_mut().map(|prefix| prefix.push(subtree.clone()));
                     }
                     return;
                 }
-                &Node::Empty { .. } => return
             }
         }
     }
 
     pub fn build_suffix(&mut self) -> Tree<T> {
-        if !self.did_seek {
-            return self.tree.clone()
-        }
-
-        let suffix = match self.tree.0.as_ref() {
-            &Node::Internal { .. } => {
-                let mut suffix = Tree::new();
-                while let Some((subtree, index)) = self.stack.pop() {
-                    let start = if subtree.height() == 1 { index } else { index + 1 };
-                    for i in start..subtree.children().len() {
-                        suffix.push(subtree.children()[i].clone());
-                    }
-                }
-                suffix
-            },
-            &Node::Leaf { .. } => {
-                if self.advance_on_next {
-                    Tree::new()
-                } else {
-                    self.tree.clone()
-                }
-            },
-            &Node::Empty { ..} => Tree::new()
-        };
-
         self.prev_leaf = self.tree.rightmost_leaf();
         self.summary = self.tree.summary().clone();
-        suffix
+
+        if self.did_seek {
+            let mut suffix = Tree::new();
+            while let Some((subtree, index)) = self.stack.pop() {
+                let start = if subtree.height() == 1 { index } else { index + 1 };
+                for i in start..subtree.children().len() {
+                    suffix.push(subtree.children()[i].clone());
+                }
+            }
+            suffix
+        } else {
+            self.did_seek = true;
+            self.tree.clone()
+        }
     }
 
     fn prev_element(&self) -> Option<&'tree T> {
