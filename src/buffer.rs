@@ -107,9 +107,9 @@ impl Buffer {
         let new_text = new_text.into();
         let mut new_text = if new_text.len() > 0 { Some(new_text) } else { None };
 
-        let fragments = {
+        let updated_fragments = {
             let mut cursor = self.fragments.cursor();
-            let mut new_fragments = cursor.build_prefix(&old_range.start);
+            let mut updated_fragments = cursor.build_prefix(&old_range.start);
             let mut inserted_fragments = Vec::new();
 
             loop {
@@ -147,12 +147,12 @@ impl Buffer {
                 }
             }
 
-            new_fragments.extend(inserted_fragments);
-            new_fragments.push(cursor.build_suffix());
-            new_fragments
+            updated_fragments.extend(inserted_fragments);
+            updated_fragments.push(cursor.build_suffix());
+            updated_fragments
         };
 
-        self.fragments = fragments;
+        self.fragments = updated_fragments;
         self.local_clock += 1;
         self.lamport_clock += 1;
     }
