@@ -105,46 +105,54 @@ impl Buffer {
 
     pub fn edit<T: Into<Text>>(&mut self, old_range: Range<usize>, new_text: T) {
         let new_text = new_text.into();
-        let mut new_text = if new_text.len() > 0 { Some(new_text) } else { None };
-
-        let updated_fragments = {
-            let mut cursor = self.fragments.cursor();
-            let mut updated_fragments = cursor.build_prefix(&old_range.start);
-            let mut inserted_fragments = Vec::new();
-
-            loop {
-                let (prev_fragment, cur_fragment, summary) = cursor.next();
-
-                if let Some(prev_fragment) = prev_fragment {
-                    if summary.extent < old_range.start {
-                        let (left, right) = cur_fragment.unwrap().split(old_range.start - summary.extent, prev_fragment);
-                        let insertion = new_text.take().map(|text| {
-                            self.build_insertion(&left, Some(&right), text)
-                        });
-                        inserted_fragments.push(left);
-                        insertion.map(|insertion| inserted_fragments.push(insertion));
-                        inserted_fragments.push(right)
-                    } else if new_text.is_some() {
-                        inserted_fragments.push(self.build_insertion(prev_fragment, cur_fragment, new_text.take().unwrap()));
-                    }
-
-                    if summary.extent >= old_range.end {
-                        break;
-                    }
-                } else {
-                    inserted_fragments.push(cur_fragment.unwrap().clone());
-                    continue;
-                }
-            }
-
-            updated_fragments.extend(inserted_fragments);
-            updated_fragments.push(cursor.build_suffix());
-            updated_fragments
-        };
-
-        self.fragments = updated_fragments;
+        let new_text = if new_text.len() > 0 { Some(new_text) } else { None };
+        self.fragments = self.edit_fragments(old_range, new_text);
         self.local_clock += 1;
         self.lamport_clock += 1;
+    }
+
+    fn edit_fragments(&self, old_range: Range<usize>, mut new_text: Option<Text>) -> Tree<Fragment> {
+        let mut cursor = self.fragments.cursor();
+        let mut updated_fragments = cursor.build_prefix(&old_range.start);
+        let mut inserted_fragments = Vec::new();
+
+        if let (None, Some(cur_fragment), _) = cursor.peek() {
+            inserted_fragments.push(cur_fragment.clone());
+            cursor.next();
+        }
+
+        let split_fragment = {
+            let (prev_fragment, cur_fragment, summary) = cursor.next();
+            let prev_fragment = prev_fragment.unwrap();
+            if summary.extent < old_range.start {
+                let (left, right) = cur_fragment.unwrap().split(old_range.start - summary.extent, prev_fragment);
+                let insertion = new_text.take().map(|text| {
+                    self.build_insertion(&left, Some(&right), text)
+                });
+                inserted_fragments.push(left);
+                insertion.map(|insertion| inserted_fragments.push(insertion));
+                inserted_fragments.push(right);
+                true
+            } else {
+                if new_text.is_some() {
+                    inserted_fragments.push(self.build_insertion(prev_fragment, cur_fragment, new_text.take().unwrap()));
+                }
+                false
+            }
+        };
+
+        if split_fragment {
+            cursor.next();
+        }
+
+        // TODO: Handle deletion
+        // while cursor.peek().2.extent < old_range.end {
+        //     cursor.next();
+        // }
+
+        updated_fragments.extend(inserted_fragments);
+        updated_fragments.push_tree(cursor.build_suffix());
+        updated_fragments
     }
 
     fn build_insertion(&self, prev_fragment: &Fragment, next_fragment: Option<&Fragment>, text: Text) -> Fragment {
