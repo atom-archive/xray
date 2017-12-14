@@ -26,7 +26,6 @@ pub struct Position {
 }
 
 pub struct Iter<'a> {
-    buffer: &'a Buffer,
     fragment_iter: tree::Iter<'a, Fragment>,
     fragment: Option<&'a Fragment>,
     fragment_offset: usize
@@ -99,7 +98,6 @@ impl Buffer {
 
     pub fn iter(&self) -> Iter {
         Iter {
-            buffer: self,
             fragment_iter: self.fragments.iter(),
             fragment: None,
             fragment_offset: 0
@@ -135,7 +133,7 @@ impl Buffer {
             let prev_fragment = prev_fragment.unwrap();
 
             if let Some(cur_fragment) = cur_fragment {
-                let (before_range, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, summary.extent, old_range);
+                let (before_range, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, summary.extent, &old_range);
                 let insertion = new_text.take().map(|new_text| {
                     self.build_insertion(
                         change_id.clone(),
@@ -166,18 +164,39 @@ impl Buffer {
             cursor.next();
         }
 
+        loop {
+            let fragment_start = cursor.peek().2.extent;
+            if fragment_start >= old_range.end {
+                break
+            }
 
-        // TODO: Handle deletion
-        // while cursor.peek().2.extent < old_range.end {
-        //     cursor.next();
-        // }
+            let (prev_fragment, cur_fragment, _) = cursor.peek();
+            let prev_fragment = prev_fragment.unwrap();
+            let cur_fragment = cur_fragment.unwrap();
+
+            let fragment_end = fragment_start + cur_fragment.len();
+            if old_range.end < fragment_end {
+                let (_, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, fragment_start, &old_range);
+                let mut within_range = within_range.unwrap();
+                within_range.deletions.insert(change_id.clone());
+                inserted_fragments.push(within_range);
+                inserted_fragments.push(after_range.unwrap());
+            } else {
+                let mut fragment = cur_fragment.clone();
+                if fragment.is_visible() {
+                    fragment.deletions.insert(change_id.clone());
+                }
+                inserted_fragments.push(fragment)
+            }
+            cursor.next();
+        }
 
         updated_fragments.extend(inserted_fragments);
         updated_fragments.push_tree(cursor.build_suffix());
         updated_fragments
     }
 
-    fn split_fragment(&self, prev_fragment: &Fragment, fragment: &Fragment, fragment_start: usize, range: Range<usize>) -> (Option<Fragment>, Option<Fragment>, Option<Fragment>) {
+    fn split_fragment(&self, prev_fragment: &Fragment, fragment: &Fragment, fragment_start: usize, range: &Range<usize>) -> (Option<Fragment>, Option<Fragment>, Option<Fragment>) {
         let fragment_end = fragment_start + fragment.len();
         let mut prefix = fragment.clone();
         let mut before_range = None;
@@ -224,10 +243,6 @@ impl Buffer {
             text
         })
     }
-
-    fn is_fragment_visible(&self, fragment: &Fragment) -> bool {
-        fragment.deletions.is_empty()
-    }
 }
 
 impl<'a> Iterator for Iter<'a> {
@@ -242,12 +257,10 @@ impl<'a> Iterator for Iter<'a> {
         }
 
         while let Some(fragment) = self.fragment_iter.next() {
-            if self.buffer.is_fragment_visible(fragment) {
-                if let Some(result) = fragment.get_code_unit(0) {
-                    self.fragment_offset = 0;
-                    self.fragment = Some(fragment);
-                    return Some(result);
-                }
+            if let Some(result) = fragment.get_code_unit(0) {
+                self.fragment_offset = 0;
+                self.fragment = Some(fragment);
+                return Some(result);
             }
         }
 
@@ -306,7 +319,15 @@ impl Fragment {
     }
 
     fn len(&self) -> usize {
-        self.end_offset - self.start_offset
+        if self.is_visible() {
+            self.end_offset - self.start_offset
+        } else {
+            0
+        }
+    }
+
+    fn is_visible(&self) -> bool {
+        self.deletions.is_empty()
     }
 }
 
@@ -314,9 +335,16 @@ impl tree::Item for Fragment {
     type Summary = FragmentSummary;
 
     fn summarize(&self) -> Self::Summary {
-        FragmentSummary {
-            extent: self.end_offset - self.start_offset,
-            newline_count: self.insertion.text.newline_count_in_range(self.start_offset, self.end_offset)
+        if self.is_visible() {
+            FragmentSummary {
+                extent: self.len(),
+                newline_count: self.insertion.text.newline_count_in_range(self.start_offset, self.end_offset)
+            }
+        } else {
+            FragmentSummary {
+                extent: 0,
+                newline_count: 0
+            }
         }
     }
 }
@@ -407,6 +435,8 @@ mod tests {
         assert_eq!(buffer.get_text(), "ghiabjklcdef");
         buffer.edit(6..7, "");
         assert_eq!(buffer.get_text(), "ghiabjlcdef");
+        buffer.edit(4..9, "mno");
+        assert_eq!(buffer.get_text(), "ghiamnoef");
     }
 
     #[test]
