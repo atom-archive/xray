@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::HashSet;
 use std::iter;
 use std::ops::{AddAssign, Range};
@@ -25,6 +26,7 @@ pub struct Position {
 }
 
 pub struct Iter<'a> {
+    buffer: &'a Buffer,
     fragment_iter: tree::Iter<'a, Fragment>,
     fragment: Option<&'a Fragment>,
     fragment_offset: usize
@@ -97,6 +99,7 @@ impl Buffer {
 
     pub fn iter(&self) -> Iter {
         Iter {
+            buffer: self,
             fragment_iter: self.fragments.iter(),
             fragment: None,
             fragment_offset: 0
@@ -106,12 +109,18 @@ impl Buffer {
     pub fn edit<T: Into<Text>>(&mut self, old_range: Range<usize>, new_text: T) {
         let new_text = new_text.into();
         let new_text = if new_text.len() > 0 { Some(new_text) } else { None };
-        self.fragments = self.edit_fragments(old_range, new_text);
-        self.local_clock += 1;
-        self.lamport_clock += 1;
+        if new_text.is_some() || old_range.end > old_range.start {
+            self.local_clock += 1;
+            self.lamport_clock += 1;
+            let change_id = ChangeId {
+                replica_id: self.replica_id,
+                local_timestamp: self.local_clock
+            };
+            self.fragments = self.edit_fragments(change_id, old_range, new_text);
+        }
     }
 
-    fn edit_fragments(&self, old_range: Range<usize>, mut new_text: Option<Text>) -> Tree<Fragment> {
+    fn edit_fragments(&self, change_id: ChangeId, old_range: Range<usize>, mut new_text: Option<Text>) -> Tree<Fragment> {
         let mut cursor = self.fragments.cursor();
         let mut updated_fragments = cursor.build_prefix(&old_range.start);
         let mut inserted_fragments = Vec::new();
@@ -121,29 +130,42 @@ impl Buffer {
             cursor.next();
         }
 
-        let split_fragment = {
+        let advance_cursor = {
             let (prev_fragment, cur_fragment, summary) = cursor.next();
             let prev_fragment = prev_fragment.unwrap();
-            if summary.extent < old_range.start {
-                let (left, right) = cur_fragment.unwrap().split(old_range.start - summary.extent, prev_fragment);
-                let insertion = new_text.take().map(|text| {
-                    self.build_insertion(&left, Some(&right), text)
+
+            if let Some(cur_fragment) = cur_fragment {
+                let (before_range, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, summary.extent, old_range);
+                let insertion = new_text.take().map(|new_text| {
+                    self.build_insertion(
+                        change_id.clone(),
+                        before_range.as_ref().unwrap_or(prev_fragment),
+                        within_range.as_ref().or(after_range.as_ref()),
+                        new_text
+                    )
                 });
-                inserted_fragments.push(left);
-                insertion.map(|insertion| inserted_fragments.push(insertion));
-                inserted_fragments.push(right);
-                true
+
+                let did_split = before_range.is_some() || after_range.is_some();
+                before_range.map(|fragment| inserted_fragments.push(fragment));
+                insertion.map(|fragment| inserted_fragments.push(fragment));
+                within_range.map(|mut fragment| {
+                    fragment.deletions.insert(change_id.clone());
+                    inserted_fragments.push(fragment);
+                });
+                after_range.map(|fragment| inserted_fragments.push(fragment));
+                did_split
             } else {
-                if new_text.is_some() {
-                    inserted_fragments.push(self.build_insertion(prev_fragment, cur_fragment, new_text.take().unwrap()));
-                }
+                new_text.take().map(|new_text| {
+                    inserted_fragments.push(self.build_insertion(change_id, prev_fragment, cur_fragment, new_text));
+                });
                 false
             }
         };
 
-        if split_fragment {
+        if advance_cursor {
             cursor.next();
         }
+
 
         // TODO: Handle deletion
         // while cursor.peek().2.extent < old_range.end {
@@ -155,17 +177,44 @@ impl Buffer {
         updated_fragments
     }
 
-    fn build_insertion(&self, prev_fragment: &Fragment, next_fragment: Option<&Fragment>, text: Text) -> Fragment {
-        let new_fragment_id = match next_fragment {
-            Some(next_fragment) => FragmentId::between(&prev_fragment.id, &next_fragment.id),
-            None => FragmentId::between(&prev_fragment.id, &FragmentId::max_value())
-        };
+    fn split_fragment(&self, prev_fragment: &Fragment, fragment: &Fragment, fragment_start: usize, range: Range<usize>) -> (Option<Fragment>, Option<Fragment>, Option<Fragment>) {
+        let fragment_end = fragment_start + fragment.len();
+        let mut prefix = fragment.clone();
+        let mut before_range = None;
+        let mut within_range = None;
+        let mut after_range = None;
+
+        if range.end < fragment_end {
+            let mut suffix = prefix.clone();
+            suffix.start_offset = range.end - fragment_start;
+            prefix.end_offset = suffix.start_offset;
+            prefix.id = FragmentId::between(&prev_fragment.id, &suffix.id);
+            after_range = Some(suffix);
+        }
+
+        if range.start < range.end {
+            let mut suffix = prefix.clone();
+            suffix.start_offset = cmp::max(range.start, fragment_start) - fragment_start;
+            prefix.end_offset = suffix.start_offset;
+            prefix.id = FragmentId::between(&prev_fragment.id, &suffix.id);
+            within_range = Some(suffix);
+        }
+
+        if range.start > fragment_start {
+            before_range = Some(prefix);
+        }
+
+        (before_range, within_range, after_range)
+    }
+
+    fn build_insertion(&self, change_id: ChangeId, prev_fragment: &Fragment, next_fragment: Option<&Fragment>, text: Text) -> Fragment {
+        let new_fragment_id = FragmentId::between(
+            &prev_fragment.id,
+            next_fragment.map(|f| &f.id).unwrap_or(&FragmentId::max_value())
+        );
 
         Fragment::new(new_fragment_id, Insertion {
-            id: ChangeId {
-                replica_id: self.replica_id,
-                local_timestamp: self.local_clock
-            },
+            id: change_id,
             start: Position {
                 insertion_id: prev_fragment.insertion.id,
                 offset: prev_fragment.end_offset,
@@ -174,6 +223,10 @@ impl Buffer {
             },
             text
         })
+    }
+
+    fn is_fragment_visible(&self, fragment: &Fragment) -> bool {
+        fragment.deletions.is_empty()
     }
 }
 
@@ -189,10 +242,12 @@ impl<'a> Iterator for Iter<'a> {
         }
 
         while let Some(fragment) = self.fragment_iter.next() {
-            if let Some(result) = fragment.get_code_unit(0) {
-                self.fragment_offset = 0;
-                self.fragment = Some(fragment);
-                return Some(result);
+            if self.buffer.is_fragment_visible(fragment) {
+                if let Some(result) = fragment.get_code_unit(0) {
+                    self.fragment_offset = 0;
+                    self.fragment = Some(fragment);
+                    return Some(result);
+                }
             }
         }
 
@@ -243,30 +298,15 @@ impl Fragment {
     }
 
     fn get_code_unit(&self, offset: usize) -> Option<u16> {
-        if offset < self.end_offset - self.start_offset {
+        if offset < self.len() {
             Some(self.insertion.text.code_units[self.start_offset + offset].clone())
         } else {
             None
         }
     }
 
-    fn split(&self, relative_offset: usize, prev_fragment: &Fragment) -> (Self, Self) {
-        let left = Self {
-            id: FragmentId::between(&prev_fragment.id, &self.id),
-            insertion: self.insertion.clone(),
-            start_offset: self.start_offset,
-            end_offset: self.start_offset + relative_offset,
-            deletions: HashSet::new()
-        };
-        let right = Self {
-            id: self.id.clone(),
-            insertion: self.insertion.clone(),
-            start_offset: left.end_offset,
-            end_offset: self.end_offset,
-            deletions: HashSet::new()
-        };
-
-        (left, right)
+    fn len(&self) -> usize {
+        self.end_offset - self.start_offset
     }
 }
 
@@ -355,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn buffer_edit() {
+    fn edit() {
         let mut buffer = Buffer::new(1);
         buffer.edit(0..0, "abc");
         assert_eq!(buffer.get_text(), "abc");
@@ -365,6 +405,8 @@ mod tests {
         assert_eq!(buffer.get_text(), "ghiabcdef");
         buffer.edit(5..5, "jkl");
         assert_eq!(buffer.get_text(), "ghiabjklcdef");
+        buffer.edit(6..7, "");
+        assert_eq!(buffer.get_text(), "ghiabjlcdef");
     }
 
     #[test]
@@ -376,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn random_fragment_ids() {
+    fn fragment_ids() {
         for seed in 0..10 {
             use rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
