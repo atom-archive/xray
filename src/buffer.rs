@@ -96,6 +96,10 @@ impl Buffer {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.fragments.len()
+    }
+
     pub fn iter(&self) -> Iter {
         Iter {
             fragment_iter: self.fragments.iter(),
@@ -194,7 +198,7 @@ impl Buffer {
 
         if range.end < fragment_end {
             let mut suffix = prefix.clone();
-            suffix.start_offset = range.end - fragment_start;
+            suffix.start_offset = prefix.start_offset + range.end - fragment_start;
             prefix.end_offset = suffix.start_offset;
             prefix.id = FragmentId::between(&prev_fragment.id, &suffix.id);
             after_range = Some(suffix);
@@ -202,7 +206,7 @@ impl Buffer {
 
         if range.start < range.end {
             let mut suffix = prefix.clone();
-            suffix.start_offset = cmp::max(range.start, fragment_start) - fragment_start;
+            suffix.start_offset = prefix.start_offset + cmp::max(range.start, fragment_start) - fragment_start;
             prefix.end_offset = suffix.start_offset;
             prefix.id = FragmentId::between(&prev_fragment.id, &suffix.id);
             within_range = Some(suffix);
@@ -327,7 +331,10 @@ impl tree::Item for Fragment {
         if self.is_visible() {
             FragmentSummary {
                 extent: self.len(),
-                newline_count: self.insertion.text.newline_count_in_range(self.start_offset, self.end_offset)
+                newline_count: self.insertion.text.newline_count_in_range(
+                    self.start_offset,
+                    self.end_offset
+                )
             }
         } else {
             FragmentSummary {
@@ -426,6 +433,38 @@ mod tests {
         assert_eq!(buffer.get_text(), "ghiabjlcdef");
         buffer.edit(4..9, "mno");
         assert_eq!(buffer.get_text(), "ghiamnoef");
+    }
+
+    #[test]
+    fn random_edit() {
+        use rand::{Rng, SeedableRng, StdRng};
+
+        for seed in 0..100000 {
+            println!("{:?}", seed);
+            let mut rng = StdRng::from_seed(&[seed]);
+
+            let mut buffer = Buffer::new(1);
+            let mut reference_string = String::new();
+
+            for _i in 0..30 {
+                let end = rng.gen_range::<usize>(0, buffer.len() + 1);
+                let start = rng.gen_range::<usize>(0, end + 1);
+                let new_text = RandomCharIter(rng).take(rng.gen_range(0, 10)).collect::<String>();
+
+                buffer.edit(start..end, new_text.as_str());
+                reference_string = [&reference_string[0..start], new_text.as_str(), &reference_string[end..]].concat();
+                assert_eq!(buffer.get_text(), reference_string);
+            }
+        }
+
+        struct RandomCharIter<T: Rng>(T);
+        impl<T: Rng> Iterator for RandomCharIter<T> {
+            type Item = char;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                Some(self.0.gen_range(b'a', b'z' + 1).into())
+            }
+        }
     }
 
     #[test]
