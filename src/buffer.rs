@@ -108,7 +108,7 @@ impl Buffer {
         }
     }
 
-    pub fn edit<T: Into<Text>>(&mut self, old_range: Range<usize>, new_text: T) {
+    pub fn splice<T: Into<Text>>(&mut self, old_range: Range<usize>, new_text: T) {
         let new_text = new_text.into();
         let new_text = if new_text.len() > 0 { Some(new_text) } else { None };
         if new_text.is_some() || old_range.end > old_range.start {
@@ -118,11 +118,11 @@ impl Buffer {
                 replica_id: self.replica_id,
                 local_timestamp: self.local_clock
             };
-            self.fragments = self.edit_fragments(change_id, old_range, new_text);
+            self.fragments = self.splice_fragments(change_id, old_range, new_text);
         }
     }
 
-    fn edit_fragments(&self, change_id: ChangeId, old_range: Range<usize>, mut new_text: Option<Text>) -> Tree<Fragment> {
+    fn splice_fragments(&self, change_id: ChangeId, old_range: Range<usize>, mut new_text: Option<Text>) -> Tree<Fragment> {
         let mut cursor = self.fragments.cursor();
         let mut updated_fragments = cursor.build_prefix(&old_range.start);
         let mut inserted_fragments = Vec::new();
@@ -419,24 +419,24 @@ mod tests {
     }
 
     #[test]
-    fn edit() {
+    fn splice() {
         let mut buffer = Buffer::new(1);
-        buffer.edit(0..0, "abc");
+        buffer.splice(0..0, "abc");
         assert_eq!(buffer.get_text(), "abc");
-        buffer.edit(3..3, "def");
+        buffer.splice(3..3, "def");
         assert_eq!(buffer.get_text(), "abcdef");
-        buffer.edit(0..0, "ghi");
+        buffer.splice(0..0, "ghi");
         assert_eq!(buffer.get_text(), "ghiabcdef");
-        buffer.edit(5..5, "jkl");
+        buffer.splice(5..5, "jkl");
         assert_eq!(buffer.get_text(), "ghiabjklcdef");
-        buffer.edit(6..7, "");
+        buffer.splice(6..7, "");
         assert_eq!(buffer.get_text(), "ghiabjlcdef");
-        buffer.edit(4..9, "mno");
+        buffer.splice(4..9, "mno");
         assert_eq!(buffer.get_text(), "ghiamnoef");
     }
 
     #[test]
-    fn random_edit() {
+    fn random_splice() {
         use rand::{Rng, SeedableRng, StdRng};
 
         for seed in 0..100000 {
@@ -451,7 +451,7 @@ mod tests {
                 let start = rng.gen_range::<usize>(0, end + 1);
                 let new_text = RandomCharIter(rng).take(rng.gen_range(0, 10)).collect::<String>();
 
-                buffer.edit(start..end, new_text.as_str());
+                buffer.splice(start..end, new_text.as_str());
                 reference_string = [&reference_string[0..start], new_text.as_str(), &reference_string[end..]].concat();
                 assert_eq!(buffer.get_text(), reference_string);
             }
