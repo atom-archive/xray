@@ -49,7 +49,6 @@ pub struct Iter<'a, T: 'a + Item> {
 pub struct Cursor<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
     did_seek: bool,
-    did_start: bool,
     stack: Vec<(&'a Tree<T>, usize)>,
     prev_leaf: Option<&'a Tree<T>>,
     summary: T::Summary
@@ -329,7 +328,6 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         Self {
             tree,
             did_seek: false,
-            did_start: false,
             stack: Vec::with_capacity(tree.height() as usize),
             prev_leaf: None,
             summary: T::Summary::default()
@@ -338,49 +336,48 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
 
     fn reset(&mut self) {
         self.did_seek = false;
-        self.did_start = false;
         self.stack.truncate(0);
         self.prev_leaf = None;
         self.summary = T::Summary::default();
     }
 
-    pub fn peek(&mut self) -> (Option<&'tree T>, Option<&'tree T>, &T::Summary) {
-        let cur_element = self.stack.last().map(|&(subtree, index)| {
-            subtree.children()[index].value()
-        });
-        (self.prev_element(), cur_element, &self.summary)
+    pub fn start<D: Dimension<Summary=T::Summary>>(&self) -> D {
+        D::from_summary(&self.summary)
     }
 
-    pub fn next(&mut self) -> (Option<&'tree T>, Option<&'tree T>, &T::Summary) {
-        if self.did_seek {
-            if self.did_start {
-                while self.stack.len() > 0 {
-                    let (prev_subtree, index) = {
-                        let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
-                        if prev_subtree.height() == 1 {
-                            let prev_leaf = &prev_subtree.children()[*index];
-                            self.prev_leaf = Some(prev_leaf);
-                            self.summary += prev_leaf.summary();
-                        }
-                        *index += 1;
-                        (prev_subtree, *index)
-                    };
-                    if let Some(child) = prev_subtree.children().get(index) {
-                        self.seek_to_first_item(child);
-                        return self.peek();
-                    } else {
-                        self.stack.pop();
-                    }
+    pub fn item<'a>(&'a self) -> Option<&'tree T> {
+        self.cur_leaf().map(|leaf| leaf.value())
+    }
+
+    pub fn prev_item<'a>(&'a self) -> Option<&'tree T> {
+        self.prev_leaf.map(|leaf| leaf.value())
+    }
+
+    fn cur_leaf<'a>(&'a self) -> Option<&'tree Tree<T>> {
+        assert!(self.did_seek, "Must seek before reading cursor position");
+        self.stack.last().map(|&(subtree, index)| &subtree.children()[index])
+    }
+
+    pub fn next(&mut self) {
+        assert!(self.did_seek, "Must seek before calling next");
+
+        while self.stack.len() > 0 {
+            let (prev_subtree, index) = {
+                let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
+                if prev_subtree.height() == 1 {
+                    let prev_leaf = &prev_subtree.children()[*index];
+                    self.prev_leaf = Some(prev_leaf);
+                    self.summary += prev_leaf.summary();
                 }
-                (self.prev_element(), None, &self.summary)
+                *index += 1;
+                (prev_subtree, *index)
+            };
+            if let Some(child) = prev_subtree.children().get(index) {
+                self.seek_to_first_item(child);
+                break;
             } else {
-                self.did_start = true;
-                self.peek()
+                self.stack.pop();
             }
-        } else {
-            self.did_start = true;
-            self.seek_to_first_item(self.tree);
-            self.peek()
         }
     }
 
@@ -401,16 +398,16 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
     }
 
     pub fn seek<D: Dimension<Summary=T::Summary>>(&mut self, pos: &D) {
-        self.seek_internal(pos, None);
+        self.seek_and_build_prefix(pos, None);
     }
 
     pub fn build_prefix<D: Dimension<Summary=T::Summary>>(&mut self, end: &D) -> Tree<T> {
         let mut prefix = Tree::new();
-        self.seek_internal(end, Some(&mut prefix));
+        self.seek_and_build_prefix(end, Some(&mut prefix));
         prefix
     }
 
-    fn seek_internal<D: Dimension<Summary=T::Summary>>(&mut self, pos: &D, mut prefix: Option<&mut Tree<T>>) {
+    fn seek_and_build_prefix<D: Dimension<Summary=T::Summary>>(&mut self, pos: &D, mut prefix: Option<&mut Tree<T>>) {
         self.reset();
         self.did_seek = true;
 
@@ -443,7 +440,6 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                     // TODO? Can we push the child unconditionally?
                     let subtree_end = D::from_summary(&self.summary) + &D::from_summary(summary);
                     if *pos >= subtree_end {
-                        self.did_start = true;
                         self.prev_leaf = Some(subtree);
                         self.summary += summary;
                         prefix.as_mut().map(|prefix| prefix.push_tree(subtree.clone()));
@@ -455,6 +451,8 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
     }
 
     pub fn build_suffix(&mut self) -> Tree<T> {
+        assert!(self.did_seek, "Must seek before calling build_suffix");
+
         self.prev_leaf = self.tree.rightmost_leaf();
         self.summary = self.tree.summary().clone();
 
@@ -471,10 +469,6 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
             self.did_seek = true;
             self.tree.clone()
         }
-    }
-
-    fn prev_element(&self) -> Option<&'tree T> {
-        self.prev_leaf.map(|leaf| leaf.value())
     }
 }
 
@@ -580,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn random_splices_and_cursor_operations() {
+    fn random() {
         for seed in 0..100 {
             use rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
@@ -610,11 +604,11 @@ mod tests {
 
                 // Scan to the start of the suffix if we aren't already there
                 if suffix_start > prefix_end {
-                    for i in prefix_end..suffix_start + 1 {
-                        let (prev_item, cur_item, summary) = cursor.next();
-                        assert_eq!(cur_item, reference_items.get(i));
-                        assert_eq!(prev_item, if i > 0 { reference_items.get(i - 1) } else { None });
-                        assert_eq!(summary.count, i);
+                    for i in prefix_end..suffix_start {
+                        assert_eq!(cursor.item(), reference_items.get(i));
+                        assert_eq!(cursor.prev_item(), if i > 0 { reference_items.get(i - 1) } else { None });
+                        assert_eq!(cursor.start::<Count>(), Count(i));
+                        cursor.next();
                     }
                 }
 
@@ -625,54 +619,93 @@ mod tests {
     }
 
     #[test]
-    fn cursor_operations() {
+    fn cursor() {
         // Empty tree
         let tree = Tree::<u16>::new();
         let mut cursor = tree.cursor();
         assert_eq!(cursor.build_prefix(&Sum(0)), Tree::new());
-        assert_eq!(cursor.next(), (None, None, &IntegersSummary::default()));
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
 
         // Single-element tree
         let mut tree = Tree::<u16>::new();
         tree.extend(vec![1]);
         let mut cursor = tree.cursor();
         assert_eq!(cursor.build_prefix(&Sum(0)), Tree::new());
-        assert_eq!(cursor.next(), (None, Some(&1), &IntegersSummary::default()));
-        assert_eq!(cursor.next(), (Some(&1), None, &IntegersSummary {count: 1, sum: 1}));
+        assert_eq!(cursor.item(), Some(&1));
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
+        cursor.next();
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(&1));
+        assert_eq!(cursor.start::<Count>(), Count(1));
+        assert_eq!(cursor.start::<Sum>(), Sum(1));
+
         assert_eq!(cursor.build_prefix(&Sum(1)).items(), [1]);
-        assert_eq!(cursor.next(), (Some(&1), None, &IntegersSummary {count: 1, sum: 1}));
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(&1));
+        assert_eq!(cursor.start::<Count>(), Count(1));
+        assert_eq!(cursor.start::<Sum>(), Sum(1));
+
         cursor.seek(&Sum(0));
         assert_eq!(cursor.build_suffix().items(), [1]);
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(&1));
+        assert_eq!(cursor.start::<Count>(), Count(1));
+        assert_eq!(cursor.start::<Sum>(), Sum(1));
 
         // Multiple-element tree
         let mut tree = Tree::new();
         tree.extend(vec![1, 2, 3, 4, 5, 6]);
         let mut cursor = tree.cursor();
 
-        // Calling next without building a prefix yields the first element
-        assert_eq!(cursor.next(), (None, Some(&1), &IntegersSummary {count: 0, sum: 0}));
-
-        // Calling next after building a prefix yields the element after the last prefix
         assert_eq!(cursor.build_prefix(&Sum(4)).items(), [1, 2]);
-        assert_eq!(cursor.next(), (Some(&2), Some(&3), &IntegersSummary {count: 2, sum: 3}));
-        assert_eq!(cursor.next(), (Some(&3), Some(&4), &IntegersSummary {count: 3, sum: 6}));
-        assert_eq!(cursor.next(), (Some(&4), Some(&5), &IntegersSummary {count: 4, sum: 10}));
-        assert_eq!(cursor.next(), (Some(&5), Some(&6), &IntegersSummary {count: 5, sum: 15}));
-        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
-        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
-        assert_eq!(cursor.build_prefix(&tree.len::<Sum>()).items(), tree.items());
-        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
-        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
+        assert_eq!(cursor.item(), Some(&3));
+        assert_eq!(cursor.prev_item(), Some(&2));
+        assert_eq!(cursor.start::<Count>(), Count(2));
+        assert_eq!(cursor.start::<Sum>(), Sum(3));
 
-        // Suffixes are built from the cursor's current element to the end
+        cursor.next();
+        assert_eq!(cursor.item(), Some(&4));
+        assert_eq!(cursor.prev_item(), Some(&3));
+        assert_eq!(cursor.start::<Count>(), Count(3));
+        assert_eq!(cursor.start::<Sum>(), Sum(6));
+
+        cursor.next();
+        assert_eq!(cursor.item(), Some(&5));
+        assert_eq!(cursor.prev_item(), Some(&4));
+        assert_eq!(cursor.start::<Count>(), Count(4));
+        assert_eq!(cursor.start::<Sum>(), Sum(10));
+
+        cursor.next();
+        assert_eq!(cursor.item(), Some(&6));
+        assert_eq!(cursor.prev_item(), Some(&5));
+        assert_eq!(cursor.start::<Count>(), Count(5));
+        assert_eq!(cursor.start::<Sum>(), Sum(15));
+
+        cursor.next();
+        cursor.next();
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(&6));
+        assert_eq!(cursor.start::<Count>(), Count(6));
+        assert_eq!(cursor.start::<Sum>(), Sum(21));
+
+        assert_eq!(cursor.build_prefix(&tree.len::<Sum>()).items(), tree.items());
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(&6));
+        assert_eq!(cursor.start::<Count>(), Count(6));
+        assert_eq!(cursor.start::<Sum>(), Sum(21));
+
+        // Suffixes are built from the cursor's current location to the end.
         cursor.seek(&Count(3));
         assert_eq!(cursor.build_suffix().items(), [4, 5, 6]);
-        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
-        assert_eq!(cursor.next(), (Some(&6), None, &IntegersSummary {count: 6, sum: 21}));
-        assert_eq!(cursor.build_suffix().items(), []);
-
-        // Calling build suffix without seeking yields the entire tree
-        let mut cursor = tree.cursor();
-        assert_eq!(cursor.build_suffix().items(), tree.items());
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(&6));
+        assert_eq!(cursor.start::<Count>(), Count(6));
+        assert_eq!(cursor.start::<Sum>(), Sum(21));
     }
 }

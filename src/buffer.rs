@@ -123,58 +123,46 @@ impl Buffer {
         let mut updated_fragments = cursor.build_prefix(&old_range.start);
         let mut inserted_fragments = Vec::new();
 
-        if let (None, Some(cur_fragment), _) = cursor.peek() {
-            inserted_fragments.push(cur_fragment.clone());
+        if cursor.prev_item().is_none() {
+            inserted_fragments.push(cursor.item().unwrap().clone());
             cursor.next();
         }
 
-        let advance_cursor = {
-            let (prev_fragment, cur_fragment, summary) = cursor.next();
-            let prev_fragment = prev_fragment.unwrap();
+        let prev_fragment = cursor.prev_item().unwrap();
+        if let Some(cur_fragment) = cursor.item() {
+            let (before_range, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, cursor.start(), &old_range);
+            let insertion = new_text.take().map(|new_text| {
+                self.build_insertion(
+                    change_id.clone(),
+                    before_range.as_ref().unwrap_or(prev_fragment),
+                    within_range.as_ref().or(after_range.as_ref()),
+                    new_text
+                )
+            });
 
-            if let Some(cur_fragment) = cur_fragment {
-                let (before_range, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, summary.extent, &old_range);
-                let insertion = new_text.take().map(|new_text| {
-                    self.build_insertion(
-                        change_id.clone(),
-                        before_range.as_ref().unwrap_or(prev_fragment),
-                        within_range.as_ref().or(after_range.as_ref()),
-                        new_text
-                    )
-                });
-
-                let did_split = before_range.is_some() || after_range.is_some();
-                before_range.map(|fragment| inserted_fragments.push(fragment));
-                insertion.map(|fragment| inserted_fragments.push(fragment));
-                within_range.map(|mut fragment| {
-                    fragment.deletions.insert(change_id.clone());
-                    inserted_fragments.push(fragment);
-                });
-                after_range.map(|fragment| inserted_fragments.push(fragment));
-                did_split
-            } else {
-                new_text.take().map(|new_text| {
-                    inserted_fragments.push(self.build_insertion(change_id, prev_fragment, cur_fragment, new_text));
-                });
-                false
-            }
-        };
-
-        if advance_cursor {
+            before_range.map(|fragment| inserted_fragments.push(fragment));
+            insertion.map(|fragment| inserted_fragments.push(fragment));
+            within_range.map(|mut fragment| {
+                fragment.deletions.insert(change_id.clone());
+                inserted_fragments.push(fragment);
+            });
+            after_range.map(|fragment| inserted_fragments.push(fragment));
             cursor.next();
+        } else {
+            new_text.take().map(|new_text| {
+                inserted_fragments.push(self.build_insertion(change_id, prev_fragment, None, new_text));
+            });
         }
 
         loop {
-            let fragment_start = cursor.peek().2.extent;
-            if fragment_start >= old_range.end {
-                break
-            }
+            let fragment_start = cursor.start();
 
-            let (prev_fragment, cur_fragment, _) = cursor.peek();
-            let prev_fragment = prev_fragment.unwrap();
-            let cur_fragment = cur_fragment.unwrap();
+            if fragment_start >= old_range.end { break; }
 
+            let prev_fragment = cursor.prev_item().unwrap();
+            let cur_fragment = cursor.item().unwrap();
             let fragment_end = fragment_start + cur_fragment.len();
+
             if old_range.end < fragment_end {
                 let (_, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, fragment_start, &old_range);
                 let mut within_range = within_range.unwrap();
@@ -188,6 +176,7 @@ impl Buffer {
                 }
                 inserted_fragments.push(fragment)
             }
+
             cursor.next();
         }
 
