@@ -5,7 +5,7 @@ use std::ops::{AddAssign, Range};
 use std::sync::Arc;
 use super::tree::{self, Tree};
 
-type ReplicaId = usize;
+pub type ReplicaId = usize;
 type LocalTimestamp = usize;
 type LamportTimestamp = usize;
 

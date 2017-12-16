@@ -1,0 +1,7 @@
+[package]
+name = "proton-core"
+version = "0.1.0"
+authors = ["Nathan Sobo <nathan@github.com>"]
+
+[dependencies]
+rand = "0.3"

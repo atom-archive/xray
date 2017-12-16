@@ -1,0 +1,23 @@
+{
+  "name": "proton",
+  "version": "0.0.1",
+  "description": "This is an experiment in using the fundamental concepts of the Teletype CRDT as Atom's core text-storage data structure. It's implemented in Rust.",
+  "main": "lib/proton.js",
+  "gypfile": true,
+  "scripts": {
+    "build-lib": "cargo build --release",
+    "build-addon": "node-gyp rebuild",
+    "build": "npm run -s build-lib && npm run -s build-addon",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atom/proton.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/atom/proton/issues"
+  },
+  "homepage": "https://github.com/atom/proton#readme"
+}
