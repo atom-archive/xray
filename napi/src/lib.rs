@@ -1,15 +1,20 @@
 extern crate napi_sys;
 
+use std::ffi::{CString, NulError};
+use std::ptr;
+
 pub mod sys {
     pub use napi_sys::*;
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-struct Error {
+#[derive(Debug)]
+pub struct Error {
     status: Status
 }
 
+#[derive(Eq, PartialEq, Debug)]
 enum Status {
     Ok,
     InvalidArg,
@@ -24,7 +29,8 @@ enum Status {
     PendingException,
     Cancelled,
     EscapeCalledTwice,
-    HandleScopeMismatch
+    HandleScopeMismatch,
+    StringContainsNull
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -38,11 +44,17 @@ pub struct PropertyDescriptor {
 #[derive(Clone, Copy, Debug)]
 pub struct Value<'env> {
     env: &'env Env,
-    sys_value: sys::napi_value
+    raw_value: sys::napi_value
 }
 
-pub struct Object<'env>(Value<'env>);
 pub struct Number<'env>(Value<'env>);
+pub struct Object<'env>(Value<'env>);
+
+impl From<NulError> for Error {
+    fn from(error: NulError) -> Self {
+        Error { status: Status::StringContainsNull }
+    }
+}
 
 impl From<sys::napi_status> for Status {
     fn from(code: sys::napi_status) -> Self {
@@ -69,8 +81,17 @@ impl From<sys::napi_status> for Status {
 }
 
 impl Env {
-    pub fn value_from_sys(&self, sys_value: sys::napi_value) -> Value {
-        Value { env: self , sys_value }
+    pub fn value_from_sys(&self, raw_value: sys::napi_value) -> Value {
+        Value { env: self , raw_value }
+    }
+
+    pub fn create_int64<'a>(&'a self, int: i64) -> Number<'a> {
+        let mut raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_create_int64(self.0, int, (&mut raw_value) as *mut sys::napi_value)
+        };
+        debug_assert!(Status::from(status) == Status::Ok);
+        Number::from_raw(self, raw_value)
     }
 }
 
@@ -80,6 +101,68 @@ impl From<sys::napi_env> for Env {
     }
 }
 
-impl Object {
-    
+impl<'env> Value<'env> {
+    pub fn from_raw(env: &'env Env, raw_value: sys::napi_value) -> Self {
+        Self { env, raw_value }
+    }
+
+    pub fn into_object(self) -> Result<Object<'env>> {
+        let mut new_raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_coerce_to_object(self.env.0, self.raw_value, (&mut new_raw_value) as *mut sys::napi_value)
+        };
+        check_status(status)?;
+        Ok(Object(self))
+    }
+}
+
+impl<'env> Number<'env> {
+    fn from_raw(env: &'env Env, raw_value: sys::napi_value) -> Self {
+        Number(Value { env, raw_value })
+    }
+}
+
+impl<'env> Into<Value<'env>> for Number<'env> {
+    fn into(self) -> Value<'env> {
+        self.0
+    }
+}
+
+impl<'env> Object<'env> {
+    pub fn set_named_property<'a, V: Into<Value<'a>>>(&mut self, name: &'a str, value: V) -> Result<()> {
+        let key = CString::new(name)?;
+        let status = unsafe {
+            sys::napi_set_named_property(self.raw_env(), self.raw_value(), key.as_ptr(), value.into().raw_value)
+        };
+        check_status(status)?;
+        Ok(())
+    }
+
+    fn raw_value(&self) -> sys::napi_value {
+        self.0.raw_value
+    }
+
+    fn raw_env(&self) -> sys::napi_env {
+        self.0.env.0
+    }
+}
+
+impl<'env> Into<sys::napi_value> for Object<'env> {
+    fn into(self) -> sys::napi_value {
+        self.0.raw_value
+    }
+}
+
+impl<'env> Into<Value<'env>> for Object<'env> {
+    fn into(self) -> Value<'env> {
+        self.0
+    }
+}
+
+fn check_status(code: sys::napi_status) -> Result<()> {
+    let status = Status::from(code);
+    match status {
+        Status::Ok => Ok(()),
+        _ => Err(Error { status })
+    }
 }
