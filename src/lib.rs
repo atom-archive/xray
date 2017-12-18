@@ -6,25 +6,11 @@ use napi::{sys, Env, Result, Value, Object};
 use std::io::Write;
 use std::ptr;
 
-#[no_mangle] pub extern "C" fn init_module_from_c(env: sys::napi_env, exports: sys::napi_value) -> sys::napi_value {
-    let env = Env::from(env);
-
-    let mut exports = Value::from_raw(&env, exports).into_object()
-        .expect("Expected an exports object to be passed to module initializer");
-
-    match init_module(&env, &mut exports) {
-        Ok(Some(exports)) => exports.into(),
-        Ok(None) => ptr::null_mut(),
-        Err(e) => {
-            let _ = writeln!(std::io::stderr(), "Error initializing module: {:?}", e);
-            ptr::null_mut()
-        }
-    }
-}
-
-fn init_module<'env>(env: &'env Env, exports: &'env mut Object) -> Result<Option<Object<'env>>> {
-    exports.set_named_property("foo", env.create_int64(42))?;
-    Ok(None)
+#[no_mangle] pub extern "C" fn init_module(raw_env: sys::napi_env, raw_exports: sys::napi_value) -> sys::napi_value {
+    napi::init_module(raw_env, raw_exports, |env, exports| {
+        exports.set_named_property("foo", env.create_int64(42))?;
+        Ok(None)
+    })
 }
 
 // let env = napi::Env::from(env);

@@ -1,6 +1,7 @@
 extern crate napi_sys;
 
 use std::ffi::{CString, NulError};
+use std::io::Write;
 use std::ptr;
 
 pub mod sys {
@@ -49,6 +50,26 @@ pub struct Value<'env> {
 
 pub struct Number<'env>(Value<'env>);
 pub struct Object<'env>(Value<'env>);
+
+
+pub fn init_module<F>(env: sys::napi_env, exports: sys::napi_value, init: F) -> sys::napi_value
+    where F: for <'env> Fn(&'env Env, &'env mut Object) -> Result<Option<Object<'env>>>
+{
+    let env = Env::from(env);
+
+    let mut exports = Value::from_raw(&env, exports).into_object()
+        .expect("Expected an exports object to be passed to module initializer");
+
+    match init(&env, &mut exports) {
+        Ok(Some(exports)) => exports.into(),
+        Ok(None) => ptr::null_mut(),
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "Error initializing module: {:?}", e);
+            ptr::null_mut()
+        }
+    }
+}
+
 
 impl From<NulError> for Error {
     fn from(error: NulError) -> Self {
