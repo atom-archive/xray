@@ -1,7 +1,6 @@
 extern crate napi_sys;
 
-use std::ffi::{CString, NulError};
-use std::io::Write;
+use std::ffi::CString;
 use std::ptr;
 
 pub mod sys {
@@ -51,28 +50,59 @@ pub struct Value<'env> {
 pub struct Number<'env>(Value<'env>);
 pub struct Object<'env>(Value<'env>);
 
+#[macro_export]
+macro_rules! register_module {
+    ($module_name:ident, $init:ident) => {
+        #[no_mangle]
+        #[cfg_attr(target_os = "linux", link_section = ".ctors")]
+        #[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
+        #[cfg_attr(target_os = "windows", link_section = ".CRT$XCU")]
+        pub static __REGISTER_MODULE: extern "C" fn() = {
+            use ::std::io::Write;
+            use ::std::os::raw::c_char;
+            use ::std::ptr;
 
-pub fn init_module<F>(env: sys::napi_env, exports: sys::napi_value, init: F) -> sys::napi_value
-    where F: for <'env> Fn(&'env Env, &'env mut Object) -> Result<Option<Object<'env>>>
-{
-    let env = Env::from(env);
+            extern "C" fn register_module() {
+                static mut MODULE_DESCRIPTOR: Option<sys::napi_module> = None;
+                unsafe {
+                    MODULE_DESCRIPTOR = Some(sys::napi_module {
+                        nm_version: 1,
+                        nm_flags: 0,
+                        nm_filename: concat!(file!(), "\0").as_ptr() as *const c_char,
+                        nm_register_func: Some(init_module),
+                        nm_modname: concat!(stringify!($module_name), "\0").as_ptr() as *const c_char,
+                        nm_priv: 0 as *mut _,
+                        reserved: [0 as *mut _; 4]
+                    });
 
-    let mut exports = Value::from_raw(&env, exports).into_object()
-        .expect("Expected an exports object to be passed to module initializer");
+                    sys::napi_module_register(MODULE_DESCRIPTOR.as_mut().unwrap() as *mut sys::napi_module);
+                }
 
-    match init(&env, &mut exports) {
-        Ok(Some(exports)) => exports.into(),
-        Ok(None) => ptr::null_mut(),
-        Err(e) => {
-            let _ = writeln!(std::io::stderr(), "Error initializing module: {:?}", e);
-            ptr::null_mut()
-        }
+                extern "C" fn init_module(raw_env: sys::napi_env, raw_exports: sys::napi_value) -> sys::napi_value {
+                    let env = Env::from(raw_env);
+                    let mut exports = Value::from_raw(&env, raw_exports).into_object()
+                        .expect("Expected an exports object to be passed to module initializer");
+
+                    let result = $init(&env, &mut exports);
+
+                    match result {
+                        Ok(Some(exports)) => exports.into(),
+                        Ok(None) => ptr::null_mut(),
+                        Err(e) => {
+                            let _ = writeln!(::std::io::stderr(), "Error initializing module: {:?}", e);
+                            ptr::null_mut()
+                        }
+                    }
+                }
+            }
+
+            register_module
+        };
     }
 }
 
-
-impl From<NulError> for Error {
-    fn from(error: NulError) -> Self {
+impl From<std::ffi::NulError> for Error {
+    fn from(_error: std::ffi::NulError) -> Self {
         Error { status: Status::StringContainsNull }
     }
 }
