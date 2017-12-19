@@ -2,14 +2,18 @@
 extern crate napi;
 extern crate proton_core;
 
-use napi::{sys, Env, Result, Value, Object};
+use napi::{sys, typenum, Env, Result, Value, Object};
 // use proton_core::{Buffer, ReplicaId};
 // use std::ptr;
 
 register_module!(proton, init);
 
 fn init<'env>(env: &'env Env, exports: &'env mut Object) -> Result<Option<Object<'env>>> {
-    exports.set_named_property("foo", env.create_int64(42))?;
+    let function = env.create_function::<typenum::U0, _>("foo", |env: &Env, _this: &Value, _args: &[&Value]| {
+        Ok(Some(env.create_int64(42).into()))
+    });
+
+    exports.set_named_property("foo", function)?;
     Ok(None)
 }
 

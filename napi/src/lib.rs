@@ -1,6 +1,9 @@
 extern crate napi_sys;
+pub extern crate typenum;
 
 use std::ffi::CString;
+use std::io::Write;
+use std::os::raw::{c_char, c_void};
 use std::ptr;
 
 pub mod sys {
@@ -49,6 +52,7 @@ pub struct Value<'env> {
 
 pub struct Number<'env>(Value<'env>);
 pub struct Object<'env>(Value<'env>);
+pub struct Function<'env>(Value<'env>);
 
 #[macro_export]
 macro_rules! register_module {
@@ -132,8 +136,13 @@ impl From<sys::napi_status> for Status {
 }
 
 impl Env {
-    pub fn value_from_sys(&self, raw_value: sys::napi_value) -> Value {
-        Value { env: self , raw_value }
+    pub fn get_undefined<'a>(&'a self) -> Value<'a> {
+        let mut raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_get_undefined(self.0, &mut raw_value)
+        };
+        debug_assert!(Status::from(status) == Status::Ok);
+        Value::from_raw(self, raw_value)
     }
 
     pub fn create_int64<'a>(&'a self, int: i64) -> Number<'a> {
@@ -143,6 +152,63 @@ impl Env {
         };
         debug_assert!(Status::from(status) == Status::Ok);
         Number::from_raw(self, raw_value)
+    }
+
+    pub fn create_function<'a, 'b, N, F>(&'a self, name: &'b str, cb_closure: F) -> Function<'a>
+        where N: typenum::Unsigned,
+              F: for<'c, 'd> Fn(&'c Env, &'c Value, &'d[&'c Value]) -> Result<Option<Value<'c>>>
+    {
+        let mut raw_result = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_create_function(
+                self.0,
+                name.as_ptr() as *const c_char,
+                name.len(),
+                Some(cb_function::<N, F>),
+                &cb_closure as *const _ as *mut c_void,
+                &mut raw_result,
+            )
+        };
+
+        debug_assert!(Status::from(status) == Status::Ok);
+        Function::from_raw(self, raw_result)
+
+        extern fn cb_function<N: typenum::Unsigned, F>(raw_env: sys::napi_env, cb_info: sys::napi_callback_info) -> sys::napi_value
+            where N: typenum::Unsigned,
+                  F: for<'c, 'd> Fn(&'c Env, &'c Value, &'d[&'c Value]) -> Result<Option<Value<'c>>>
+        {
+            let mut argc = N::to_usize();
+            let mut argv = Vec::with_capacity(argc);
+            let mut raw_this = ptr::null_mut();
+            let mut closure_data: *mut c_void = ptr::null_mut();
+
+            let closure: &mut F = unsafe {
+                sys::napi_get_cb_info(
+                    raw_env,
+                    cb_info,
+                    &mut argc,
+                    argv.as_mut_ptr(),
+                    &mut raw_this,
+                    &mut closure_data
+                );
+
+                &mut *(closure_data as *mut F)
+            };
+
+            let env = Env::from(raw_env);
+            let this = Value::from_raw(&env, raw_this);
+
+            let result = closure(&env, &this, &[]);
+
+            match result {
+                Ok(Some(result)) => result.into(),
+                Ok(None) => env.get_undefined().into(),
+                Err(e) => {
+                    let _ = writeln!(::std::io::stderr(), "Error calling function: {:?}", e);
+                    env.get_undefined().into()
+                }
+            }
+        }
     }
 }
 
@@ -164,6 +230,12 @@ impl<'env> Value<'env> {
         };
         check_status(status)?;
         Ok(Object(self))
+    }
+}
+
+impl<'env> Into<sys::napi_value> for Value<'env> {
+    fn into(self) -> sys::napi_value {
+        self.raw_value
     }
 }
 
@@ -205,6 +277,18 @@ impl<'env> Into<sys::napi_value> for Object<'env> {
 }
 
 impl<'env> Into<Value<'env>> for Object<'env> {
+    fn into(self) -> Value<'env> {
+        self.0
+    }
+}
+
+impl<'env> Function<'env> {
+    fn from_raw(env: &'env Env, raw_value: sys::napi_value) -> Self {
+        Function(Value { env, raw_value })
+    }
+}
+
+impl<'env> Into<Value<'env>> for Function<'env> {
     fn into(self) -> Value<'env> {
         self.0
     }
