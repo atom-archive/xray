@@ -156,7 +156,7 @@ impl Env {
 
     pub fn create_function<'a, 'b, N, F>(&'a self, name: &'b str, cb_closure: F) -> Function<'a>
         where N: typenum::Unsigned,
-              F: for<'c, 'd> Fn(&'c Env, &'c Value, &'d[&'c Value]) -> Result<Option<Value<'c>>>
+              F: for<'c, 'd> Fn(&'c Env, &'c Value, &'d[Value<'c>]) -> Result<Option<Value<'c>>>
     {
         let mut raw_result = ptr::null_mut();
         let status = unsafe {
@@ -171,23 +171,25 @@ impl Env {
         };
 
         debug_assert!(Status::from(status) == Status::Ok);
-        Function::from_raw(self, raw_result)
+        return Function::from_raw(self, raw_result);
 
         extern fn cb_function<N: typenum::Unsigned, F>(raw_env: sys::napi_env, cb_info: sys::napi_callback_info) -> sys::napi_value
             where N: typenum::Unsigned,
-                  F: for<'c, 'd> Fn(&'c Env, &'c Value, &'d[&'c Value]) -> Result<Option<Value<'c>>>
+                  F: for<'c, 'd> Fn(&'c Env, &'c Value, &'d[Value<'c>]) -> Result<Option<Value<'c>>>
         {
             let mut argc = N::to_usize();
-            let mut argv = Vec::with_capacity(argc);
+            let mut raw_args = Vec::with_capacity(argc);
             let mut raw_this = ptr::null_mut();
             let mut closure_data: *mut c_void = ptr::null_mut();
 
             let closure: &mut F = unsafe {
+                raw_args.set_len(argc);
+
                 sys::napi_get_cb_info(
                     raw_env,
                     cb_info,
                     &mut argc,
-                    argv.as_mut_ptr(),
+                    raw_args.as_mut_ptr(),
                     &mut raw_this,
                     &mut closure_data
                 );
@@ -198,7 +200,9 @@ impl Env {
             let env = Env::from(raw_env);
             let this = Value::from_raw(&env, raw_this);
 
-            let result = closure(&env, &this, &[]);
+            let args = raw_args.into_iter().map(|raw_value| Value::from_raw(&env, raw_value)).collect::<Vec<Value>>();
+
+            let result = closure(&env, &this, &args);
 
             match result {
                 Ok(Some(result)) => result.into(),
@@ -231,6 +235,15 @@ impl<'env> Value<'env> {
         check_status(status)?;
         Ok(Object(self))
     }
+
+    pub fn into_number(self) -> Result<Number<'env>> {
+        let mut new_raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_coerce_to_number(self.env.0, self.raw_value, &mut new_raw_value)
+        };
+        check_status(status)?;
+        Ok(Number(self))
+    }
 }
 
 impl<'env> Into<sys::napi_value> for Value<'env> {
@@ -248,6 +261,17 @@ impl<'env> Number<'env> {
 impl<'env> Into<Value<'env>> for Number<'env> {
     fn into(self) -> Value<'env> {
         self.0
+    }
+}
+
+impl <'env> Into<i64> for Number<'env> {
+    fn into(self) -> i64 {
+        let mut result = 0;
+        let status = unsafe {
+            sys::napi_get_value_int64(self.0.env.0, self.0.raw_value, &mut result)
+        };
+        debug_assert!(Status::from(status) == Status::Ok);
+        result
     }
 }
 
