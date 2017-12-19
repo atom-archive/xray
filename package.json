@@ -4,7 +4,8 @@
   "description": "This is an experiment in using the fundamental concepts of the Teletype CRDT as Atom's core text-storage data structure. It's implemented in Rust.",
   "main": "lib/proton.js",
   "scripts": {
-    "build": "cargo rustc --release -- -Clink-args=\"-undefined dynamic_lookup -export_dynamic\" && cp target/release/{libproton.dylib,proton.node}",
+    "build": "script/build.js",
+    "build-debug": "script/build.js --debug",
     "test": "echo \"Error: no tests specified\" && exit 1"
   },
   "repository": {
