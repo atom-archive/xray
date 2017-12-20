@@ -4,6 +4,7 @@ pub extern crate typenum;
 use std::ffi::CString;
 use std::io::Write;
 use std::os::raw::{c_char, c_void};
+use std::mem;
 use std::ptr;
 
 pub mod sys {
@@ -135,6 +136,8 @@ impl From<sys::napi_status> for Status {
     }
 }
 
+pub type Callback = for<'a> fn(&'a Env, &'a Value, &'a[Value<'a>]) -> Result<Option<Value<'a>>>;
+
 impl Env {
     pub fn get_undefined<'a>(&'a self) -> Value<'a> {
         let mut raw_value = ptr::null_mut();
@@ -154,55 +157,51 @@ impl Env {
         Number::from_raw(self, raw_value)
     }
 
-    pub fn create_function<'a, 'b, N, F>(&'a self, name: &'b str, cb_closure: F) -> Function<'a>
-        where N: typenum::Unsigned,
-              F: for<'c, 'd> Fn(&'c Env, &'c Value, &'d[Value<'c>]) -> Result<Option<Value<'c>>>
-    {
+    pub fn create_function<'a, N: typenum::Unsigned>(&self, name: &'a str, callback: Callback) -> Function {
         let mut raw_result = ptr::null_mut();
+
         let status = unsafe {
             sys::napi_create_function(
                 self.0,
                 name.as_ptr() as *const c_char,
                 name.len(),
-                Some(cb_function::<N, F>),
-                &cb_closure as *const _ as *mut c_void,
+                Some(raw_callback::<N>),
+                callback as *mut c_void,
                 &mut raw_result,
             )
         };
 
         debug_assert!(Status::from(status) == Status::Ok);
+
         return Function::from_raw(self, raw_result);
 
-        extern fn cb_function<N: typenum::Unsigned, F>(raw_env: sys::napi_env, cb_info: sys::napi_callback_info) -> sys::napi_value
-            where N: typenum::Unsigned,
-                  F: for<'c, 'd> Fn(&'c Env, &'c Value, &'d[Value<'c>]) -> Result<Option<Value<'c>>>
-        {
+        extern fn raw_callback<N: typenum::Unsigned>(raw_env: sys::napi_env, cb_info: sys::napi_callback_info) -> sys::napi_value {
             let mut argc = N::to_usize();
-            let mut raw_args = Vec::with_capacity(argc);
+            let mut raw_args: [sys::napi_value; 8] = unsafe { mem::uninitialized() };
             let mut raw_this = ptr::null_mut();
-            let mut closure_data: *mut c_void = ptr::null_mut();
 
-            let closure: &mut F = unsafe {
-                raw_args.set_len(argc);
-
-                sys::napi_get_cb_info(
+            let callback: Callback = unsafe {
+                let mut callback_ptr: *mut c_void = ptr::null_mut();
+                let status = sys::napi_get_cb_info(
                     raw_env,
                     cb_info,
                     &mut argc,
-                    raw_args.as_mut_ptr(),
+                    &mut raw_args[0],
                     &mut raw_this,
-                    &mut closure_data
+                    &mut callback_ptr
                 );
-
-                &mut *(closure_data as *mut F)
+                debug_assert!(Status::from(status) == Status::Ok);
+                mem::transmute(callback_ptr)
             };
 
             let env = Env::from(raw_env);
             let this = Value::from_raw(&env, raw_this);
+            let mut args: [Value; 8] = unsafe { mem::uninitialized() };
+            for (i, raw_arg) in raw_args.into_iter().enumerate() {
+                args[i] = Value::from_raw(&env, *raw_arg)
+            }
 
-            let args = raw_args.into_iter().map(|raw_value| Value::from_raw(&env, raw_value)).collect::<Vec<Value>>();
-
-            let result = closure(&env, &this, &args);
+            let result = callback(&env, &this, &args[0..argc]);
 
             match result {
                 Ok(Some(result)) => result.into(),
