@@ -1,5 +1,4 @@
 extern crate napi_sys;
-pub extern crate typenum;
 
 use std::ffi::CString;
 use std::io::Write;
@@ -157,7 +156,7 @@ impl Env {
         Number::from_raw(self, raw_value)
     }
 
-    pub fn create_function<'a, N: typenum::Unsigned>(&self, name: &'a str, callback: Callback) -> Function {
+    pub fn create_function<'a>(&self, name: &'a str, callback: Callback) -> Function {
         let mut raw_result = ptr::null_mut();
 
         let status = unsafe {
@@ -165,7 +164,7 @@ impl Env {
                 self.0,
                 name.as_ptr() as *const c_char,
                 name.len(),
-                Some(raw_callback::<N>),
+                Some(raw_callback),
                 callback as *mut c_void,
                 &mut raw_result,
             )
@@ -175,8 +174,8 @@ impl Env {
 
         return Function::from_raw(self, raw_result);
 
-        extern fn raw_callback<N: typenum::Unsigned>(raw_env: sys::napi_env, cb_info: sys::napi_callback_info) -> sys::napi_value {
-            let mut argc = N::to_usize();
+        extern fn raw_callback(raw_env: sys::napi_env, cb_info: sys::napi_callback_info) -> sys::napi_value {
+            let mut argc = 8;
             let mut raw_args: [sys::napi_value; 8] = unsafe { mem::uninitialized() };
             let mut raw_this = ptr::null_mut();
 

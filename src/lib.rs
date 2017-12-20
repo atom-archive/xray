@@ -2,14 +2,14 @@
 extern crate napi;
 extern crate proton_core;
 
-use napi::{sys, typenum, Env, Result, Value, Object};
+use napi::{sys, Env, Result, Value, Object};
 // use proton_core::{Buffer, ReplicaId};
 // use std::ptr;
 
 register_module!(proton, init);
 
 fn init<'env>(env: &'env Env, exports: &'env mut Object) -> Result<Option<Object<'env>>> {
-    let function = env.create_function::<typenum::U1>("foo", |env: &Env, _this: &Value, args: &[Value]| {
+    let function = env.create_function("foo", |env: &Env, _this: &Value, args: &[Value]| {
         let arg: i64 = args[0].into_number()?.into();
         Ok(Some(env.create_int64(arg + 1).into()))
     });

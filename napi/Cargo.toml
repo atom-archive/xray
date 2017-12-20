@@ -5,4 +5,3 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 
 [dependencies]
 napi-sys = {path = "./napi-sys"}
-typenum = "1.9"
