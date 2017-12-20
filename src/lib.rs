@@ -3,18 +3,21 @@ extern crate napi;
 extern crate proton_core;
 
 use napi::{sys, Env, Result, Value, Object};
-// use proton_core::{Buffer, ReplicaId};
-// use std::ptr;
+use proton_core::{Buffer, ReplicaId};
 
 register_module!(proton, init);
 
 fn init<'env>(env: &'env Env, exports: &'env mut Object) -> Result<Option<Object<'env>>> {
-    let function = env.create_function("foo", |env: &Env, _this: &Value, args: &[Value]| {
-        let arg: i64 = args[0].into_number()?.into();
-        Ok(Some(env.create_int64(arg + 1).into()))
-    });
+    let text_buffer_constructor = env.define_class(
+        "TextBuffer",
+        |env: &Env, mut this: Value, args: &[Value]| {
+            let replica_id: ReplicaId = args[0].into_number()?.into();
+            env.wrap(&mut this, Buffer::new(replica_id))?;
+            Ok(None)
+        }
+    );
 
-    exports.set_named_property("foo", function)?;
+    exports.set_named_property("TextBuffer", text_buffer_constructor)?;
     Ok(None)
 }
 
