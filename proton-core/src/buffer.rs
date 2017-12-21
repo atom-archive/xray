@@ -439,7 +439,7 @@ mod tests {
     fn random_splice() {
         use rand::{Rng, SeedableRng, StdRng};
 
-        for seed in 0..100000 {
+        for seed in 0..100 {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
