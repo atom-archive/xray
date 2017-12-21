@@ -28,7 +28,7 @@ mod buffer {
     }
 
     fn get_length<'a>(env: &'a Env, this: Value, _args: &[Value]) -> Result<Option<Value<'a>>> {
-       let buffer: &Buffer = unsafe { env.unwrap(&this)? };
+       let buffer: &Buffer = env.unwrap(&this)?;
        Ok(Some(env.create_int64(buffer.len() as i64).into()))
     }
 }

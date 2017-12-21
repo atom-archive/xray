@@ -1,5 +1,6 @@
 extern crate napi_sys;
 
+use std::any::TypeId;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 use std::mem;
@@ -55,6 +56,12 @@ pub struct Function<'env>(Value<'env>);
 pub struct Property {
     name: RustString,
     raw_descriptor: sys::napi_property_descriptor
+}
+
+#[repr(C)]
+struct TaggedObject<T> {
+    type_id: TypeId,
+    object: T,
 }
 
 #[macro_export]
@@ -259,12 +266,12 @@ impl Env {
         Function::from_raw(self, raw_result)
     }
 
-    pub fn wrap<T>(&self, js_object: &mut Value, native_object: T) -> Result<()> {
+    pub fn wrap<T: 'static>(&self, js_object: &mut Value, native_object: T) -> Result<()> {
         let status = unsafe {
             sys::napi_wrap(
                 self.0,
                 js_object.raw_value,
-                Box::into_raw(Box::new(native_object)) as *mut c_void,
+                Box::into_raw(Box::new(TaggedObject::new(native_object))) as *mut c_void,
                 Some(raw_finalize::<T>),
                 ptr::null_mut(),
                 ptr::null_mut()
@@ -274,15 +281,24 @@ impl Env {
         check_status(status).or(Ok(()))
     }
 
-    pub unsafe fn unwrap<T>(&self, js_object: &Value) -> Result<&mut T> {
-        let mut raw_result: *mut c_void = ptr::null_mut();
-        let status = sys::napi_unwrap(
-            self.0,
-            js_object.raw_value,
-            &mut raw_result
-        );
-        check_status(status)?;
-        Ok(mem::transmute(raw_result))
+    pub fn unwrap<T: 'static>(&self, js_object: &Value) -> Result<&mut T> {
+        unsafe {
+            let mut unknown_tagged_object: *mut c_void = ptr::null_mut();
+            let status = sys::napi_unwrap(
+                self.0,
+                js_object.raw_value,
+                &mut unknown_tagged_object
+            );
+            check_status(status)?;
+
+            let type_id: *const TypeId = mem::transmute(unknown_tagged_object);
+            if *type_id == TypeId::of::<T>() {
+                let tagged_object: *mut TaggedObject<T> = mem::transmute(unknown_tagged_object);
+                Ok(&mut (*tagged_object).object)
+            } else {
+                Err(Error { status: Status::InvalidArg })
+            }
+        }
     }
 }
 
@@ -452,6 +468,15 @@ impl Property {
     fn into_raw(mut self, env: &Env) -> sys::napi_property_descriptor {
         self.raw_descriptor.name = env.create_string(&self.name).into();
         self.raw_descriptor
+    }
+}
+
+impl<T: 'static> TaggedObject<T> {
+    fn new(object: T) -> Self {
+        TaggedObject {
+            type_id: TypeId::of::<T>(),
+            object
+        }
     }
 }
 
