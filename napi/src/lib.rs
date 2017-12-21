@@ -1,10 +1,10 @@
 extern crate napi_sys;
 
 use std::ffi::CString;
-use std::io::Write;
 use std::os::raw::{c_char, c_void};
 use std::mem;
 use std::ptr;
+use std::string::String as RustString;
 
 pub mod sys {
     pub use napi_sys::*;
@@ -41,19 +41,21 @@ pub enum Status {
 pub struct Env(sys::napi_env);
 
 #[derive(Clone, Copy, Debug)]
-pub struct PropertyDescriptor {
-    sys_descriptor: sys::napi_property_descriptor
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct Value<'env> {
     env: &'env Env,
     raw_value: sys::napi_value
 }
 
 pub struct Number<'env>(Value<'env>);
+pub struct String<'env>(Value<'env>);
 pub struct Object<'env>(Value<'env>);
 pub struct Function<'env>(Value<'env>);
+
+#[derive(Clone, Debug)]
+pub struct Property {
+    name: RustString,
+    raw_descriptor: sys::napi_property_descriptor
+}
 
 #[macro_export]
 macro_rules! register_module {
@@ -208,6 +210,15 @@ impl Env {
         Number::from_raw(self, raw_value)
     }
 
+    pub fn create_string<'a, 'b>(&'a self, s: &'b str) -> String<'a> {
+        let mut raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_create_string_utf8(self.0, s.as_ptr() as *const c_char, s.len(), &mut raw_value)
+        };
+        debug_assert!(Status::from(status) == Status::Ok);
+        String::from_raw(self, raw_value)
+    }
+
     pub fn create_function<'a>(&self, name: &'a str, callback: Callback) -> Function {
         let mut raw_result = ptr::null_mut();
         let status = unsafe {
@@ -226,8 +237,10 @@ impl Env {
         Function::from_raw(self, raw_result)
     }
 
-    pub fn define_class<'a>(&self, name: &'a str, constructor_cb: Callback) -> Function {
+    pub fn define_class<'a>(&self, name: &'a str, constructor_cb: Callback, properties: Vec<Property>) -> Function {
         let mut raw_result = ptr::null_mut();
+        let raw_properties = properties.into_iter().map(|prop| prop.into_raw(self)).collect::<Vec<sys::napi_property_descriptor>>();
+
         let status = unsafe {
             sys::napi_define_class(
                 self.0,
@@ -235,8 +248,8 @@ impl Env {
                 name.len(),
                 Some(constructor_cb),
                 ptr::null_mut(),
-                0,
-                ptr::null_mut(),
+                raw_properties.len(),
+                raw_properties.as_ptr(),
                 &mut raw_result
             )
         };
@@ -259,6 +272,17 @@ impl Env {
         };
 
         check_status(status).or(Ok(()))
+    }
+
+    pub unsafe fn unwrap<T>(&self, js_object: &Value) -> Result<&mut T> {
+        let mut raw_result: *mut c_void = ptr::null_mut();
+        let status = sys::napi_unwrap(
+            self.0,
+            js_object.raw_value,
+            &mut raw_result
+        );
+        check_status(status)?;
+        Ok(mem::transmute(raw_result))
     }
 }
 
@@ -321,6 +345,24 @@ impl <'env> Into<i64> for Number<'env> {
     }
 }
 
+impl<'env> String<'env> {
+    fn from_raw(env: &'env Env, raw_value: sys::napi_value) -> Self {
+        String(Value { env, raw_value })
+    }
+}
+
+impl<'env> Into<Value<'env>> for String<'env> {
+    fn into(self) -> Value<'env> {
+        self.0
+    }
+}
+
+impl<'env> Into<sys::napi_value> for String<'env> {
+    fn into(self) -> sys::napi_value {
+        self.0.raw_value
+    }
+}
+
 impl <'env> Into<usize> for Number<'env> {
     fn into(self) -> usize {
         let mut result = 0;
@@ -375,6 +417,45 @@ impl<'env> Into<Value<'env>> for Function<'env> {
     }
 }
 
+impl Property {
+    pub fn new(name: &str) -> Self {
+        Property {
+            name: RustString::from(name),
+            raw_descriptor: sys::napi_property_descriptor {
+                utf8name: ptr::null_mut(),
+                name: ptr::null_mut(),
+                method: None,
+                getter: None,
+                setter: None,
+                value: ptr::null_mut(),
+                attributes: sys::napi_property_attributes::napi_default,
+                data: ptr::null_mut()
+            }
+        }
+    }
+
+    pub fn with_value(mut self, value: Value) -> Self {
+        self.raw_descriptor.value = value.raw_value;
+        self
+    }
+
+    pub fn with_method(mut self, callback: Callback) -> Self {
+        self.raw_descriptor.method = Some(callback);
+        self
+    }
+
+    pub fn with_getter(mut self, callback: Callback) -> Self {
+        self.raw_descriptor.getter = Some(callback);
+        self
+    }
+
+    fn into_raw(mut self, env: &Env) -> sys::napi_property_descriptor {
+        let name_len = self.name.len();
+        self.raw_descriptor.name = env.create_string(&self.name).into();
+        self.raw_descriptor
+    }
+}
+
 fn check_status(code: sys::napi_status) -> Result<()> {
     let status = Status::from(code);
     match status {
@@ -383,6 +464,6 @@ fn check_status(code: sys::napi_status) -> Result<()> {
     }
 }
 
-extern "C" fn raw_finalize<T>(raw_env: sys::napi_env, finalize_data: *mut c_void, finalize_hint: *mut c_void) {
+extern "C" fn raw_finalize<T>(_raw_env: sys::napi_env, finalize_data: *mut c_void, _finalize_hint: *mut c_void) {
     unsafe { Box::from_raw(finalize_data as *mut T) };
 }
