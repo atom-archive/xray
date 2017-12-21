@@ -11,6 +11,7 @@ pub mod sys {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+pub type Callback = extern "C" fn(sys::napi_env, sys::napi_callback_info) -> sys::napi_value;
 
 #[derive(Debug)]
 pub struct Error {
@@ -18,7 +19,7 @@ pub struct Error {
 }
 
 #[derive(Eq, PartialEq, Debug)]
-enum Status {
+pub enum Status {
     Ok,
     InvalidArg,
     ObjectExpected,
@@ -105,6 +106,59 @@ macro_rules! register_module {
     }
 }
 
+#[macro_export]
+macro_rules! callback {
+    ($callback_expr:expr) => {
+        {
+            use std::io::Write;
+            use ::std::mem;
+            use ::std::ptr;
+            use $crate::sys;
+            use $crate::{Env, Status, Value};
+
+            extern "C" fn raw_callback(raw_env: sys::napi_env, cb_info: sys::napi_callback_info) -> sys::napi_value {
+                const MAX_ARGC: usize = 8;
+                let mut argc = MAX_ARGC;
+                let mut raw_args: [$crate::sys::napi_value; MAX_ARGC] = unsafe { mem::uninitialized() };
+                let mut raw_this = ptr::null_mut();
+
+                unsafe {
+                    let status = sys::napi_get_cb_info(
+                        raw_env,
+                        cb_info,
+                        &mut argc,
+                        &mut raw_args[0],
+                        &mut raw_this,
+                        ptr::null_mut()
+                    );
+                    debug_assert!(Status::from(status) == Status::Ok);
+                }
+
+                let env = Env::from(raw_env);
+                let this = Value::from_raw(&env, raw_this);
+                let mut args: [Value; 8] = unsafe { mem::uninitialized() };
+                for (i, raw_arg) in raw_args.into_iter().enumerate() {
+                    args[i] = Value::from_raw(&env, *raw_arg)
+                }
+
+                let callback = $callback_expr;
+                let result = callback(&env, this, &args[0..argc]);
+
+                match result {
+                    Ok(Some(result)) => result.into(),
+                    Ok(None) => env.get_undefined().into(),
+                    Err(e) => {
+                        let _ = writeln!(::std::io::stderr(), "Error calling function: {:?}", e);
+                        env.get_undefined().into()
+                    }
+                }
+            }
+
+            raw_callback
+        }
+    }
+}
+
 impl From<std::ffi::NulError> for Error {
     fn from(_error: std::ffi::NulError) -> Self {
         Error { status: Status::StringContainsNull }
@@ -135,8 +189,6 @@ impl From<sys::napi_status> for Status {
     }
 }
 
-pub type Callback = for<'a> fn(&'a Env, Value<'a>, &'a[Value<'a>]) -> Result<Option<Value<'a>>>;
-
 impl Env {
     pub fn get_undefined<'a>(&'a self) -> Value<'a> {
         let mut raw_value = ptr::null_mut();
@@ -163,7 +215,7 @@ impl Env {
                 self.0,
                 name.as_ptr() as *const c_char,
                 name.len(),
-                Some(raw_callback),
+                Some(callback),
                 callback as *mut c_void,
                 &mut raw_result,
             )
@@ -181,8 +233,8 @@ impl Env {
                 self.0,
                 name.as_ptr() as *const c_char,
                 name.len(),
-                Some(raw_callback),
-                constructor_cb as *mut c_void,
+                Some(constructor_cb),
+                ptr::null_mut(),
                 0,
                 ptr::null_mut(),
                 &mut raw_result
@@ -331,45 +383,6 @@ fn check_status(code: sys::napi_status) -> Result<()> {
     }
 }
 
-extern fn raw_callback(raw_env: sys::napi_env, cb_info: sys::napi_callback_info) -> sys::napi_value {
-    const MAX_ARGC: usize = 8;
-    let mut argc = MAX_ARGC;
-    let mut raw_args: [sys::napi_value; MAX_ARGC] = unsafe { mem::uninitialized() };
-    let mut raw_this = ptr::null_mut();
-
-    let callback: Callback = unsafe {
-        let mut callback_ptr: *mut c_void = ptr::null_mut();
-        let status = sys::napi_get_cb_info(
-            raw_env,
-            cb_info,
-            &mut argc,
-            &mut raw_args[0],
-            &mut raw_this,
-            &mut callback_ptr
-        );
-        debug_assert!(Status::from(status) == Status::Ok);
-        mem::transmute(callback_ptr)
-    };
-
-    let env = Env::from(raw_env);
-    let this = Value::from_raw(&env, raw_this);
-    let mut args: [Value; 8] = unsafe { mem::uninitialized() };
-    for (i, raw_arg) in raw_args.into_iter().enumerate() {
-        args[i] = Value::from_raw(&env, *raw_arg)
-    }
-
-    let result = callback(&env, this, &args[0..argc]);
-
-    match result {
-        Ok(Some(result)) => result.into(),
-        Ok(None) => env.get_undefined().into(),
-        Err(e) => {
-            let _ = writeln!(::std::io::stderr(), "Error calling function: {:?}", e);
-            env.get_undefined().into()
-        }
-    }
-}
-
-extern fn raw_finalize<T>(raw_env: sys::napi_env, finalize_data: *mut c_void, finalize_hint: *mut c_void) {
+extern "C" fn raw_finalize<T>(raw_env: sys::napi_env, finalize_data: *mut c_void, finalize_hint: *mut c_void) {
     unsafe { Box::from_raw(finalize_data as *mut T) };
 }
