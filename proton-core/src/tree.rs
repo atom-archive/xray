@@ -167,6 +167,7 @@ impl<'a, T: Item> Tree<T> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn splice<D: Dimension<Summary=T::Summary>, I: IntoIterator<Item=T>>(&mut self, old_range: Range<&D>, new_items: I) {
         let mut result = Self::new();
         self.append_subsequence(&mut result, &D::default(), old_range.start);
@@ -397,6 +398,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn seek<D: Dimension<Summary=T::Summary>>(&mut self, pos: &D) {
         self.seek_and_build_prefix(pos, None);
     }
