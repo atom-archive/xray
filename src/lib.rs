@@ -18,7 +18,8 @@ mod buffer {
     pub fn init(env: &Env) -> Function {
         env.define_class("TextBuffer", callback!(constructor), vec![
             Property::new("length").with_getter(callback!(get_length)),
-            Property::new("splice").with_method(callback!(splice))
+            Property::new("getText").with_method(callback!(get_text)),
+            Property::new("splice").with_method(callback!(splice)),
         ])
     }
 
@@ -31,6 +32,11 @@ mod buffer {
     fn get_length<'a>(env: &'a Env, this: Value, _args: &[Value]) -> Result<Option<Value<'a>>> {
         let buffer: &Buffer = env.unwrap(&this)?;
         Ok(Some(env.create_int64(buffer.len() as i64).into()))
+    }
+
+    fn get_text<'a>(env: &'a Env, this: Value, _args: &[Value]) -> Result<Option<Value<'a>>> {
+        let buffer: &Buffer = env.unwrap(&this)?;
+        Ok(Some(env.create_string_utf16(&buffer.to_u16_chars()).into()))
     }
 
     fn splice<'a>(env: &'a Env, this: Value, args: &[Value]) -> Result<Option<Value<'a>>> {

@@ -226,6 +226,15 @@ impl Env {
         String::from_raw(self, raw_value)
     }
 
+    pub fn create_string_utf16<'a, 'b>(&'a self, chars: &[u16]) -> String<'a> {
+        let mut raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_create_string_utf16(self.0, chars.as_ptr(), chars.len(), &mut raw_value)
+        };
+        debug_assert!(Status::from(status) == Status::Ok);
+        String::from_raw(self, raw_value)
+    }
+
     pub fn create_function<'a>(&self, name: &'a str, callback: Callback) -> Function {
         let mut raw_result = ptr::null_mut();
         let status = unsafe {

@@ -100,6 +100,12 @@ impl Buffer {
         self.fragments.len()
     }
 
+    pub fn to_u16_chars(&self) -> Vec<u16> {
+        let mut result = Vec::with_capacity(self.len());
+        result.extend(self.iter());
+        result
+    }
+
     pub fn iter(&self) -> Iter {
         Iter {
             fragment_iter: self.fragments.iter(),
@@ -419,7 +425,7 @@ mod tests {
     use super::*;
 
     impl Buffer {
-        fn get_text(&self) -> String {
+        fn to_string(&self) -> String {
             String::from_utf16_lossy(self.iter().collect::<Vec<u16>>().as_slice())
         }
     }
@@ -428,17 +434,17 @@ mod tests {
     fn splice() {
         let mut buffer = Buffer::new(1);
         buffer.splice(0..0, "abc");
-        assert_eq!(buffer.get_text(), "abc");
+        assert_eq!(buffer.to_string(), "abc");
         buffer.splice(3..3, "def");
-        assert_eq!(buffer.get_text(), "abcdef");
+        assert_eq!(buffer.to_string(), "abcdef");
         buffer.splice(0..0, "ghi");
-        assert_eq!(buffer.get_text(), "ghiabcdef");
+        assert_eq!(buffer.to_string(), "ghiabcdef");
         buffer.splice(5..5, "jkl");
-        assert_eq!(buffer.get_text(), "ghiabjklcdef");
+        assert_eq!(buffer.to_string(), "ghiabjklcdef");
         buffer.splice(6..7, "");
-        assert_eq!(buffer.get_text(), "ghiabjlcdef");
+        assert_eq!(buffer.to_string(), "ghiabjlcdef");
         buffer.splice(4..9, "mno");
-        assert_eq!(buffer.get_text(), "ghiamnoef");
+        assert_eq!(buffer.to_string(), "ghiamnoef");
     }
 
     #[test]
@@ -459,7 +465,7 @@ mod tests {
 
                 buffer.splice(start..end, new_text.as_str());
                 reference_string = [&reference_string[0..start], new_text.as_str(), &reference_string[end..]].concat();
-                assert_eq!(buffer.get_text(), reference_string);
+                assert_eq!(buffer.to_string(), reference_string);
             }
         }
 
