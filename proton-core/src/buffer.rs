@@ -291,6 +291,12 @@ impl<'a> From<&'a str> for Text {
     }
 }
 
+impl<'a> From<Vec<u16>> for Text {
+    fn from(s: Vec<u16>) -> Self {
+        Self::new(s)
+    }
+}
+
 impl Fragment {
     fn new(id: FragmentId, ins: Insertion) -> Self {
         let end_offset = ins.text.len();

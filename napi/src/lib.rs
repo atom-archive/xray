@@ -313,15 +313,6 @@ impl<'env> Value<'env> {
         Self { env, raw_value }
     }
 
-    pub fn into_object(self) -> Result<Object<'env>> {
-        let mut new_raw_value = ptr::null_mut();
-        let status = unsafe {
-            sys::napi_coerce_to_object(self.env.0, self.raw_value, (&mut new_raw_value) as *mut sys::napi_value)
-        };
-        check_status(status)?;
-        Ok(Object(self))
-    }
-
     pub fn into_number(self) -> Result<Number<'env>> {
         let mut new_raw_value = ptr::null_mut();
         let status = unsafe {
@@ -329,6 +320,24 @@ impl<'env> Value<'env> {
         };
         check_status(status)?;
         Ok(Number(self))
+    }
+
+    pub fn into_string(self) -> Result<String<'env>> {
+        let mut new_raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_coerce_to_string(self.env.0, self.raw_value, &mut new_raw_value)
+        };
+        check_status(status)?;
+        Ok(String(self))
+    }
+
+    pub fn into_object(self) -> Result<Object<'env>> {
+        let mut new_raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_coerce_to_object(self.env.0, self.raw_value, (&mut new_raw_value) as *mut sys::napi_value)
+        };
+        check_status(status)?;
+        Ok(Object(self))
     }
 }
 
@@ -365,6 +374,15 @@ impl<'env> String<'env> {
     fn from_raw(env: &'env Env, raw_value: sys::napi_value) -> Self {
         String(Value { env, raw_value })
     }
+
+    pub fn len(&self) -> usize {
+        let mut raw_length = ptr::null_mut();
+        unsafe {
+            let status = sys::napi_get_named_property(self.0.env.0, self.0.raw_value, "length\0".as_ptr() as *const c_char, &mut raw_length);
+            debug_assert!(Status::from(status) == Status::Ok);
+        }
+        Number::from_raw(self.0.env, raw_length).into()
+    }
 }
 
 impl<'env> Into<Value<'env>> for String<'env> {
@@ -376,6 +394,22 @@ impl<'env> Into<Value<'env>> for String<'env> {
 impl<'env> Into<sys::napi_value> for String<'env> {
     fn into(self) -> sys::napi_value {
         self.0.raw_value
+    }
+
+}
+
+impl<'env> Into<Vec<u16>> for String<'env> {
+    fn into(self) -> Vec<u16> {
+        let u16_char_count = self.len();
+        let mut result = Vec::with_capacity(u16_char_count);
+
+        unsafe {
+            let status = sys::napi_get_value_string_utf16(self.0.env.0, self.0.raw_value, result.as_mut_ptr(), u16_char_count * 2, &mut 0);
+            debug_assert!(Status::from(status) == Status::Ok);
+            result.set_len(u16_char_count);
+        }
+
+        result
     }
 }
 
