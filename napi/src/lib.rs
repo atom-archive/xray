@@ -1,4 +1,5 @@
 extern crate napi_sys;
+extern crate futures;
 
 use std::any::TypeId;
 use std::ffi::CString;
@@ -6,6 +7,8 @@ use std::os::raw::{c_char, c_void};
 use std::mem;
 use std::ptr;
 use std::string::String as RustString;
+
+mod async;
 
 pub mod sys {
     pub use napi_sys::*;
