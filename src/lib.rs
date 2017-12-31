@@ -5,13 +5,40 @@ extern crate proton_core;
 use std::rc::Rc;
 use std::cell::RefCell;
 use proton_core::{Buffer, ReplicaId, Editor};
-use napi::{sys, Result, Env, Property, Value, Function, Object};
+use napi::{sys, Result, Env, Property, Value, Function, Object, futures};
 
 register_module!(proton, init);
 
 fn init<'env>(env: &'env Env, exports: &'env mut Object) -> Result<Option<Object<'env>>> {
     exports.set_named_property("TextBuffer", buffer::init(env))?;
     exports.set_named_property("TextEditor", editor::init(env))?;
+    exports.set_named_property("testSpawn", env.create_function("testSpawn", callback!(test_spawn)))?;
+    Ok(None)
+}
+
+fn test_spawn<'a>(env: &'a Env, this: Value, args: &[Value<'a>]) -> Result<Option<Value<'a>>> {
+    use std::{thread, time};
+    use futures::{Future, Stream};
+
+    let (tx, rx) = futures::sync::mpsc::unbounded();
+
+    env.spawn(rx.for_each(|n: usize| {
+        println!("Received value {:?}", n);
+        futures::future::ok(())
+    }));
+
+    for _i in 0..10 {
+        let thread_tx = tx.clone();
+        thread::spawn(move || {
+            let mut n = 0;
+            loop {
+                thread_tx.send(n);
+                n += 1;
+                thread::sleep(time::Duration::from_millis(500));
+            }
+        });
+    }
+
     Ok(None)
 }
 

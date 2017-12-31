@@ -1,5 +1,5 @@
 extern crate napi_sys;
-extern crate futures;
+pub extern crate futures;
 
 use std::any::TypeId;
 use std::ffi::CString;
@@ -7,6 +7,7 @@ use std::os::raw::{c_char, c_void};
 use std::mem;
 use std::ptr;
 use std::string::String as RustString;
+use futures::Future;
 
 mod async;
 
@@ -311,6 +312,11 @@ impl Env {
                 Err(Error { status: Status::InvalidArg })
             }
         }
+    }
+
+    pub fn spawn<T: 'static + Future>(&self, future: T) {
+        let event_loop = unsafe { sys::uv_default_loop() };
+        async::spawn(future, event_loop);
     }
 }
 
