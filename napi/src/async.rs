@@ -22,12 +22,8 @@ unsafe impl Sync for UvHandle {}
 impl<T: 'static + Future> Task<T> {
     fn poll_future(&mut self) -> bool {
         match self.spawn.poll_future_notify(&self.notify_handle, 0) {
-            Ok(Async::Ready(_)) => {
-                false
-            },
-            Ok(Async::NotReady) => {
-                true
-            },
+            Ok(Async::Ready(_)) => false,
+            Ok(Async::NotReady) => true,
             Err(_) => panic!("Future yielded an error")
         }
     }
