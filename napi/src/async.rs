@@ -22,7 +22,11 @@ unsafe impl Sync for UvAsyncHandle {}
 impl<T: 'static + Future> Task<T> {
     fn poll_future(&mut self) -> bool {
         match self.spawn.poll_future_notify(&self.notify_handle, 0) {
-            Ok(Async::Ready(_)) => true,
+            Ok(Async::Ready(_)) => {
+                let mut handle = self.notify_handle.0.write().unwrap().take().unwrap();
+                handle.close();
+                true
+            },
             Ok(Async::NotReady) => false,
             Err(_) => panic!("Future yielded an error")
         }
@@ -54,6 +58,19 @@ impl UvAsyncHandle {
             handle.0.data = data;
             handle
         }
+    }
+
+    fn close(self) {
+        unsafe {
+            sys::uv_close(mem::transmute_copy(&self.0), Some(drop_handle_after_close));
+            mem::forget(self.0);
+        }
+    }
+}
+
+extern "C" fn drop_handle_after_close(handle: *mut sys::uv_handle_t) {
+    unsafe {
+        Box::from_raw(handle);
     }
 }
 

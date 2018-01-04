@@ -34,7 +34,10 @@ fn test_spawn<'a>(env: &'a Env, this: Value, args: &[Value<'a>]) -> Result<Optio
             loop {
                 thread_tx.send(n);
                 n += 1;
-                thread::sleep(time::Duration::from_millis(500));
+                thread::sleep(time::Duration::from_millis(50));
+                if n == 10 {
+                    break;
+                }
             }
         });
     }
