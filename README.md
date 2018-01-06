@@ -1,4 +1,4 @@
-# xray
+# Xray
 
 This is an experiment in using the fundamental concepts of the Teletype CRDT as Atom's core text-storage data structure. It's implemented in Rust.
 
