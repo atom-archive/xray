@@ -1,5 +1,5 @@
 [package]
-name = "xray-core"
+name = "xray_core"
 version = "0.1.0"
 authors = ["Nathan Sobo <nathan@github.com>"]
 

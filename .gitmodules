@@ -1,3 +1,0 @@
-[submodule "napi/napi-sys"]
-	path = napi/napi-sys
-	url = https://github.com/nathansobo/napi-sys

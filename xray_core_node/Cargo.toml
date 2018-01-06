@@ -7,7 +7,5 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 crate-type = ["cdylib"]
 
 [dependencies]
-xray-core = {path = "./xray-core"}
-collider = {path = "../collider"}
-
-[workspace]
+xray_core = {path = "../xray_core"}
+collider = {path = "../../collider"}
