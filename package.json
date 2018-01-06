@@ -1,8 +1,8 @@
 {
-  "name": "proton",
+  "name": "xray",
   "version": "0.0.1",
   "description": "This is an experiment in using the fundamental concepts of the Teletype CRDT as Atom's core text-storage data structure. It's implemented in Rust.",
-  "main": "lib/proton.js",
+  "main": "lib/xray.js",
   "scripts": {
     "build": "scripts/build.js",
     "build-debug": "scripts/build.js --debug",
@@ -10,12 +10,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/atom/proton.git"
+    "url": "git+https://github.com/atom/xray.git"
   },
   "author": "",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/atom/proton/issues"
+    "url": "https://github.com/atom/xray/issues"
   },
-  "homepage": "https://github.com/atom/proton#readme"
+  "homepage": "https://github.com/atom/xray#readme"
 }

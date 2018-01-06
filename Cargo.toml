@@ -1,5 +1,5 @@
 [package]
-name = "proton"
+name = "xray"
 version = "0.1.0"
 authors = ["Nathan Sobo <nathan@github.com>"]
 
@@ -7,7 +7,7 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 crate-type = ["cdylib"]
 
 [dependencies]
-proton-core = {path = "./proton-core"}
+xray-core = {path = "./xray-core"}
 collider = {path = "../collider"}
 
 [workspace]

@@ -1,13 +1,13 @@
 #[macro_use]
 extern crate collider;
-extern crate proton_core;
+extern crate xray_core;
 
 use std::rc::Rc;
 use std::cell::RefCell;
-use proton_core::{Buffer, ReplicaId, Editor};
+use xray_core::{Buffer, ReplicaId, Editor};
 use collider::{Result, Env, Property, Value, Function, Object};
 
-register_module!(proton, init);
+register_module!(xray, init);
 
 fn init<'env>(env: &'env Env, exports: &'env mut Object) -> Result<Option<Object<'env>>> {
     exports.set_named_property("TextBuffer", buffer::init(env))?;
