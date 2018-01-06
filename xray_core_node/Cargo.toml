@@ -8,4 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 xray_core = {path = "../xray_core"}
-collider = {path = "../../collider"}
+covalent = {path = "../../covalent"}

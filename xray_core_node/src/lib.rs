@@ -1,11 +1,11 @@
 #[macro_use]
-extern crate collider;
+extern crate covalent;
 extern crate xray_core;
 
 use std::rc::Rc;
 use std::cell::RefCell;
 use xray_core::{Buffer, ReplicaId, Editor};
-use collider::{Result, Env, Property, Value, Function, Object};
+use covalent::{Result, Env, Property, Value, Function, Object};
 
 register_module!(xray, init);
 

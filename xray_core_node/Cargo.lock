@@ -4,7 +4,7 @@ version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
-name = "collider"
+name = "covalent"
 version = "0.1.0"
 dependencies = [
  "futures 0.1.17 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -47,7 +47,7 @@ dependencies = [
 name = "xray"
 version = "0.1.0"
 dependencies = [
- "collider 0.1.0",
+ "covalent 0.1.0",
  "xray_core 0.1.0",
 ]
 
