@@ -25,3 +25,35 @@ Focus on minimizing startup time from the beginning and don't add *anything* tha
 ## Static typing, versioning, and minimalism
 
 Version APIs wherever possible to allow evolution without breakage. Use static typing wherever possible to clarify interfaces, improve documentation, and minimize the chances of inadvertent breakage. In core, expose the *minimal* API needed to get the job done, pushing other concerns out to libraries.
+
+# Informal Short-Term Roadmap
+
+This is mostly for our own use right now and might not make a ton of sense just yet to the casual observer.
+
+* [x] A CRDT-backed buffer implementation with the ability to edit text
+* [x] Bindings to N-API enabling a buffer's text to be retrieved as a JS string and edits to be performed.
+* [ ] Refactor N-API bindings to use marker types in N-API values.
+* [ ] Build an async value single-producer/multi-consumer broadcast channel that implements `futures::Stream` and returns the most recently assigned value when polled. This will be used to propagate buffer and editor changes to observers. We will represent the state of the underlying object with a value object rather than emitting what changed, then compute deltas as needed in a demand-oriented way.
+* [ ] Implement a read-only editor view in Electron using canvas. How fast can we get it on screen? How fast can we scroll it?
+* [ ] Add selections/cursors and multi-cursor editing. How many cursors can we comfortably type with?
+* [ ] Create a server process to load and save buffers and incrementally persist their edit histories to a database.
+* [ ] Implement syntax highlighting with tree-sitter and a simple custom theming system.
+* [ ] Multi-tab, single-pane workspace. Let's try going all-in on React. It's a big dependency, but we can snapshot it.
+* [ ] Make sure right-to-left text works
+* [ ] Soft wraps and folds
+* [ ] File finder backed by a bitmap index
+
+At this point we should have a very minimal working text editor that's obviously missing a ton of important features. There's a very long tail of features that will be required to make an even minimally usable system. If we decide to continue the experiment, here's a list of some major features we'll need to implement in rough priority order. Each of these bullets obviously implies a big task list of its own.
+
+* Windows and Linux support
+* Key bindings and command system – We need to come up with something that's not based on selectors or DOM events.
+* Smart indent – We can use the syntax tree and a language definition file.
+* Autocomplete – Let's try to index a default subsequence match provider and support the language server protocol early on.
+* Find and replace – Let's base this on `ripgrep` from the get-go. We can add a slower fallback implementation based on `pcre` later for more complex regular expressions.
+* Status bar
+* Project browser (tree view)
+* Snippets
+* Multiple panes
+* Symbol navigator based on tree sitter
+* Savable projects and workspaces
+* Integrate existing Git package
