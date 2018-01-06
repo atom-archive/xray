@@ -1,8 +1,0 @@
-[package]
-name = "napi"
-version = "0.1.0"
-authors = ["Nathan Sobo <nathan@github.com>"]
-
-[dependencies]
-napi-sys = {path = "./napi-sys"}
-futures = "0.1.17"
