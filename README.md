@@ -32,12 +32,14 @@ This is mostly for our own use right now and might not make a ton of sense just 
 
 * [x] A CRDT-backed buffer implementation with the ability to edit text
 * [x] Bindings to N-API enabling a buffer's text to be retrieved as a JS string and edits to be performed.
-* [ ] Refactor N-API bindings to use marker types in N-API values.
-* [ ] Build an async value single-producer/multi-consumer broadcast channel that implements `futures::Stream` and returns the most recently assigned value when polled. This will be used to propagate buffer and editor changes to observers. We will represent the state of the underlying object with a value object rather than emitting what changed, then compute deltas as needed in a demand-oriented way.
+* [x] Refactor N-API bindings to use marker types in N-API values.
+* [ ] Covalent: Error handling
+* [ ] Covalent: Async promise resolution
+* [ ] Implement `BroadcastLatest`, a single-producer/multi-consumer broadcast channel that implements the `futures::Stream` trait and returns the most recently assigned value when polled. This will be used to propagate buffer and editor changes to observers.
 * [ ] Implement a read-only editor view in Electron using canvas. How fast can we get it on screen? How fast can we scroll it?
+* [ ] Implement syntax highlighting with tree-sitter and a simple custom theming system. How fast can we load and scroll now?
 * [ ] Add selections/cursors and multi-cursor editing. How many cursors can we comfortably type with?
 * [ ] Create a server process to load and save buffers and incrementally persist their edit histories to a database.
-* [ ] Implement syntax highlighting with tree-sitter and a simple custom theming system.
 * [ ] Multi-tab, single-pane workspace. Let's try going all-in on React. It's a big dependency, but we can snapshot it.
 * [ ] Make sure right-to-left text works
 * [ ] Soft wraps and folds
