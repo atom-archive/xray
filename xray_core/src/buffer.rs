@@ -1,20 +1,25 @@
 use std::cmp;
 use std::collections::HashSet;
+use std::fmt::{Debug, Error, Formatter};
 use std::iter;
 use std::ops::{AddAssign, Range};
 use std::sync::Arc;
+use std::sync::mpsc::TrySendError;
+use multiqueue::{MPMCFutReceiver, MPMCFutSender, mpmc_fut_queue};
 use super::tree::{self, Tree};
 
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
 type LamportTimestamp = usize;
+pub type Version = LamportTimestamp;
 
-#[derive(Debug)]
 pub struct Buffer {
     replica_id: ReplicaId,
     local_clock: LocalTimestamp,
     lamport_clock: LamportTimestamp,
-    fragments: Tree<Fragment>
+    fragments: Tree<Fragment>,
+    changes_sink: MPMCFutSender<Version>,
+    changes_stream: MPMCFutReceiver<Version>
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -88,11 +93,14 @@ impl Buffer {
             text: Text::new(vec![])
         }));
 
+        let (changes_sink, changes_stream) = mpmc_fut_queue(512);
         Buffer {
             replica_id,
             local_clock: 0,
             lamport_clock: 0,
-            fragments
+            fragments,
+            changes_sink,
+            changes_stream
         }
     }
 
@@ -125,6 +133,7 @@ impl Buffer {
                 local_timestamp: self.local_clock
             };
             self.fragments = self.splice_fragments(change_id, old_range, new_text);
+            self.broadcast_change();
         }
     }
 
@@ -241,6 +250,28 @@ impl Buffer {
             },
             text
         })
+    }
+
+    pub fn changes(&self) -> MPMCFutReceiver<Version> {
+        self.changes_stream.clone()
+    }
+
+    fn broadcast_change(&self) {
+        match self.changes_sink.try_send(self.lamport_clock) {
+            Err(TrySendError::Full(_)) => panic!("Tried to broadcast a change on a full queue"),
+            _ => {}
+        }
+    }
+}
+
+impl Debug for Buffer {
+    fn fmt(&self, fmt: &mut Formatter) -> Result<(), Error> {
+        fmt.debug_struct("Buffer")
+            .field("replica_id", &self.replica_id)
+            .field("local_clock", &self.local_clock)
+            .field("lamport_clock", &self.lamport_clock)
+            .field("fragments", &self.fragments)
+            .finish()
     }
 }
 

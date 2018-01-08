@@ -5,3 +5,5 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 
 [dependencies]
 rand = "0.3"
+multiqueue = "0.3"
+futures = "0.1"
