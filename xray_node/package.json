@@ -2,8 +2,9 @@
   "name": "xray",
   "version": "0.0.1",
   "description": "This is an experiment in using the fundamental concepts of the Teletype CRDT as Atom's core text-storage data structure. It's implemented in Rust.",
-  "main": "lib/xray.js",
+  "main": "target/release/xray_node",
   "scripts": {
+    "install": "npm run build-release",
     "build": "napi build",
     "build-release": "napi build --release",
     "check": "napi check"
