@@ -1,0 +1,23 @@
+{
+  "name": "napi",
+  "version": "0.1.0",
+  "description": "A minimal library for building compiled Node add-ons in Rust.",
+  "bin": {
+    "napi": "scripts/napi.js"
+  },
+  "scripts": {
+    "check": "scripts/napi.js check"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atom/napi.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/atom/napi/issues"
+  },
+  "homepage": "https://github.com/atom/napi#readme",
+  "dependencies": {
+    "minimist": "^1.2.0"
+  }
+}

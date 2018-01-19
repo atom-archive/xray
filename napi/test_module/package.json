@@ -1,0 +1,13 @@
+{
+  "name": "test-module",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "napi build",
+    "build-release": "napi build --release",
+    "check": "napi check",
+    "test": "node ./tests.js"
+  },
+  "dependencies": {
+    "napi": ".."
+  }
+}

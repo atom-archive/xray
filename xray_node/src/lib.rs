@@ -1,11 +1,11 @@
 #[macro_use]
-extern crate covalent;
+extern crate napi;
 extern crate xray_core;
 
 use std::rc::Rc;
 use std::cell::RefCell;
 use xray_core::{Buffer, ReplicaId, Editor};
-use covalent::{Result, Env, Property, Value, Any, Function, Object, Number, String};
+use napi::{Result, Env, Property, Value, Any, Function, Object, Number, String};
 
 register_module!(xray, init);
 
