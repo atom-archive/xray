@@ -1,12 +1,13 @@
 #[macro_use]
 extern crate napi;
 
-use napi::{Result, Env, Value, Any, Object, futures};
+use napi::{Result, Env, Error, Value, Any, Object, Status, futures};
 
 register_module!(test_module, init);
 
 fn init<'env>(env: &'env Env, exports: &'env mut Value<'env, Object>) -> Result<Option<Value<'env, Object>>> {
     exports.set_named_property("testSpawn", env.create_function("testSpawn", callback!(test_spawn)))?;
+    exports.set_named_property("testThrow", env.create_function("testThrow", callback!(test_throw)))?;
     Ok(None)
 }
 
@@ -47,4 +48,8 @@ fn test_spawn<'a>(env: &'a Env, _this: Value<'a, Any>, _args: &[Value<'a, Any>])
     }
 
     Ok(Some(promise.try_into().unwrap()))
+}
+
+fn test_throw<'a>(env: &'a Env, _this: Value<'a, Any>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+    Err(Error::new(Status::GenericFailure))
 }
