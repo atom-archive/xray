@@ -11,4 +11,3 @@ function testThrow() {
 }
 
 testSpawn().then(testThrow)
-
