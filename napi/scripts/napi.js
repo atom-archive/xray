@@ -32,4 +32,6 @@ switch (subcommand) {
     break;
   case 'check':
     cp.execSync(`cargo check`, {stdio: 'inherit'})
+  case 'doc':
+    cp.execSync(`cargo doc`, {stdio: 'inherit'})
 }
