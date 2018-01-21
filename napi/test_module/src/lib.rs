@@ -50,6 +50,6 @@ fn test_spawn<'a>(env: &'a Env, _this: Value<'a, Any>, _args: &[Value<'a, Any>])
     Ok(Some(promise.try_into().unwrap()))
 }
 
-fn test_throw<'a>(env: &'a Env, _this: Value<'a, Any>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+fn test_throw<'a>(_env: &'a Env, _this: Value<'a, Any>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
     Err(Error::new(Status::GenericFailure))
 }
