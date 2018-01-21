@@ -200,6 +200,12 @@ macro_rules! callback {
     }
 }
 
+impl Error {
+    pub fn new(status: Status) -> Self {
+        Error { status: status }
+    }
+}
+
 impl From<std::ffi::NulError> for Error {
     fn from(_error: std::ffi::NulError) -> Self {
         Error { status: Status::StringContainsNull }
