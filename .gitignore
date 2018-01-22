@@ -2,3 +2,4 @@
 **/target/
 **/*.rs.bk
 **/.DS_Store
+xray_core/Cargo.lock

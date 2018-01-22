@@ -1,5 +1,7 @@
 extern crate rand;
+extern crate futures;
 
+mod notify_cell;
 mod tree;
 mod buffer;
 mod editor;

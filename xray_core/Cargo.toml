@@ -5,3 +5,7 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 
 [dependencies]
 rand = "0.3"
+futures = "0.1"
+
+[dev-dependencies]
+futures-cpupool = "0.1"
