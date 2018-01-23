@@ -13,6 +13,7 @@ fn init<'env>(env: &'env Env, exports: &'env mut Value<'env, Object>) -> Result<
 fn test_spawn<'a>(env: &'a Env, _this: Value<'a, Any>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
     use std::{thread, time};
     use futures::{Future, Stream};
+    use futures::future::Executor;
 
     let async_context = env.async_init(None, "test_spawn");
     let (promise, deferred) = env.create_promise();
@@ -28,7 +29,7 @@ fn test_spawn<'a>(env: &'a Env, _this: Value<'a, Any>, _args: &[Value<'a, Any>])
         futures::future::ok(())
     });
 
-    env.spawn(future);
+    env.create_executor().execute(future).unwrap();
 
     for _i in 0..10 {
         let thread_tx = tx.clone();

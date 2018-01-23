@@ -1,11 +1,15 @@
 use std::sync::{Arc, RwLock};
 use futures::{Future, Async};
-
+use futures::future::{Executor, ExecuteError};
 use futures::executor::{self, Notify, Spawn};
 use std::mem;
 use std::ptr;
 use std::os::raw::c_void;
 use super::sys;
+
+pub struct LibuvExecutor {
+    event_loop: *mut sys::uv_loop_t
+}
 
 struct Task<T: 'static + Future> {
     spawn: Spawn<T>,
@@ -16,8 +20,39 @@ struct TaskNotifyHandle(RwLock<Option<UvAsyncHandle>>);
 
 struct UvAsyncHandle(Box<sys::uv_async_t>);
 
-unsafe impl Send for UvAsyncHandle {}
-unsafe impl Sync for UvAsyncHandle {}
+impl LibuvExecutor {
+    pub fn new(event_loop: *mut sys::uv_loop_t) -> Self {
+        Self { event_loop }
+    }
+}
+
+impl<F> Executor<F> for LibuvExecutor
+    where F: 'static + Future<Item = (), Error = ()>
+{
+
+    fn execute(&self, future: F) -> Result<(), ExecuteError<F>> {
+        let spawn = executor::spawn(future);
+
+        unsafe {
+            let mut task = Box::new(Task {
+                spawn,
+                notify_handle: mem::uninitialized()
+            });
+
+            ptr::write(&mut task.notify_handle, Arc::new(TaskNotifyHandle::new(
+                self.event_loop,
+                Some(poll_future_on_main_thread::<F>),
+                mem::transmute_copy(&task)
+            )));
+
+            if !task.poll_future() {
+                mem::forget(task)
+            }
+        }
+
+        Ok(())
+    }
+}
 
 impl<T: 'static + Future> Task<T> {
     fn poll_future(&mut self) -> bool {
@@ -68,6 +103,9 @@ impl UvAsyncHandle {
     }
 }
 
+unsafe impl Send for UvAsyncHandle {}
+unsafe impl Sync for UvAsyncHandle {}
+
 extern "C" fn drop_handle_after_close(handle: *mut sys::uv_handle_t) {
     unsafe {
         Box::from_raw(handle);
@@ -78,26 +116,5 @@ extern "C" fn poll_future_on_main_thread<T: 'static + Future>(handle: *mut sys::
     let mut task: Box<Task<T>> = unsafe { Box::from_raw((*handle).data as *mut Task<T>) };
     if !task.poll_future() {
         mem::forget(task); // Don't drop task if it isn't complete.
-    }
-}
-
-pub fn spawn<T: 'static + Future>(future: T, event_loop: *mut sys::uv_loop_t) {
-    let spawn = executor::spawn(future);
-
-    unsafe {
-        let mut task = Box::new(Task {
-            spawn,
-            notify_handle: mem::uninitialized()
-        });
-
-        ptr::write(&mut task.notify_handle, Arc::new(TaskNotifyHandle::new(
-            event_loop,
-            Some(poll_future_on_main_thread::<T>),
-            mem::transmute_copy(&task)
-        )));
-
-        if !task.poll_future() {
-            mem::forget(task)
-        }
     }
 }

@@ -9,7 +9,7 @@ use std::string::String as RustString;
 use futures::Future;
 
 pub mod sys;
-mod async;
+mod executor;
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type Callback = extern "C" fn(sys::napi_env, sys::napi_callback_info) -> sys::napi_value;
@@ -381,9 +381,9 @@ impl Env {
         }
     }
 
-    pub fn spawn<T: 'static + Future>(&self, future: T) {
+    pub fn create_executor(&self) -> executor::LibuvExecutor {
         let event_loop = unsafe { sys::uv_default_loop() };
-        async::spawn(future, event_loop);
+        executor::LibuvExecutor::new(event_loop)
     }
 }
 
