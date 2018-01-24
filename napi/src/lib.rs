@@ -67,6 +67,12 @@ pub struct Value<'env, T> {
     _marker: PhantomData<T>
 }
 
+pub struct Ref<T> {
+    raw_env: sys::napi_env,
+    raw_ref: sys::napi_ref,
+    _marker: PhantomData<T>
+}
+
 pub struct AsyncContext {
     raw_env: sys::napi_env,
     raw_context: sys::napi_async_context,
@@ -289,6 +295,30 @@ impl Env {
         Value::from_raw(self, raw_result)
     }
 
+    pub fn create_reference<T>(&self, value: &Value<T>) -> Ref<T> {
+        let mut raw_ref = ptr::null_mut();
+        unsafe {
+            let status = sys::napi_create_reference(self.0, value.raw_value, 1, &mut raw_ref);
+            debug_assert!(Status::from(status) == Status::Ok);
+        };
+
+        Ref {
+            raw_env: self.0,
+            raw_ref,
+            _marker: PhantomData
+        }
+    }
+
+    pub fn get_reference_value<T: ValueType>(&self, reference: &Ref<T>) -> Value<T> {
+        let mut raw_value = ptr::null_mut();
+        unsafe {
+            let status = sys::napi_get_reference_value(self.0, reference.raw_ref, &mut raw_value);
+            debug_assert!(Status::from(status) == Status::Ok);
+        };
+
+        Value::from_raw(self, raw_value)
+    }
+
     pub fn define_class<'a, 'b>(&'a self, name: &'b str, constructor_cb: Callback, properties: Vec<Property>) -> Value<'a, Function> {
         let mut raw_result = ptr::null_mut();
         let raw_properties = properties.into_iter().map(|prop| prop.into_raw(self)).collect::<Vec<sys::napi_property_descriptor>>();
@@ -380,6 +410,7 @@ impl Env {
             debug_assert!(Status::from(status) == Status::Ok);
 
             let status = sys::napi_create_reference(self.0, raw_resource, 1, &mut raw_resource_ref);
+            debug_assert!(Status::from(status) == Status::Ok);
         }
 
         AsyncContext { raw_env: self.0, raw_resource: raw_resource_ref, raw_context }
@@ -575,6 +606,45 @@ impl<'env> Value<'env, Object> {
 
     fn raw_env(&self) -> sys::napi_env {
         self.env.0
+    }
+}
+
+impl<'env> Value<'env, Function> {
+    pub fn call(&self, this: Option<&Value<'env, Object>>, args: &[Value<'env, Any>]) -> Result<Value<'env, Any>> {
+        let raw_this = this.map(|v| v.into_raw()).unwrap_or_else(|| self.env.get_undefined().into_raw());
+        let mut raw_args: [sys::napi_value; 8] = unsafe { mem::uninitialized() };
+        for (i, arg) in args.into_iter().enumerate() {
+            raw_args[i] = arg.raw_value;
+        }
+        let mut return_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_call_function(
+                self.env.0,
+                raw_this,
+                self.raw_value,
+                args.len(),
+                &raw_args[0],
+                &mut return_value
+           )
+       };
+       check_status(status)?;
+
+       Ok(Value::from_raw(self.env, return_value))
+    }
+}
+
+impl<T> Drop for Ref<T> {
+    fn drop(&mut self) {
+        unsafe {
+            let mut ref_count = 0;
+            let status = sys::napi_reference_unref(self.raw_env, self.raw_ref, &mut ref_count);
+            debug_assert!(Status::from(status) == Status::Ok);
+
+            if ref_count == 0 {
+                let status = sys::napi_delete_reference(self.raw_env, self.raw_ref);
+                debug_assert!(Status::from(status) == Status::Ok);
+            }
+        }
     }
 }
 
