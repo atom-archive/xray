@@ -19,6 +19,7 @@ struct Inner<T: Clone> {
     value: Option<T>,
     last_written_at: Version,
     subscribers: Vec<Task>,
+    completed: bool,
 }
 
 impl<T: Clone> NotifyCell<T> {
@@ -28,6 +29,7 @@ impl<T: Clone> NotifyCell<T> {
                 value: None,
                 last_written_at: 0,
                 subscribers: Vec::new(),
+                completed: false,
             })),
         }
     }
@@ -38,6 +40,7 @@ impl<T: Clone> NotifyCell<T> {
                 value: Some(value),
                 last_written_at: 0,
                 subscribers: Vec::new(),
+                completed: false,
             })),
         }
     }
@@ -66,7 +69,9 @@ impl<T: Clone> Stream for NotifyCellObserver<T> {
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         let mut inner = self.inner.lock().unwrap();
 
-        if let Some(value) = inner.value.as_ref().cloned() {
+        if inner.completed {
+            Ok(Async::Ready(None))
+        } else if let Some(value) = inner.value.as_ref().cloned() {
             if let Some(last_polled_at) = self.last_polled_at {
                 if inner.last_written_at > last_polled_at {
                     self.last_polled_at = Some(inner.last_written_at);
@@ -82,6 +87,16 @@ impl<T: Clone> Stream for NotifyCellObserver<T> {
         } else {
             inner.subscribers.push(task::current());
             Ok(Async::NotReady)
+        }
+    }
+}
+
+impl<T: Clone> Drop for NotifyCell<T> {
+    fn drop(&mut self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.completed = true;
+        for subscriber in inner.subscribers.drain(..) {
+            subscriber.notify();
         }
     }
 }
@@ -103,27 +118,20 @@ mod tests {
             .take(1000)
             .collect::<BTreeSet<_>>();
 
-        let mut generated_values_iter = generated_values.clone().into_iter();
-        let cell = NotifyCell::new(Some(generated_values_iter.next().unwrap()));
+        let generated_values_iter = generated_values.clone().into_iter();
+        let cell = NotifyCell::new();
 
-        let num_threads = 100;
+        let num_threads = 1000;
         let pool = CpuPool::new(num_threads);
 
-        let cpu_futures = (0..num_threads).map(|_| {
-            let observer = cell.observe();
-
-            pool.spawn(
-                observer
-                    .take_while(|v| Ok(v.is_some()))
-                    .map(|v| v.unwrap())
-                    .collect()
-            )
-        }).collect::<Vec<_>>();
+        let cpu_futures = (0..num_threads)
+            .map(|_| pool.spawn(cell.observe().collect()))
+            .collect::<Vec<_>>();
 
         for value in generated_values_iter {
-            cell.set(Some(value));
+            cell.set(value);
         }
-        cell.set(None);
+        drop(cell); // Dropping the cell terminates the stream.
 
         for future in cpu_futures {
             let observed_values = future.wait().unwrap();
