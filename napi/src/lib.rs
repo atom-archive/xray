@@ -6,7 +6,6 @@ use std::marker::PhantomData;
 use std::mem;
 use std::ptr;
 use std::string::String as RustString;
-use futures::Future;
 
 pub mod sys;
 mod executor;
