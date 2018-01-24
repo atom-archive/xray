@@ -1,29 +1,41 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 use futures::{Async, Poll, Stream};
 use futures::task::{self, Task};
 
 type Version = usize;
 
+#[derive(Debug)]
 pub struct NotifyCell<T: Clone> {
-    inner: Arc<RwLock<Inner<T>>>,
+    inner: Arc<Mutex<Inner<T>>>,
 }
 
 pub struct NotifyCellObserver<T: Clone> {
     last_polled_at: Option<Version>,
-    inner: Arc<RwLock<Inner<T>>>,
+    inner: Arc<Mutex<Inner<T>>>,
 }
 
+#[derive(Debug)]
 struct Inner<T: Clone> {
-    value: T,
+    value: Option<T>,
     last_written_at: Version,
     subscribers: Vec<Task>,
 }
 
 impl<T: Clone> NotifyCell<T> {
-    pub fn new(value: T) -> Self {
+    pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Inner {
-                value,
+            inner: Arc::new(Mutex::new(Inner {
+                value: None,
+                last_written_at: 0,
+                subscribers: Vec::new(),
+            })),
+        }
+    }
+
+    pub fn with_value(value: T) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner {
+                value: Some(value),
                 last_written_at: 0,
                 subscribers: Vec::new(),
             })),
@@ -31,8 +43,8 @@ impl<T: Clone> NotifyCell<T> {
     }
 
     pub fn set(&self, value: T) {
-        let mut inner = self.inner.write().unwrap();
-        inner.value = value;
+        let mut inner = self.inner.lock().unwrap();
+        inner.value = Some(value);
         inner.last_written_at += 1;
         for subscriber in inner.subscribers.drain(..) {
             subscriber.notify();
@@ -47,49 +59,29 @@ impl<T: Clone> NotifyCell<T> {
     }
 }
 
-impl<T: Clone> NotifyCellObserver<T> {
-    fn poll_with_read_lock(&mut self) -> Async<Option<T>> {
-        let inner = self.inner.read().unwrap();
-
-        if let Some(last_polled_at) = self.last_polled_at {
-            if inner.last_written_at > last_polled_at {
-                self.last_polled_at = Some(inner.last_written_at);
-                Async::Ready(Some(inner.value.clone()))
-            } else {
-                Async::NotReady
-            }
-        } else {
-            self.last_polled_at = Some(inner.last_written_at);
-            Async::Ready(Some(inner.value.clone()))
-        }
-    }
-
-    fn poll_with_write_lock(&mut self) -> Async<Option<T>> {
-        let mut inner = self.inner.write().unwrap();
-
-        if let Some(last_polled_at) = self.last_polled_at {
-            if inner.last_written_at > last_polled_at {
-                self.last_polled_at = Some(inner.last_written_at);
-                Async::Ready(Some(inner.value.clone()))
-            } else {
-                inner.subscribers.push(task::current());
-                Async::NotReady
-            }
-        } else {
-            self.last_polled_at = Some(inner.last_written_at);
-            Async::Ready(Some(inner.value.clone()))
-        }
-    }
-}
-
 impl<T: Clone> Stream for NotifyCellObserver<T> {
     type Item = T;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        match self.poll_with_read_lock() {
-            Async::NotReady => Ok(self.poll_with_write_lock()),
-            result @ Async::Ready(..) => Ok(result),
+        let mut inner = self.inner.lock().unwrap();
+
+        if let Some(value) = inner.value.as_ref().cloned() {
+            if let Some(last_polled_at) = self.last_polled_at {
+                if inner.last_written_at > last_polled_at {
+                    self.last_polled_at = Some(inner.last_written_at);
+                    Ok(Async::Ready(Some(value.clone())))
+                } else {
+                    inner.subscribers.push(task::current());
+                    Ok(Async::NotReady)
+                }
+            } else {
+                self.last_polled_at = Some(inner.last_written_at);
+                Ok(Async::Ready(Some(value.clone())))
+            }
+        } else {
+            inner.subscribers.push(task::current());
+            Ok(Async::NotReady)
         }
     }
 }

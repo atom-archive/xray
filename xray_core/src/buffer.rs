@@ -4,6 +4,7 @@ use std::iter;
 use std::ops::{AddAssign, Range};
 use std::sync::Arc;
 use super::tree::{self, Tree};
+use notify_cell::NotifyCell;
 
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
@@ -14,8 +15,12 @@ pub struct Buffer {
     replica_id: ReplicaId,
     local_clock: LocalTimestamp,
     lamport_clock: LamportTimestamp,
-    fragments: Tree<Fragment>
+    fragments: Tree<Fragment>,
+    pub version: NotifyCell<Version>
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct Version(LocalTimestamp);
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct Position {
@@ -92,7 +97,8 @@ impl Buffer {
             replica_id,
             local_clock: 0,
             lamport_clock: 0,
-            fragments
+            fragments,
+            version: NotifyCell::with_value(Version(0))
         }
     }
 
@@ -125,6 +131,7 @@ impl Buffer {
                 local_timestamp: self.local_clock
             };
             self.fragments = self.splice_fragments(change_id, old_range, new_text);
+            self.version.set(Version(self.local_clock));
         }
     }
 
