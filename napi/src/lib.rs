@@ -84,7 +84,7 @@ pub struct Property {
 #[repr(C)]
 struct TaggedObject<T> {
     type_id: TypeId,
-    object: T,
+    object: Option<T>,
 }
 
 #[macro_export]
@@ -339,7 +339,28 @@ impl Env {
             let type_id: *const TypeId = mem::transmute(unknown_tagged_object);
             if *type_id == TypeId::of::<T>() {
                 let tagged_object: *mut TaggedObject<T> = mem::transmute(unknown_tagged_object);
-                Ok(&mut (*tagged_object).object)
+                (*tagged_object).object.as_mut().ok_or(Error { status: Status::InvalidArg })
+            } else {
+                Err(Error { status: Status::InvalidArg })
+            }
+        }
+    }
+
+    pub fn drop_wrapped<T: 'static>(&self, js_object: Value<Object>) -> Result<()> {
+        unsafe {
+            let mut unknown_tagged_object: *mut c_void = ptr::null_mut();
+            let status = sys::napi_unwrap(
+                self.0,
+                js_object.raw_value,
+                &mut unknown_tagged_object
+            );
+            check_status(status)?;
+
+            let type_id: *const TypeId = mem::transmute(unknown_tagged_object);
+            if *type_id == TypeId::of::<T>() {
+                let tagged_object: *mut TaggedObject<T> = mem::transmute(unknown_tagged_object);
+                (*tagged_object).object = None;
+                Ok(())
             } else {
                 Err(Error { status: Status::InvalidArg })
             }
@@ -627,7 +648,7 @@ impl<T: 'static> TaggedObject<T> {
     fn new(object: T) -> Self {
         TaggedObject {
             type_id: TypeId::of::<T>(),
-            object
+            object: Some(object)
         }
     }
 }
