@@ -641,5 +641,8 @@ fn check_status(code: sys::napi_status) -> Result<()> {
 }
 
 extern "C" fn raw_finalize<T>(_raw_env: sys::napi_env, finalize_data: *mut c_void, _finalize_hint: *mut c_void) {
-    unsafe { Box::from_raw(finalize_data as *mut T) };
+    unsafe {
+        let tagged_object: *mut TaggedObject<T> = mem::transmute(finalize_data);
+        Box::from_raw(tagged_object);
+    }
 }
