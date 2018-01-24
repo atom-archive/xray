@@ -9,6 +9,7 @@
     "build-release": "napi build --release",
     "check": "napi check"
   },
+  "types": "xray.d.ts",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/atom/xray.git"
