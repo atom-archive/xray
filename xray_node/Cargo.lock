@@ -348,6 +348,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 name = "xray_core"
 version = "0.1.0"
 dependencies = [
+ "futures 0.1.17 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.3.20 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 

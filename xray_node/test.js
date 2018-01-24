@@ -8,5 +8,17 @@ console.log(buffer.length);
 
 console.log(buffer.getText());
 
-const editor1 = new TextEditor(buffer)
-const editor2 = new TextEditor(buffer)
+let editor1 = new TextEditor(buffer, () => {
+  console.log("editor 1 changed!")
+})
+let editor2 = new TextEditor(buffer, () => {
+  console.log("editor 2 changed!")
+})
+
+console.log("Splicing...")
+buffer.splice(0, 0, 'foo')
+
+setTimeout(() => {
+  editor1.destroy()
+  editor2.destroy()
+}, 50)

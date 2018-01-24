@@ -5,7 +5,9 @@ extern crate xray_core;
 use std::rc::Rc;
 use std::cell::RefCell;
 use xray_core::{Buffer, ReplicaId, Editor};
-use napi::{Result, Env, Property, Value, Any, Function, Object, Number, String};
+use napi::{futures, Result, Env, Property, Value, Ref, Any, Function, Object, Number, String};
+use futures::future::Executor;
+use futures::Stream;
 
 register_module!(xray, init);
 
@@ -64,8 +66,23 @@ mod editor {
     }
 
     fn constructor<'a>(env: &'a Env, mut this: Value<'a, Object>, args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let executor = env.create_executor();
+
         let buffer: &Rc<RefCell<Buffer>> = env.unwrap(&args[0].try_into()?)?;
         let editor = Editor::new(buffer.clone());
+        editor.run(&executor);
+
+        let on_change_cb: Ref<Function> = env.create_reference(&args[1].try_into()?);
+        let async_context = env.async_init(None, "editor.onChange");
+        executor.execute(editor.version.observe().for_each(move |_| {
+            async_context.enter(|&mut env| {
+                let on_change_cb = env.get_reference_value(&on_change_cb);
+                on_change_cb.call(None, &[]).unwrap();
+            });
+
+            Ok(())
+        })).unwrap();
+
         env.wrap(&mut this, editor)?;
         Ok(None)
     }

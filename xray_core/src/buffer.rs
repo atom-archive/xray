@@ -98,7 +98,7 @@ impl Buffer {
             local_clock: 0,
             lamport_clock: 0,
             fragments,
-            version: NotifyCell::with_value(Version(0))
+            version: NotifyCell::new(Version(0))
         }
     }
 
