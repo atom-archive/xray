@@ -58,13 +58,21 @@ mod editor {
     use super::*;
 
     pub fn init(env: &Env) -> Value<Function> {
-        env.define_class("TextEditor", callback!(constructor), vec![])
+        env.define_class("TextEditor", callback!(constructor), vec![
+            Property::new("destroy").with_method(callback!(destroy))
+        ])
     }
 
     fn constructor<'a>(env: &'a Env, mut this: Value<'a, Object>, args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
         let buffer: &Rc<RefCell<Buffer>> = env.unwrap(&args[0].try_into()?)?;
         let editor = Editor::new(buffer.clone());
         env.wrap(&mut this, editor)?;
+        Ok(None)
+    }
+
+    fn destroy<'a>(env: &'a Env, this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        env.drop_wrapped::<Editor>(this)?;
+
         Ok(None)
     }
 }
