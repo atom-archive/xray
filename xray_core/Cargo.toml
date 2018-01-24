@@ -9,3 +9,4 @@ futures = "0.1"
 
 [dev-dependencies]
 futures-cpupool = "0.1"
+tokio-core = "0.1"

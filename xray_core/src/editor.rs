@@ -47,3 +47,22 @@ impl Drop for Editor {
         self.dropped.set(true);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate tokio_core;
+
+    use super::*;
+    use self::tokio_core::reactor::Core;
+    use futures::future;
+
+    #[test]
+    fn test_version_updates() {
+        let mut event_loop = Core::new().unwrap();
+        let buffer = Rc::new(RefCell::new(Buffer::new(1)));
+        let editor = Editor::new(buffer.clone());
+        editor.run(&event_loop);
+        buffer.borrow_mut().splice(0..0, "test");
+        event_loop.run(editor.version.observe().take(1).into_future());
+    }
+}
