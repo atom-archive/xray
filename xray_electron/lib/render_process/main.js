@@ -1,3 +1,5 @@
+const fs = require("fs");
+const path = require("path");
 const xray = require("xray");
 const React = require("react");
 const ReactDOM = require("react-dom");
@@ -11,11 +13,11 @@ const $ = React.createElement;
 
 const theme = {
   editor: {
-    backgroundColor: "black",
-    baseTextColor: "white",
-    fontFamily: "Fira Code",
+    fontFamily: "Monaco",
+    backgroundColor: "white",
+    baseTextColor: "black",
     fontSize: 20,
-    lineHeight: 1.3
+    lineHeight: 1
   }
 }
 
@@ -23,7 +25,9 @@ ReactDOM.render(
   $(
     StyletronProvider,
     { styletron: new Styletron() },
-    $(ThemeProvider, { theme: theme }, $(TextEditor))
+    $(ThemeProvider, { theme: theme }, $(TextEditor, {
+      initialText: fs.readFileSync(path.join(__dirname, '../../node_modules/react/cjs/react.development.js'), 'utf8')
+    }))
   ),
   document.getElementById("app")
 );

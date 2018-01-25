@@ -1,60 +1,102 @@
 const React = require("react");
 const ReactDOM = require("react-dom");
+const PropTypes = require("prop-types");
 const { styled } = require("styletron-react");
 const xray = require("xray");
 const ContentCanvas = require("./content_canvas");
 const $ = React.createElement;
 
-module.exports = class TextEditorContainer extends React.Component {
-  render() {
-    return $(TextEditor, {
-      offsetWidth: this.state ? this.state.offsetWidth : 0,
-      offsetHeight: this.state? this.state.offsetHeight : 0,
-      contentCanvasCreated: canvas => (this.contentCanvas = canvas)
-    });
+class TextEditorContainer extends React.Component {
+  constructor(props) {
+    super(props);
+    this.setContentCanvas = this.setContentCanvas.bind(this);
+
+    const buffer = new xray.TextBuffer(1);
+    const editor = new xray.TextEditor(buffer, this.editorChanged.bind(this));
+
+    if (props.initialText) {
+      buffer.splice(0, 0, props.initialText);
+    }
+
+    window.setInterval(() => {
+      this.setState({
+        editorVersion: this.state.editorVersion + 1
+      });
+    }, 100)
+
+    this.state = {
+      editor: editor,
+      offsetHeight: 0,
+      offsetWidth: 0,
+      editorVersion: 0
+    };
+  }
+
+  setContentCanvas (contentCanvas) {
+    this.contentCanvas = contentCanvas
   }
 
   componentDidMount() {
-    const node = ReactDOM.findDOMNode(this);
+    const { offsetWidth, offsetHeight } = ReactDOM.findDOMNode(this);
 
     this.setState({
-      offsetWidth: node.offsetWidth,
-      offsetHeight: node.offsetHeight
+      offsetWidth,
+      offsetHeight
     });
   }
+
+  componentWillUnmount() {
+    this.state.editor.destroy();
+  }
+
+  editorChanged() {
+    this.setState({
+      editorVersion: this.state.editorVersion + 1
+    });
+  }
+
+  computeFrameState() {
+    const { offsetHeight } = this.state;
+    const { fontSize, lineHeight } = this.context.theme;
+    return this.state.editor.render({
+      offsetHeight,
+      lineHeight: fontSize * lineHeight
+    });
+  }
+
+  render() {
+    const { offsetWidth, offsetHeight } = this.state;
+
+    return $(TextEditor, {
+      offsetWidth,
+      offsetHeight,
+      frameState: this.computeFrameState(),
+      contentCanvasCreated: this.setContentCanvas
+    });
+  }
+}
+
+TextEditorContainer.contextTypes = {
+  theme: PropTypes.object
 };
 
-const ContentScroller = styled("div", {
+const Root = styled("div", {
   width: "100%",
   height: "100%",
-  overflow: "auto"
+  overflow: "hidden"
 });
-
-const StickyContentCanvas = styled(ContentCanvas, {
-  position: "sticky",
-  top: 0,
-  left: 0
-});
-
-const DummyContent = props => {
-  return $("div", {
-    style: {
-      width: props.width + "px",
-      height: props.height + "px"
-    }
-  });
-};
 
 function TextEditor(props) {
   return $(
-    ContentScroller,
+    Root,
     null,
-    $(StickyContentCanvas, {
+    $(ContentCanvas, {
       created: props.contentCanvasCreated,
       width: props.offsetWidth,
       height: props.offsetHeight,
-      scale: window.devicePixelRatio
-    }),
-    DummyContent({ width: 3000, height: 3000 })
+      frameState: props.frameState
+    })
   );
 }
+
+module.exports = TextEditorContainer;
