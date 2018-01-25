@@ -563,13 +563,13 @@ impl<'env> Value<'env, String> {
 
 impl<'env> Into<Vec<u16>> for Value<'env, String> {
     fn into(self) -> Vec<u16> {
-        let u16_char_count = self.len();
-        let mut result = Vec::with_capacity(u16_char_count);
+        let mut result = Vec::with_capacity(self.len() + 1); // Leave room for trailing null byte
 
         unsafe {
-            let status = sys::napi_get_value_string_utf16(self.env.0, self.raw_value, result.as_mut_ptr(), u16_char_count * 2, &mut 0);
+            let mut written_char_count = 0;
+            let status = sys::napi_get_value_string_utf16(self.env.0, self.raw_value, result.as_mut_ptr(), result.capacity(), &mut written_char_count);
             debug_assert!(Status::from(status) == Status::Ok);
-            result.set_len(u16_char_count);
+            result.set_len(written_char_count);
         }
 
         result
