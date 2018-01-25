@@ -12,6 +12,15 @@ pub struct Editor {
     dropped: NotifyCell<bool>,
 }
 
+pub struct RenderParams {
+    pub offset_height: f64,
+    pub line_height: f64
+}
+
+pub struct Frame {
+    pub lines: Vec<Vec<u16>>
+}
+
 impl Editor {
     pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
         let version = buffer.borrow().version.get().unwrap();
@@ -39,6 +48,31 @@ impl Editor {
                 .select2(drop_observation)
                 .then(|_| Ok(())),
         )).unwrap();
+    }
+
+    pub fn render(&self, params: RenderParams) -> Frame {
+        let buffer = self.buffer.borrow();
+        let mut lines = Vec::new();
+        let mut cur_line = Vec::new();
+        let end_row = (params.offset_height / params.line_height).ceil() as usize;
+        let mut cur_row = 0;
+        for c in buffer.iter() {
+            if c == (b'\n' as u16) {
+                lines.push(cur_line);
+                cur_line = Vec::new();
+                cur_row += 1;
+                if cur_row >= end_row {
+                    break;
+                }
+            } else {
+                cur_line.push(c);
+            }
+        }
+        if cur_row < end_row {
+            lines.push(cur_line);
+        }
+
+        Frame { lines }
     }
 }
 

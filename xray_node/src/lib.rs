@@ -4,7 +4,6 @@ extern crate xray_core;
 
 use std::rc::Rc;
 use std::cell::RefCell;
-use xray_core::{Buffer, ReplicaId, Editor};
 use napi::{futures, Result, Env, Property, Value, Ref, Any, Function, Object, Number, String};
 use futures::future::Executor;
 use futures::Stream;
@@ -19,6 +18,7 @@ fn init<'env>(env: &'env Env, exports: &'env mut Value<'env, Object>) -> Result<
 
 mod buffer {
     use super::*;
+    use xray_core::buffer::{Buffer, ReplicaId};
 
     pub fn init(env: &Env) -> Value<Function> {
         env.define_class("TextBuffer", callback!(constructor), vec![
@@ -57,10 +57,13 @@ mod buffer {
 }
 
 mod editor {
+    use xray_core::buffer::Buffer;
+    use xray_core::editor::{Editor, RenderParams};
     use super::*;
 
     pub fn init(env: &Env) -> Value<Function> {
         env.define_class("TextEditor", callback!(constructor), vec![
+            Property::new("render").with_method(callback!(render)),
             Property::new("destroy").with_method(callback!(destroy))
         ])
     }
@@ -85,6 +88,26 @@ mod editor {
 
         env.wrap(&mut this, editor)?;
         Ok(None)
+    }
+
+    fn render<'a>(env: &'a Env, this: Value<'a, Object>, args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &Editor = env.unwrap(&this)?;
+        let params = args[0].try_into::<Object>()?;
+
+        let frame = editor.render(RenderParams {
+            offset_height: params.get_named_property("offsetHeight")?.into(),
+            line_height: params.get_named_property("lineHeight")?.into()
+        });
+
+        let mut js_frame = env.create_object();
+        let mut js_lines = env.create_array_with_length(frame.lines.len());
+
+        for (i, line) in frame.lines.iter().enumerate() {
+            js_lines.set_index(i, env.create_string_utf16(line))?;
+        }
+        js_frame.set_named_property("lines", js_lines)?;
+
+        Ok(Some(js_frame.try_into()?))
     }
 
     fn destroy<'a>(env: &'a Env, this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {

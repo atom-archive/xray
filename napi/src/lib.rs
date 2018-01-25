@@ -276,6 +276,15 @@ impl Env {
         Value::from_raw(self, raw_value)
     }
 
+    pub fn create_array_with_length(&self, length: usize) -> Value<Object> {
+        let mut raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_create_array_with_length(self.0, length, &mut raw_value)
+        };
+        debug_assert!(Status::from(status) == Status::Ok);
+        Value::from_raw(self, raw_value)
+    }
+
     pub fn create_function<'a, 'b>(&'a self, name: &'b str, callback: Callback) -> Value<'a, Function> {
         let mut raw_result = ptr::null_mut();
         let status = unsafe {
@@ -589,7 +598,26 @@ impl<'env> Into<i64> for Value<'env, Number> {
     }
 }
 
+impl<'env> Into<f64> for Value<'env, Number> {
+    fn into(self) -> f64 {
+        let mut result = 0_f64;
+        let status = unsafe {
+            sys::napi_get_value_double(self.env.0, self.raw_value, &mut result)
+        };
+        debug_assert!(Status::from(status) == Status::Ok);
+        result
+    }
+}
+
 impl<'env> Value<'env, Object> {
+    pub fn set_property<'a, K, V>(&mut self, key: Value<K>, value: Value<V>) -> Result<()> {
+        let status = unsafe {
+            sys::napi_set_property(self.raw_env(), self.raw_value(), key.raw_value, value.raw_value)
+        };
+        check_status(status)?;
+        Ok(())
+    }
+
     pub fn set_named_property<'a, T, V: Into<Value<'a, T>>>(&mut self, name: &'a str, value: V) -> Result<()> {
         let key = CString::new(name)?;
         let status = unsafe {
@@ -597,6 +625,20 @@ impl<'env> Value<'env, Object> {
         };
         check_status(status)?;
         Ok(())
+    }
+
+    pub fn get_named_property<T: ValueType>(&self, name: &str) -> Result<Value<T>> {
+        let key = CString::new(name)?;
+        let mut raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_get_named_property(self.raw_env(), self.raw_value(), key.as_ptr(), &mut raw_value)
+        };
+        check_status(status)?;
+        Value::<Any>::from_raw(self.env, raw_value).try_into()
+    }
+
+    pub fn set_index<'a, T>(&mut self, index: usize, value: Value<T>) -> Result<()> {
+        self.set_property(self.env.create_int64(index as i64), value)
     }
 
     fn raw_value(&self) -> sys::napi_value {
