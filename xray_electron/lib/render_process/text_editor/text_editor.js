@@ -3,13 +3,12 @@ const ReactDOM = require("react-dom");
 const PropTypes = require("prop-types");
 const { styled } = require("styletron-react");
 const xray = require("xray");
-const ContentCanvas = require("./content_canvas");
+const TextPlane = require("./text_plane");
 const $ = React.createElement;
 
 class TextEditorContainer extends React.Component {
   constructor(props) {
     super(props);
-    this.setContentCanvas = this.setContentCanvas.bind(this);
 
     const buffer = new xray.TextBuffer(1);
     const editor = new xray.TextEditor(buffer, this.editorChanged.bind(this));
@@ -30,10 +29,6 @@ class TextEditorContainer extends React.Component {
       offsetWidth: 0,
       editorVersion: 0
     };
-  }
-
-  setContentCanvas (contentCanvas) {
-    this.contentCanvas = contentCanvas
   }
 
   componentDidMount() {
@@ -70,8 +65,7 @@ class TextEditorContainer extends React.Component {
     return $(TextEditor, {
       offsetWidth,
       offsetHeight,
-      frameState: this.computeFrameState(),
-      contentCanvasCreated: this.setContentCanvas
+      frameState: this.computeFrameState()
     });
   }
 }
@@ -90,8 +84,7 @@ function TextEditor(props) {
   return $(
     Root,
     null,
-    $(ContentCanvas, {
-      created: props.contentCanvasCreated,
+    $(TextPlane, {
       width: props.offsetWidth,
       height: props.offsetHeight,
       frameState: props.frameState
