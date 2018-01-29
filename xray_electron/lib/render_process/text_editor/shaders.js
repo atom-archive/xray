@@ -17,19 +17,20 @@ exports.textBlendVertex = `
   layout (location = 4) in vec2 atlasOrigin;
   layout (location = 5) in vec2 atlasSize;
 
-  // uniform vec2 scale;
+  uniform vec2 viewportScale;
 
   flat out vec4 textColor;
   out vec2 atlasPosition;
 
   void main() {
       vec2 targetPixelPosition = targetOrigin + unitQuadVertex * targetSize;
-      // vec2 pos = pixelPos * posScale + vec2(-1.0, 1.0);
-      gl_Position = vec4(targetPixelPosition, 0.0, 1.0);
+      vec2 targetPosition = targetPixelPosition * viewportScale + vec2(-1.0, 1.0);
+      gl_Position = vec4(targetPosition, 0.0, 1.0);
       textColor = textColorRGBA * vec4(1.0 / 255.0);
       // Conversion to sRGB.
       textColor = textColor * textColor;
-      atlasPosition = atlasOrigin + targetPixelPosition * atlasSize;
+      textColor = textColorRGBA;
+      atlasPosition = atlasOrigin + unitQuadVertex * atlasSize;
   }
 `.trim()
 

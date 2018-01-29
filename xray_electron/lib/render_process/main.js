@@ -17,7 +17,7 @@ const theme = {
     backgroundColor: "white",
     baseTextColor: "black",
     fontSize: 20,
-    lineHeight: 1
+    lineHeight: 1.5
   }
 }
 
