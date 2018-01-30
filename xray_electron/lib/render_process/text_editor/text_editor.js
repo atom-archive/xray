@@ -52,7 +52,7 @@ class TextEditorContainer extends React.Component {
 
   computeFrameState() {
     const { offsetHeight } = this.state;
-    const { fontSize, lineHeight } = this.context.theme;
+    const { fontSize, lineHeight } = this.context.theme.editor;
     return this.state.editor.render({
       offsetHeight,
       lineHeight: fontSize * lineHeight

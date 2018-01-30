@@ -43,7 +43,7 @@ class TextPlane extends React.Component {
       });
     }
 
-    this.renderer.draw();
+    this.renderer.drawLines(this.props.frameState.lines);
   }
 
   getLineHeight() {}
@@ -66,6 +66,7 @@ class Renderer {
     this.gl = gl;
     this.gl.enable(this.gl.BLEND);
     this.atlas = new Atlas(gl, style);
+    this.style = style
 
     const textBlendVertexShader = this.createShader(
       shaders.textBlendVertex,
@@ -186,42 +187,41 @@ class Renderer {
     this.gl.vertexAttribDivisor(shaders.attributes.atlasSize, 1);
   }
 
-  draw() {
-    const glyph = this.atlas.getGlyph("hello");
-    // targetOrigin
-    this.glyphInstances[0] = 0;
-    this.glyphInstances[1] = 0;
-    // targetSize
-    this.glyphInstances[2] = glyph.width;
-    this.glyphInstances[3] = glyph.height;
-    // textColorRGBA
-    this.glyphInstances[4] = 0;
-    this.glyphInstances[5] = 0;
-    this.glyphInstances[6] = 0;
-    this.glyphInstances[7] = 1;
-    // atlasOrigin
-    this.glyphInstances[8] = glyph.textureU;
-    this.glyphInstances[9] = glyph.textureV;
-    // atlasSize
-    this.glyphInstances[10] = glyph.textureWidth;
-    this.glyphInstances[11] = glyph.textureHeight;
+  drawLines(lines) {
+    let instances = 0
+    let y = 0;
+    for (var i = 0; i < lines.length; i++) {
+      let x = 0;
+      const line = lines[i]
+      for (var j = 0; j < line.length; j++) {
+        const char = line[j]
+        const glyph = this.atlas.getGlyph(char);
 
-    this.glyphInstances[12] = glyph.width;
-    this.glyphInstances[13] = 0;
-    // targetSize
-    this.glyphInstances[14] = glyph.width;
-    this.glyphInstances[15] = glyph.height;
-    // textColorRGBA
-    this.glyphInstances[16] = 0;
-    this.glyphInstances[17] = 0;
-    this.glyphInstances[18] = 0;
-    this.glyphInstances[19] = 1;
-    // atlasOrigin
-    this.glyphInstances[20] = glyph.textureU;
-    this.glyphInstances[21] = glyph.textureV;
-    // atlasSize
-    this.glyphInstances[22] = glyph.textureWidth;
-    this.glyphInstances[23] = glyph.textureHeight;
+        // targetOrigin
+        this.glyphInstances[0 + 12 * instances] = x;
+        this.glyphInstances[1 + 12 * instances] = y;
+        // targetSize
+        this.glyphInstances[2 + 12 * instances] = glyph.width;
+        this.glyphInstances[3 + 12 * instances] = glyph.height;
+        // textColorRGBA
+        this.glyphInstances[4 + 12 * instances] = 0;
+        this.glyphInstances[5 + 12 * instances] = 0;
+        this.glyphInstances[6 + 12 * instances] = 0;
+        this.glyphInstances[7 + 12 * instances] = 1;
+        // atlasOrigin
+        this.glyphInstances[8 + 12 * instances] = glyph.textureU;
+        this.glyphInstances[9 + 12 * instances] = glyph.textureV;
+        // atlasSize
+        this.glyphInstances[10 + 12 * instances] = glyph.textureWidth;
+        this.glyphInstances[11 + 12 * instances] = glyph.textureHeight;
+
+        x += glyph.width;
+        instances++
+      }
+
+      x = 0;
+      y += this.style.computedLineHeight;
+    }
 
     this.gl.useProgram(this.textBlendPass1Program);
     this.gl.viewport(0, 0, this.gl.canvas.width, this.gl.canvas.height);
@@ -257,7 +257,7 @@ class Renderer {
       6,
       this.gl.UNSIGNED_BYTE,
       0,
-      2
+      instances
     );
 
     this.gl.useProgram(this.textBlendPass2Program);
@@ -281,7 +281,7 @@ class Renderer {
       6,
       this.gl.UNSIGNED_BYTE,
       0,
-      2
+      instances
     );
   }
 
