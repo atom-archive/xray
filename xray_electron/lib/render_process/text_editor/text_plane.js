@@ -309,48 +309,21 @@ class Renderer {
 
     return shader;
   }
-
-  getAttributeLocations(program, attributeNames) {
-    const locations = {};
-    for (let i = 0; i < attributeNames.length; i++) {
-      const name = attributeNames[i];
-      locations[name] = this.gl.getAttribLocation(program, name);
-    }
-    return locations;
-  }
 }
 
 class Atlas {
   constructor(gl, style) {
-    const size = 512;
-
-    this.texture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.RGBA,
-      size,
-      size,
-      0,
-      gl.RGBA,
-      gl.UNSIGNED_BYTE,
-      new ImageData(size, size)
-    );
+    this.textureSize = 512;
+    this.uvScale = 1 / this.textureSize;
+    this.style = style;
+    this.nextX = 0;
+    this.nextY = 0;
 
     this.gl = gl;
     this.glyphCanvas = document.createElement("canvas");
-    this.glyphCanvas.width = size;
-    this.glyphCanvas.height = size;
+    this.glyphCanvas.width = this.textureSize;
+    this.glyphCanvas.height = this.textureSize;
     this.glyphCtx = this.glyphCanvas.getContext("2d", { alpha: false });
-    this.uvScale = 1 / size;
-    this.style = style;
-  }
-
-  getGlyph(text) {
     this.glyphCtx.fillStyle = "white";
     this.glyphCtx.fillRect(
       0,
@@ -360,47 +333,58 @@ class Atlas {
     );
     this.glyphCtx.font = `${this.style.fontSize}px ${this.style.fontFamily}`;
     this.glyphCtx.fillStyle = "black";
-    const x = 0;
-    const y = 0;
+    this.glyphs = new Map()
+    this.texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+
+  getGlyph(text) {
+    let glyph = this.glyphs.get(text);
+    if (!glyph) {
+      glyph = this.rasterizeGlyph(text)
+      this.glyphs.set(text, glyph);
+    }
+
+    return glyph
+  }
+
+  rasterizeGlyph (text) {
     const { width } = this.glyphCtx.measureText(text);
-    this.glyphCtx.fillText(text, 0, this.style.computedLineHeight);
+    if (this.nextX + width > this.textureSize) {
+      this.nextX = 0;
+      this.nextY += this.style.computedLineHeight;
+    }
 
-    document.body.appendChild(this.glyphCanvas);
-    Object.assign(this.glyphCanvas.style, {
-      position: "absolute",
-      top: 32 + "px"
-    });
+    if (this.nextY + this.style.computedLineHeight > this.textureSize) {
+      throw new Error("Texture is too small");
+    }
 
+    const x = this.nextX
+    const y = this.nextY
+    this.glyphCtx.fillText(text, x, y + this.style.computedLineHeight);
     this.gl.texImage2D(
       this.gl.TEXTURE_2D,
       0,
       this.gl.RGBA,
-      512,
-      512,
+      this.textureSize,
+      this.textureSize,
       0,
       this.gl.RGBA,
       this.gl.UNSIGNED_BYTE,
       this.glyphCanvas
     );
 
-    // this.gl.texSubImage2D(
-    //   this.gl.TEXTURE_2D,
-    //   0,
-    //   x,
-    //   y,
-    //   width,
-    //   this.computedLineHeight,
-    //   this.gl.RGBA,
-    //   this.gl.UNSIGNED_BYTE,
-    //   this.glyphCtx.getImageData(0, 0, width, this.style.computedLineHeight)
-    // );
+    this.nextX += width;
 
     return {
       textureU: x * this.uvScale,
       textureV: y * this.uvScale,
-      textureWidth: Math.floor(width) * this.uvScale,
+      textureWidth: width * this.uvScale,
       textureHeight: this.style.computedLineHeight * this.uvScale,
-      width: Math.floor(width),
+      width,
       height: this.style.computedLineHeight
     };
   }
