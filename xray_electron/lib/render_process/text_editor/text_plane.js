@@ -316,6 +316,7 @@ class Atlas {
     this.textureSize = 512;
     this.uvScale = 1 / this.textureSize;
     this.style = style;
+    this.glyphPadding = 2;
     this.nextX = 0;
     this.nextY = 0;
 
@@ -356,7 +357,7 @@ class Atlas {
     const { width } = this.glyphCtx.measureText(text);
     if (this.nextX + width > this.textureSize) {
       this.nextX = 0;
-      this.nextY += this.style.computedLineHeight;
+      this.nextY += this.style.computedLineHeight + this.glyphPadding;
     }
 
     if (this.nextY + this.style.computedLineHeight > this.textureSize) {
@@ -378,7 +379,7 @@ class Atlas {
       this.glyphCanvas
     );
 
-    this.nextX += width;
+    this.nextX += width + this.glyphPadding;
 
     return {
       textureU: x * this.uvScale,
