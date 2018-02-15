@@ -216,12 +216,12 @@ class Renderer {
         this.glyphInstances[10 + 12 * instances] = glyph.textureWidth;
         this.glyphInstances[11 + 12 * instances] = glyph.textureHeight;
 
-        x += glyph.width;
+        x += Math.round(glyph.width);
         instances++;
       }
 
       x = 0;
-      y += this.style.computedLineHeight * window.devicePixelRatio;
+      y += Math.round(this.style.computedLineHeight * window.devicePixelRatio);
     }
 
     this.gl.useProgram(this.textBlendPass1Program);
@@ -364,7 +364,7 @@ class Atlas {
 
     if ((this.nextX + width) * dpiScale > this.textureSize) {
       this.nextX = 0;
-      this.nextY += height + this.glyphPadding;
+      this.nextY = Math.ceil(this.nextY + height + this.glyphPadding);
     }
 
     if ((this.nextY + height) * dpiScale > this.textureSize) {
@@ -386,7 +386,7 @@ class Atlas {
       this.glyphCanvas
     );
 
-    this.nextX += width + this.glyphPadding;
+    this.nextX = Math.ceil(this.nextX + width + this.glyphPadding);
 
     return {
       textureU: x * dpiScale * this.uvScale,
