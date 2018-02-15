@@ -333,6 +333,7 @@ class Atlas {
     );
     this.glyphCtx.font = `${this.style.fontSize}px ${this.style.fontFamily}`;
     this.glyphCtx.fillStyle = "black";
+    this.glyphCtx.textBaseline = 'bottom';
     this.glyphs = new Map()
     this.texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
