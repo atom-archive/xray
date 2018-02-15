@@ -12,8 +12,8 @@ class TextPlane extends React.Component {
     return $("canvas", {
       ref: "canvas",
       className: this.props.className,
-      width: this.props.width,
-      height: this.props.height,
+      width: this.props.width * window.devicePixelRatio,
+      height: this.props.height * window.devicePixelRatio,
       style: {
         width: this.props.width + "px",
         height: this.props.height + "px"
@@ -39,7 +39,8 @@ class TextPlane extends React.Component {
         fontSize,
         backgroundColor,
         baseTextColor,
-        computedLineHeight
+        computedLineHeight,
+        dpiScale: window.devicePixelRatio
       });
     }
 
@@ -66,7 +67,7 @@ class Renderer {
     this.gl = gl;
     this.gl.enable(this.gl.BLEND);
     this.atlas = new Atlas(gl, style);
-    this.style = style
+    this.style = style;
 
     const textBlendVertexShader = this.createShader(
       shaders.textBlendVertex,
@@ -188,13 +189,13 @@ class Renderer {
   }
 
   drawLines(lines) {
-    let instances = 0
+    let instances = 0;
     let y = 0;
     for (var i = 0; i < lines.length; i++) {
       let x = 0;
-      const line = lines[i]
+      const line = lines[i];
       for (var j = 0; j < line.length; j++) {
-        const char = line[j]
+        const char = line[j];
         const glyph = this.atlas.getGlyph(char);
 
         // targetOrigin
@@ -216,11 +217,11 @@ class Renderer {
         this.glyphInstances[11 + 12 * instances] = glyph.textureHeight;
 
         x += glyph.width;
-        instances++
+        instances++;
       }
 
       x = 0;
-      y += this.style.computedLineHeight;
+      y += this.style.computedLineHeight * window.devicePixelRatio;
     }
 
     this.gl.useProgram(this.textBlendPass1Program);
@@ -319,6 +320,7 @@ class Atlas {
     this.glyphPadding = 2;
     this.nextX = 0;
     this.nextY = 0;
+    this.glyphs = new Map();
 
     this.gl = gl;
     this.glyphCanvas = document.createElement("canvas");
@@ -334,8 +336,9 @@ class Atlas {
     );
     this.glyphCtx.font = `${this.style.fontSize}px ${this.style.fontFamily}`;
     this.glyphCtx.fillStyle = "black";
-    this.glyphCtx.textBaseline = 'bottom';
-    this.glyphs = new Map()
+    this.glyphCtx.textBaseline = "bottom";
+    this.glyphCtx.scale(style.dpiScale, style.dpiScale);
+
     this.texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -346,27 +349,31 @@ class Atlas {
   getGlyph(text) {
     let glyph = this.glyphs.get(text);
     if (!glyph) {
-      glyph = this.rasterizeGlyph(text)
+      glyph = this.rasterizeGlyph(text);
       this.glyphs.set(text, glyph);
     }
 
-    return glyph
+    return glyph;
   }
 
-  rasterizeGlyph (text) {
+  rasterizeGlyph(text) {
+    const { dpiScale, computedLineHeight } = this.style;
+
+    const height = computedLineHeight;
     const { width } = this.glyphCtx.measureText(text);
-    if (this.nextX + width > this.textureSize) {
+
+    if ((this.nextX + width) * dpiScale > this.textureSize) {
       this.nextX = 0;
-      this.nextY += this.style.computedLineHeight + this.glyphPadding;
+      this.nextY += height + this.glyphPadding;
     }
 
-    if (this.nextY + this.style.computedLineHeight > this.textureSize) {
+    if ((this.nextY + height) * dpiScale > this.textureSize) {
       throw new Error("Texture is too small");
     }
 
-    const x = this.nextX
-    const y = this.nextY
-    this.glyphCtx.fillText(text, x, y + this.style.computedLineHeight);
+    const x = this.nextX;
+    const y = this.nextY;
+    this.glyphCtx.fillText(text, x, y + height);
     this.gl.texImage2D(
       this.gl.TEXTURE_2D,
       0,
@@ -382,12 +389,12 @@ class Atlas {
     this.nextX += width + this.glyphPadding;
 
     return {
-      textureU: x * this.uvScale,
-      textureV: y * this.uvScale,
-      textureWidth: width * this.uvScale,
-      textureHeight: this.style.computedLineHeight * this.uvScale,
-      width,
-      height: this.style.computedLineHeight
+      textureU: x * dpiScale * this.uvScale,
+      textureV: y * dpiScale * this.uvScale,
+      textureWidth: width * dpiScale * this.uvScale,
+      textureHeight: height * dpiScale * this.uvScale,
+      width: width * dpiScale,
+      height: height * dpiScale
     };
   }
 }
