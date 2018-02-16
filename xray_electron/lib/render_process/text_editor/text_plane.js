@@ -61,6 +61,7 @@ const UNIT_QUAD_VERTICES = new Float32Array([1, 1, 1, 0, 0, 0, 0, 1]);
 const UNIT_QUAD_ELEMENT_INDICES = new Uint8Array([0, 1, 3, 1, 2, 3]);
 const MAX_GLYPH_INSTANCES = 1 << 16;
 const GLYPH_INSTANCE_SIZE_IN_BYTES = 12 * Float32Array.BYTES_PER_ELEMENT;
+const SUBPIXEL_DIVISOR = 4;
 
 class Renderer {
   constructor(gl, style) {
@@ -196,10 +197,12 @@ class Renderer {
       const line = lines[i];
       for (var j = 0; j < line.length; j++) {
         const char = line[j];
-        const glyph = this.atlas.getGlyph(char);
+        const variantIndex =
+          Math.round(x * SUBPIXEL_DIVISOR) % SUBPIXEL_DIVISOR;
+        const glyph = this.atlas.getGlyph(char, variantIndex);
 
         // targetOrigin
-        this.glyphInstances[0 + 12 * instances] = x;
+        this.glyphInstances[0 + 12 * instances] = Math.round(x - glyph.variantOffset);
         this.glyphInstances[1 + 12 * instances] = y;
         // targetSize
         this.glyphInstances[2 + 12 * instances] = glyph.width;
@@ -216,7 +219,7 @@ class Renderer {
         this.glyphInstances[10 + 12 * instances] = glyph.textureWidth;
         this.glyphInstances[11 + 12 * instances] = glyph.textureHeight;
 
-        x += Math.round(glyph.width);
+        x += glyph.subpixelWidth;
         instances++;
       }
 
@@ -344,23 +347,35 @@ class Atlas {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // document.body.appendChild(this.glyphCanvas)
+    // this.glyphCanvas.style.position = 'absolute'
+    // this.glyphCanvas.style.top = 0
+    // this.glyphCanvas.style.right = 0
   }
 
-  getGlyph(text) {
-    let glyph = this.glyphs.get(text);
+  getGlyph(text, variantIndex) {
+    let glyphVariants = this.glyphs.get(text);
+    if (!glyphVariants) {
+      glyphVariants = new Map();
+      this.glyphs.set(text, glyphVariants);
+    }
+
+    let glyph = glyphVariants.get(variantIndex);
     if (!glyph) {
-      glyph = this.rasterizeGlyph(text);
-      this.glyphs.set(text, glyph);
+      glyph = this.rasterizeGlyph(text, variantIndex);
+      glyphVariants.set(variantIndex, glyph);
     }
 
     return glyph;
   }
 
-  rasterizeGlyph(text) {
+  rasterizeGlyph(text, variantIndex) {
     const { dpiScale, computedLineHeight } = this.style;
+    const variantOffset = variantIndex / SUBPIXEL_DIVISOR;
 
     const height = computedLineHeight;
-    const { width } = this.glyphCtx.measureText(text);
+    const { width: subpixelWidth } = this.glyphCtx.measureText(text);
+    const width = Math.ceil(variantOffset) + Math.ceil(subpixelWidth);
 
     if ((this.nextX + width) * dpiScale > this.textureSize) {
       this.nextX = 0;
@@ -373,7 +388,7 @@ class Atlas {
 
     const x = this.nextX;
     const y = this.nextY;
-    this.glyphCtx.fillText(text, x, y + height);
+    this.glyphCtx.fillText(text, x + variantOffset, y + height);
     this.gl.texImage2D(
       this.gl.TEXTURE_2D,
       0,
@@ -386,7 +401,7 @@ class Atlas {
       this.glyphCanvas
     );
 
-    this.nextX = Math.ceil(this.nextX + width + this.glyphPadding);
+    this.nextX += width;
 
     return {
       textureU: x * dpiScale * this.uvScale,
@@ -394,7 +409,9 @@ class Atlas {
       textureWidth: width * dpiScale * this.uvScale,
       textureHeight: height * dpiScale * this.uvScale,
       width: width * dpiScale,
-      height: height * dpiScale
+      height: height * dpiScale,
+      subpixelWidth: subpixelWidth * dpiScale,
+      variantOffset
     };
   }
 }
