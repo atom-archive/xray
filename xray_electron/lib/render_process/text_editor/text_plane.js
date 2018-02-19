@@ -227,6 +227,8 @@ class Renderer {
       y += Math.round(this.style.computedLineHeight * window.devicePixelRatio);
     }
 
+    this.atlas.uploadTexture()
+
     this.gl.useProgram(this.textBlendPass1Program);
     this.gl.viewport(0, 0, this.gl.canvas.width, this.gl.canvas.height);
     const viewportScaleLocation = this.gl.getUniformLocation(
@@ -342,6 +344,7 @@ class Atlas {
     this.glyphCtx.textBaseline = "bottom";
     this.glyphCtx.scale(style.dpiScale, style.dpiScale);
 
+    this.shouldUploadTexture = false
     this.texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -381,6 +384,8 @@ class Atlas {
   }
 
   rasterizeGlyph(text, variantIndex) {
+    this.shouldUploadTexture = true
+
     const { dpiScale, computedLineHeight } = this.style;
     const variantOffset = variantIndex / SUBPIXEL_DIVISOR;
 
@@ -400,18 +405,6 @@ class Atlas {
     const x = this.nextX;
     const y = this.nextY;
     this.glyphCtx.fillText(text, x + variantOffset, y + height);
-    this.gl.texSubImage2D(
-      this.gl.TEXTURE_2D,
-      0,
-      x,
-      y,
-      width,
-      height,
-      this.gl.RGBA,
-      this.gl.UNSIGNED_BYTE,
-      this.glyphCtx.getImageData(x, y, width, height)
-    );
-
     this.nextX += width;
 
     return {
@@ -424,5 +417,22 @@ class Atlas {
       subpixelWidth: subpixelWidth * dpiScale,
       variantOffset
     };
+  }
+
+  uploadTexture () {
+    if (this.shouldUploadTexture) {
+      this.gl.texImage2D(
+        this.gl.TEXTURE_2D,
+        0,
+        this.gl.RGBA,
+        this.textureSize,
+        this.textureSize,
+        0,
+        this.gl.RGBA,
+        this.gl.UNSIGNED_BYTE,
+        this.glyphCanvas
+      );
+      this.shouldUploadTexture = false
+    }
   }
 }
