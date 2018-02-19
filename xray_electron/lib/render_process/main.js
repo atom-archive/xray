@@ -15,10 +15,10 @@ const $ = React.createElement;
 
 const theme = {
   editor: {
-    fontFamily: "Monaco",
+    fontFamily: "Menlo",
     backgroundColor: "white",
     baseTextColor: "black",
-    fontSize: 20,
+    fontSize: 14,
     lineHeight: 1.5
   }
 }
