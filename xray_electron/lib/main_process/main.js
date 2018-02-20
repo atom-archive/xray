@@ -17,6 +17,7 @@ function createWindow () {
   });
 }
 
+app.commandLine.appendSwitch("enable-experimental-web-platform-features");
 app.on('ready', createWindow);
 app.on('window-all-closed', function () {
   if (process.platform !== 'darwin') {

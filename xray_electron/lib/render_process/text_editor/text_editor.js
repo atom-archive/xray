@@ -18,25 +18,31 @@ class TextEditorContainer extends React.Component {
     }
 
     this.state = {
+      resizeObserver: new ResizeObserver((entries) => this.componentDidResize(entries[0].contentRect)),
       editor: editor,
       scrollTop: 0,
-      offsetHeight: 0,
-      offsetWidth: 0,
+      height: 0,
+      width: 0,
       editorVersion: 0
     };
   }
 
   componentDidMount() {
-    const { offsetWidth, offsetHeight } = ReactDOM.findDOMNode(this);
-
-    this.setState({
-      offsetWidth,
-      offsetHeight
+    const element = ReactDOM.findDOMNode(this);
+    this.state.resizeObserver.observe(element);
+    this.componentDidResize({
+      width: element.offsetWidth,
+      height: element.offsetHeight
     });
   }
 
   componentWillUnmount() {
     this.state.editor.destroy();
+    this.state.resizeObserver.disconnect();
+  }
+
+  componentDidResize({width, height}) {
+    this.setState({width, height});
   }
 
   editorChanged() {
@@ -46,22 +52,22 @@ class TextEditorContainer extends React.Component {
   }
 
   computeFrameState() {
-    const { scrollTop, offsetHeight } = this.state;
+    const { scrollTop, height } = this.state;
     const { fontSize, lineHeight } = this.context.theme.editor;
     return this.state.editor.render({
       scrollTop,
-      offsetHeight,
+      height,
       lineHeight: fontSize * lineHeight
     });
   }
 
   render() {
-    const { scrollTop, offsetWidth, offsetHeight } = this.state;
+    const { scrollTop, width, height } = this.state;
 
     return $(TextEditor, {
       scrollTop,
-      offsetWidth,
-      offsetHeight,
+      width,
+      height,
       frameState: this.computeFrameState(),
       onWheel: event => {
         this.setState({
@@ -88,8 +94,8 @@ function TextEditor(props) {
     {onWheel: props.onWheel},
     $(TextPlane, {
       scrollTop: props.scrollTop,
-      width: props.offsetWidth,
-      height: props.offsetHeight,
+      width: props.width,
+      height: props.height,
       frameState: props.frameState
     })
   );

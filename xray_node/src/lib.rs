@@ -96,7 +96,7 @@ mod editor {
 
         let frame = editor.render(RenderParams {
             scroll_top: params.get_named_property("scrollTop")?.into(),
-            offset_height: params.get_named_property("offsetHeight")?.into(),
+            height: params.get_named_property("height")?.into(),
             line_height: params.get_named_property("lineHeight")?.into()
         });
 
