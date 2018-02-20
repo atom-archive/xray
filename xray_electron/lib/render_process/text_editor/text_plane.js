@@ -197,7 +197,7 @@ class Renderer {
     const { dpiScale } = this.style;
 
     const firstVisibleRowY = firstVisibleRow * this.style.computedLineHeight;
-    let y = (firstVisibleRowY - scrollTop) * dpiScale;
+    let y = Math.round((firstVisibleRowY - scrollTop) * dpiScale);
     let instances = 0;
     for (var i = 0; i < lines.length; i++) {
       let x = 0;
