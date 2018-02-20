@@ -319,7 +319,7 @@ class Renderer {
 
 class Atlas {
   constructor(gl, style) {
-    this.textureSize = 512;
+    this.textureSize = 512 * style.dpiScale;
     this.uvScale = 1 / this.textureSize;
     this.style = style;
     this.glyphPadding = 2;

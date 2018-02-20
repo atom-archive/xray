@@ -95,6 +95,7 @@ mod editor {
         let params = args[0].try_into::<Object>()?;
 
         let frame = editor.render(RenderParams {
+            scroll_top: params.get_named_property("scrollTop")?.into(),
             offset_height: params.get_named_property("offsetHeight")?.into(),
             line_height: params.get_named_property("lineHeight")?.into()
         });

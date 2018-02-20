@@ -17,6 +17,8 @@ pub trait Dimension: for<'a> Add<&'a Self, Output=Self> + Ord + Clone + fmt::Deb
 
     fn from_summary(summary: &Self::Summary) -> Self;
 
+    fn is_strictly_increasing() -> bool;
+
     fn default() -> Self {
         Self::from_summary(&Self::Summary::default())
     }
@@ -413,26 +415,25 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         self.reset();
         self.did_seek = true;
 
-        let mut subtree = self.tree;
-        loop {
+        let mut cur_subtree = Some(self.tree);
+        while let Some(subtree) = cur_subtree.take() {
             match subtree.0.as_ref() {
                 &Node::Internal {ref rightmost_leaf, ref summary, ref children, ..} => {
                     let subtree_end = D::from_summary(&self.summary) + &D::from_summary(summary);
-                    if *pos >= subtree_end {
+                    if *pos > subtree_end || (*pos == subtree_end && D::is_strictly_increasing()) {
                         self.summary += summary;
                         self.prev_leaf = rightmost_leaf.as_ref();
                         prefix.as_mut().map(|prefix| prefix.push_tree(subtree.clone()));
-                        return;
                     } else {
                         for (index, child) in children.iter().enumerate() {
                             let child_end = D::from_summary(&self.summary) + &D::from_summary(child.summary());
-                            if *pos >= child_end {
+                            if *pos > child_end || (*pos == child_end && D::is_strictly_increasing()) {
                                 self.summary += child.summary();
                                 self.prev_leaf = child.rightmost_leaf();
                                 prefix.as_mut().map(|prefix| prefix.push_tree(child.clone()));
                             } else {
                                 self.stack.push((subtree, index));
-                                subtree = child;
+                                cur_subtree = Some(child);
                                 break;
                             }
                         }
@@ -441,12 +442,11 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                 &Node::Leaf {ref summary, ..} => {
                     // TODO? Can we push the child unconditionally?
                     let subtree_end = D::from_summary(&self.summary) + &D::from_summary(summary);
-                    if *pos >= subtree_end {
+                    if *pos > subtree_end || (*pos == subtree_end && D::is_strictly_increasing()) {
                         self.prev_leaf = Some(subtree);
                         self.summary += summary;
                         prefix.as_mut().map(|prefix| prefix.push_tree(subtree.clone()));
                     }
-                    return;
                 }
             }
         }
@@ -514,6 +514,10 @@ mod tests {
         fn from_summary(summary: &Self::Summary) -> Self {
             Count(summary.count)
         }
+
+        fn is_strictly_increasing() -> bool {
+            true
+        }
     }
 
     impl<'a> Add<&'a Self> for Count {
@@ -530,6 +534,10 @@ mod tests {
 
         fn from_summary(summary: &Self::Summary) -> Self {
             Sum(summary.sum)
+        }
+
+        fn is_strictly_increasing() -> bool {
+            true
         }
     }
 

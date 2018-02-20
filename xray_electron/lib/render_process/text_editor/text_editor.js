@@ -17,14 +17,9 @@ class TextEditorContainer extends React.Component {
       buffer.splice(0, 0, props.initialText);
     }
 
-    window.setInterval(() => {
-      this.setState({
-        editorVersion: this.state.editorVersion + 1
-      });
-    }, 100)
-
     this.state = {
       editor: editor,
+      scrollTop: 0,
       offsetHeight: 0,
       offsetWidth: 0,
       editorVersion: 0
@@ -51,9 +46,10 @@ class TextEditorContainer extends React.Component {
   }
 
   computeFrameState() {
-    const { offsetHeight } = this.state;
+    const { scrollTop, offsetHeight } = this.state;
     const { fontSize, lineHeight } = this.context.theme.editor;
     return this.state.editor.render({
+      scrollTop,
       offsetHeight,
       lineHeight: fontSize * lineHeight
     });
@@ -65,7 +61,10 @@ class TextEditorContainer extends React.Component {
     return $(TextEditor, {
       offsetWidth,
       offsetHeight,
-      frameState: this.computeFrameState()
+      frameState: this.computeFrameState(),
+      onWheel: (event) => {
+        this.setState({scrollTop: Math.max(0, this.state.scrollTop + event.deltaY)})
+      }
     });
   }
 }
@@ -83,7 +82,7 @@ const Root = styled("div", {
 function TextEditor(props) {
   return $(
     Root,
-    null,
+    {onWheel: props.onWheel},
     $(TextPlane, {
       width: props.offsetWidth,
       height: props.offsetHeight,

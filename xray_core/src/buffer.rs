@@ -1,7 +1,7 @@
 use std::cmp;
 use std::collections::HashSet;
 use std::iter;
-use std::ops::{AddAssign, Range};
+use std::ops::{Add, AddAssign, Range};
 use std::sync::Arc;
 use super::tree::{self, Tree};
 use notify_cell::NotifyCell;
@@ -31,8 +31,7 @@ pub struct Position {
 }
 
 pub struct Iter<'a> {
-    fragment_iter: tree::Iter<'a, Fragment>,
-    fragment: Option<&'a Fragment>,
+    fragment_cursor: tree::Cursor<'a, Fragment>,
     fragment_offset: usize
 }
 
@@ -67,7 +66,7 @@ struct Fragment {
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub struct FragmentSummary {
     extent: usize,
-    newline_count: usize
+    newline_count: NewlineCount
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
@@ -75,6 +74,9 @@ struct FragmentId(Vec<u16>);
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct Offset(usize);
+
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
+struct NewlineCount(pub usize);
 
 impl Buffer {
     pub fn new(replica_id: ReplicaId) -> Self {
@@ -113,11 +115,11 @@ impl Buffer {
     }
 
     pub fn iter(&self) -> Iter {
-        Iter {
-            fragment_iter: self.fragments.iter(),
-            fragment: None,
-            fragment_offset: 0
-        }
+        Iter::new(self)
+    }
+
+    pub fn iter_starting_at_row(&self, row: usize) -> Iter {
+        Iter::starting_at_row(self, NewlineCount(row))
     }
 
     pub fn splice<T: Into<Text>>(&mut self, old_range: Range<usize>, new_text: T) {
@@ -251,22 +253,57 @@ impl Buffer {
     }
 }
 
+impl<'a> Iter<'a> {
+    fn new(buffer: &'a Buffer) -> Self {
+        let mut fragment_cursor = buffer.fragments.cursor();
+        fragment_cursor.seek(&0);
+        Self {
+            fragment_cursor,
+            fragment_offset: 0
+        }
+    }
+
+    fn starting_at_row(buffer: &'a Buffer, target_row: NewlineCount) -> Self {
+        let mut fragment_cursor = buffer.fragments.cursor();
+        fragment_cursor.seek(&target_row);
+
+        let mut fragment_offset = 0;
+        if let Some(fragment) = fragment_cursor.item() {
+            let target_row = target_row.0;
+            let fragment_start_row = fragment_cursor.start::<NewlineCount>().0;
+            if target_row != fragment_start_row {
+                let target_row_within_fragment = target_row - fragment_start_row - 1;
+                fragment_offset = fragment.insertion.text.newline_offsets[target_row_within_fragment] + 1;
+            }
+        }
+
+        Self {
+            fragment_cursor,
+            fragment_offset
+        }
+    }
+}
+
 impl<'a> Iterator for Iter<'a> {
     type Item = u16;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(fragment) = self.fragment {
-            self.fragment_offset += 1;
+        if let Some(fragment) = self.fragment_cursor.item() {
             if let Some(c) = fragment.get_code_unit(self.fragment_offset) {
+                self.fragment_offset += 1;
                 return Some(c)
             }
         }
 
-        while let Some(fragment) = self.fragment_iter.next() {
-            if let Some(result) = fragment.get_code_unit(0) {
-                self.fragment_offset = 0;
-                self.fragment = Some(fragment);
-                return Some(result);
+        loop {
+            self.fragment_cursor.next();
+            if let Some(fragment) = self.fragment_cursor.item() {
+                if let Some(c) = fragment.get_code_unit(0) {
+                    self.fragment_offset = 1;
+                    return Some(c)
+                }
+            } else {
+                break;
             }
         }
 
@@ -291,10 +328,10 @@ impl Text {
         self.code_units.len()
     }
 
-    fn newline_count_in_range(&self, start: usize, end: usize) -> usize {
+    fn newline_count_in_range(&self, start: usize, end: usize) -> NewlineCount {
         let newlines_start = find_insertion_index(&self.newline_offsets, &start);
         let newlines_end = find_insertion_index(&self.newline_offsets, &end);
-        newlines_end - newlines_start
+        NewlineCount(newlines_end - newlines_start)
     }
 }
 
@@ -358,7 +395,7 @@ impl tree::Item for Fragment {
         } else {
             FragmentSummary {
                 extent: 0,
-                newline_count: 0
+                newline_count: NewlineCount(0)
             }
         }
     }
@@ -375,7 +412,7 @@ impl Default for FragmentSummary {
     fn default() -> Self {
         FragmentSummary {
             extent: 0,
-            newline_count: 0
+            newline_count: NewlineCount(0)
         }
     }
 }
@@ -385,6 +422,38 @@ impl tree::Dimension for usize {
 
     fn from_summary(summary: &Self::Summary) -> Self {
         summary.extent
+    }
+
+    #[inline]
+    fn is_strictly_increasing() -> bool {
+        true
+    }
+}
+
+impl tree::Dimension for NewlineCount {
+    type Summary = FragmentSummary;
+
+    fn from_summary(summary: &Self::Summary) -> Self {
+        summary.newline_count
+    }
+
+    #[inline]
+    fn is_strictly_increasing() -> bool {
+        false
+    }
+}
+
+impl<'a> Add<&'a Self> for NewlineCount {
+    type Output = NewlineCount;
+
+    fn add(self, other: &'a Self) -> Self::Output {
+        NewlineCount(self.0 + other.0)
+    }
+}
+
+impl AddAssign for NewlineCount {
+    fn add_assign(&mut self, other: Self) {
+        self.0 += other.0;
     }
 }
 
@@ -487,11 +556,38 @@ mod tests {
     }
 
     #[test]
+    fn iter_starting_at_row() {
+        let mut buffer = Buffer::new(1);
+        buffer.splice(0..0, "abcd\nefgh\nij");
+        buffer.splice(12..12, "kl\nmno");
+        buffer.splice(18..18, "\npqrs");
+        buffer.splice(18..21, "\nPQ");
+
+        let iter = buffer.iter_starting_at_row(0);
+        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "abcd\nefgh\nijkl\nmno\nPQrs");
+
+        let iter = buffer.iter_starting_at_row(1);
+        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "efgh\nijkl\nmno\nPQrs");
+
+        let iter = buffer.iter_starting_at_row(2);
+        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "ijkl\nmno\nPQrs");
+
+        let iter = buffer.iter_starting_at_row(3);
+        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "mno\nPQrs");
+
+        let iter = buffer.iter_starting_at_row(4);
+        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "PQrs");
+
+        let iter = buffer.iter_starting_at_row(5);
+        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "");
+    }
+
+    #[test]
     fn text_newline_count() {
         let text = Text::from("abc\ndefgh\nijklm\nopq");
-        assert_eq!(text.newline_count_in_range(3, 15), 2);
-        assert_eq!(text.newline_count_in_range(3, 16), 3);
-        assert_eq!(text.newline_count_in_range(4, 16), 2);
+        assert_eq!(text.newline_count_in_range(3, 15), NewlineCount(2));
+        assert_eq!(text.newline_count_in_range(3, 16), NewlineCount(3));
+        assert_eq!(text.newline_count_in_range(4, 16), NewlineCount(2));
     }
 
     #[test]

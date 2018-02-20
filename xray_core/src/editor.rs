@@ -13,6 +13,7 @@ pub struct Editor {
 }
 
 pub struct RenderParams {
+    pub scroll_top: f64,
     pub offset_height: f64,
     pub line_height: f64
 }
@@ -54,9 +55,11 @@ impl Editor {
         let buffer = self.buffer.borrow();
         let mut lines = Vec::new();
         let mut cur_line = Vec::new();
-        let end_row = (params.offset_height / params.line_height).ceil() as usize;
-        let mut cur_row = 0;
-        for c in buffer.iter() {
+        let start_row = (params.scroll_top / params.line_height).floor() as usize;
+        let end_row = start_row + (params.offset_height / params.line_height).ceil() as usize;
+
+        let mut cur_row = start_row;
+        for c in buffer.iter_starting_at_row(start_row) {
             if c == (b'\n' as u16) {
                 lines.push(cur_line);
                 cur_line = Vec::new();
