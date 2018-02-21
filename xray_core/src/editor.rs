@@ -19,6 +19,7 @@ pub struct RenderParams {
 }
 
 pub struct Frame {
+    pub first_visible_row: usize,
     pub lines: Vec<Vec<u16>>
 }
 
@@ -55,8 +56,9 @@ impl Editor {
         let buffer = self.buffer.borrow();
         let mut lines = Vec::new();
         let mut cur_line = Vec::new();
+        let scroll_bottom = params.scroll_top + params.offset_height;
         let start_row = (params.scroll_top / params.line_height).floor() as usize;
-        let end_row = start_row + (params.offset_height / params.line_height).ceil() as usize;
+        let end_row = (scroll_bottom / params.line_height).ceil() as usize;
 
         let mut cur_row = start_row;
         for c in buffer.iter_starting_at_row(start_row) {
@@ -75,7 +77,10 @@ impl Editor {
             lines.push(cur_line);
         }
 
-        Frame { lines }
+        Frame {
+            first_visible_row: start_row,
+            lines
+        }
     }
 }
 

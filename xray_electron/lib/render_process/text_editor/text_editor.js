@@ -56,14 +56,17 @@ class TextEditorContainer extends React.Component {
   }
 
   render() {
-    const { offsetWidth, offsetHeight } = this.state;
+    const { scrollTop, offsetWidth, offsetHeight } = this.state;
 
     return $(TextEditor, {
+      scrollTop,
       offsetWidth,
       offsetHeight,
       frameState: this.computeFrameState(),
-      onWheel: (event) => {
-        this.setState({scrollTop: Math.max(0, this.state.scrollTop + event.deltaY)})
+      onWheel: event => {
+        this.setState({
+          scrollTop: Math.max(0, this.state.scrollTop + event.deltaY)
+        });
       }
     });
   }
@@ -84,6 +87,7 @@ function TextEditor(props) {
     Root,
     {onWheel: props.onWheel},
     $(TextPlane, {
+      scrollTop: props.scrollTop,
       width: props.offsetWidth,
       height: props.offsetHeight,
       frameState: props.frameState

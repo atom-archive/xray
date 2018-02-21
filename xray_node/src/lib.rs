@@ -107,6 +107,7 @@ mod editor {
             js_lines.set_index(i, env.create_string_utf16(line))?;
         }
         js_frame.set_named_property("lines", js_lines)?;
+        js_frame.set_named_property("firstVisibleRow", env.create_int64(frame.first_visible_row as i64))?;
 
         Ok(Some(js_frame.try_into()?))
     }

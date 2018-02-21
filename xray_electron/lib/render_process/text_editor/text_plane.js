@@ -44,7 +44,11 @@ class TextPlane extends React.Component {
       });
     }
 
-    this.renderer.drawLines(this.props.frameState.lines);
+    this.renderer.drawLines({
+      scrollTop: this.props.scrollTop,
+      firstVisibleRow: this.props.frameState.firstVisibleRow,
+      lines: this.props.frameState.lines
+    });
   }
 
   getLineHeight() {}
@@ -189,9 +193,12 @@ class Renderer {
     this.gl.vertexAttribDivisor(shaders.attributes.atlasSize, 1);
   }
 
-  drawLines(lines) {
+  drawLines({ scrollTop, firstVisibleRow, lines }) {
+    const { dpiScale } = this.style;
+
+    const firstVisibleRowY = firstVisibleRow * this.style.computedLineHeight;
+    let y = (firstVisibleRowY - scrollTop) * dpiScale;
     let instances = 0;
-    let y = 0;
     for (var i = 0; i < lines.length; i++) {
       let x = 0;
       const line = lines[i];
@@ -224,7 +231,7 @@ class Renderer {
       }
 
       x = 0;
-      y += Math.round(this.style.computedLineHeight * window.devicePixelRatio);
+      y += Math.round(this.style.computedLineHeight * dpiScale);
     }
 
     this.atlas.uploadTexture()
