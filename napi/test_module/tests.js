@@ -7,7 +7,13 @@ function testSpawn() {
 
 function testThrow() {
   console.log('=== Test throwing from Rust')
-  testModule.testThrow()
+  try {
+    testModule.testThrow()
+  } catch (e) {
+    return
+  }
+  console.error('Expected function to throw an error')
+  process.exit(1)
 }
 
 testSpawn().then(testThrow)
