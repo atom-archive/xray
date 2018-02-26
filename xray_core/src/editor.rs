@@ -4,7 +4,7 @@ use futures::future::Executor;
 use futures::{Future, Stream};
 use notify_cell::NotifyCell;
 
-use buffer::{Buffer, Version};
+use buffer::{Buffer, Version, Range};
 
 pub struct Editor {
     buffer: Rc<RefCell<Buffer>>,
@@ -104,7 +104,7 @@ mod tests {
         let buffer = Rc::new(RefCell::new(Buffer::new(1)));
         let editor = Editor::new(buffer.clone());
         editor.run(&event_loop);
-        buffer.borrow_mut().splice(0..0, "test");
+        buffer.borrow_mut().splice(Range::new(0, 0), "test");
         event_loop.run(editor.version.observe().take(1).into_future());
     }
 }

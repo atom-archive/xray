@@ -1,7 +1,7 @@
 use std::cmp;
 use std::collections::HashSet;
 use std::iter;
-use std::ops::{Add, AddAssign, Range};
+use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 use super::tree::{self, Tree};
 use notify_cell::NotifyCell;
@@ -28,6 +28,12 @@ pub struct Anchor {
     offset: usize,
     replica_id: ReplicaId,
     lamport_timestamp: LamportTimestamp
+}
+
+pub struct Range<T> {
+    pub start: T,
+    pub end: T,
+    pub reversed: bool
 }
 
 pub struct Iter<'a> {
@@ -71,9 +77,6 @@ pub struct FragmentSummary {
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
 struct FragmentId(Vec<u16>);
-
-#[derive(Eq, PartialEq, Clone, Debug)]
-struct Offset(usize);
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct NewlineCount(pub usize);
@@ -250,6 +253,12 @@ impl Buffer {
             },
             text
         })
+    }
+}
+
+impl<T> Range<T> {
+    pub fn new(start: T, end: T) -> Self {
+        Self { start, end, reversed: false }
     }
 }
 
@@ -509,17 +518,17 @@ mod tests {
     #[test]
     fn splice() {
         let mut buffer = Buffer::new(1);
-        buffer.splice(0..0, "abc");
+        buffer.splice(Range::new(0, 0), "abc");
         assert_eq!(buffer.to_string(), "abc");
-        buffer.splice(3..3, "def");
+        buffer.splice(Range::new(3, 3), "def");
         assert_eq!(buffer.to_string(), "abcdef");
-        buffer.splice(0..0, "ghi");
+        buffer.splice(Range::new(0, 0), "ghi");
         assert_eq!(buffer.to_string(), "ghiabcdef");
-        buffer.splice(5..5, "jkl");
+        buffer.splice(Range::new(5, 5), "jkl");
         assert_eq!(buffer.to_string(), "ghiabjklcdef");
-        buffer.splice(6..7, "");
+        buffer.splice(Range::new(6, 7), "");
         assert_eq!(buffer.to_string(), "ghiabjlcdef");
-        buffer.splice(4..9, "mno");
+        buffer.splice(Range::new(4, 9), "mno");
         assert_eq!(buffer.to_string(), "ghiamnoef");
     }
 
@@ -539,7 +548,7 @@ mod tests {
                 let start = rng.gen_range::<usize>(0, end + 1);
                 let new_text = RandomCharIter(rng).take(rng.gen_range(0, 10)).collect::<String>();
 
-                buffer.splice(start..end, new_text.as_str());
+                buffer.splice(Range::new(start, end), new_text.as_str());
                 reference_string = [&reference_string[0..start], new_text.as_str(), &reference_string[end..]].concat();
                 assert_eq!(buffer.to_string(), reference_string);
             }
@@ -558,10 +567,10 @@ mod tests {
     #[test]
     fn iter_starting_at_row() {
         let mut buffer = Buffer::new(1);
-        buffer.splice(0..0, "abcd\nefgh\nij");
-        buffer.splice(12..12, "kl\nmno");
-        buffer.splice(18..18, "\npqrs");
-        buffer.splice(18..21, "\nPQ");
+        buffer.splice(Range::new(0, 0), "abcd\nefgh\nij");
+        buffer.splice(Range::new(12, 12), "kl\nmno");
+        buffer.splice(Range::new(18, 18), "\npqrs");
+        buffer.splice(Range::new(18, 21), "\nPQ");
 
         let iter = buffer.iter_starting_at_row(0);
         assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "abcd\nefgh\nijkl\nmno\nPQrs");
