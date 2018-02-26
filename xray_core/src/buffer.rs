@@ -23,7 +23,7 @@ pub struct Buffer {
 pub struct Version(LocalTimestamp);
 
 #[derive(Eq, PartialEq, Debug)]
-pub struct Position {
+pub struct Anchor {
     insertion_id: ChangeId,
     offset: usize,
     replica_id: ReplicaId,
@@ -38,7 +38,7 @@ pub struct Iter<'a> {
 #[derive(Eq, PartialEq, Debug)]
 struct Insertion {
     id: ChangeId,
-    start: Position,
+    start: Anchor,
     text: Text
 }
 
@@ -86,7 +86,7 @@ impl Buffer {
         // Push start sentinel.
         fragments.push(Fragment::new(FragmentId::min_value(), Insertion {
             id: ChangeId { replica_id: 0, local_timestamp: 0 },
-            start: Position {
+            start: Anchor {
                 insertion_id: ChangeId { replica_id: 0, local_timestamp: 0},
                 offset: 0,
                 replica_id: 0,
@@ -242,7 +242,7 @@ impl Buffer {
 
         Fragment::new(new_fragment_id, Insertion {
             id: change_id,
-            start: Position {
+            start: Anchor {
                 insertion_id: prev_fragment.insertion.id,
                 offset: prev_fragment.end_offset,
                 replica_id: self.replica_id,
