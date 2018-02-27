@@ -555,10 +555,10 @@ mod tests {
     #[test]
     fn test_extend_and_push() {
         let mut tree1 = Tree::new();
-        tree1.extend((1..20));
+        tree1.extend(1..20);
 
         let mut tree2 = Tree::new();
-        tree2.extend((1..50));
+        tree2.extend(1..50);
 
         tree1.push_tree(tree2);
 
