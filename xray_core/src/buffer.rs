@@ -346,7 +346,15 @@ impl Buffer {
             fragments_cursor.seek(&split.fragment_id);
 
             fragments_cursor.item().map(|fragment| {
-                fragments_cursor.start::<usize>() + (anchor.offset - fragment.start_offset)
+                let overshoot = if fragment.is_visible() {
+                    anchor.offset - fragment.start_offset
+                } else {
+                    0
+                };
+
+                print!("{:?} {:?}", fragments_cursor.start::<usize>(), overshoot);
+
+                fragments_cursor.start::<usize>() + overshoot
             })
         }).ok_or(Error::InvalidAnchor)
     }
@@ -811,5 +819,7 @@ mod tests {
         assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 5);
         buffer.splice(Range::new(2, 3), "");
         assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 4);
+        buffer.splice(Range::new(3, 5), "ghi");
+        assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 6);
     }
 }
