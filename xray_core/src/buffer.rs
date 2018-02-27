@@ -95,7 +95,10 @@ pub struct FragmentSummary {
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
-struct NewlineCount(pub usize);
+struct CharacterCount(usize);
+
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
+struct NewlineCount(usize);
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct FragmentMapping {
@@ -139,7 +142,7 @@ impl Buffer {
     }
 
     pub fn len(&self) -> usize {
-        self.fragments.len()
+        self.fragments.len::<CharacterCount>().0
     }
 
     pub fn to_u16_chars(&self) -> Vec<u16> {
@@ -174,7 +177,7 @@ impl Buffer {
     fn splice_fragments(&mut self, change_id: ChangeId, old_range: Range<usize>, mut new_text: Option<Text>) {
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
-        let mut updated_fragments = cursor.build_prefix(&old_range.start, SeekBias::Right);
+        let mut updated_fragments = cursor.build_prefix(&CharacterCount(old_range.start), SeekBias::Right);
         let mut inserted_fragments = Vec::new();
 
         if cursor.prev_item().is_none() {
@@ -184,7 +187,7 @@ impl Buffer {
 
         let prev_fragment = cursor.prev_item().unwrap();
         if let Some(cur_fragment) = cursor.item() {
-            let (before_range, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, cursor.start(), &old_range);
+            let (before_range, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, cursor.start::<CharacterCount>().0, &old_range);
             let insertion = new_text.take().map(|new_text| {
                 self.build_insertion(
                     change_id.clone(),
@@ -209,7 +212,7 @@ impl Buffer {
         }
 
         loop {
-            let fragment_start = cursor.start();
+            let fragment_start = cursor.start::<CharacterCount>().0;
 
             if fragment_start >= old_range.end { break; }
 
@@ -344,13 +347,13 @@ impl Buffer {
             AnchorBias::Right => SeekBias::Right,
         };
         let mut cursor = self.fragments.cursor();
-        cursor.seek(&offset, seek_bias);
+        cursor.seek(&CharacterCount(offset), seek_bias);
 
         cursor.item().map(|fragment| {
             Anchor {
                 position: LogicalPosition {
                     insertion_id: fragment.insertion.id,
-                    offset: offset - cursor.start::<usize>(),
+                    offset: offset - cursor.start::<CharacterCount>().0,
                     replica_id: self.replica_id,
                     lamport_timestamp: self.lamport_clock
                 },
@@ -381,7 +384,7 @@ impl Buffer {
                 } else {
                     0
                 };
-                fragments_cursor.start::<usize>() + overshoot
+                fragments_cursor.start::<CharacterCount>().0 + overshoot
             })
         }).ok_or(Error::InvalidAnchor)
     }
@@ -390,7 +393,7 @@ impl Buffer {
 impl<'a> Iter<'a> {
     fn new(buffer: &'a Buffer) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
-        fragment_cursor.seek(&0, SeekBias::Right);
+        fragment_cursor.seek(&CharacterCount(0), SeekBias::Right);
         Self {
             fragment_cursor,
             fragment_offset: 0
@@ -613,11 +616,25 @@ impl Default for FragmentSummary {
     }
 }
 
-impl tree::Dimension for usize {
+impl tree::Dimension for CharacterCount {
     type Summary = FragmentSummary;
 
     fn from_summary(summary: &Self::Summary) -> Self {
-        summary.extent
+        CharacterCount(summary.extent)
+    }
+}
+
+impl<'a> Add<&'a Self> for CharacterCount {
+    type Output = CharacterCount;
+
+    fn add(self, other: &'a Self) -> Self::Output {
+        CharacterCount(self.0 + other.0)
+    }
+}
+
+impl AddAssign for CharacterCount {
+    fn add_assign(&mut self, other: Self) {
+        self.0 += other.0;
     }
 }
 
