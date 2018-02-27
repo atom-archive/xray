@@ -1,7 +1,7 @@
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::iter;
-use std::ops::{Add, AddAssign};
+use std::ops::{Add, AddAssign, Range};
 use std::result;
 use std::sync::Arc;
 use super::tree::{self, Tree};
@@ -37,12 +37,6 @@ pub struct Anchor {
     offset: usize,
     replica_id: ReplicaId,
     lamport_timestamp: LamportTimestamp
-}
-
-pub struct Range<T> {
-    pub start: T,
-    pub end: T,
-    pub reversed: bool
 }
 
 pub struct Iter<'a> {
@@ -357,12 +351,6 @@ impl Buffer {
                 fragments_cursor.start::<usize>() + overshoot
             })
         }).ok_or(Error::InvalidAnchor)
-    }
-}
-
-impl<T> Range<T> {
-    pub fn new(start: T, end: T) -> Self {
-        Self { start, end, reversed: false }
     }
 }
 
@@ -708,17 +696,17 @@ mod tests {
     #[test]
     fn splice() {
         let mut buffer = Buffer::new(1);
-        buffer.splice(Range::new(0, 0), "abc");
+        buffer.splice(0..0, "abc");
         assert_eq!(buffer.to_string(), "abc");
-        buffer.splice(Range::new(3, 3), "def");
+        buffer.splice(3..3, "def");
         assert_eq!(buffer.to_string(), "abcdef");
-        buffer.splice(Range::new(0, 0), "ghi");
+        buffer.splice(0..0, "ghi");
         assert_eq!(buffer.to_string(), "ghiabcdef");
-        buffer.splice(Range::new(5, 5), "jkl");
+        buffer.splice(5..5, "jkl");
         assert_eq!(buffer.to_string(), "ghiabjklcdef");
-        buffer.splice(Range::new(6, 7), "");
+        buffer.splice(6..7, "");
         assert_eq!(buffer.to_string(), "ghiabjlcdef");
-        buffer.splice(Range::new(4, 9), "mno");
+        buffer.splice(4..9, "mno");
         assert_eq!(buffer.to_string(), "ghiamnoef");
     }
 
@@ -738,7 +726,7 @@ mod tests {
                 let start = rng.gen_range::<usize>(0, end + 1);
                 let new_text = RandomCharIter(rng).take(rng.gen_range(0, 10)).collect::<String>();
 
-                buffer.splice(Range::new(start, end), new_text.as_str());
+                buffer.splice(start..end, new_text.as_str());
                 reference_string = [&reference_string[0..start], new_text.as_str(), &reference_string[end..]].concat();
                 assert_eq!(buffer.to_string(), reference_string);
             }
@@ -757,10 +745,10 @@ mod tests {
     #[test]
     fn iter_starting_at_row() {
         let mut buffer = Buffer::new(1);
-        buffer.splice(Range::new(0, 0), "abcd\nefgh\nij");
-        buffer.splice(Range::new(12, 12), "kl\nmno");
-        buffer.splice(Range::new(18, 18), "\npqrs");
-        buffer.splice(Range::new(18, 21), "\nPQ");
+        buffer.splice(0..0, "abcd\nefgh\nij");
+        buffer.splice(12..12, "kl\nmno");
+        buffer.splice(18..18, "\npqrs");
+        buffer.splice(18..21, "\nPQ");
 
         let iter = buffer.iter_starting_at_row(0);
         assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "abcd\nefgh\nijkl\nmno\nPQrs");
@@ -813,13 +801,13 @@ mod tests {
     #[test]
     fn anchors() {
         let mut buffer = Buffer::new(1);
-        buffer.splice(Range::new(0, 0), "abc");
+        buffer.splice(0..0, "abc");
         let anchor_1 = buffer.anchor_for_offset(2).unwrap();
-        buffer.splice(Range::new(1, 1), "def");
+        buffer.splice(1..1, "def");
         assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 5);
-        buffer.splice(Range::new(2, 3), "");
+        buffer.splice(2..3, "");
         assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 4);
-        buffer.splice(Range::new(3, 5), "ghi");
+        buffer.splice(3..5, "ghi");
         assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 6);
     }
 }
