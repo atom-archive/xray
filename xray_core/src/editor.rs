@@ -4,12 +4,13 @@ use futures::future::Executor;
 use futures::{Future, Stream};
 use notify_cell::NotifyCell;
 
-use buffer::{Buffer, Version, Range};
+use buffer::{Buffer, Version, Anchor, Range};
 
 pub struct Editor {
     buffer: Rc<RefCell<Buffer>>,
     pub version: Rc<NotifyCell<Version>>,
     dropped: NotifyCell<bool>,
+    // selections: Vec<Range<Anchor>>
 }
 
 pub struct RenderParams {
@@ -26,10 +27,12 @@ pub struct Frame {
 impl Editor {
     pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
         let version = buffer.borrow().version.get().unwrap();
+        // let selections = vec![buffer.borrow().anchors_for_offsets(Range::new(0, 0))];
         Self {
             buffer,
             version: Rc::new(NotifyCell::new(version)),
             dropped: NotifyCell::new(false),
+            // selections
         }
     }
 

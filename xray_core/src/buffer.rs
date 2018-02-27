@@ -1,7 +1,8 @@
 use std::cmp;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::iter;
 use std::ops::{Add, AddAssign};
+use std::result;
 use std::sync::Arc;
 use super::tree::{self, Tree};
 use notify_cell::NotifyCell;
@@ -9,6 +10,13 @@ use notify_cell::NotifyCell;
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
 type LamportTimestamp = usize;
+type Result<T> = result::Result<T, Error>;
+
+#[derive(Debug)]
+pub enum Error {
+    OffsetOutOfRange,
+    InvalidAnchor
+}
 
 #[derive(Debug)]
 pub struct Buffer {
@@ -16,6 +24,7 @@ pub struct Buffer {
     local_clock: LocalTimestamp,
     lamport_clock: LamportTimestamp,
     fragments: Tree<Fragment>,
+    insertions: HashMap<ChangeId, Tree<FragmentMapping>>,
     pub version: NotifyCell<Version>
 }
 
@@ -60,6 +69,9 @@ struct ChangeId {
     local_timestamp: LocalTimestamp
 }
 
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
+struct FragmentId(Vec<u16>);
+
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct Fragment {
     id: FragmentId,
@@ -72,14 +84,26 @@ struct Fragment {
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub struct FragmentSummary {
     extent: usize,
-    newline_count: NewlineCount
+    newline_count: NewlineCount,
+    max_fragment_id: FragmentId
 }
-
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
-struct FragmentId(Vec<u16>);
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct NewlineCount(pub usize);
+
+#[derive(Eq, PartialEq, Clone, Debug)]
+struct FragmentMapping {
+    extent: usize,
+    fragment_id: FragmentId
+}
+
+#[derive(Eq, PartialEq, Clone, Debug)]
+struct FragmentMappingSummary {
+    extent: usize
+}
+
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
+struct InsertionOffset(usize);
 
 impl Buffer {
     pub fn new(replica_id: ReplicaId) -> Self {
@@ -103,6 +127,7 @@ impl Buffer {
             local_clock: 0,
             lamport_clock: 0,
             fragments,
+            insertions: HashMap::new(),
             version: NotifyCell::new(Version(0))
         }
     }
@@ -135,13 +160,14 @@ impl Buffer {
                 replica_id: self.replica_id,
                 local_timestamp: self.local_clock
             };
-            self.fragments = self.splice_fragments(change_id, old_range, new_text);
+            self.splice_fragments(change_id, old_range, new_text);
             self.version.set(Version(self.local_clock));
         }
     }
 
-    fn splice_fragments(&self, change_id: ChangeId, old_range: Range<usize>, mut new_text: Option<Text>) -> Tree<Fragment> {
-        let mut cursor = self.fragments.cursor();
+    fn splice_fragments(&mut self, change_id: ChangeId, old_range: Range<usize>, mut new_text: Option<Text>) {
+        let old_fragments = self.fragments.clone();
+        let mut cursor = old_fragments.cursor();
         let mut updated_fragments = cursor.build_prefix(&old_range.start);
         let mut inserted_fragments = Vec::new();
 
@@ -204,10 +230,10 @@ impl Buffer {
 
         updated_fragments.extend(inserted_fragments);
         updated_fragments.push_tree(cursor.build_suffix());
-        updated_fragments
+        self.fragments = updated_fragments;
     }
 
-    fn split_fragment(&self, prev_fragment: &Fragment, fragment: &Fragment, fragment_start: usize, range: &Range<usize>) -> (Option<Fragment>, Option<Fragment>, Option<Fragment>) {
+    fn split_fragment(&mut self, prev_fragment: &Fragment, fragment: &Fragment, fragment_start: usize, range: &Range<usize>) -> (Option<Fragment>, Option<Fragment>, Option<Fragment>) {
         let fragment_end = fragment_start + fragment.len();
         let mut prefix = fragment.clone();
         let mut before_range = None;
@@ -234,14 +260,55 @@ impl Buffer {
             before_range = Some(prefix);
         }
 
+        if within_range.is_some() || after_range.is_some() {
+            let mut updated_split_tree;
+            {
+                let split_tree = self.insertions.get(&fragment.insertion.id).unwrap();
+                let mut cursor = split_tree.cursor();
+                updated_split_tree = cursor.build_prefix(&InsertionOffset(fragment_start));
+
+                if let Some(ref fragment) = before_range {
+                    updated_split_tree.push(FragmentMapping {
+                        extent: range.start - fragment_start,
+                        fragment_id: fragment.id.clone()
+                    })
+                }
+
+                if let Some(ref fragment) = within_range {
+                    updated_split_tree.push(FragmentMapping {
+                        extent: range.end - range.start,
+                        fragment_id: fragment.id.clone()
+                    })
+                }
+                if let Some(ref fragment) = after_range {
+                    updated_split_tree.push(FragmentMapping {
+                        extent: fragment_end - range.end,
+                        fragment_id: fragment.id.clone()
+                    })
+                }
+
+                cursor.next();
+                updated_split_tree.push_tree(cursor.build_suffix());
+            }
+
+            self.insertions.insert(fragment.insertion.id, updated_split_tree);
+        }
+
         (before_range, within_range, after_range)
     }
 
-    fn build_insertion(&self, change_id: ChangeId, prev_fragment: &Fragment, next_fragment: Option<&Fragment>, text: Text) -> Fragment {
+    fn build_insertion(&mut self, change_id: ChangeId, prev_fragment: &Fragment, next_fragment: Option<&Fragment>, text: Text) -> Fragment {
         let new_fragment_id = FragmentId::between(
             &prev_fragment.id,
             next_fragment.map(|f| &f.id).unwrap_or(&FragmentId::max_value())
         );
+
+        let mut split_tree = Tree::new();
+        split_tree.push(FragmentMapping {
+            extent: text.len(),
+            fragment_id: new_fragment_id.clone()
+        });
+        self.insertions.insert(change_id, split_tree);
 
         Fragment::new(new_fragment_id, Insertion {
             id: change_id,
@@ -253,6 +320,35 @@ impl Buffer {
             },
             text
         })
+    }
+
+    pub fn anchor_for_offset(&self, offset: usize) -> Result<Anchor> {
+        let mut cursor = self.fragments.cursor();
+        cursor.seek(&offset);
+
+        cursor.item().map(|fragment| {
+            Anchor {
+                insertion_id: fragment.insertion.id,
+                offset: offset - cursor.start::<usize>(),
+                replica_id: self.replica_id,
+                lamport_timestamp: self.lamport_clock
+            }
+        }).ok_or(Error::OffsetOutOfRange)
+    }
+
+    pub fn offset_for_anchor(&self, anchor: Anchor) -> Result<usize> {
+        let splits = self.insertions.get(&anchor.insertion_id).ok_or(Error::InvalidAnchor)?;
+        let mut splits_cursor = splits.cursor();
+
+        splits_cursor.seek(&InsertionOffset(anchor.offset));
+        splits_cursor.item().and_then(|split| {
+            let mut fragments_cursor = self.fragments.cursor();
+            fragments_cursor.seek(&split.fragment_id);
+
+            fragments_cursor.item().map(|fragment| {
+                fragments_cursor.start::<usize>() + (anchor.offset - fragment.start_offset)
+            })
+        }).ok_or(Error::InvalidAnchor)
     }
 }
 
@@ -356,6 +452,67 @@ impl<'a> From<Vec<u16>> for Text {
     }
 }
 
+impl FragmentId {
+    fn min_value() -> Self {
+        FragmentId(vec![0 as u16])
+    }
+
+    fn max_value() -> Self {
+        FragmentId(vec![u16::max_value()])
+    }
+
+    fn between(left: &Self, right: &Self) -> Self {
+        Self::between_with_max(left, right, u16::max_value())
+    }
+
+    fn between_with_max(left: &Self, right: &Self, max_value: u16) -> Self {
+        let mut new_entries = Vec::new();
+
+        let left_entries = left.0.iter().cloned().chain(iter::repeat(0));
+        let right_entries = right.0.iter().cloned().chain(iter::repeat(max_value));
+        for (l, r) in left_entries.zip(right_entries) {
+            let interval = r - l;
+            if interval > 1 {
+                new_entries.push(l + interval / 2);
+                break
+            } else {
+                new_entries.push(l);
+            }
+        }
+
+        FragmentId(new_entries)
+    }
+}
+
+impl tree::Dimension for FragmentId {
+    type Summary = FragmentSummary;
+
+    fn from_summary(summary: &Self::Summary) -> Self {
+        summary.max_fragment_id.clone()
+    }
+
+    #[inline]
+    fn is_strictly_increasing() -> bool {
+        false
+    }
+}
+
+impl<'a> Add<&'a Self> for FragmentId {
+    type Output = FragmentId;
+
+    fn add(self, other: &'a Self) -> Self::Output {
+        cmp::max(&self, other).clone()
+    }
+}
+
+impl AddAssign for FragmentId {
+    fn add_assign(&mut self, other: Self) {
+        if *self < other {
+            *self = other
+        }
+    }
+}
+
 impl Fragment {
     fn new(id: FragmentId, ins: Insertion) -> Self {
         let end_offset = ins.text.len();
@@ -399,12 +556,14 @@ impl tree::Item for Fragment {
                 newline_count: self.insertion.text.newline_count_in_range(
                     self.start_offset,
                     self.end_offset
-                )
+                ),
+                max_fragment_id: self.id.clone()
             }
         } else {
             FragmentSummary {
                 extent: 0,
-                newline_count: NewlineCount(0)
+                newline_count: NewlineCount(0),
+                max_fragment_id: self.id.clone()
             }
         }
     }
@@ -414,6 +573,9 @@ impl<'a> AddAssign<&'a FragmentSummary> for FragmentSummary {
     fn add_assign(&mut self, other: &Self) {
         self.extent += other.extent;
         self.newline_count += other.newline_count;
+        if self.max_fragment_id < other.max_fragment_id {
+            self.max_fragment_id = other.max_fragment_id.clone();
+        }
     }
 }
 
@@ -421,7 +583,8 @@ impl Default for FragmentSummary {
     fn default() -> Self {
         FragmentSummary {
             extent: 0,
-            newline_count: NewlineCount(0)
+            newline_count: NewlineCount(0),
+            max_fragment_id: FragmentId::min_value()
         }
     }
 }
@@ -466,35 +629,54 @@ impl AddAssign for NewlineCount {
     }
 }
 
-impl FragmentId {
-    fn min_value() -> Self {
-        FragmentId(vec![0 as u16])
-    }
+impl tree::Item for FragmentMapping {
+    type Summary = FragmentMappingSummary;
 
-    fn max_value() -> Self {
-        FragmentId(vec![u16::max_value()])
-    }
-
-    fn between(left: &Self, right: &Self) -> Self {
-        Self::between_with_max(left, right, u16::max_value())
-    }
-
-    fn between_with_max(left: &Self, right: &Self, max_value: u16) -> Self {
-        let mut new_entries = Vec::new();
-
-        let left_entries = left.0.iter().cloned().chain(iter::repeat(0));
-        let right_entries = right.0.iter().cloned().chain(iter::repeat(max_value));
-        for (l, r) in left_entries.zip(right_entries) {
-            let interval = r - l;
-            if interval > 1 {
-                new_entries.push(l + interval / 2);
-                break
-            } else {
-                new_entries.push(l);
-            }
+    fn summarize(&self) -> Self::Summary {
+        FragmentMappingSummary {
+            extent: self.extent
         }
+    }
+}
 
-        FragmentId(new_entries)
+impl<'a> AddAssign<&'a FragmentMappingSummary> for FragmentMappingSummary {
+    fn add_assign(&mut self, other: &Self) {
+        self.extent += other.extent;
+    }
+}
+
+impl Default for FragmentMappingSummary {
+    fn default() -> Self {
+        FragmentMappingSummary {
+            extent: 0
+        }
+    }
+}
+
+impl tree::Dimension for InsertionOffset {
+    type Summary = FragmentMappingSummary;
+
+    fn from_summary(summary: &Self::Summary) -> Self {
+        InsertionOffset(summary.extent)
+    }
+
+    #[inline]
+    fn is_strictly_increasing() -> bool {
+        true
+    }
+}
+
+impl<'a> Add<&'a Self> for InsertionOffset {
+    type Output = InsertionOffset;
+
+    fn add(self, other: &'a Self) -> Self::Output {
+        InsertionOffset(self.0 + other.0)
+    }
+}
+
+impl AddAssign for InsertionOffset {
+    fn add_assign(&mut self, other: Self) {
+        self.0 += other.0;
     }
 }
 
@@ -618,5 +800,14 @@ mod tests {
                 assert_eq!(ids, sorted_ids);
             }
         }
+    }
+
+    #[test]
+    fn anchors() {
+        let mut buffer = Buffer::new(1);
+        buffer.splice(Range::new(0, 0), "abc");
+        let anchor_1 = buffer.anchor_for_offset(2).unwrap();
+        buffer.splice(Range::new(1, 1), "def");
+        assert_eq!(buffer.offset_for_anchor(anchor_1).unwrap(), 5);
     }
 }
