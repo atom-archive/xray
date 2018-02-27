@@ -4,7 +4,7 @@ use std::iter;
 use std::ops::{Add, AddAssign, Range};
 use std::result;
 use std::sync::Arc;
-use super::tree::{self, Tree};
+use super::tree::{self, Tree, SeekBias};
 use notify_cell::NotifyCell;
 
 pub type ReplicaId = usize;
@@ -162,7 +162,7 @@ impl Buffer {
     fn splice_fragments(&mut self, change_id: ChangeId, old_range: Range<usize>, mut new_text: Option<Text>) {
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
-        let mut updated_fragments = cursor.build_prefix(&old_range.start);
+        let mut updated_fragments = cursor.build_prefix(&old_range.start, SeekBias::Right);
         let mut inserted_fragments = Vec::new();
 
         if cursor.prev_item().is_none() {
@@ -259,7 +259,7 @@ impl Buffer {
             {
                 let split_tree = self.insertions.get(&fragment.insertion.id).unwrap();
                 let mut cursor = split_tree.cursor();
-                updated_split_tree = cursor.build_prefix(&InsertionOffset(fragment_start));
+                updated_split_tree = cursor.build_prefix(&InsertionOffset(fragment_start), SeekBias::Right);
 
                 if let Some(ref fragment) = before_range {
                     updated_split_tree.push(FragmentMapping {
@@ -318,7 +318,7 @@ impl Buffer {
 
     pub fn anchor_for_offset(&self, offset: usize) -> Result<Anchor> {
         let mut cursor = self.fragments.cursor();
-        cursor.seek(&offset);
+        cursor.seek(&offset, SeekBias::Right);
 
         cursor.item().map(|fragment| {
             Anchor {
@@ -334,10 +334,10 @@ impl Buffer {
         let splits = self.insertions.get(&anchor.insertion_id).ok_or(Error::InvalidAnchor)?;
         let mut splits_cursor = splits.cursor();
 
-        splits_cursor.seek(&InsertionOffset(anchor.offset));
+        splits_cursor.seek(&InsertionOffset(anchor.offset), SeekBias::Right);
         splits_cursor.item().and_then(|split| {
             let mut fragments_cursor = self.fragments.cursor();
-            fragments_cursor.seek(&split.fragment_id);
+            fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
 
             fragments_cursor.item().map(|fragment| {
                 let overshoot = if fragment.is_visible() {
@@ -357,7 +357,7 @@ impl Buffer {
 impl<'a> Iter<'a> {
     fn new(buffer: &'a Buffer) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
-        fragment_cursor.seek(&0);
+        fragment_cursor.seek(&0, SeekBias::Right);
         Self {
             fragment_cursor,
             fragment_offset: 0
@@ -366,7 +366,7 @@ impl<'a> Iter<'a> {
 
     fn starting_at_row(buffer: &'a Buffer, target_row: NewlineCount) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
-        fragment_cursor.seek(&target_row);
+        fragment_cursor.seek(&target_row, SeekBias::Left);
 
         let mut fragment_offset = 0;
         if let Some(fragment) = fragment_cursor.item() {
@@ -486,11 +486,6 @@ impl tree::Dimension for FragmentId {
     fn from_summary(summary: &Self::Summary) -> Self {
         summary.max_fragment_id.clone()
     }
-
-    #[inline]
-    fn is_strictly_increasing() -> bool {
-        false
-    }
 }
 
 impl<'a> Add<&'a Self> for FragmentId {
@@ -591,11 +586,6 @@ impl tree::Dimension for usize {
     fn from_summary(summary: &Self::Summary) -> Self {
         summary.extent
     }
-
-    #[inline]
-    fn is_strictly_increasing() -> bool {
-        true
-    }
 }
 
 impl tree::Dimension for NewlineCount {
@@ -603,11 +593,6 @@ impl tree::Dimension for NewlineCount {
 
     fn from_summary(summary: &Self::Summary) -> Self {
         summary.newline_count
-    }
-
-    #[inline]
-    fn is_strictly_increasing() -> bool {
-        false
     }
 }
 
@@ -654,11 +639,6 @@ impl tree::Dimension for InsertionOffset {
 
     fn from_summary(summary: &Self::Summary) -> Self {
         InsertionOffset(summary.extent)
-    }
-
-    #[inline]
-    fn is_strictly_increasing() -> bool {
-        true
     }
 }
 
