@@ -33,6 +33,18 @@ pub struct Version(LocalTimestamp);
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct Anchor {
+    position: LogicalPosition,
+    bias: AnchorBias
+}
+
+#[derive(Eq, PartialEq, Debug)]
+enum AnchorBias {
+    Left,
+    Right
+}
+
+#[derive(Eq, PartialEq, Debug)]
+struct LogicalPosition {
     insertion_id: ChangeId,
     offset: usize,
     replica_id: ReplicaId,
@@ -47,7 +59,7 @@ pub struct Iter<'a> {
 #[derive(Eq, PartialEq, Debug)]
 struct Insertion {
     id: ChangeId,
-    start: Anchor,
+    start: LogicalPosition,
     text: Text
 }
 
@@ -107,7 +119,7 @@ impl Buffer {
         // Push start sentinel.
         fragments.push(Fragment::new(FragmentId::min_value(), Insertion {
             id: ChangeId { replica_id: 0, local_timestamp: 0 },
-            start: Anchor {
+            start: LogicalPosition {
                 insertion_id: ChangeId { replica_id: 0, local_timestamp: 0},
                 offset: 0,
                 replica_id: 0,
@@ -259,7 +271,7 @@ impl Buffer {
             {
                 let split_tree = self.insertions.get(&fragment.insertion.id).unwrap();
                 let mut cursor = split_tree.cursor();
-                updated_split_tree = cursor.build_prefix(&InsertionOffset(fragment_start), SeekBias::Right);
+                updated_split_tree = cursor.build_prefix(&InsertionOffset(fragment.start_offset), SeekBias::Right);
 
                 if let Some(ref fragment) = before_range {
                     updated_split_tree.push(FragmentMapping {
@@ -285,6 +297,8 @@ impl Buffer {
                 updated_split_tree.push_tree(cursor.build_suffix());
             }
 
+            println!("split fragments {:#?}", updated_split_tree.iter().collect::<Vec<_>>());
+
             self.insertions.insert(fragment.insertion.id, updated_split_tree);
         }
 
@@ -306,7 +320,7 @@ impl Buffer {
 
         Fragment::new(new_fragment_id, Insertion {
             id: change_id,
-            start: Anchor {
+            start: LogicalPosition {
                 insertion_id: prev_fragment.insertion.id,
                 offset: prev_fragment.end_offset,
                 replica_id: self.replica_id,
@@ -316,38 +330,57 @@ impl Buffer {
         })
     }
 
-    pub fn anchor_for_offset(&self, offset: usize) -> Result<Anchor> {
+    pub fn anchor_before_offset(&self, offset: usize) -> Result<Anchor> {
+        self.anchor_for_offset(offset, AnchorBias::Left)
+    }
+
+    pub fn anchor_after_offset(&self, offset: usize) -> Result<Anchor> {
+        self.anchor_for_offset(offset, AnchorBias::Right)
+    }
+
+    fn anchor_for_offset(&self, offset: usize, bias: AnchorBias) -> Result<Anchor> {
+        let seek_bias = match bias {
+            AnchorBias::Left => SeekBias::Left,
+            AnchorBias::Right => SeekBias::Right,
+        };
         let mut cursor = self.fragments.cursor();
-        cursor.seek(&offset, SeekBias::Right);
+        cursor.seek(&offset, seek_bias);
 
         cursor.item().map(|fragment| {
             Anchor {
-                insertion_id: fragment.insertion.id,
-                offset: offset - cursor.start::<usize>(),
-                replica_id: self.replica_id,
-                lamport_timestamp: self.lamport_clock
+                position: LogicalPosition {
+                    insertion_id: fragment.insertion.id,
+                    offset: offset - cursor.start::<usize>(),
+                    replica_id: self.replica_id,
+                    lamport_timestamp: self.lamport_clock
+                },
+                bias
             }
         }).ok_or(Error::OffsetOutOfRange)
     }
 
     pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<usize> {
-        let splits = self.insertions.get(&anchor.insertion_id).ok_or(Error::InvalidAnchor)?;
-        let mut splits_cursor = splits.cursor();
+        let seek_bias = match anchor.bias {
+            AnchorBias::Left => SeekBias::Left,
+            AnchorBias::Right => SeekBias::Right,
+        };
 
-        splits_cursor.seek(&InsertionOffset(anchor.offset), SeekBias::Right);
+        let splits = self.insertions.get(&anchor.position.insertion_id).ok_or(Error::InvalidAnchor)?;
+        let mut splits_cursor = splits.cursor();
+        splits_cursor.seek(&InsertionOffset(anchor.position.offset), seek_bias);
+
+        // println!("fragment mappings {:?}", splits.iter().collect::<Vec<_>>());
+
         splits_cursor.item().and_then(|split| {
             let mut fragments_cursor = self.fragments.cursor();
             fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
 
             fragments_cursor.item().map(|fragment| {
                 let overshoot = if fragment.is_visible() {
-                    anchor.offset - fragment.start_offset
+                    anchor.position.offset - fragment.start_offset
                 } else {
                     0
                 };
-
-                print!("{:?} {:?}", fragments_cursor.start::<usize>(), overshoot);
-
                 fragments_cursor.start::<usize>() + overshoot
             })
         }).ok_or(Error::InvalidAnchor)
@@ -782,12 +815,27 @@ mod tests {
     fn anchors() {
         let mut buffer = Buffer::new(1);
         buffer.splice(0..0, "abc");
-        let anchor_1 = buffer.anchor_for_offset(2).unwrap();
+        let left_anchor = buffer.anchor_before_offset(2).unwrap();
+        let right_anchor = buffer.anchor_after_offset(2).unwrap();
+
         buffer.splice(1..1, "def");
-        assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 5);
+        assert_eq!(buffer.to_string(), "adefbc");
+        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
+        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
+
         buffer.splice(2..3, "");
-        assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 4);
-        buffer.splice(3..5, "ghi");
-        assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 6);
+        assert_eq!(buffer.to_string(), "adfbc");
+        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 4);
+        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 4);
+
+        buffer.splice(4..4, "ghi");
+        assert_eq!(buffer.to_string(), "adfbghic");
+        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 4);
+        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
+
+        buffer.splice(6..8, "");
+        assert_eq!(buffer.to_string(), "adfbgh");
+        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 4);
+        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
     }
 }
