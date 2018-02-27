@@ -336,7 +336,7 @@ impl Buffer {
         }).ok_or(Error::OffsetOutOfRange)
     }
 
-    pub fn offset_for_anchor(&self, anchor: Anchor) -> Result<usize> {
+    pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<usize> {
         let splits = self.insertions.get(&anchor.insertion_id).ok_or(Error::InvalidAnchor)?;
         let mut splits_cursor = splits.cursor();
 
@@ -808,6 +808,8 @@ mod tests {
         buffer.splice(Range::new(0, 0), "abc");
         let anchor_1 = buffer.anchor_for_offset(2).unwrap();
         buffer.splice(Range::new(1, 1), "def");
-        assert_eq!(buffer.offset_for_anchor(anchor_1).unwrap(), 5);
+        assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 5);
+        buffer.splice(Range::new(2, 3), "");
+        assert_eq!(buffer.offset_for_anchor(&anchor_1).unwrap(), 4);
     }
 }
