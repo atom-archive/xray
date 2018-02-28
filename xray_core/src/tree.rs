@@ -713,5 +713,11 @@ mod tests {
         assert_eq!(cursor.prev_item(), Some(&6));
         assert_eq!(cursor.start::<Count>(), Count(6));
         assert_eq!(cursor.start::<Sum>(), Sum(21));
+
+        // Seeking can bias left or right
+        cursor.seek(&Sum(1), SeekBias::Left);
+        assert_eq!(cursor.item(), Some(&1));
+        cursor.seek(&Sum(1), SeekBias::Right);
+        assert_eq!(cursor.item(), Some(&2));
     }
 }
