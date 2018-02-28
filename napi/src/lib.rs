@@ -31,6 +31,9 @@ pub struct Any;
 pub struct Undefined;
 
 #[derive(Clone, Copy, Debug)]
+pub struct Boolean;
+
+#[derive(Clone, Copy, Debug)]
 pub struct Number;
 
 #[derive(Clone, Copy, Debug)]
@@ -209,6 +212,15 @@ impl Env {
         let mut raw_value = ptr::null_mut();
         let status = unsafe {
             sys::napi_get_undefined(self.0, &mut raw_value)
+        };
+        debug_assert!(Status::from(status) == Status::Ok);
+        Value::from_raw(self, raw_value)
+    }
+
+    pub fn get_boolean(&self, value: bool) -> Value<Boolean> {
+        let mut raw_value = ptr::null_mut();
+        let status = unsafe {
+            sys::napi_get_boolean(self.0, value, &mut raw_value)
         };
         debug_assert!(Status::from(status) == Status::Ok);
         Value::from_raw(self, raw_value)
@@ -434,6 +446,12 @@ impl ValueType for Any {
 impl ValueType for Undefined {
     fn matches_raw_type(raw_type: sys::napi_valuetype) -> bool {
         raw_type == sys::napi_valuetype::napi_undefined
+    }
+}
+
+impl ValueType for Boolean {
+    fn matches_raw_type(raw_type: sys::napi_valuetype) -> bool {
+        raw_type == sys::napi_valuetype::napi_boolean
     }
 }
 

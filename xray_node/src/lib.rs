@@ -57,8 +57,8 @@ mod buffer {
 }
 
 mod editor {
-    use xray_core::buffer::Buffer;
-    use xray_core::editor::{Editor, RenderParams};
+    use xray_core::buffer::{Buffer, Point};
+    use xray_core::editor::{Editor, render};
     use super::*;
 
     pub fn init(env: &Env) -> Value<Function> {
@@ -94,19 +94,30 @@ mod editor {
         let editor: &Editor = env.unwrap(&this)?;
         let params = args[0].try_into::<Object>()?;
 
-        let frame = editor.render(RenderParams {
+        let frame = editor.render(render::Params {
             scroll_top: params.get_named_property("scrollTop")?.into(),
             height: params.get_named_property("height")?.into(),
             line_height: params.get_named_property("lineHeight")?.into()
         });
 
         let mut js_frame = env.create_object();
-        let mut js_lines = env.create_array_with_length(frame.lines.len());
 
+        let mut js_lines = env.create_array_with_length(frame.lines.len());
         for (i, line) in frame.lines.iter().enumerate() {
             js_lines.set_index(i, env.create_string_utf16(line))?;
         }
         js_frame.set_named_property("lines", js_lines)?;
+
+        let mut js_selections = env.create_array_with_length(frame.selections.len());
+        for (i, selection) in frame.selections.iter().enumerate() {
+            let mut js_selection = env.create_object();
+            js_selection.set_named_property("start", point_to_js(env, selection.start)?)?;
+            js_selection.set_named_property("end", point_to_js(env, selection.end)?)?;
+            js_selection.set_named_property("reversed", env.get_boolean(selection.reversed))?;
+            js_selections.set_index(i, js_selection)?;
+        }
+        js_frame.set_named_property("selections", js_selections)?;
+
         js_frame.set_named_property("firstVisibleRow", env.create_int64(frame.first_visible_row as i64))?;
 
         Ok(Some(js_frame.try_into()?))
@@ -116,5 +127,12 @@ mod editor {
         env.drop_wrapped::<Editor>(this)?;
 
         Ok(None)
+    }
+
+    fn point_to_js(env: &Env, point: Point) -> Result<Value<Object>> {
+        let mut js_point = env.create_object();
+        js_point.set_named_property("row", env.create_int64(point.row as i64))?;
+        js_point.set_named_property("column", env.create_int64(point.column as i64))?;
+        Ok(js_point)
     }
 }

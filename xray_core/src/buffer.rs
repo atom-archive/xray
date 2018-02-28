@@ -33,8 +33,8 @@ pub struct Version(LocalTimestamp);
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub struct Point {
-    row: u32,
-    column: u32
+    pub row: u32,
+    pub column: u32
 }
 
 #[derive(Eq, PartialEq, Debug)]
