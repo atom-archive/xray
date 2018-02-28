@@ -31,6 +31,12 @@ pub struct Buffer {
 #[derive(Clone, Copy, Debug)]
 pub struct Version(LocalTimestamp);
 
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub struct Point {
+    row: u32,
+    column: u32
+}
+
 #[derive(Eq, PartialEq, Debug)]
 pub struct Anchor(AnchorInner);
 
@@ -93,7 +99,7 @@ struct Fragment {
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub struct FragmentSummary {
     extent: usize,
-    newline_count: NewlineCount,
+    extent_2d: Point,
     max_fragment_id: FragmentId
 }
 
@@ -156,8 +162,8 @@ impl Buffer {
         Iter::new(self)
     }
 
-    pub fn iter_starting_at_row(&self, row: usize) -> Iter {
-        Iter::starting_at_row(self, NewlineCount(row))
+    pub fn iter_starting_at_row(&self, row: u32) -> Iter {
+        Iter::starting_at_row(self, row)
     }
 
     pub fn splice<T: Into<Text>>(&mut self, old_range: Range<usize>, new_text: T) {
@@ -405,8 +411,88 @@ impl Buffer {
             }
         }
     }
+
+    pub fn point_for_anchor(&self, anchor: &Anchor) -> Result<Point> {
+        match &anchor.0 {
+            &AnchorInner::Start => Ok(Point {row: 0, column: 0}),
+            &AnchorInner::End => Ok(self.fragments.len::<Point>()),
+            &AnchorInner::Middle { ref insertion_id, offset, ref bias } => {
+                let seek_bias = match bias {
+                    &AnchorBias::Left => SeekBias::Left,
+                    &AnchorBias::Right => SeekBias::Right,
+                };
+
+                let splits = self.insertions.get(&insertion_id).ok_or(Error::InvalidAnchor)?;
+                let mut splits_cursor = splits.cursor();
+                splits_cursor.seek(&InsertionOffset(offset), seek_bias);
+
+                splits_cursor.item().and_then(|split| {
+                    let mut fragments_cursor = self.fragments.cursor();
+                    fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
+                    fragments_cursor.item().map(|fragment| {
+                        let overshoot = if fragment.is_visible() {
+                            fragment.insertion.text.compute_2d_extent(fragment.start_offset, offset)
+                        } else {
+                            Point {row: 0, column: 0}
+                        };
+                        fragments_cursor.start::<Point>() + &overshoot
+                    })
+                }).ok_or(Error::InvalidAnchor)
+            }
+        }
+    }
 }
 
+impl tree::Dimension for Point {
+    type Summary = FragmentSummary;
+
+    fn from_summary(summary: &Self::Summary) -> Self {
+        summary.extent_2d
+    }
+}
+
+impl<'a> Add<&'a Self> for Point {
+    type Output = Point;
+
+    fn add(self, other: &'a Self) -> Self::Output {
+        if other.row == 0 {
+            Point {
+                row: self.row,
+                column: self.column + other.column
+            }
+        } else {
+            Point {
+                row: self.row + other.row,
+                column: other.column
+            }
+        }
+    }
+}
+
+impl AddAssign for Point {
+    fn add_assign(&mut self, other: Self) {
+        if other.row == 0 {
+            self.column += other.column;
+        } else {
+            self.row += other.row;
+            self.column = other.column;
+        }
+    }
+}
+
+impl PartialOrd for Point {
+    fn partial_cmp(&self, other: &Point) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Point {
+    fn cmp(&self, other: &Point) -> cmp::Ordering {
+        let a = (self.row as usize) << 32 | self.column as usize;
+        let b = (other.row as usize) << 32 | other.column as usize;
+        a.cmp(&b)
+    }
+}
 impl<'a> Iter<'a> {
     fn new(buffer: &'a Buffer) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
@@ -417,17 +503,16 @@ impl<'a> Iter<'a> {
         }
     }
 
-    fn starting_at_row(buffer: &'a Buffer, target_row: NewlineCount) -> Self {
+    fn starting_at_row(buffer: &'a Buffer, target_row: u32) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
-        fragment_cursor.seek(&target_row, SeekBias::Left);
+        fragment_cursor.seek(&Point {row: target_row, column: 0}, SeekBias::Right);
 
         let mut fragment_offset = 0;
         if let Some(fragment) = fragment_cursor.item() {
-            let target_row = target_row.0;
-            let fragment_start_row = fragment_cursor.start::<NewlineCount>().0;
+            let fragment_start_row = fragment_cursor.start::<Point>().row;
             if target_row != fragment_start_row {
                 let target_row_within_fragment = target_row - fragment_start_row - 1;
-                fragment_offset = fragment.insertion.text.newline_offsets[target_row_within_fragment] + 1;
+                fragment_offset = fragment.insertion.text.newline_offsets[target_row_within_fragment as usize] + 1;
             }
         }
 
@@ -482,10 +567,20 @@ impl Text {
         self.code_units.len()
     }
 
-    fn newline_count_in_range(&self, start: usize, end: usize) -> NewlineCount {
-        let newlines_start = find_insertion_index(&self.newline_offsets, &start);
-        let newlines_end = find_insertion_index(&self.newline_offsets, &end);
-        NewlineCount(newlines_end - newlines_start)
+    fn compute_2d_extent(&self, start_offset: usize, end_offset: usize) -> Point {
+        let newlines_start = find_insertion_index(&self.newline_offsets, &start_offset);
+        let newlines_end = find_insertion_index(&self.newline_offsets, &end_offset);
+
+        let last_line_start_offset = if newlines_end == 0 {
+            0
+        } else {
+            self.newline_offsets[newlines_end - 1] + 1
+        };
+
+        Point {
+            row: (newlines_end - newlines_start) as u32,
+            column: (end_offset - cmp::max(last_line_start_offset, start_offset)) as u32
+        }
     }
 }
 
@@ -597,7 +692,7 @@ impl tree::Item for Fragment {
         if self.is_visible() {
             FragmentSummary {
                 extent: self.len(),
-                newline_count: self.insertion.text.newline_count_in_range(
+                extent_2d: self.insertion.text.compute_2d_extent(
                     self.start_offset,
                     self.end_offset
                 ),
@@ -606,7 +701,7 @@ impl tree::Item for Fragment {
         } else {
             FragmentSummary {
                 extent: 0,
-                newline_count: NewlineCount(0),
+                extent_2d: Point {row: 0, column: 0},
                 max_fragment_id: self.id.clone()
             }
         }
@@ -616,7 +711,7 @@ impl tree::Item for Fragment {
 impl<'a> AddAssign<&'a FragmentSummary> for FragmentSummary {
     fn add_assign(&mut self, other: &Self) {
         self.extent += other.extent;
-        self.newline_count += other.newline_count;
+        self.extent_2d += other.extent_2d;
         if self.max_fragment_id < other.max_fragment_id {
             self.max_fragment_id = other.max_fragment_id.clone();
         }
@@ -627,7 +722,7 @@ impl Default for FragmentSummary {
     fn default() -> Self {
         FragmentSummary {
             extent: 0,
-            newline_count: NewlineCount(0),
+            extent_2d: Point {row: 0, column: 0},
             max_fragment_id: FragmentId::min_value()
         }
     }
@@ -650,28 +745,6 @@ impl<'a> Add<&'a Self> for CharacterCount {
 }
 
 impl AddAssign for CharacterCount {
-    fn add_assign(&mut self, other: Self) {
-        self.0 += other.0;
-    }
-}
-
-impl tree::Dimension for NewlineCount {
-    type Summary = FragmentSummary;
-
-    fn from_summary(summary: &Self::Summary) -> Self {
-        summary.newline_count
-    }
-}
-
-impl<'a> Add<&'a Self> for NewlineCount {
-    type Output = NewlineCount;
-
-    fn add(self, other: &'a Self) -> Self::Output {
-        NewlineCount(self.0 + other.0)
-    }
-}
-
-impl AddAssign for NewlineCount {
     fn add_assign(&mut self, other: Self) {
         self.0 += other.0;
     }
@@ -817,11 +890,23 @@ mod tests {
     }
 
     #[test]
-    fn text_newline_count() {
+    fn compute_2d_extent () {
         let text = Text::from("abc\ndefgh\nijklm\nopq");
-        assert_eq!(text.newline_count_in_range(3, 15), NewlineCount(2));
-        assert_eq!(text.newline_count_in_range(3, 16), NewlineCount(3));
-        assert_eq!(text.newline_count_in_range(4, 16), NewlineCount(2));
+        assert_eq!(text.compute_2d_extent(3, 15), Point {row: 2, column: 5});
+        assert_eq!(text.compute_2d_extent(3, 16), Point {row: 3, column: 0});
+        assert_eq!(text.compute_2d_extent(4, 16), Point {row: 2, column: 0});
+        assert_eq!(text.compute_2d_extent(1, 2), Point {row: 0, column: 1});
+        assert_eq!(text.compute_2d_extent(1, 3), Point {row: 0, column: 2});
+        assert_eq!(text.compute_2d_extent(5, 7), Point {row: 0, column: 2});
+        assert_eq!(text.compute_2d_extent(5, 9), Point {row: 0, column: 4});
+        assert_eq!(text.compute_2d_extent(0, 0), Point {row: 0, column: 0});
+        assert_eq!(text.compute_2d_extent(2, 2), Point {row: 0, column: 0});
+        assert_eq!(text.compute_2d_extent(3, 3), Point {row: 0, column: 0});
+        assert_eq!(text.compute_2d_extent(4, 4), Point {row: 0, column: 0});
+        assert_eq!(text.compute_2d_extent(4, 4), Point {row: 0, column: 0});
+        assert_eq!(text.compute_2d_extent(8, 8), Point {row: 0, column: 0});
+        assert_eq!(text.compute_2d_extent(9, 9), Point {row: 0, column: 0});
+        assert_eq!(text.compute_2d_extent(10, 10), Point {row: 0, column: 0});
     }
 
     #[test]
@@ -852,25 +937,33 @@ mod tests {
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
 
-        buffer.splice(1..1, "def");
-        assert_eq!(buffer.to_string(), "adefbc");
-        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
-        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
+        buffer.splice(1..1, "def\n");
+        assert_eq!(buffer.to_string(), "adef\nbc");
+        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 6);
+        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
+        assert_eq!(buffer.point_for_anchor(&left_anchor).unwrap(), Point { row: 1, column: 1 });
+        assert_eq!(buffer.point_for_anchor(&right_anchor).unwrap(), Point { row: 1, column: 1 });
 
         buffer.splice(2..3, "");
-        assert_eq!(buffer.to_string(), "adfbc");
-        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 4);
-        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 4);
+        assert_eq!(buffer.to_string(), "adf\nbc");
+        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
+        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
+        assert_eq!(buffer.point_for_anchor(&left_anchor).unwrap(), Point { row: 1, column: 1 });
+        assert_eq!(buffer.point_for_anchor(&right_anchor).unwrap(), Point { row: 1, column: 1 });
 
-        buffer.splice(4..4, "ghi");
-        assert_eq!(buffer.to_string(), "adfbghic");
-        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 4);
+        buffer.splice(5..5, "ghi\n");
+        assert_eq!(buffer.to_string(), "adf\nbghi\nc");
+        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
+        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 9);
+        assert_eq!(buffer.point_for_anchor(&left_anchor).unwrap(), Point { row: 1, column: 1 });
+        assert_eq!(buffer.point_for_anchor(&right_anchor).unwrap(), Point { row: 2, column: 0 });
+
+        buffer.splice(7..9, "");
+        assert_eq!(buffer.to_string(), "adf\nbghc");
+        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
-
-        buffer.splice(6..8, "");
-        assert_eq!(buffer.to_string(), "adfbgh");
-        assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 4);
-        assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
+        assert_eq!(buffer.point_for_anchor(&left_anchor).unwrap(), Point { row: 1, column: 1 });
+        assert_eq!(buffer.point_for_anchor(&right_anchor).unwrap(), Point { row: 1, column: 3 });
     }
 
     #[test]

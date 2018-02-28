@@ -3,35 +3,63 @@ use std::cell::RefCell;
 use futures::future::Executor;
 use futures::{Future, Stream};
 use notify_cell::NotifyCell;
-use buffer::{Buffer, Version};
+use buffer::{Buffer, Version, Point, Anchor};
 
 pub struct Editor {
     buffer: Rc<RefCell<Buffer>>,
     pub version: Rc<NotifyCell<Version>>,
     dropped: NotifyCell<bool>,
-    // selections: Vec<Range<Anchor>>
+    selections: Vec<Selection>
 }
 
-pub struct RenderParams {
-    pub scroll_top: f64,
-    pub height: f64,
-    pub line_height: f64
+struct Selection {
+    start: Anchor,
+    end: Anchor,
+    reversed: bool
 }
 
-pub struct Frame {
-    pub first_visible_row: usize,
-    pub lines: Vec<Vec<u16>>
+pub mod render {
+    use super::Point;
+
+    pub struct Params {
+        pub scroll_top: f64,
+        pub height: f64,
+        pub line_height: f64
+    }
+
+    pub struct Frame {
+        pub first_visible_row: u32,
+        pub lines: Vec<Vec<u16>>,
+        pub selections: Vec<Selection>
+    }
+
+    pub struct Selection {
+        pub start: Point,
+        pub end: Point,
+        pub reversed: bool
+    }
 }
 
 impl Editor {
     pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
-        let version = buffer.borrow().version.get().unwrap();
-        // let selections = vec![buffer.borrow().anchors_for_offsets(Range::new(0, 0))];
+        let version;
+        let selections;
+
+        {
+            let buffer = buffer.borrow();
+            version = buffer.version.get().unwrap();
+            selections = vec![Selection {
+                start: buffer.anchor_before_offset(0).unwrap(),
+                end: buffer.anchor_before_offset(0).unwrap(),
+                reversed: false
+            }];
+        }
+
         Self {
-            buffer,
             version: Rc::new(NotifyCell::new(version)),
+            buffer,
+            selections,
             dropped: NotifyCell::new(false),
-            // selections
         }
     }
 
@@ -54,13 +82,13 @@ impl Editor {
         )).unwrap();
     }
 
-    pub fn render(&self, params: RenderParams) -> Frame {
+    pub fn render(&self, params: render::Params) -> render::Frame {
         let buffer = self.buffer.borrow();
         let mut lines = Vec::new();
         let mut cur_line = Vec::new();
         let scroll_bottom = params.scroll_top + params.height;
-        let start_row = (params.scroll_top / params.line_height).floor() as usize;
-        let end_row = (scroll_bottom / params.line_height).ceil() as usize;
+        let start_row = (params.scroll_top / params.line_height).floor() as u32;
+        let end_row = (scroll_bottom / params.line_height).ceil() as u32;
 
         let mut cur_row = start_row;
         for c in buffer.iter_starting_at_row(start_row) {
@@ -79,9 +107,16 @@ impl Editor {
             lines.push(cur_line);
         }
 
-        Frame {
+        render::Frame {
             first_visible_row: start_row,
-            lines
+            lines,
+            selections: self.selections.iter().map(|selection| {
+                render::Selection {
+                    start: buffer.point_for_anchor(&selection.start).unwrap(),
+                    end: buffer.point_for_anchor(&selection.end).unwrap(),
+                    reversed: selection.reversed
+                }
+            }).collect()
         }
     }
 }
