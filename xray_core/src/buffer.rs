@@ -32,9 +32,16 @@ pub struct Buffer {
 pub struct Version(LocalTimestamp);
 
 #[derive(Eq, PartialEq, Debug)]
-pub struct Anchor {
-    position: LogicalPosition,
-    bias: AnchorBias
+pub struct Anchor(AnchorInner);
+
+#[derive(Eq, PartialEq, Debug)]
+enum AnchorInner {
+    Start,
+    End,
+    Middle {
+        position: LogicalPosition,
+        bias: AnchorBias
+    }
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -342,51 +349,73 @@ impl Buffer {
     }
 
     fn anchor_for_offset(&self, offset: usize, bias: AnchorBias) -> Result<Anchor> {
-        let seek_bias = match bias {
-            AnchorBias::Left => SeekBias::Left,
-            AnchorBias::Right => SeekBias::Right,
+        let max_offset = self.len();
+        if offset > max_offset {
+            return Err(Error::OffsetOutOfRange);
+        }
+
+        let seek_bias;
+        match bias {
+            AnchorBias::Left => {
+                if offset == 0 {
+                    return Ok(Anchor(AnchorInner::Start));
+                } else {
+                    seek_bias = SeekBias::Left;
+                }
+            }
+            AnchorBias::Right => {
+                if offset == self.len() {
+                    return Ok(Anchor(AnchorInner::End));
+                } else {
+                    seek_bias = SeekBias::Right;
+                }
+            }
         };
+
         let mut cursor = self.fragments.cursor();
         cursor.seek(&CharacterCount(offset), seek_bias);
+        let fragment = cursor.item().unwrap();
 
-        cursor.item().map(|fragment| {
-            Anchor {
-                position: LogicalPosition {
-                    insertion_id: fragment.insertion.id,
-                    offset: offset - cursor.start::<CharacterCount>().0,
-                    replica_id: self.replica_id,
-                    lamport_timestamp: self.lamport_clock
-                },
-                bias
-            }
-        }).ok_or(Error::OffsetOutOfRange)
+        Ok(Anchor(AnchorInner::Middle {
+            position: LogicalPosition {
+                insertion_id: fragment.insertion.id,
+                offset: offset - cursor.start::<CharacterCount>().0,
+                replica_id: self.replica_id,
+                lamport_timestamp: self.lamport_clock
+            },
+            bias
+        }))
     }
 
     pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<usize> {
-        let seek_bias = match anchor.bias {
-            AnchorBias::Left => SeekBias::Left,
-            AnchorBias::Right => SeekBias::Right,
-        };
-
-        let splits = self.insertions.get(&anchor.position.insertion_id).ok_or(Error::InvalidAnchor)?;
-        let mut splits_cursor = splits.cursor();
-        splits_cursor.seek(&InsertionOffset(anchor.position.offset), seek_bias);
-
-        // println!("fragment mappings {:?}", splits.iter().collect::<Vec<_>>());
-
-        splits_cursor.item().and_then(|split| {
-            let mut fragments_cursor = self.fragments.cursor();
-            fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
-
-            fragments_cursor.item().map(|fragment| {
-                let overshoot = if fragment.is_visible() {
-                    anchor.position.offset - fragment.start_offset
-                } else {
-                    0
+        match &anchor.0 {
+            &AnchorInner::Start => Ok(0),
+            &AnchorInner::End => Ok(self.len()),
+            &AnchorInner::Middle { ref position, ref bias } => {
+                let seek_bias = match bias {
+                    &AnchorBias::Left => SeekBias::Left,
+                    &AnchorBias::Right => SeekBias::Right,
                 };
-                fragments_cursor.start::<CharacterCount>().0 + overshoot
-            })
-        }).ok_or(Error::InvalidAnchor)
+
+                let splits = self.insertions.get(&position.insertion_id).ok_or(Error::InvalidAnchor)?;
+                let mut splits_cursor = splits.cursor();
+                splits_cursor.seek(&InsertionOffset(position.offset), seek_bias);
+
+                splits_cursor.item().and_then(|split| {
+                    let mut fragments_cursor = self.fragments.cursor();
+                    fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
+
+                    fragments_cursor.item().map(|fragment| {
+                        let overshoot = if fragment.is_visible() {
+                            position.offset - fragment.start_offset
+                        } else {
+                            0
+                        };
+                        fragments_cursor.start::<CharacterCount>().0 + overshoot
+                    })
+                }).ok_or(Error::InvalidAnchor)
+            }
+        }
     }
 }
 
@@ -854,5 +883,28 @@ mod tests {
         assert_eq!(buffer.to_string(), "adfbgh");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 4);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
+    }
+
+    #[test]
+    fn anchors_at_start_and_end() {
+        let mut buffer = Buffer::new(1);
+        let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
+        let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
+
+        buffer.splice(0..0, "abc");
+        assert_eq!(buffer.to_string(), "abc");
+        assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
+        assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 3);
+
+        let after_start_anchor = buffer.anchor_after_offset(0).unwrap();
+        let before_end_anchor = buffer.anchor_before_offset(3).unwrap();
+
+        buffer.splice(3..3, "def");
+        buffer.splice(0..0, "ghi");
+        assert_eq!(buffer.to_string(), "ghiabcdef");
+        assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
+        assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
+        assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
+        assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 9);
     }
 }
