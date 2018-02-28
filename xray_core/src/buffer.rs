@@ -307,8 +307,6 @@ impl Buffer {
                 updated_split_tree.push_tree(cursor.build_suffix());
             }
 
-            println!("split fragments {:#?}", updated_split_tree.iter().collect::<Vec<_>>());
-
             self.insertions.insert(fragment.insertion.id, updated_split_tree);
         }
 
