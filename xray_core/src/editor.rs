@@ -1,5 +1,6 @@
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::cmp;
 use futures::future::Executor;
 use futures::{Future, Stream};
 use notify_cell::NotifyCell;
@@ -33,6 +34,7 @@ pub mod render {
         pub selections: Vec<Selection>
     }
 
+    #[derive(Debug, Eq, PartialEq)]
     pub struct Selection {
         pub start: Point,
         pub end: Point,
@@ -110,20 +112,62 @@ impl Editor {
         render::Frame {
             first_visible_row: start_row,
             lines,
-            selections: self.selections.iter().map(|selection| {
-                render::Selection {
-                    start: buffer.point_for_anchor(&selection.start).unwrap(),
-                    end: buffer.point_for_anchor(&selection.end).unwrap(),
-                    reversed: selection.reversed
-                }
-            }).collect()
+            selections: self.selections.iter().map(|selection| selection.render(&buffer)).collect()
         }
+    }
+
+    pub fn move_right(&mut self) {
+        let buffer = self.buffer.borrow();
+        let max_offset = buffer.len();
+        self.selections = self.selections.iter().map(|selection| {
+            let new_offset = cmp::min(
+                max_offset,
+                buffer.offset_for_anchor(selection.head()).unwrap() + 1
+            );
+            let new_anchor = buffer.anchor_before_offset(new_offset).unwrap();
+            Selection {
+                start: new_anchor.clone(),
+                end: new_anchor,
+                reversed: false
+            }
+        }).collect();
+    }
+
+    pub fn move_left(&mut self) {
+        let buffer = self.buffer.borrow();
+        self.selections = self.selections.iter().map(|selection| {
+            let new_offset = buffer.offset_for_anchor(selection.head()).unwrap().saturating_sub(1);
+            let new_anchor = buffer.anchor_before_offset(new_offset).unwrap();
+            Selection {
+                start: new_anchor.clone(),
+                end: new_anchor,
+                reversed: false
+            }
+        }).collect();
     }
 }
 
 impl Drop for Editor {
     fn drop(&mut self) {
         self.dropped.set(true);
+    }
+}
+
+impl Selection {
+    fn head(&self) -> &Anchor {
+        if self.reversed {
+            &self.start
+        } else {
+            &self.end
+        }
+    }
+
+    fn render(&self, buffer: &Buffer) -> render::Selection {
+        render::Selection {
+            start: buffer.point_for_anchor(&self.start).unwrap(),
+            end: buffer.point_for_anchor(&self.end).unwrap(),
+            reversed: self.reversed
+        }
     }
 }
 
@@ -143,5 +187,39 @@ mod tests {
         editor.run(&event_loop);
         buffer.borrow_mut().splice(0..0, "test");
         event_loop.run(editor.version.observe().take(1).into_future());
+    }
+
+    #[test]
+    fn test_move_right_and_left() {
+        let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
+        editor.buffer.borrow_mut().splice(0..0, "abc\ndef\nghi");
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        editor.move_right();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+
+        for _ in 0..3 { editor.move_right(); }
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+
+        for _ in 0..8 { editor.move_right(); }
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+
+        for _ in 0..4 { editor.move_left(); }
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 3)]);
+
+        for _ in 0..8 { editor.move_left(); }
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+    }
+
+    fn render_selections(editor: &Editor) -> Vec<render::Selection> {
+        editor.selections.iter().map(|s| s.render(&editor.buffer.borrow())).collect()
+    }
+
+    fn empty_selection(row: u32, column: u32) -> render::Selection {
+        render::Selection {
+            start: Point::new(row, column),
+            end: Point::new(row, column),
+            reversed: false
+        }
     }
 }

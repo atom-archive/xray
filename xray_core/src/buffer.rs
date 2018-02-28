@@ -37,10 +37,10 @@ pub struct Point {
     pub column: u32
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Anchor(AnchorInner);
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 enum AnchorInner {
     Start,
     End,
@@ -51,7 +51,7 @@ enum AnchorInner {
     }
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 enum AnchorBias {
     Left,
     Right
@@ -438,6 +438,12 @@ impl Buffer {
                 }).ok_or(Error::InvalidAnchor)
             }
         }
+    }
+}
+
+impl Point {
+    pub fn new(row: u32, column: u32) -> Self {
+        Point { row, column }
     }
 }
 
