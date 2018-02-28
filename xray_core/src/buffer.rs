@@ -39,7 +39,8 @@ enum AnchorInner {
     Start,
     End,
     Middle {
-        position: LogicalPosition,
+        insertion_id: ChangeId,
+        offset: usize,
         bias: AnchorBias
     }
 }
@@ -50,14 +51,6 @@ enum AnchorBias {
     Right
 }
 
-#[derive(Eq, PartialEq, Debug)]
-struct LogicalPosition {
-    insertion_id: ChangeId,
-    offset: usize,
-    replica_id: ReplicaId,
-    lamport_timestamp: LamportTimestamp
-}
-
 pub struct Iter<'a> {
     fragment_cursor: tree::Cursor<'a, Fragment>,
     fragment_offset: usize
@@ -66,7 +59,10 @@ pub struct Iter<'a> {
 #[derive(Eq, PartialEq, Debug)]
 struct Insertion {
     id: ChangeId,
-    start: LogicalPosition,
+    parent_id: ChangeId,
+    offset_in_parent: usize,
+    replica_id: ReplicaId,
+    lamport_timestamp: LamportTimestamp,
     text: Text
 }
 
@@ -129,12 +125,10 @@ impl Buffer {
         // Push start sentinel.
         fragments.push(Fragment::new(FragmentId::min_value(), Insertion {
             id: ChangeId { replica_id: 0, local_timestamp: 0 },
-            start: LogicalPosition {
-                insertion_id: ChangeId { replica_id: 0, local_timestamp: 0},
-                offset: 0,
-                replica_id: 0,
-                lamport_timestamp: 0
-            },
+            parent_id: ChangeId { replica_id: 0, local_timestamp: 0},
+            offset_in_parent: 0,
+            replica_id: 0,
+            lamport_timestamp: 0,
             text: Text::new(vec![])
         }));
 
@@ -330,12 +324,10 @@ impl Buffer {
 
         Fragment::new(new_fragment_id, Insertion {
             id: change_id,
-            start: LogicalPosition {
-                insertion_id: prev_fragment.insertion.id,
-                offset: prev_fragment.end_offset,
-                replica_id: self.replica_id,
-                lamport_timestamp: self.lamport_clock
-            },
+            parent_id: prev_fragment.insertion.id,
+            offset_in_parent: prev_fragment.end_offset,
+            replica_id: self.replica_id,
+            lamport_timestamp: self.lamport_clock,
             text
         })
     }
@@ -377,12 +369,8 @@ impl Buffer {
         let fragment = cursor.item().unwrap();
 
         Ok(Anchor(AnchorInner::Middle {
-            position: LogicalPosition {
-                insertion_id: fragment.insertion.id,
-                offset: offset - cursor.start::<CharacterCount>().0,
-                replica_id: self.replica_id,
-                lamport_timestamp: self.lamport_clock
-            },
+            insertion_id: fragment.insertion.id,
+            offset: offset - cursor.start::<CharacterCount>().0,
             bias
         }))
     }
@@ -391,15 +379,15 @@ impl Buffer {
         match &anchor.0 {
             &AnchorInner::Start => Ok(0),
             &AnchorInner::End => Ok(self.len()),
-            &AnchorInner::Middle { ref position, ref bias } => {
+            &AnchorInner::Middle { ref insertion_id, offset, ref bias } => {
                 let seek_bias = match bias {
                     &AnchorBias::Left => SeekBias::Left,
                     &AnchorBias::Right => SeekBias::Right,
                 };
 
-                let splits = self.insertions.get(&position.insertion_id).ok_or(Error::InvalidAnchor)?;
+                let splits = self.insertions.get(&insertion_id).ok_or(Error::InvalidAnchor)?;
                 let mut splits_cursor = splits.cursor();
-                splits_cursor.seek(&InsertionOffset(position.offset), seek_bias);
+                splits_cursor.seek(&InsertionOffset(offset), seek_bias);
 
                 splits_cursor.item().and_then(|split| {
                     let mut fragments_cursor = self.fragments.cursor();
@@ -407,7 +395,7 @@ impl Buffer {
 
                     fragments_cursor.item().map(|fragment| {
                         let overshoot = if fragment.is_visible() {
-                            position.offset - fragment.start_offset
+                            offset - fragment.start_offset
                         } else {
                             0
                         };
