@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::cmp;
+use std::cmp::{self, Ordering};
 use futures::future::Executor;
 use futures::{Future, Stream};
 use notify_cell::NotifyCell;
@@ -115,6 +115,45 @@ impl Editor {
             first_visible_row: start_row,
             lines,
             selections: self.selections.iter().map(|selection| selection.render(&buffer)).collect()
+        }
+    }
+
+    pub fn add_selection(&mut self, start: Point, end: Point) {
+        debug_assert!(start <= end); // TODO: Reverse selection if end < start
+
+        {
+            let buffer = self.buffer.borrow();
+
+            // TODO: Clip points or return a result.
+            let start_anchor = buffer.anchor_before_point(start).unwrap();
+            let end_anchor = buffer.anchor_before_point(end).unwrap();
+            let index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start_anchor).unwrap()) {
+                Ok(index) => index,
+                Err(index) => index
+            };
+            self.selections.insert(index, Selection {
+                start: start_anchor,
+                end: end_anchor,
+                reversed: false,
+                goal_column: None
+            });
+        }
+
+        self.merge_selections();
+    }
+
+    fn merge_selections(&mut self) {
+        let buffer = self.buffer.borrow();
+        let mut i = 1;
+        while i < self.selections.len() {
+            if buffer.cmp_anchors(&self.selections[i - 1].end, &self.selections[i].start).unwrap() >= Ordering::Equal {
+                let removed = self.selections.remove(i);
+                if buffer.cmp_anchors(&removed.end, &self.selections[i - 1].end).unwrap() > Ordering::Equal {
+                    self.selections[i - 1].end = removed.end;
+                }
+            } else {
+                i += 1;
+            }
         }
     }
 
@@ -328,6 +367,57 @@ mod tests {
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
     }
 
+    #[test]
+    fn test_add_selection() {
+        let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
+        editor.buffer.borrow_mut().splice(0..0, "abcd\nefgh\nijkl\nmnop");
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        // Adding non-overlapping selections
+        editor.move_right();
+        editor.move_right();
+        editor.add_selection(Point::new(0, 0), Point::new(0, 1));
+        editor.add_selection(Point::new(2, 2), Point::new(2, 3));
+        editor.add_selection(Point::new(0, 3), Point::new(1, 2));
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 0), (0, 1)),
+                selection((0, 2), (0, 2)),
+                selection((0, 3), (1, 2)),
+                selection((2, 2), (2, 3))
+            ]
+        );
+
+        // Adding a selection that starts at the start of an existing selection
+        editor.add_selection(Point::new(0, 3), Point::new(1, 0));
+        editor.add_selection(Point::new(0, 3), Point::new(1, 3));
+        editor.add_selection(Point::new(0, 3), Point::new(1, 2));
+
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 0), (0, 1)),
+                selection((0, 2), (0, 2)),
+                selection((0, 3), (1, 3)),
+                selection((2, 2), (2, 3))
+            ]
+        );
+
+        // Adding a selection that starts or ends inside an existing selection
+        editor.add_selection(Point::new(0, 1), Point::new(0, 2));
+        editor.add_selection(Point::new(1, 2), Point::new(1, 4));
+        editor.add_selection(Point::new(2, 1), Point::new(2, 2));
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 0), (0, 2)),
+                selection((0, 3), (1, 4)),
+                selection((2, 1), (2, 3))
+            ]
+        );
+    }
+
     fn render_selections(editor: &Editor) -> Vec<render::Selection> {
         editor.selections.iter().map(|s| s.render(&editor.buffer.borrow())).collect()
     }
@@ -336,6 +426,14 @@ mod tests {
         render::Selection {
             start: Point::new(row, column),
             end: Point::new(row, column),
+            reversed: false
+        }
+    }
+
+    fn selection(start: (u32, u32), end: (u32, u32)) -> render::Selection {
+        render::Selection {
+            start: Point::new(start.0, start.1),
+            end: Point::new(end.0, end.1),
             reversed: false
         }
     }

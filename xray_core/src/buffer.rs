@@ -513,6 +513,12 @@ impl Buffer {
             }
         }
     }
+
+    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<cmp::Ordering> {
+        let a_offset = self.offset_for_anchor(a)?;
+        let b_offset = self.offset_for_anchor(b)?;
+        Ok(a_offset.cmp(&b_offset))
+    }
 }
 
 impl Point {
@@ -929,6 +935,7 @@ fn find_insertion_index<T: Ord>(v: &Vec<T>, x: &T) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cmp::Ordering;
 
     impl Buffer {
         fn to_string(&self) -> String {
@@ -1081,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn anchors() {
+    fn test_anchors() {
         let mut buffer = Buffer::new(1);
         buffer.splice(0..0, "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
@@ -1125,6 +1132,23 @@ mod tests {
         assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 2 }), buffer.anchor_before_offset(6));
         assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 3 }), buffer.anchor_before_offset(7));
         assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 4 }), buffer.anchor_before_offset(8));
+
+        // Comparison between anchors.
+        let anchor_at_offset_0 = buffer.anchor_before_offset(0).unwrap();
+        let anchor_at_offset_1 = buffer.anchor_before_offset(1).unwrap();
+        let anchor_at_offset_2 = buffer.anchor_before_offset(2).unwrap();
+
+        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_0, &anchor_at_offset_0), Ok(Ordering::Equal));
+        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_1, &anchor_at_offset_1), Ok(Ordering::Equal));
+        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_2, &anchor_at_offset_2), Ok(Ordering::Equal));
+
+        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_0, &anchor_at_offset_1), Ok(Ordering::Less));
+        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_1, &anchor_at_offset_2), Ok(Ordering::Less));
+        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_0, &anchor_at_offset_2), Ok(Ordering::Less));
+
+        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_1, &anchor_at_offset_0), Ok(Ordering::Greater));
+        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_2, &anchor_at_offset_1), Ok(Ordering::Greater));
+        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_2, &anchor_at_offset_0), Ok(Ordering::Greater));
     }
 
     #[test]
