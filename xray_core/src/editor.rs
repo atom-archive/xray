@@ -160,44 +160,43 @@ impl Editor {
     pub fn move_right(&mut self) {
         let buffer = self.buffer.borrow();
         let max_offset = buffer.len();
-        self.selections = self.selections.iter().map(|selection| {
+
+        for selection in &mut self.selections {
             let new_offset = cmp::min(
                 max_offset,
                 buffer.offset_for_anchor(selection.head()).unwrap() + 1
             );
             let new_anchor = buffer.anchor_before_offset(new_offset).unwrap();
-            Selection {
-                start: new_anchor.clone(),
-                end: new_anchor,
-                reversed: false,
-                goal_column: None
-            }
-        }).collect();
+
+            selection.start = new_anchor.clone();
+            selection.end = new_anchor;
+            selection.reversed = false;
+            selection.goal_column = None;
+        }
     }
 
     pub fn move_left(&mut self) {
         let buffer = self.buffer.borrow();
-        self.selections = self.selections.iter().map(|selection| {
+        for selection in &mut self.selections {
             let new_offset = buffer.offset_for_anchor(selection.head()).unwrap().saturating_sub(1);
             let new_anchor = buffer.anchor_before_offset(new_offset).unwrap();
-            Selection {
-                start: new_anchor.clone(),
-                end: new_anchor,
-                reversed: false,
-                goal_column: None
-            }
-        }).collect();
+
+            selection.start = new_anchor.clone();
+            selection.end = new_anchor;
+            selection.reversed = false;
+            selection.goal_column = None;
+        }
     }
 
     pub fn move_up(&mut self) {
         let buffer = self.buffer.borrow();
-        self.selections = self.selections.iter().map(|selection| {
+        for selection in &mut self.selections {
             let mut new_point = buffer.point_for_anchor(&selection.start).unwrap();
-            let goal_column = selection.goal_column.or(Some(new_point.column));
+            selection.goal_column.get_or_insert(new_point.column);
             if new_point.row > 0 {
                 new_point.row -= 1;
                 new_point.column = cmp::min(
-                    goal_column.unwrap(),
+                    selection.goal_column.unwrap(),
                     buffer.len_for_row(new_point.row).unwrap()
                 );
             } else {
@@ -205,26 +204,25 @@ impl Editor {
             }
 
             let new_anchor = buffer.anchor_before_point(new_point).unwrap();
-            Selection {
-                start: new_anchor.clone(),
-                end: new_anchor,
-                reversed: false,
-                goal_column
-            }
-        }).collect();
+
+            selection.start = new_anchor.clone();
+            selection.end = new_anchor;
+            selection.reversed = false;
+        }
     }
 
     pub fn move_down(&mut self) {
         let buffer = self.buffer.borrow();
-        self.selections = self.selections.iter().map(|selection| {
+
+        for selection in &mut self.selections {
             let max_point = buffer.max_point();
 
             let mut new_point = buffer.point_for_anchor(&selection.end).unwrap();
-            let goal_column = selection.goal_column.or(Some(new_point.column));
+            selection.goal_column.get_or_insert(new_point.column);
             if new_point.row < max_point.row {
                 new_point.row += 1;
                 new_point.column = cmp::min(
-                    goal_column.unwrap(),
+                    selection.goal_column.unwrap(),
                     buffer.len_for_row(new_point.row).unwrap()
                 )
             } else {
@@ -232,13 +230,11 @@ impl Editor {
             }
 
             let new_anchor = buffer.anchor_before_point(new_point).unwrap();
-            Selection {
-                start: new_anchor.clone(),
-                end: new_anchor,
-                reversed: false,
-                goal_column
-            }
-        }).collect();
+
+            selection.start = new_anchor.clone();
+            selection.end = new_anchor;
+            selection.reversed = false;
+        }
     }
 }
 
