@@ -4,6 +4,7 @@ extern crate glob;
 
 use glob::glob;
 use std::env;
+use std::process::Command;
 
 fn main() {
     let node_include_path = env::var("NODE_INCLUDE_PATH");
@@ -29,6 +30,10 @@ fn main() {
         .expect("Unable to generate napi bindings")
         .write_to_file("src/sys/bindings.rs")
         .expect("Unable to write napi bindings");
+
+    Command::new("rustup").args(&["run", "nightly", "rustfmt", "src/sys/bindings.rs"])
+        .status()
+        .expect("Unable to format napi bindings");
 
     cc::Build::new()
         .cpp(true)
