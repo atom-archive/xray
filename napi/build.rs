@@ -35,6 +35,7 @@ fn main() {
     let status = Command::new("rustup").args(&["run", "nightly", "rustfmt", "src/sys/bindings.rs"])
         .status()
         .expect("Failed to execute rustup");
+
     if !status.success() {
         println!("cargo:warning=Couldn't run rustfmt on generated napi bindings. See the README for instructions on installing it.");
     }
