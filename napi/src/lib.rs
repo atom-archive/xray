@@ -10,31 +10,14 @@ use std::string::String as RustString;
 pub mod sys;
 mod executor;
 
+use sys::Status;
+
 pub type Result<T> = std::result::Result<T, Error>;
 pub type Callback = extern "C" fn(sys::napi_env, sys::napi_callback_info) -> sys::napi_value;
 
 #[derive(Debug)]
 pub struct Error {
     status: Status
-}
-
-#[derive(Eq, PartialEq, Debug)]
-pub enum Status {
-    Ok,
-    InvalidArg,
-    ObjectExpected,
-    StringExpected,
-    NameExpected,
-    FunctionExpected,
-    NumberExpected,
-    BooleanExpected,
-    ArrayExpected,
-    GenericFailure,
-    PendingException,
-    Cancelled,
-    EscapeCalledTwice,
-    HandleScopeMismatch,
-    StringContainsNull
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -214,30 +197,6 @@ impl Error {
 impl From<std::ffi::NulError> for Error {
     fn from(_error: std::ffi::NulError) -> Self {
         Error { status: Status::StringContainsNull }
-    }
-}
-
-impl From<sys::napi_status> for Status {
-    fn from(code: sys::napi_status) -> Self {
-        use sys::napi_status::*;
-        use Status::*;
-
-        match code {
-            napi_ok => Ok,
-            napi_invalid_arg => InvalidArg,
-            napi_object_expected => ObjectExpected,
-            napi_string_expected => StringExpected,
-            napi_name_expected => NameExpected,
-            napi_function_expected => FunctionExpected,
-            napi_number_expected => NumberExpected,
-            napi_boolean_expected => BooleanExpected,
-            napi_array_expected => ArrayExpected,
-            napi_generic_failure => GenericFailure,
-            napi_pending_exception => PendingException,
-            napi_cancelled => Cancelled,
-            napi_escape_called_twice => EscapeCalledTwice,
-            napi_handle_scope_mismatch => HandleScopeMismatch
-        }
     }
 }
 

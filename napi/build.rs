@@ -4,7 +4,6 @@ extern crate glob;
 
 use glob::glob;
 use std::env;
-use std::process::Command;
 
 fn main() {
     let node_include_path = env::var("NODE_INCLUDE_PATH");
@@ -21,7 +20,6 @@ fn main() {
     }
 
     bindgen::Builder::default()
-        .rustfmt_bindings(false)
         .header("src/sys/bindings.h")
         .clang_arg(String::from("-I") + &node_include_path)
         .rustified_enum("(napi_|uv_).+")
@@ -31,14 +29,6 @@ fn main() {
         .expect("Unable to generate napi bindings")
         .write_to_file("src/sys/bindings.rs")
         .expect("Unable to write napi bindings");
-
-    let status = Command::new("rustup").args(&["run", "nightly", "rustfmt", "src/sys/bindings.rs"])
-        .status()
-        .expect("Failed to execute rustup");
-
-    if !status.success() {
-        println!("cargo:warning=Couldn't run rustfmt on generated napi bindings. See the README for instructions on installing it.");
-    }
 
     cc::Build::new()
         .cpp(true)
