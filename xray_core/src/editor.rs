@@ -1,6 +1,7 @@
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
+use std::mem;
 use futures::future::Executor;
 use futures::{Future, Stream};
 use notify_cell::NotifyCell;
@@ -179,8 +180,7 @@ impl Editor {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
             let cursor = Self::move_cursor_left(&buffer, selection.head());
-            selection.reversed = buffer.cmp_anchors(&cursor, selection.tail()).unwrap() < Ordering::Equal;
-            *selection.head_mut() = cursor;
+            selection.set_head(&buffer, cursor);
         }
     }
 
@@ -217,7 +217,7 @@ impl Editor {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
             let cursor = Self::move_cursor_right(&buffer, selection.head());
-            *selection.head_mut() = cursor;
+            selection.set_head(&buffer, cursor);
         }
     }
 
@@ -236,50 +236,74 @@ impl Editor {
     pub fn move_up(&mut self) {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
-            let mut new_point = buffer.point_for_anchor(&selection.start).unwrap();
-            selection.goal_column.get_or_insert(new_point.column);
-            if new_point.row > 0 {
-                new_point.row -= 1;
-                new_point.column = cmp::min(
-                    selection.goal_column.unwrap(),
-                    buffer.len_for_row(new_point.row).unwrap()
-                );
-            } else {
-                new_point = Point::new(0, 0);
-            }
-
-            let new_anchor = buffer.anchor_before_point(new_point).unwrap();
-
-            selection.start = new_anchor.clone();
-            selection.end = new_anchor;
+            let (cursor, goal_column) = Self::move_cursor_up(&buffer, &selection.end, selection.goal_column);
+            selection.start = cursor.clone();
+            selection.end = cursor;
+            selection.goal_column = goal_column;
             selection.reversed = false;
         }
     }
 
+    pub fn select_up(&mut self) {
+        let buffer = self.buffer.borrow();
+        for selection in &mut self.selections {
+            let (cursor, goal_column) = Self::move_cursor_up(&buffer, selection.head(), selection.goal_column);
+            selection.set_head(&buffer, cursor);
+            selection.goal_column = goal_column;
+        }
+    }
+
+    fn move_cursor_up(buffer: &Buffer, cursor: &Anchor, goal_column: Option<u32>) -> (Anchor, Option<u32>) {
+        let mut point = buffer.point_for_anchor(cursor).unwrap();
+        let goal_column = goal_column.or(Some(point.column));
+        if point.row > 0 {
+            point.row -= 1;
+            point.column = cmp::min(
+                goal_column.unwrap(),
+                buffer.len_for_row(point.row).unwrap()
+            );
+        } else {
+            point = Point::new(0, 0);
+        }
+
+        (buffer.anchor_before_point(point).unwrap(), goal_column)
+    }
+
     pub fn move_down(&mut self) {
         let buffer = self.buffer.borrow();
-
         for selection in &mut self.selections {
-            let max_point = buffer.max_point();
-
-            let mut new_point = buffer.point_for_anchor(&selection.end).unwrap();
-            selection.goal_column.get_or_insert(new_point.column);
-            if new_point.row < max_point.row {
-                new_point.row += 1;
-                new_point.column = cmp::min(
-                    selection.goal_column.unwrap(),
-                    buffer.len_for_row(new_point.row).unwrap()
-                )
-            } else {
-                new_point = max_point;
-            }
-
-            let new_anchor = buffer.anchor_before_point(new_point).unwrap();
-
-            selection.start = new_anchor.clone();
-            selection.end = new_anchor;
+            let (cursor, goal_column) = Self::move_cursor_down(&buffer, &selection.end, selection.goal_column);
+            selection.start = cursor.clone();
+            selection.end = cursor;
+            selection.goal_column = goal_column;
             selection.reversed = false;
         }
+    }
+
+    pub fn select_down(&mut self) {
+        let buffer = self.buffer.borrow();
+        for selection in &mut self.selections {
+            let (cursor, goal_column) = Self::move_cursor_down(&buffer, selection.head(), selection.goal_column);
+            selection.set_head(&buffer, cursor);
+            selection.goal_column = goal_column;
+        }
+    }
+
+    fn move_cursor_down(buffer: &Buffer, cursor: &Anchor, goal_column: Option<u32>) -> (Anchor, Option<u32>) {
+        let mut point = buffer.point_for_anchor(cursor).unwrap();
+        let goal_column = goal_column.or(Some(point.column));
+        let max_point = buffer.max_point();
+        if point.row < max_point.row {
+            point.row += 1;
+            point.column = cmp::min(
+                goal_column.unwrap(),
+                buffer.len_for_row(point.row).unwrap()
+            )
+        } else {
+            point = max_point;
+        }
+
+        (buffer.anchor_before_point(point).unwrap(), goal_column)
     }
 }
 
@@ -298,11 +322,19 @@ impl Selection {
         }
     }
 
-    fn head_mut(&mut self) -> &mut Anchor {
-        if self.reversed {
-            &mut self.start
+    fn set_head(&mut self, buffer: &Buffer, cursor: Anchor) {
+        if buffer.cmp_anchors(&cursor, self.tail()).unwrap() < Ordering::Equal {
+            if !self.reversed {
+                mem::swap(&mut self.start, &mut self.end);
+                self.reversed = true;
+            }
+            self.start = cursor;
         } else {
-            &mut self.end
+            if self.reversed {
+                mem::swap(&mut self.start, &mut self.end);
+                self.reversed = false;
+            }
+            self.end = cursor;
         }
     }
 
@@ -413,25 +445,56 @@ mod tests {
     }
 
     #[test]
-    fn test_selection() {
+    fn test_selection_movement() {
         let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
         editor.buffer.borrow_mut().splice(0..0, "abc\n\ndef");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
         editor.select_right();
         assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 1))]);
+
+        // Selecting right wraps across newlines
         for _ in 0..3 { editor.select_right(); }
         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
+
+        // Moving right with a non-empty selection clears the selection
         editor.move_right();
         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
         editor.move_right();
         assert_eq!(render_selections(&editor), vec![empty_selection(2, 0)]);
+
+        // Selecting left wraps across newlines
         editor.select_left();
         assert_eq!(render_selections(&editor), vec![rev_selection((1, 0), (2, 0))]);
         editor.select_left();
         assert_eq!(render_selections(&editor), vec![rev_selection((0, 3), (2, 0))]);
+
+        // Moving left with a non-empty selection clears the selection
         editor.move_left();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+
+        // Reverse is updated correctly when selecting left and right
+        editor.select_left();
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 2), (0, 3))]);
+        editor.select_right();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+        editor.select_right();
+        assert_eq!(render_selections(&editor), vec![selection((0, 3), (1, 0))]);
+        editor.select_left();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+        editor.select_left();
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 2), (0, 3))]);
+
+        // Selecting vertically moves the head and updates the reversed property
+        editor.select_left();
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 1), (0, 3))]);
+        editor.select_down();
+        assert_eq!(render_selections(&editor), vec![selection((0, 3), (1, 0))]);
+        editor.select_down();
+        assert_eq!(render_selections(&editor), vec![selection((0, 3), (2, 1))]);
+        editor.select_up();
+        editor.select_up();
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 1), (0, 3))]);
     }
 
     #[test]
