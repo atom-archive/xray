@@ -144,6 +144,136 @@ impl Editor {
         self.merge_selections();
     }
 
+    pub fn move_left(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+            for selection in &mut self.selections {
+                let start = buffer.point_for_anchor(&selection.start);
+                let end = buffer.point_for_anchor(&selection.end);
+
+                if start != end {
+                    selection.end = selection.start.clone();
+                } else {
+                    let cursor = movement::left(&buffer, &selection.start);
+                    selection.start = cursor.clone();
+                    selection.end = cursor;
+                }
+                selection.reversed = false;
+                selection.goal_column = None;
+            }
+        }
+        self.merge_selections();
+    }
+
+    pub fn select_left(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+            for selection in &mut self.selections {
+                let cursor = movement::left(&buffer, selection.head());
+                selection.set_head(&buffer, cursor);
+                selection.goal_column = None;
+            }
+        }
+        self.merge_selections();
+    }
+
+    pub fn move_right(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+            for selection in &mut self.selections {
+                let start = buffer.point_for_anchor(&selection.start);
+                let end = buffer.point_for_anchor(&selection.end);
+
+                if start != end {
+                    selection.start = selection.end.clone();
+                } else {
+                    let cursor = movement::right(&buffer, &selection.end);
+                    selection.start = cursor.clone();
+                    selection.end = cursor;
+                }
+                selection.reversed = false;
+                selection.goal_column = None;
+            }
+        }
+        self.merge_selections();
+    }
+
+    pub fn select_right(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+            for selection in &mut self.selections {
+                let cursor = movement::right(&buffer, selection.head());
+                selection.set_head(&buffer, cursor);
+                selection.goal_column = None;
+            }
+        }
+        self.merge_selections();
+    }
+
+    pub fn move_up(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+            for selection in &mut self.selections {
+                let start = buffer.point_for_anchor(&selection.start);
+                let end = buffer.point_for_anchor(&selection.end);
+                if start != end {
+                    selection.goal_column = None;
+                }
+
+                let (cursor, goal_column) = movement::up(&buffer, &selection.start, selection.goal_column);
+                selection.start = cursor.clone();
+                selection.end = cursor;
+                selection.goal_column = goal_column;
+                selection.reversed = false;
+            }
+        }
+        self.merge_selections();
+    }
+
+    pub fn select_up(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+            for selection in &mut self.selections {
+                let (cursor, goal_column) = movement::up(&buffer, selection.head(), selection.goal_column);
+                selection.set_head(&buffer, cursor);
+                selection.goal_column = goal_column;
+            }
+        }
+        self.merge_selections();
+    }
+
+    pub fn move_down(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+            for selection in &mut self.selections {
+                let start = buffer.point_for_anchor(&selection.start);
+                let end = buffer.point_for_anchor(&selection.end);
+                if start != end {
+                    selection.goal_column = None;
+                }
+
+                let (cursor, goal_column) = movement::down(&buffer, &selection.end, selection.goal_column);
+                selection.start = cursor.clone();
+                selection.end = cursor;
+                selection.goal_column = goal_column;
+                selection.reversed = false;
+            }
+        }
+        self.merge_selections();
+    }
+
+    pub fn select_down(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+            for selection in &mut self.selections {
+                let (cursor, goal_column) = movement::down(&buffer, selection.head(), selection.goal_column);
+                selection.set_head(&buffer, cursor);
+                selection.goal_column = goal_column;
+            }
+        }
+        self.merge_selections();
+    }
+
     fn merge_selections(&mut self) {
         let buffer = self.buffer.borrow();
         let mut i = 1;
@@ -156,112 +286,6 @@ impl Editor {
             } else {
                 i += 1;
             }
-        }
-    }
-
-    pub fn move_left(&mut self) {
-        let buffer = self.buffer.borrow();
-        for selection in &mut self.selections {
-            let start = buffer.point_for_anchor(&selection.start);
-            let end = buffer.point_for_anchor(&selection.end);
-
-            if start != end {
-                selection.end = selection.start.clone();
-            } else {
-                let cursor = movement::left(&buffer, &selection.start);
-                selection.start = cursor.clone();
-                selection.end = cursor;
-            }
-            selection.reversed = false;
-            selection.goal_column = None;
-        }
-    }
-
-    pub fn select_left(&mut self) {
-        let buffer = self.buffer.borrow();
-        for selection in &mut self.selections {
-            let cursor = movement::left(&buffer, selection.head());
-            selection.set_head(&buffer, cursor);
-            selection.goal_column = None;
-        }
-    }
-
-    pub fn move_right(&mut self) {
-        let buffer = self.buffer.borrow();
-        for selection in &mut self.selections {
-            let start = buffer.point_for_anchor(&selection.start);
-            let end = buffer.point_for_anchor(&selection.end);
-
-            if start != end {
-                selection.start = selection.end.clone();
-            } else {
-                let cursor = movement::right(&buffer, &selection.end);
-                selection.start = cursor.clone();
-                selection.end = cursor;
-            }
-            selection.reversed = false;
-            selection.goal_column = None;
-        }
-    }
-
-    pub fn select_right(&mut self) {
-        let buffer = self.buffer.borrow();
-        for selection in &mut self.selections {
-            let cursor = movement::right(&buffer, selection.head());
-            selection.set_head(&buffer, cursor);
-            selection.goal_column = None;
-        }
-    }
-
-    pub fn move_up(&mut self) {
-        let buffer = self.buffer.borrow();
-        for selection in &mut self.selections {
-            let start = buffer.point_for_anchor(&selection.start);
-            let end = buffer.point_for_anchor(&selection.end);
-            if start != end {
-                selection.goal_column = None;
-            }
-
-            let (cursor, goal_column) = movement::up(&buffer, &selection.start, selection.goal_column);
-            selection.start = cursor.clone();
-            selection.end = cursor;
-            selection.goal_column = goal_column;
-            selection.reversed = false;
-        }
-    }
-
-    pub fn select_up(&mut self) {
-        let buffer = self.buffer.borrow();
-        for selection in &mut self.selections {
-            let (cursor, goal_column) = movement::up(&buffer, selection.head(), selection.goal_column);
-            selection.set_head(&buffer, cursor);
-            selection.goal_column = goal_column;
-        }
-    }
-
-    pub fn move_down(&mut self) {
-        let buffer = self.buffer.borrow();
-        for selection in &mut self.selections {
-            let start = buffer.point_for_anchor(&selection.start);
-            let end = buffer.point_for_anchor(&selection.end);
-            if start != end {
-                selection.goal_column = None;
-            }
-
-            let (cursor, goal_column) = movement::down(&buffer, &selection.end, selection.goal_column);
-            selection.start = cursor.clone();
-            selection.end = cursor;
-            selection.goal_column = goal_column;
-            selection.reversed = false;
-        }
-    }
-
-    pub fn select_down(&mut self) {
-        let buffer = self.buffer.borrow();
-        for selection in &mut self.selections {
-            let (cursor, goal_column) = movement::down(&buffer, selection.head(), selection.goal_column);
-            selection.set_head(&buffer, cursor);
-            selection.goal_column = goal_column;
         }
     }
 }
