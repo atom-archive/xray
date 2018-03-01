@@ -192,21 +192,15 @@ impl Editor {
     pub fn move_up(&mut self) {
         let buffer = self.buffer.borrow();
         self.selections = self.selections.iter().map(|selection| {
-            let goal_column;
-            let mut new_point = buffer.point_for_anchor(selection.head()).unwrap();
+            let mut new_point = buffer.point_for_anchor(&selection.start).unwrap();
+            let goal_column = selection.goal_column.or(Some(new_point.column));
             if new_point.row > 0 {
                 new_point.row -= 1;
-                new_point.column = selection.goal_column.unwrap_or(new_point.column);
-
-                let row_len = buffer.len_for_row(new_point.row).unwrap();
-                if new_point.column > row_len {
-                    goal_column = Some(new_point.column);
-                    new_point.column = row_len;
-                } else {
-                    goal_column = None;
-                }
+                new_point.column = cmp::min(
+                    goal_column.unwrap(),
+                    buffer.len_for_row(new_point.row).unwrap()
+                );
             } else {
-                goal_column = selection.goal_column.or(Some(new_point.column));
                 new_point = Point::new(0, 0);
             }
 
@@ -225,21 +219,15 @@ impl Editor {
         self.selections = self.selections.iter().map(|selection| {
             let max_point = buffer.max_point();
 
-            let goal_column;
-            let mut new_point = buffer.point_for_anchor(selection.head()).unwrap();
+            let mut new_point = buffer.point_for_anchor(&selection.end).unwrap();
+            let goal_column = selection.goal_column.or(Some(new_point.column));
             if new_point.row < max_point.row {
                 new_point.row += 1;
-                new_point.column = selection.goal_column.unwrap_or(new_point.column);
-
-                let row_len = buffer.len_for_row(new_point.row).unwrap();
-                if new_point.column > row_len {
-                    goal_column = Some(new_point.column);
-                    new_point.column = row_len;
-                } else {
-                    goal_column = None;
-                }
+                new_point.column = cmp::min(
+                    goal_column.unwrap(),
+                    buffer.len_for_row(new_point.row).unwrap()
+                )
             } else {
-                goal_column = selection.goal_column.or(Some(new_point.column));
                 new_point = max_point;
             }
 
