@@ -147,13 +147,12 @@ The primary goal of the next three months is to validate the key ideas presented
 
 More concretely, our goal is to ship a high-performance standalone editor component suitable for use in any web application, something we could eventually use on GitHub.com. This standalone editor will give us a chance to test a limited set of critical features in production scenarios without building out an entire desktop-based editor. We plan to develop this new editor in the context of a prototype Electron application, but we'll offer the standalone component as a separate build artifact from the main app.
 
-* [ ] Standalone editor component
+* [ ] Standalone editor component (dev release)
   * [x] CRDT based text storage
   * [ ] WebGL-based black and white text rendering
     * [x] Rendering of glyphs with a 1:1 correspondence with characters
     * [x] Subpixel horizontal character positioning
-    * [ ] Rendering of glyphs with a 1:n character mapping
-    * [ ] Bi-directional text
+    * [ ] Multi-character graphemes
   * [ ] Cursors and selections
     * [ ] Rendering
     * [ ] Basic movement
@@ -162,9 +161,10 @@ More concretely, our goal is to ship a high-performance standalone editor compon
   * [ ] Editing
     * [ ] Insert characters
     * [ ] Copy and paste
+  * [ ] Web-compatible build artifact
   * [ ] Syntax highlighting
   * [ ] History
   * [ ] Synthetic scrollbars
+* Stretch
   * [ ] Auto-indent
-  * [ ] Web-compatible build artifact
-* [ ] File system interaction on the desktop
+  * [ ] File system interaction on the desktop
