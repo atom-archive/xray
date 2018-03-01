@@ -182,6 +182,7 @@ impl Editor {
         for selection in &mut self.selections {
             let cursor = movement::left(&buffer, selection.head());
             selection.set_head(&buffer, cursor);
+            selection.goal_column = None;
         }
     }
 
@@ -208,13 +209,20 @@ impl Editor {
         for selection in &mut self.selections {
             let cursor = movement::right(&buffer, selection.head());
             selection.set_head(&buffer, cursor);
+            selection.goal_column = None;
         }
     }
 
     pub fn move_up(&mut self) {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
-            let (cursor, goal_column) = movement::up(&buffer, &selection.end, selection.goal_column);
+            let start = buffer.point_for_anchor(&selection.start);
+            let end = buffer.point_for_anchor(&selection.end);
+            if start != end {
+                selection.goal_column = None;
+            }
+
+            let (cursor, goal_column) = movement::up(&buffer, &selection.start, selection.goal_column);
             selection.start = cursor.clone();
             selection.end = cursor;
             selection.goal_column = goal_column;
@@ -234,6 +242,12 @@ impl Editor {
     pub fn move_down(&mut self) {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
+            let start = buffer.point_for_anchor(&selection.start);
+            let end = buffer.point_for_anchor(&selection.end);
+            if start != end {
+                selection.goal_column = None;
+            }
+
             let (cursor, goal_column) = movement::down(&buffer, &selection.end, selection.goal_column);
             selection.start = cursor.clone();
             selection.end = cursor;
@@ -440,6 +454,21 @@ mod tests {
         editor.select_up();
         editor.select_up();
         assert_eq!(render_selections(&editor), vec![rev_selection((0, 1), (0, 3))]);
+
+        // Favors selection end when moving down
+        editor.move_down();
+        editor.move_down();
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+
+        // Favors selection start when moving up
+        editor.move_left();
+        editor.move_left();
+        editor.select_right();
+        editor.select_right();
+        assert_eq!(render_selections(&editor), vec![selection((2, 1), (2, 3))]);
+        editor.move_up();
+        editor.move_up();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
     }
 
     #[test]
