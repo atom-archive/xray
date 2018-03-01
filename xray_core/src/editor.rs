@@ -16,7 +16,8 @@ pub struct Editor {
 struct Selection {
     start: Anchor,
     end: Anchor,
-    reversed: bool
+    reversed: bool,
+    goal_column: Option<u32>
 }
 
 pub mod render {
@@ -53,7 +54,8 @@ impl Editor {
             selections = vec![Selection {
                 start: buffer.anchor_before_offset(0).unwrap(),
                 end: buffer.anchor_before_offset(0).unwrap(),
-                reversed: false
+                reversed: false,
+                goal_column: None
             }];
         }
 
@@ -128,7 +130,8 @@ impl Editor {
             Selection {
                 start: new_anchor.clone(),
                 end: new_anchor,
-                reversed: false
+                reversed: false,
+                goal_column: None
             }
         }).collect();
     }
@@ -141,7 +144,8 @@ impl Editor {
             Selection {
                 start: new_anchor.clone(),
                 end: new_anchor,
-                reversed: false
+                reversed: false,
+                goal_column: None
             }
         }).collect();
     }
@@ -149,17 +153,30 @@ impl Editor {
     pub fn move_up(&mut self) {
         let buffer = self.buffer.borrow();
         self.selections = self.selections.iter().map(|selection| {
+            let goal_column;
             let mut new_point = buffer.point_for_anchor(selection.head()).unwrap();
-            if new_point.row > 1 {
+            if new_point.row > 0 {
                 new_point.row -= 1;
+                new_point.column = selection.goal_column.unwrap_or(new_point.column);
+
+                let row_len = buffer.len_for_row(new_point.row).unwrap();
+                if new_point.column > row_len {
+                    goal_column = Some(new_point.column);
+                    new_point.column = row_len;
+                } else {
+                    goal_column = None;
+                }
             } else {
+                goal_column = selection.goal_column.or(Some(new_point.column));
                 new_point = Point::new(0, 0);
             }
+
             let new_anchor = buffer.anchor_before_point(new_point).unwrap();
             Selection {
                 start: new_anchor.clone(),
                 end: new_anchor,
-                reversed: false
+                reversed: false,
+                goal_column
             }
         }).collect();
     }
@@ -168,17 +185,31 @@ impl Editor {
         let buffer = self.buffer.borrow();
         self.selections = self.selections.iter().map(|selection| {
             let max_point = buffer.max_point();
+
+            let goal_column;
             let mut new_point = buffer.point_for_anchor(selection.head()).unwrap();
             if new_point.row < max_point.row {
                 new_point.row += 1;
+                new_point.column = selection.goal_column.unwrap_or(new_point.column);
+
+                let row_len = buffer.len_for_row(new_point.row).unwrap();
+                if new_point.column > row_len {
+                    goal_column = Some(new_point.column);
+                    new_point.column = row_len;
+                } else {
+                    goal_column = None;
+                }
             } else {
+                goal_column = selection.goal_column.or(Some(new_point.column));
                 new_point = max_point;
             }
+
             let new_anchor = buffer.anchor_before_point(new_point).unwrap();
             Selection {
                 start: new_anchor.clone(),
                 end: new_anchor,
-                reversed: false
+                reversed: false,
+                goal_column
             }
         }).collect();
     }
@@ -256,8 +287,6 @@ mod tests {
         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
         editor.move_up();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        return
 
         // Maintains a goal column when moving down
         // This means we'll jump to the column we started with even after crossing a shorter line

@@ -152,6 +152,33 @@ impl Buffer {
         self.fragments.len::<CharacterCount>().0
     }
 
+    pub fn len_for_row(&self, row: u32) -> Result<u32> {
+        let mut cursor = self.fragments.cursor();
+
+        let row_start_offset = {
+            let row_start = Point { row, column: 0 };
+            cursor.seek(&row_start, SeekBias::Left);
+
+            let row_start_fragment = cursor.item().ok_or(Error::OffsetOutOfRange)?;
+            let point_within_fragment = row_start - &cursor.start::<Point>();
+            row_start_fragment.offset_for_point(point_within_fragment)?
+        };
+
+        let row_end_offset = {
+            let next_row_start = Point { row: row + 1, column: 0 };
+            cursor.seek(&next_row_start, SeekBias::Left);
+
+            if let Some(next_row_start_fragment) = cursor.item() {
+                let point_within_fragment = next_row_start - &cursor.start::<Point>();
+                next_row_start_fragment.offset_for_point(point_within_fragment)? - 1
+            } else {
+                self.len()
+            }
+        };
+
+        Ok((row_end_offset - row_start_offset) as u32)
+    }
+
     pub fn max_point(&self) -> Point {
         self.fragments.len::<Point>()
     }
