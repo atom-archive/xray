@@ -6,6 +6,7 @@ use futures::future::Executor;
 use futures::{Future, Stream};
 use notify_cell::NotifyCell;
 use buffer::{Buffer, Version, Point, Anchor};
+use movement;
 
 pub struct Editor {
     buffer: Rc<RefCell<Buffer>>,
@@ -167,7 +168,7 @@ impl Editor {
             if start != end {
                 selection.end = selection.start.clone();
             } else {
-                let cursor = Self::move_cursor_left(&buffer, &selection.start);
+                let cursor = movement::left(&buffer, &selection.start);
                 selection.start = cursor.clone();
                 selection.end = cursor;
             }
@@ -179,20 +180,9 @@ impl Editor {
     pub fn select_left(&mut self) {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
-            let cursor = Self::move_cursor_left(&buffer, selection.head());
+            let cursor = movement::left(&buffer, selection.head());
             selection.set_head(&buffer, cursor);
         }
-    }
-
-    fn move_cursor_left(buffer: &Buffer, cursor: &Anchor) -> Anchor {
-        let mut point = buffer.point_for_anchor(cursor).unwrap();
-        if point.column > 0 {
-            point.column -= 1;
-        } else if point.row > 0 {
-            point.row -= 1;
-            point.column = buffer.len_for_row(point.row).unwrap();
-        }
-        buffer.anchor_before_point(point).unwrap()
     }
 
     pub fn move_right(&mut self) {
@@ -204,7 +194,7 @@ impl Editor {
             if start != end {
                 selection.start = selection.end.clone();
             } else {
-                let cursor = Self::move_cursor_right(&buffer, &selection.end);
+                let cursor = movement::right(&buffer, &selection.end);
                 selection.start = cursor.clone();
                 selection.end = cursor;
             }
@@ -216,27 +206,15 @@ impl Editor {
     pub fn select_right(&mut self) {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
-            let cursor = Self::move_cursor_right(&buffer, selection.head());
+            let cursor = movement::right(&buffer, selection.head());
             selection.set_head(&buffer, cursor);
         }
-    }
-
-    fn move_cursor_right(buffer: &Buffer, cursor: &Anchor) -> Anchor {
-        let mut point = buffer.point_for_anchor(cursor).unwrap();
-        let max_column = buffer.len_for_row(point.row).unwrap();
-        if point.column < max_column {
-            point.column += 1;
-        } else if point.row < buffer.max_point().row {
-            point.row += 1;
-            point.column = 0;
-        }
-        buffer.anchor_before_point(point).unwrap()
     }
 
     pub fn move_up(&mut self) {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
-            let (cursor, goal_column) = Self::move_cursor_up(&buffer, &selection.end, selection.goal_column);
+            let (cursor, goal_column) = movement::up(&buffer, &selection.end, selection.goal_column);
             selection.start = cursor.clone();
             selection.end = cursor;
             selection.goal_column = goal_column;
@@ -247,32 +225,16 @@ impl Editor {
     pub fn select_up(&mut self) {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
-            let (cursor, goal_column) = Self::move_cursor_up(&buffer, selection.head(), selection.goal_column);
+            let (cursor, goal_column) = movement::up(&buffer, selection.head(), selection.goal_column);
             selection.set_head(&buffer, cursor);
             selection.goal_column = goal_column;
         }
     }
 
-    fn move_cursor_up(buffer: &Buffer, cursor: &Anchor, goal_column: Option<u32>) -> (Anchor, Option<u32>) {
-        let mut point = buffer.point_for_anchor(cursor).unwrap();
-        let goal_column = goal_column.or(Some(point.column));
-        if point.row > 0 {
-            point.row -= 1;
-            point.column = cmp::min(
-                goal_column.unwrap(),
-                buffer.len_for_row(point.row).unwrap()
-            );
-        } else {
-            point = Point::new(0, 0);
-        }
-
-        (buffer.anchor_before_point(point).unwrap(), goal_column)
-    }
-
     pub fn move_down(&mut self) {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
-            let (cursor, goal_column) = Self::move_cursor_down(&buffer, &selection.end, selection.goal_column);
+            let (cursor, goal_column) = movement::down(&buffer, &selection.end, selection.goal_column);
             selection.start = cursor.clone();
             selection.end = cursor;
             selection.goal_column = goal_column;
@@ -283,27 +245,10 @@ impl Editor {
     pub fn select_down(&mut self) {
         let buffer = self.buffer.borrow();
         for selection in &mut self.selections {
-            let (cursor, goal_column) = Self::move_cursor_down(&buffer, selection.head(), selection.goal_column);
+            let (cursor, goal_column) = movement::down(&buffer, selection.head(), selection.goal_column);
             selection.set_head(&buffer, cursor);
             selection.goal_column = goal_column;
         }
-    }
-
-    fn move_cursor_down(buffer: &Buffer, cursor: &Anchor, goal_column: Option<u32>) -> (Anchor, Option<u32>) {
-        let mut point = buffer.point_for_anchor(cursor).unwrap();
-        let goal_column = goal_column.or(Some(point.column));
-        let max_point = buffer.max_point();
-        if point.row < max_point.row {
-            point.row += 1;
-            point.column = cmp::min(
-                goal_column.unwrap(),
-                buffer.len_for_row(point.row).unwrap()
-            )
-        } else {
-            point = max_point;
-        }
-
-        (buffer.anchor_before_point(point).unwrap(), goal_column)
     }
 }
 
