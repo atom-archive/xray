@@ -34,6 +34,7 @@ pub enum Status {
     Cancelled,
     EscapeCalledTwice,
     HandleScopeMismatch,
+    CallBackScopeMismatch,
     StringContainsNull
 }
 
@@ -236,7 +237,8 @@ impl From<sys::napi_status> for Status {
             napi_pending_exception => PendingException,
             napi_cancelled => Cancelled,
             napi_escape_called_twice => EscapeCalledTwice,
-            napi_handle_scope_mismatch => HandleScopeMismatch
+            napi_handle_scope_mismatch => HandleScopeMismatch,
+            napi_callback_scope_mismatch => CallBackScopeMismatch
         }
     }
 }

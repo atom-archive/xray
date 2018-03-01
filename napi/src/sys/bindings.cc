@@ -3,6 +3,10 @@
 #include <node.h>
 #include <v8.h>
 
+#ifdef __unix__
+#include <string.h>
+#endif
+
 static
 v8::Local<v8::Value> V8LocalValueFromJsValue(napi_value v) {
   v8::Local<v8::Value> local;
