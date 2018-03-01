@@ -145,6 +145,43 @@ impl Editor {
             }
         }).collect();
     }
+
+    pub fn move_up(&mut self) {
+        let buffer = self.buffer.borrow();
+        self.selections = self.selections.iter().map(|selection| {
+            let mut new_point = buffer.point_for_anchor(selection.head()).unwrap();
+            if new_point.row > 1 {
+                new_point.row -= 1;
+            } else {
+                new_point = Point::new(0, 0);
+            }
+            let new_anchor = buffer.anchor_before_point(new_point).unwrap();
+            Selection {
+                start: new_anchor.clone(),
+                end: new_anchor,
+                reversed: false
+            }
+        }).collect();
+    }
+
+    pub fn move_down(&mut self) {
+        let buffer = self.buffer.borrow();
+        self.selections = self.selections.iter().map(|selection| {
+            let max_point = buffer.max_point();
+            let mut new_point = buffer.point_for_anchor(selection.head()).unwrap();
+            if new_point.row < max_point.row {
+                new_point.row += 1;
+            } else {
+                new_point = max_point;
+            }
+            let new_anchor = buffer.anchor_before_point(new_point).unwrap();
+            Selection {
+                start: new_anchor.clone(),
+                end: new_anchor,
+                reversed: false
+            }
+        }).collect();
+    }
 }
 
 impl Drop for Editor {
@@ -190,25 +227,76 @@ mod tests {
     }
 
     #[test]
-    fn test_move_right_and_left() {
+    fn test_cursor_movement() {
         let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
-        editor.buffer.borrow_mut().splice(0..0, "abc\ndef\nghi");
+        editor.buffer.borrow_mut().splice(0..0, "abc\n\ndef");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
         editor.move_right();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
 
+        // Wraps across lines moving right
         for _ in 0..3 { editor.move_right(); }
         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
 
-        for _ in 0..8 { editor.move_right(); }
+        // Stops at end
+        for _ in 0..4 { editor.move_right(); }
         assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
 
+        // Wraps across lines moving left
         for _ in 0..4 { editor.move_left(); }
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 3)]);
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
 
-        for _ in 0..8 { editor.move_left(); }
+        // Stops at start
+        for _ in 0..4 { editor.move_left(); }
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        // Moves down and up at column 0
+        editor.move_down();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_up();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        return
+
+        // Maintains a goal column when moving down
+        // This means we'll jump to the column we started with even after crossing a shorter line
+        editor.move_right();
+        editor.move_right();
+        editor.move_down();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_down();
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 2)]);
+
+        // Jumps to end when moving down on the last line.
+        editor.move_down();
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+
+        // Stops at end
+        editor.move_down();
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+
+        // Resets the goal column when moving horizontally
+        editor.move_left();
+        editor.move_left();
+        editor.move_up();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_up();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+
+        // Jumps to start when moving up on the first line
+        editor.move_up();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        // Preserves goal column after jumping to start/end
+        editor.move_down();
+        editor.move_down();
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 1)]);
+        editor.move_down();
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+        editor.move_up();
+        editor.move_up();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
     }
 
     fn render_selections(editor: &Editor) -> Vec<render::Selection> {

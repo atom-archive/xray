@@ -1,7 +1,7 @@
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::iter;
-use std::ops::{Add, AddAssign, Range};
+use std::ops::{Add, AddAssign, Sub, Range};
 use std::result;
 use std::sync::Arc;
 use super::tree::{self, Tree, SeekBias};
@@ -12,7 +12,7 @@ type LocalTimestamp = usize;
 type LamportTimestamp = usize;
 type Result<T> = result::Result<T, Error>;
 
-#[derive(Debug)]
+#[derive(Eq, PartialEq, Debug)]
 pub enum Error {
     OffsetOutOfRange,
     InvalidAnchor
@@ -150,6 +150,10 @@ impl Buffer {
 
     pub fn len(&self) -> usize {
         self.fragments.len::<CharacterCount>().0
+    }
+
+    pub fn max_point(&self) -> Point {
+        self.fragments.len::<Point>()
     }
 
     pub fn to_u16_chars(&self) -> Vec<u16> {
@@ -360,7 +364,7 @@ impl Buffer {
                 }
             }
             AnchorBias::Right => {
-                if offset == self.len() {
+                if offset == max_offset {
                     return Ok(Anchor(AnchorInner::End));
                 } else {
                     seek_bias = SeekBias::Right;
@@ -375,6 +379,49 @@ impl Buffer {
         Ok(Anchor(AnchorInner::Middle {
             insertion_id: fragment.insertion.id,
             offset: offset - cursor.start::<CharacterCount>().0,
+            bias
+        }))
+    }
+
+    pub fn anchor_before_point(&self, point: Point) -> Result<Anchor> {
+        self.anchor_for_point(point, AnchorBias::Left)
+    }
+
+    pub fn anchor_after_point(&self, point: Point) -> Result<Anchor> {
+        self.anchor_for_point(point, AnchorBias::Right)
+    }
+
+    fn anchor_for_point(&self, point: Point, bias: AnchorBias) -> Result<Anchor> {
+        let max_point = self.max_point();
+        if point > max_point {
+            return Err(Error::OffsetOutOfRange);
+        }
+
+        let seek_bias;
+        match bias {
+            AnchorBias::Left => {
+                if point.is_zero() {
+                    return Ok(Anchor(AnchorInner::Start));
+                } else {
+                    seek_bias = SeekBias::Left;
+                }
+            }
+            AnchorBias::Right => {
+                if point == max_point {
+                    return Ok(Anchor(AnchorInner::End));
+                } else {
+                    seek_bias = SeekBias::Right;
+                }
+            }
+        };
+
+        let mut cursor = self.fragments.cursor();
+        cursor.seek(&point, seek_bias);
+        let fragment = cursor.item().unwrap();
+
+        Ok(Anchor(AnchorInner::Middle {
+            insertion_id: fragment.insertion.id,
+            offset: fragment.offset_for_point(point - &cursor.start::<Point>())?,
             bias
         }))
     }
@@ -445,6 +492,10 @@ impl Point {
     pub fn new(row: u32, column: u32) -> Self {
         Point { row, column }
     }
+
+    pub fn is_zero(&self) -> bool {
+        self.row == 0 && self.column == 0
+    }
 }
 
 impl tree::Dimension for Point {
@@ -460,15 +511,23 @@ impl<'a> Add<&'a Self> for Point {
 
     fn add(self, other: &'a Self) -> Self::Output {
         if other.row == 0 {
-            Point {
-                row: self.row,
-                column: self.column + other.column
-            }
+            Point::new(self.row, self.column + other.column)
         } else {
-            Point {
-                row: self.row + other.row,
-                column: other.column
-            }
+            Point::new(self.row + other.row, other.column)
+        }
+    }
+}
+
+impl<'a> Sub<&'a Self> for Point {
+    type Output = Point;
+
+    fn sub(self, other: &'a Self) -> Self::Output {
+        debug_assert!(*other <= self);
+
+        if self.row == other.row {
+            Point::new(0, self.column - other.column)
+        } else {
+            Point::new(self.row - other.row, self.column)
         }
     }
 }
@@ -586,6 +645,28 @@ impl Text {
             column: (end_offset - cmp::max(last_line_start_offset, start_offset)) as u32
         }
     }
+
+    fn offset_for_point(&self, point: Point) -> Result<usize> {
+        let row_start_offset;
+        if point.row == 0 {
+            row_start_offset = 0;
+        } else {
+            row_start_offset = self.newline_offsets[(point.row - 1) as usize] + 1;
+        }
+
+        let row_end_offset = if self.newline_offsets.len() > point.row as usize {
+            self.newline_offsets[point.row as usize]
+        } else {
+            self.len()
+        };
+
+        let target_offset = row_start_offset + point.column as usize;
+        if target_offset <= row_end_offset {
+            Ok(target_offset)
+        } else {
+            Err(Error::OffsetOutOfRange)
+        }
+    }
 }
 
 impl<'a> From<&'a str> for Text {
@@ -686,6 +767,12 @@ impl Fragment {
 
     fn is_visible(&self) -> bool {
         self.deletions.is_empty()
+    }
+
+    fn offset_for_point(&self, point: Point) -> Result<usize> {
+        let text = &self.insertion.text;
+        let point_in_insertion = text.compute_2d_extent(0, self.start_offset) + &point;
+        Ok(text.offset_for_point(point_in_insertion)? - self.start_offset)
     }
 }
 
@@ -914,6 +1001,27 @@ mod tests {
     }
 
     #[test]
+    fn test_offset_for_point () {
+        let text = Text::from("abc\ndefgh");
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 0 }), Ok(0));
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 1 }), Ok(1));
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 2 }), Ok(2));
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 3 }), Ok(3));
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 4 }), Err(Error::OffsetOutOfRange));
+        assert_eq!(text.offset_for_point(Point { row: 1, column: 0 }), Ok(4));
+        assert_eq!(text.offset_for_point(Point { row: 1, column: 1 }), Ok(5));
+        assert_eq!(text.offset_for_point(Point { row: 1, column: 5 }), Ok(9));
+        assert_eq!(text.offset_for_point(Point { row: 1, column: 6 }), Err(Error::OffsetOutOfRange));
+
+        let text = Text::from("abc");
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 0 }), Ok(0));
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 1 }), Ok(1));
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 2 }), Ok(2));
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 3 }), Ok(3));
+        assert_eq!(text.offset_for_point(Point { row: 0, column: 4 }), Err(Error::OffsetOutOfRange));
+    }
+
+    #[test]
     fn fragment_ids() {
         for seed in 0..10 {
             use rand::{Rng, SeedableRng, StdRng};
@@ -968,6 +1076,17 @@ mod tests {
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
         assert_eq!(buffer.point_for_anchor(&left_anchor).unwrap(), Point { row: 1, column: 1 });
         assert_eq!(buffer.point_for_anchor(&right_anchor).unwrap(), Point { row: 1, column: 3 });
+
+        // Ensure anchoring to a point is equivalent to anchoring to an offset.
+        assert_eq!(buffer.anchor_before_point(Point { row: 0, column: 0 }), buffer.anchor_before_offset(0));
+        assert_eq!(buffer.anchor_before_point(Point { row: 0, column: 1 }), buffer.anchor_before_offset(1));
+        assert_eq!(buffer.anchor_before_point(Point { row: 0, column: 2 }), buffer.anchor_before_offset(2));
+        assert_eq!(buffer.anchor_before_point(Point { row: 0, column: 3 }), buffer.anchor_before_offset(3));
+        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 0 }), buffer.anchor_before_offset(4));
+        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 1 }), buffer.anchor_before_offset(5));
+        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 2 }), buffer.anchor_before_offset(6));
+        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 3 }), buffer.anchor_before_offset(7));
+        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 4 }), buffer.anchor_before_offset(8));
     }
 
     #[test]

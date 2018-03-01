@@ -408,7 +408,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
     pub fn seek<D: Dimension<Summary=T::Summary>>(&mut self, pos: &D, bias: SeekBias) {
         self.seek_and_build_prefix(pos, bias, None);
     }
-
+				
     pub fn build_prefix<D: Dimension<Summary=T::Summary>>(&mut self, end: &D, bias: SeekBias) -> Tree<T> {
         let mut prefix = Tree::new();
         self.seek_and_build_prefix(end, bias, Some(&mut prefix));
