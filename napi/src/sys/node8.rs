@@ -38,7 +38,7 @@ impl From<napi_status> for Status {
             napi_pending_exception => PendingException,
             napi_cancelled => Cancelled,
             napi_escape_called_twice => EscapeCalledTwice,
-            napi_handle_scope_mismatch => HandleScopeMismatch
+            napi_handle_scope_mismatch => HandleScopeMismatch,
         }
     }
 }
