@@ -470,19 +470,19 @@ impl Buffer {
                 let splits = self.insertions.get(&insertion_id).ok_or(Error::InvalidAnchor)?;
                 let mut splits_cursor = splits.cursor();
                 splits_cursor.seek(&InsertionOffset(offset), seek_bias);
-
-                splits_cursor.item().and_then(|split| {
+                splits_cursor.item().ok_or(Error::InvalidAnchor).and_then(|split| {
                     let mut fragments_cursor = self.fragments.cursor();
                     fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
-                    fragments_cursor.item().map(|fragment| {
+                    fragments_cursor.item().ok_or(Error::InvalidAnchor).and_then(|fragment| {
                         let overshoot = if fragment.is_visible() {
-                            fragment.insertion.text.compute_2d_extent(fragment.start_offset, offset)
+                            fragment.point_for_offset(offset)?
                         } else {
                             Point {row: 0, column: 0}
                         };
-                        fragments_cursor.start::<Point>() + &overshoot
+
+                        Ok(fragments_cursor.start::<Point>() + &overshoot)
                     })
-                }).ok_or(Error::InvalidAnchor)
+                })
             }
         }
     }
@@ -630,29 +630,30 @@ impl Text {
         self.code_units.len()
     }
 
-    fn compute_2d_extent(&self, start_offset: usize, end_offset: usize) -> Point {
-        let newlines_start = find_insertion_index(&self.newline_offsets, &start_offset);
-        let newlines_end = find_insertion_index(&self.newline_offsets, &end_offset);
-
-        let last_line_start_offset = if newlines_end == 0 {
-            0
+    fn point_for_offset(&self, offset: usize) -> Result<Point> {
+        if offset > self.len() {
+            Err(Error::OffsetOutOfRange)
         } else {
-            self.newline_offsets[newlines_end - 1] + 1
-        };
+            let row = find_insertion_index(&self.newline_offsets, &offset);
+            let row_start_offset = if row == 0 {
+                0
+            } else {
+                self.newline_offsets[row - 1] + 1
+            };
 
-        Point {
-            row: (newlines_end - newlines_start) as u32,
-            column: (end_offset - cmp::max(last_line_start_offset, start_offset)) as u32
+            Ok(Point {
+                row: row as u32,
+                column: (offset - row_start_offset) as u32
+            })
         }
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize> {
-        let row_start_offset;
-        if point.row == 0 {
-            row_start_offset = 0;
+        let row_start_offset = if point.row == 0 {
+            0
         } else {
-            row_start_offset = self.newline_offsets[(point.row - 1) as usize] + 1;
-        }
+            self.newline_offsets[(point.row - 1) as usize] + 1
+        };
 
         let row_end_offset = if self.newline_offsets.len() > point.row as usize {
             self.newline_offsets[point.row as usize]
@@ -769,9 +770,14 @@ impl Fragment {
         self.deletions.is_empty()
     }
 
+    fn point_for_offset(&self, offset: usize) -> Result<Point> {
+        let text = &self.insertion.text;
+        return Ok(text.point_for_offset(offset)? - &text.point_for_offset(self.start_offset)?)
+    }
+
     fn offset_for_point(&self, point: Point) -> Result<usize> {
         let text = &self.insertion.text;
-        let point_in_insertion = text.compute_2d_extent(0, self.start_offset) + &point;
+        let point_in_insertion = text.point_for_offset(self.start_offset)? + &point;
         Ok(text.offset_for_point(point_in_insertion)? - self.start_offset)
     }
 }
@@ -781,12 +787,11 @@ impl tree::Item for Fragment {
 
     fn summarize(&self) -> Self::Summary {
         if self.is_visible() {
+            let fragment_2d_start = self.insertion.text.point_for_offset(self.start_offset).unwrap();
+            let fragment_2d_end = self.insertion.text.point_for_offset(self.end_offset).unwrap();
             FragmentSummary {
                 extent: self.len(),
-                extent_2d: self.insertion.text.compute_2d_extent(
-                    self.start_offset,
-                    self.end_offset
-                ),
+                extent_2d: fragment_2d_end - &fragment_2d_start,
                 max_fragment_id: self.id.clone()
             }
         } else {
@@ -981,23 +986,29 @@ mod tests {
     }
 
     #[test]
-    fn compute_2d_extent () {
+    fn test_point_for_offset() {
         let text = Text::from("abc\ndefgh\nijklm\nopq");
-        assert_eq!(text.compute_2d_extent(3, 15), Point {row: 2, column: 5});
-        assert_eq!(text.compute_2d_extent(3, 16), Point {row: 3, column: 0});
-        assert_eq!(text.compute_2d_extent(4, 16), Point {row: 2, column: 0});
-        assert_eq!(text.compute_2d_extent(1, 2), Point {row: 0, column: 1});
-        assert_eq!(text.compute_2d_extent(1, 3), Point {row: 0, column: 2});
-        assert_eq!(text.compute_2d_extent(5, 7), Point {row: 0, column: 2});
-        assert_eq!(text.compute_2d_extent(5, 9), Point {row: 0, column: 4});
-        assert_eq!(text.compute_2d_extent(0, 0), Point {row: 0, column: 0});
-        assert_eq!(text.compute_2d_extent(2, 2), Point {row: 0, column: 0});
-        assert_eq!(text.compute_2d_extent(3, 3), Point {row: 0, column: 0});
-        assert_eq!(text.compute_2d_extent(4, 4), Point {row: 0, column: 0});
-        assert_eq!(text.compute_2d_extent(4, 4), Point {row: 0, column: 0});
-        assert_eq!(text.compute_2d_extent(8, 8), Point {row: 0, column: 0});
-        assert_eq!(text.compute_2d_extent(9, 9), Point {row: 0, column: 0});
-        assert_eq!(text.compute_2d_extent(10, 10), Point {row: 0, column: 0});
+        assert_eq!(text.point_for_offset(0), Ok(Point { row: 0, column: 0 }));
+        assert_eq!(text.point_for_offset(1), Ok(Point { row: 0, column: 1 }));
+        assert_eq!(text.point_for_offset(2), Ok(Point { row: 0, column: 2 }));
+        assert_eq!(text.point_for_offset(3), Ok(Point { row: 0, column: 3 }));
+        assert_eq!(text.point_for_offset(4), Ok(Point { row: 1, column: 0 }));
+        assert_eq!(text.point_for_offset(5), Ok(Point { row: 1, column: 1 }));
+        assert_eq!(text.point_for_offset(9), Ok(Point { row: 1, column: 5 }));
+        assert_eq!(text.point_for_offset(10), Ok(Point { row: 2, column: 0 }));
+        assert_eq!(text.point_for_offset(14), Ok(Point { row: 2, column: 4 }));
+        assert_eq!(text.point_for_offset(15), Ok(Point { row: 2, column: 5 }));
+        assert_eq!(text.point_for_offset(16), Ok(Point { row: 3, column: 0 }));
+        assert_eq!(text.point_for_offset(17), Ok(Point { row: 3, column: 1 }));
+        assert_eq!(text.point_for_offset(19), Ok(Point { row: 3, column: 3 }));
+        assert_eq!(text.point_for_offset(20), Err(Error::OffsetOutOfRange));
+
+        let text = Text::from("abc");
+        assert_eq!(text.point_for_offset(0), Ok(Point { row: 0, column: 0 }));
+        assert_eq!(text.point_for_offset(1), Ok(Point { row: 0, column: 1 }));
+        assert_eq!(text.point_for_offset(2), Ok(Point { row: 0, column: 2 }));
+        assert_eq!(text.point_for_offset(3), Ok(Point { row: 0, column: 3 }));
+        assert_eq!(text.point_for_offset(4), Err(Error::OffsetOutOfRange));
     }
 
     #[test]
