@@ -144,6 +144,62 @@ impl Editor {
         self.merge_selections();
     }
 
+    pub fn add_selection_above(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+
+            let mut new_selections = Vec::new();
+            for selection in &self.selections {
+                let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
+                let selection_end = buffer.point_for_anchor(&selection.end).unwrap();
+
+                let mut should_insert = false;
+                let mut start = selection_start;
+                let mut end = selection_end;
+                let mut start_goal_column = if selection_start == selection_end {
+                    selection.goal_column.clone()
+                } else {
+                    None
+                };
+                let mut end_goal_column = selection.goal_column.clone();
+                while !should_insert && end.row > 0 {
+                    let (new_start, new_start_goal_column) = movement::up(&buffer, start, start_goal_column);
+                    let (new_end, new_end_goal_column) = movement::up(&buffer, end, end_goal_column);
+
+                    if selection_start == selection_end {
+                        should_insert = selection_end.column == 0 || new_end.column > 0;
+                    } else {
+                        should_insert = new_start.column != new_end.column;
+                    }
+
+                    start = new_start;
+                    end = new_end;
+                    start_goal_column = new_start_goal_column;
+                    end_goal_column = new_end_goal_column;
+                }
+
+                if should_insert {
+                    new_selections.push(Selection {
+                        start: buffer.anchor_before_point(start).unwrap(),
+                        end: buffer.anchor_before_point(end).unwrap(),
+                        reversed: selection.reversed,
+                        goal_column: end_goal_column
+                    });
+                }
+            }
+
+            for selection in new_selections {
+                let index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &selection.start).unwrap()) {
+                    Ok(index) => index,
+                    Err(index) => index
+                };
+                self.selections.insert(index, selection);
+            }
+        }
+
+        self.merge_selections();
+    }
+
     pub fn add_selection_below(&mut self) {
         {
             let buffer = self.buffer.borrow();
@@ -157,7 +213,11 @@ impl Editor {
                 let mut should_insert = false;
                 let mut start = selection_start;
                 let mut end = selection_end;
-                let mut start_goal_column = None;
+                let mut start_goal_column = if selection_start == selection_end {
+                    selection.goal_column.clone()
+                } else {
+                    None
+                };
                 let mut end_goal_column = selection.goal_column.clone();
                 while !should_insert && end.row < max_row {
                     let (new_start, new_start_goal_column) = movement::down(&buffer, start, start_goal_column);
@@ -601,6 +661,56 @@ mod tests {
                 selection((0, 0), (0, 2)),
                 selection((0, 3), (1, 4)),
                 selection((2, 1), (2, 3))
+            ]
+        );
+    }
+
+    #[test]
+    fn test_add_selection_above() {
+        let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
+        editor.buffer.borrow_mut().splice(0..0, "\
+            abcdefghijk\n\
+            lmnop\n\
+            \n\
+            \n\
+            qrstuvwxyz\n\
+        ");
+
+        editor.add_selection(Point::new(2, 0), Point::new(2, 0));
+        editor.add_selection(Point::new(4, 1), Point::new(4, 3));
+        editor.add_selection(Point::new(4, 6), Point::new(4, 6));
+        editor.add_selection(Point::new(4, 7), Point::new(4, 9));
+        editor.add_selection_above();
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 0), (0, 0)),
+                selection((0, 7), (0, 9)),
+                selection((1, 0), (1, 0)),
+                selection((1, 1), (1, 3)),
+                selection((1, 5), (1, 5)),
+                selection((2, 0), (2, 0)),
+                selection((4, 1), (4, 3)),
+                selection((4, 6), (4, 6)),
+                selection((4, 7), (4, 9))
+            ]
+        );
+
+        editor.add_selection_above();
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 0), (0, 0)),
+                selection((0, 1), (0, 3)),
+                selection((0, 6), (0, 6)),
+                selection((0, 7), (0, 9)),
+                selection((1, 0), (1, 0)),
+                selection((1, 1), (1, 3)),
+                selection((1, 5), (1, 5)),
+                selection((2, 0), (2, 0)),
+                selection((4, 1), (4, 3)),
+                selection((4, 6), (4, 6)),
+                selection((4, 7), (4, 9))
             ]
         );
     }
