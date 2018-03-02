@@ -144,6 +144,62 @@ impl Editor {
         self.merge_selections();
     }
 
+    pub fn add_selection_below(&mut self) {
+        {
+            let buffer = self.buffer.borrow();
+            let max_row = buffer.max_point().row;
+
+            let mut new_selections = Vec::new();
+            for selection in &self.selections {
+                let selection_start_point = buffer.point_for_anchor(&selection.start).unwrap();
+                let selection_end_point = buffer.point_for_anchor(&selection.end).unwrap();
+                let selection_was_empty = selection_start_point == selection_end_point;
+
+                let mut should_insert = false;
+                let mut start = selection.start.clone();
+                let mut end = selection.end.clone();
+                let mut start_goal_column = None;
+                let mut end_goal_column = selection.goal_column.clone();
+                while !should_insert && buffer.point_for_anchor(&end).unwrap().row < max_row {
+                    let (new_start, new_start_goal_column) = movement::down(&buffer, &start, start_goal_column);
+                    let (new_end, new_end_goal_column) = movement::down(&buffer, &end, end_goal_column);
+                    let new_start_point = buffer.point_for_anchor(&new_start).unwrap();
+                    let new_end_point = buffer.point_for_anchor(&new_end).unwrap();
+
+                    if selection_was_empty {
+                        should_insert = selection_end_point.column == 0 || new_end_point.column > 0;
+                    } else {
+                        should_insert = new_start_point.column != new_end_point.column;
+                    }
+
+                    start = new_start;
+                    end = new_end;
+                    start_goal_column = new_start_goal_column;
+                    end_goal_column = new_end_goal_column;
+                }
+
+                if should_insert {
+                    new_selections.push(Selection {
+                        start,
+                        end,
+                        reversed: selection.reversed,
+                        goal_column: end_goal_column
+                    });
+                }
+            }
+
+            for selection in new_selections {
+                let index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &selection.start).unwrap()) {
+                    Ok(index) => index,
+                    Err(index) => index
+                };
+                self.selections.insert(index, selection);
+            }
+        }
+
+        self.merge_selections();
+    }
+
     pub fn move_left(&mut self) {
         {
             let buffer = self.buffer.borrow();
@@ -542,6 +598,52 @@ mod tests {
                 selection((0, 0), (0, 2)),
                 selection((0, 3), (1, 4)),
                 selection((2, 1), (2, 3))
+            ]
+        );
+    }
+
+    #[test]
+    fn test_add_selection_below() {
+        let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
+        editor.buffer.borrow_mut().splice(0..0, "\
+            abcdefgh\n\
+            ijklm\n\
+            \n\
+            \n\
+            nopqrstuvwx\n\
+            yz\
+        ");
+
+        editor.add_selection(Point::new(0, 1), Point::new(0, 1));
+        editor.add_selection(Point::new(0, 4), Point::new(0, 8));
+        editor.add_selection(Point::new(4, 5), Point::new(4, 6));
+        editor.add_selection_below();
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 0), (0, 0)),
+                selection((0, 1), (0, 1)),
+                selection((0, 4), (0, 8)),
+                selection((1, 0), (1, 0)),
+                selection((1, 1), (1, 1)),
+                selection((1, 4), (1, 5)),
+                selection((4, 5), (4, 6))
+            ]
+        );
+
+        editor.add_selection_below();
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 0), (0, 0)),
+                selection((0, 1), (0, 1)),
+                selection((0, 4), (0, 8)),
+                selection((1, 0), (1, 0)),
+                selection((1, 1), (1, 1)),
+                selection((1, 4), (1, 5)),
+                selection((2, 0), (2, 0)),
+                selection((4, 1), (4, 1)),
+                selection((4, 4), (4, 8))
             ]
         );
     }
