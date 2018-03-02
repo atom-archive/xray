@@ -150,11 +150,13 @@ impl Editor {
 
             let mut new_selections = Vec::new();
             for selection in &self.selections {
-                // TODO: Add test for start.row != end.row.
                 let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
                 let selection_end = buffer.point_for_anchor(&selection.end).unwrap();
-                let goal_column = selection.goal_column.unwrap_or(selection_end.column);
+                if selection_start.row != selection_end.row {
+                    continue;
+                }
 
+                let goal_column = selection.goal_column.unwrap_or(selection_end.column);
                 let mut row = selection_start.row;
                 while row > 0 {
                     row -= 1;
@@ -204,11 +206,13 @@ impl Editor {
 
             let mut new_selections = Vec::new();
             for selection in &self.selections {
-                // TODO: Add test for start.row != end.row.
                 let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
                 let selection_end = buffer.point_for_anchor(&selection.end).unwrap();
-                let goal_column = selection.goal_column.unwrap_or(selection_end.column);
+                if selection_start.row != selection_end.row {
+                    continue;
+                }
 
+                let goal_column = selection.goal_column.unwrap_or(selection_end.column);
                 let mut row = selection_start.row + 1;
                 while row <= max_row {
                     let max_column = buffer.len_for_row(row).unwrap();
@@ -671,6 +675,22 @@ mod tests {
             qrstuvwxyz\n\
         ");
 
+        // Multi-line selections
+        editor.move_down();
+        editor.move_right();
+        editor.move_right();
+        editor.select_down();
+        editor.select_down();
+        editor.select_down();
+        editor.select_right();
+        editor.select_right();
+        editor.add_selection_above();
+        assert_eq!(render_selections(&editor), vec![selection((1, 2), (4, 4))]);
+
+        // Single-line selections
+        editor.move_up();
+        editor.move_left();
+        editor.move_left();
         editor.add_selection(Point::new(2, 0), Point::new(2, 0));
         editor.add_selection(Point::new(4, 1), Point::new(4, 3));
         editor.add_selection(Point::new(4, 6), Point::new(4, 6));
@@ -722,6 +742,17 @@ mod tests {
             yz\
         ");
 
+        // Multi-line selections
+        editor.select_down();
+        editor.select_down();
+        editor.select_down();
+        editor.select_down();
+        editor.select_right();
+        editor.add_selection_below();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (4, 1))]);
+
+        // Single-line selections
+        editor.move_left();
         editor.add_selection(Point::new(0, 1), Point::new(0, 1));
         editor.add_selection(Point::new(0, 4), Point::new(0, 8));
         editor.add_selection(Point::new(4, 5), Point::new(4, 6));
