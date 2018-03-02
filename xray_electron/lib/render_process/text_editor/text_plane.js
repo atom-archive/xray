@@ -96,25 +96,18 @@ class Renderer {
       textBlendPass2FragmentShader
     );
 
-    // this.textBlendVAO = this.gl.createVertexArray();
-    // this.gl.bindVertexArray(this.textBlendVAO);
 
+    this.createBuffers();
+    this.textBlendVAO = this.createTextBlendVAO();
+  }
+
+  createBuffers() {
     this.unitQuadVerticesBuffer = this.gl.createBuffer();
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.unitQuadVerticesBuffer);
     this.gl.bufferData(
       this.gl.ARRAY_BUFFER,
       UNIT_QUAD_VERTICES,
-      gl.STATIC_DRAW
-    );
-
-    this.gl.enableVertexAttribArray(shaders.attributes.unitQuadVertex);
-    this.gl.vertexAttribPointer(
-      shaders.attributes.unitQuadVertex,
-      2,
-      this.gl.FLOAT,
-      false,
-      0,
-      0
+      this.gl.STATIC_DRAW
     );
 
     this.unitQuadElementIndicesBuffer = this.gl.createBuffer();
@@ -125,72 +118,91 @@ class Renderer {
     this.gl.bufferData(
       this.gl.ELEMENT_ARRAY_BUFFER,
       UNIT_QUAD_ELEMENT_INDICES,
-      gl.STATIC_DRAW
+      this.gl.STATIC_DRAW
     );
 
     this.glyphInstances = new Float32Array(MAX_GLYPH_INSTANCES);
     this.glyphInstancesBuffer = this.gl.createBuffer();
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.glyphInstancesBuffer);
-    this.gl.bufferData(
-      this.gl.ARRAY_BUFFER,
-      this.glyphInstances,
-      this.gl.STREAM_DRAW
+  }
+
+  createTextBlendVAO() {
+    const vao = this.gl.createVertexArray();
+    this.gl.bindVertexArray(vao);
+
+    this.gl.bindBuffer(
+      this.gl.ELEMENT_ARRAY_BUFFER,
+      this.unitQuadElementIndicesBuffer
     );
 
-    this.gl.enableVertexAttribArray(shaders.attributes.targetOrigin);
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.unitQuadVerticesBuffer);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.unitQuadVertex);
     this.gl.vertexAttribPointer(
-      shaders.attributes.targetOrigin,
+      shaders.textBlendAttributes.unitQuadVertex,
+      2,
+      this.gl.FLOAT,
+      false,
+      0,
+      0
+    );
+
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.glyphInstancesBuffer);
+
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.targetOrigin);
+    this.gl.vertexAttribPointer(
+      shaders.textBlendAttributes.targetOrigin,
       2,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       0
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.targetOrigin, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.targetOrigin, 1);
 
-    this.gl.enableVertexAttribArray(shaders.attributes.targetSize);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.targetSize);
     this.gl.vertexAttribPointer(
-      shaders.attributes.targetSize,
+      shaders.textBlendAttributes.targetSize,
       2,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       2 * Float32Array.BYTES_PER_ELEMENT
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.targetSize, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.targetSize, 1);
 
-    this.gl.enableVertexAttribArray(shaders.attributes.textColorRGBA);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.textColorRGBA);
     this.gl.vertexAttribPointer(
-      shaders.attributes.textColorRGBA,
+      shaders.textBlendAttributes.textColorRGBA,
       4,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       4 * Float32Array.BYTES_PER_ELEMENT
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.textColorRGBA, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.textColorRGBA, 1);
 
-    this.gl.enableVertexAttribArray(shaders.attributes.atlasOrigin);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.atlasOrigin);
     this.gl.vertexAttribPointer(
-      shaders.attributes.atlasOrigin,
+      shaders.textBlendAttributes.atlasOrigin,
       2,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       8 * Float32Array.BYTES_PER_ELEMENT
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.atlasOrigin, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.atlasOrigin, 1);
 
-    this.gl.enableVertexAttribArray(shaders.attributes.atlasSize);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.atlasSize);
     this.gl.vertexAttribPointer(
-      shaders.attributes.atlasSize,
+      shaders.textBlendAttributes.atlasSize,
       2,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       10 * Float32Array.BYTES_PER_ELEMENT
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.atlasSize, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.atlasSize, 1);
+
+    return vao
   }
 
   drawLines({ scrollTop, firstVisibleRow, lines }) {

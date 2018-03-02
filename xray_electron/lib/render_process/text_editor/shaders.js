@@ -1,4 +1,4 @@
-exports.attributes = {
+exports.textBlendAttributes = {
   unitQuadVertex: 0,
   targetOrigin: 1,
   targetSize: 2,
