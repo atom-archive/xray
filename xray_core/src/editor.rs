@@ -151,25 +151,22 @@ impl Editor {
 
             let mut new_selections = Vec::new();
             for selection in &self.selections {
-                let selection_start_point = buffer.point_for_anchor(&selection.start).unwrap();
-                let selection_end_point = buffer.point_for_anchor(&selection.end).unwrap();
-                let selection_was_empty = selection_start_point == selection_end_point;
+                let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
+                let selection_end = buffer.point_for_anchor(&selection.end).unwrap();
 
                 let mut should_insert = false;
-                let mut start = selection.start.clone();
-                let mut end = selection.end.clone();
+                let mut start = selection_start;
+                let mut end = selection_end;
                 let mut start_goal_column = None;
                 let mut end_goal_column = selection.goal_column.clone();
-                while !should_insert && buffer.point_for_anchor(&end).unwrap().row < max_row {
-                    let (new_start, new_start_goal_column) = movement::down(&buffer, &start, start_goal_column);
-                    let (new_end, new_end_goal_column) = movement::down(&buffer, &end, end_goal_column);
-                    let new_start_point = buffer.point_for_anchor(&new_start).unwrap();
-                    let new_end_point = buffer.point_for_anchor(&new_end).unwrap();
+                while !should_insert && end.row < max_row {
+                    let (new_start, new_start_goal_column) = movement::down(&buffer, start, start_goal_column);
+                    let (new_end, new_end_goal_column) = movement::down(&buffer, end, end_goal_column);
 
-                    if selection_was_empty {
-                        should_insert = selection_end_point.column == 0 || new_end_point.column > 0;
+                    if selection_start == selection_end {
+                        should_insert = selection_end.column == 0 || new_end.column > 0;
                     } else {
-                        should_insert = new_start_point.column != new_end_point.column;
+                        should_insert = new_start.column != new_end.column;
                     }
 
                     start = new_start;
@@ -180,8 +177,8 @@ impl Editor {
 
                 if should_insert {
                     new_selections.push(Selection {
-                        start,
-                        end,
+                        start: buffer.anchor_before_point(start).unwrap(),
+                        end: buffer.anchor_before_point(end).unwrap(),
                         reversed: selection.reversed,
                         goal_column: end_goal_column
                     });
@@ -204,13 +201,13 @@ impl Editor {
         {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
-                let start = buffer.point_for_anchor(&selection.start);
-                let end = buffer.point_for_anchor(&selection.end);
+                let start = buffer.point_for_anchor(&selection.start).unwrap();
+                let end = buffer.point_for_anchor(&selection.end).unwrap();
 
                 if start != end {
                     selection.end = selection.start.clone();
                 } else {
-                    let cursor = movement::left(&buffer, &selection.start);
+                    let cursor = buffer.anchor_before_point(movement::left(&buffer, start)).unwrap();
                     selection.start = cursor.clone();
                     selection.end = cursor;
                 }
@@ -225,7 +222,8 @@ impl Editor {
         {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
-                let cursor = movement::left(&buffer, selection.head());
+                let head = buffer.point_for_anchor(selection.head()).unwrap();
+                let cursor = buffer.anchor_before_point(movement::left(&buffer, head)).unwrap();
                 selection.set_head(&buffer, cursor);
                 selection.goal_column = None;
             }
@@ -237,13 +235,13 @@ impl Editor {
         {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
-                let start = buffer.point_for_anchor(&selection.start);
-                let end = buffer.point_for_anchor(&selection.end);
+                let start = buffer.point_for_anchor(&selection.start).unwrap();
+                let end = buffer.point_for_anchor(&selection.end).unwrap();
 
                 if start != end {
                     selection.start = selection.end.clone();
                 } else {
-                    let cursor = movement::right(&buffer, &selection.end);
+                    let cursor = buffer.anchor_before_point(movement::right(&buffer, end)).unwrap();
                     selection.start = cursor.clone();
                     selection.end = cursor;
                 }
@@ -258,7 +256,8 @@ impl Editor {
         {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
-                let cursor = movement::right(&buffer, selection.head());
+                let head = buffer.point_for_anchor(selection.head()).unwrap();
+                let cursor = buffer.anchor_before_point(movement::right(&buffer, head)).unwrap();
                 selection.set_head(&buffer, cursor);
                 selection.goal_column = None;
             }
@@ -270,13 +269,14 @@ impl Editor {
         {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
-                let start = buffer.point_for_anchor(&selection.start);
-                let end = buffer.point_for_anchor(&selection.end);
+                let start = buffer.point_for_anchor(&selection.start).unwrap();
+                let end = buffer.point_for_anchor(&selection.end).unwrap();
                 if start != end {
                     selection.goal_column = None;
                 }
 
-                let (cursor, goal_column) = movement::up(&buffer, &selection.start, selection.goal_column);
+                let (start, goal_column) = movement::up(&buffer, start, selection.goal_column);
+                let cursor = buffer.anchor_before_point(start).unwrap();
                 selection.start = cursor.clone();
                 selection.end = cursor;
                 selection.goal_column = goal_column;
@@ -290,8 +290,9 @@ impl Editor {
         {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
-                let (cursor, goal_column) = movement::up(&buffer, selection.head(), selection.goal_column);
-                selection.set_head(&buffer, cursor);
+                let head = buffer.point_for_anchor(selection.head()).unwrap();
+                let (head, goal_column) = movement::up(&buffer, head, selection.goal_column);
+                selection.set_head(&buffer, buffer.anchor_before_point(head).unwrap());
                 selection.goal_column = goal_column;
             }
         }
@@ -302,13 +303,14 @@ impl Editor {
         {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
-                let start = buffer.point_for_anchor(&selection.start);
-                let end = buffer.point_for_anchor(&selection.end);
+                let start = buffer.point_for_anchor(&selection.start).unwrap();
+                let end = buffer.point_for_anchor(&selection.end).unwrap();
                 if start != end {
                     selection.goal_column = None;
                 }
 
-                let (cursor, goal_column) = movement::down(&buffer, &selection.end, selection.goal_column);
+                let (start, goal_column) = movement::down(&buffer, end, selection.goal_column);
+                let cursor = buffer.anchor_before_point(start).unwrap();
                 selection.start = cursor.clone();
                 selection.end = cursor;
                 selection.goal_column = goal_column;
@@ -322,8 +324,9 @@ impl Editor {
         {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
-                let (cursor, goal_column) = movement::down(&buffer, selection.head(), selection.goal_column);
-                selection.set_head(&buffer, cursor);
+                let head = buffer.point_for_anchor(selection.head()).unwrap();
+                let (head, goal_column) = movement::down(&buffer, head, selection.goal_column);
+                selection.set_head(&buffer, buffer.anchor_before_point(head).unwrap());
                 selection.goal_column = goal_column;
             }
         }
