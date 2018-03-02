@@ -25,9 +25,10 @@ process.env.NODE_INCLUDE_PATH = nodeIncludePath
 
 switch (subcommand) {
   case 'build':
-    const releaseFlag = argv.release ? '--release ' : ''
+    const featuresFlag = `--features node${nodeMajorVersion}`
+    const releaseFlag = argv.release ? '--release' : ''
     const targetDir = argv.release ? 'release' : 'debug'
-    cp.execSync(`cargo rustc ${releaseFlag}-- -Clink-args=\"-undefined dynamic_lookup -export_dynamic\"`, {stdio: 'inherit'})
+    cp.execSync(`cargo rustc ${featuresFlag} ${releaseFlag} -- -Clink-args=\"-undefined dynamic_lookup -export_dynamic\"`, {stdio: 'inherit'})
     cp.execSync(`cp target/${targetDir}/{lib${moduleName}.dylib,${moduleName}.node}`, {stdio: 'inherit'})
     break;
   case 'check':
