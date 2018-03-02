@@ -150,41 +150,38 @@ impl Editor {
 
             let mut new_selections = Vec::new();
             for selection in &self.selections {
+                // TODO: Add test for start.row != end.row.
                 let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
                 let selection_end = buffer.point_for_anchor(&selection.end).unwrap();
+                let goal_column = selection.goal_column.unwrap_or(selection_end.column);
 
-                let mut should_insert = false;
-                let mut start = selection_start;
-                let mut end = selection_end;
-                let mut start_goal_column = if selection_start == selection_end {
-                    selection.goal_column.clone()
-                } else {
-                    None
-                };
-                let mut end_goal_column = selection.goal_column.clone();
-                while !should_insert && end.row > 0 {
-                    let (new_start, new_start_goal_column) = movement::up(&buffer, start, start_goal_column);
-                    let (new_end, new_end_goal_column) = movement::up(&buffer, end, end_goal_column);
+                let mut row = selection_start.row;
+                while row > 0 {
+                    row -= 1;
+                    let max_column = buffer.len_for_row(row).unwrap();
 
+                    let start_column;
+                    let end_column;
+                    let add_selection;
                     if selection_start == selection_end {
-                        should_insert = selection_end.column == 0 || new_end.column > 0;
+                        start_column = cmp::min(goal_column, max_column);
+                        end_column = cmp::min(goal_column, max_column);
+                        add_selection = selection_end.column == 0 || end_column > 0;
                     } else {
-                        should_insert = new_start.column != new_end.column;
+                        start_column = cmp::min(selection_start.column, max_column);
+                        end_column = cmp::min(goal_column, max_column);
+                        add_selection = start_column != end_column;
                     }
 
-                    start = new_start;
-                    end = new_end;
-                    start_goal_column = new_start_goal_column;
-                    end_goal_column = new_end_goal_column;
-                }
-
-                if should_insert {
-                    new_selections.push(Selection {
-                        start: buffer.anchor_before_point(start).unwrap(),
-                        end: buffer.anchor_before_point(end).unwrap(),
-                        reversed: selection.reversed,
-                        goal_column: end_goal_column
-                    });
+                    if add_selection {
+                        new_selections.push(Selection {
+                            start: buffer.anchor_before_point(Point::new(row, start_column)).unwrap(),
+                            end: buffer.anchor_before_point(Point::new(row, end_column)).unwrap(),
+                            reversed: selection.reversed,
+                            goal_column: Some(goal_column)
+                        });
+                        break;
+                    }
                 }
             }
 
