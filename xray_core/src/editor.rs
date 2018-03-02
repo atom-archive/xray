@@ -213,8 +213,9 @@ impl Editor {
                 }
 
                 let goal_column = selection.goal_column.unwrap_or(selection_end.column);
-                let mut row = selection_start.row + 1;
-                while row <= max_row {
+                let mut row = selection_start.row;
+                while row < max_row {
+                    row += 1;
                     let max_column = buffer.len_for_row(row).unwrap();
 
                     let start_column;
@@ -238,8 +239,6 @@ impl Editor {
                             goal_column: Some(goal_column)
                         });
                         break;
-                    } else {
-                        row += 1;
                     }
                 }
             }
