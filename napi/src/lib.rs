@@ -10,7 +10,7 @@ use std::string::String as RustString;
 pub mod sys;
 mod executor;
 
-use sys::Status;
+pub use sys::Status;
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type Callback = extern "C" fn(sys::napi_env, sys::napi_callback_info) -> sys::napi_value;
