@@ -1,6 +1,5 @@
 const React = require("react");
 const ReactDOM = require("react-dom");
-const ResizeObserverPolyfill = require("resize-observer-polyfill");
 const PropTypes = require("prop-types");
 const { styled } = require("styletron-react");
 const xray = require("xray");
@@ -19,7 +18,7 @@ class TextEditorContainer extends React.Component {
     }
 
     this.state = {
-      resizeObserver: new ResizeObserverPolyfill((entries) => this.componentDidResize(entries[0].contentRect)),
+      resizeObserver: new ResizeObserver((entries) => this.componentDidResize(entries[0].contentRect)),
       editor: editor,
       scrollTop: 0,
       height: 0,

@@ -4,13 +4,12 @@
   "main": "./lib/main_process/main.js",
   "license": "MIT",
   "scripts": {
-    "start": "node_modules/.bin/electron index.html"
+    "start": "node_modules/.bin/electron ."
   },
   "dependencies": {
     "prop-types": "^15.6.0",
     "react": "^16.2.0",
     "react-dom": "^16.2.0",
-    "resize-observer-polyfill": "^1.5.0",
     "styletron-client": "^3.0.4",
     "styletron-react": "^3.0.4",
     "xray": "../xray_node"
