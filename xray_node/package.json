@@ -5,9 +5,9 @@
   "main": "target/release/xray_node",
   "scripts": {
     "install": "npm run build-release",
-    "build": "napi build",
-    "build-release": "napi build --release",
-    "check": "napi check"
+    "build": "node_modules/.bin/napi build",
+    "build-release": "node_modules/.bin/napi build --release",
+    "check": "node_modules/.bin/napi check"
   },
   "types": "xray.d.ts",
   "repository": {
