@@ -3,10 +3,6 @@ name = "napi"
 version = "0.1.0"
 authors = ["Nathan Sobo <nathan@github.com>"]
 
-[features]
-node8 = []
-node9 = []
-
 [dependencies]
 futures = "0.1.17"
 

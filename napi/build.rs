@@ -5,19 +5,28 @@ extern crate glob;
 use glob::glob;
 use std::env;
 
-fn main() {
-    let node_include_path = env::var("NODE_INCLUDE_PATH");
-    if node_include_path.is_err() {
-        eprintln!("NODE_INCLUDE_PATH environment variable is not defined.");
+fn expect_env(key: &str) -> String {
+    let value = env::var(key);
+    if value.is_err() {
+        eprintln!("{} environment variable is not defined.", key);
         eprintln!("Make sure you're running cargo via the `napi` wrapper script to assign correct environment variables and options.");
         std::process::exit(1);
     };
-    let node_include_path = node_include_path.unwrap();
+    value.unwrap()
+}
+
+fn main() {
+    let node_include_path = expect_env("NODE_INCLUDE_PATH");
+    let node_major_version = expect_env("NODE_MAJOR_VERSION");
 
     println!("cargo:rerun-if-env-changed=NODE_INCLUDE_PATH");
     for entry in glob("./src/sys/**/*.*").unwrap() {
         println!("cargo:rerun-if-changed={}", entry.unwrap().to_str().unwrap());
     }
+
+    // Activate the "node8" or "node9" feature for compatibility with
+    // different versions of Node.js/N-API.
+    println!("cargo:rustc-cfg=node{}", node_major_version);
 
     bindgen::Builder::default()
         .header("src/sys/bindings.h")
