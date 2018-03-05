@@ -6,12 +6,12 @@
 
 include!("bindings.rs");
 
-#[cfg(feature = "node8")]
+#[cfg(node8)]
 mod node8;
-#[cfg(feature = "node8")]
+#[cfg(node8)]
 pub use self::node8::Status;
 
-#[cfg(feature = "node9")]
+#[cfg(node9)]
 mod node9;
-#[cfg(feature = "node9")]
+#[cfg(node9)]
 pub use self::node9::Status;
