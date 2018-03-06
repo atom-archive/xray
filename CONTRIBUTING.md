@@ -1,5 +1,7 @@
 # Contributing to Xray
 
+It's really important to us to have a smooth on-ramp for contributors, and one great way you can contribute is by helping us improve this guide. If your experience is bumpy, can you help us make it smoother for the next person?
+
 ## Building
 
 So far, we have only built this project on macOS. If you'd like to help us improve our build or documentation to support other platforms, that would be a huge help!
