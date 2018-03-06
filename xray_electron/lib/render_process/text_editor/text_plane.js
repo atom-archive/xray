@@ -111,6 +111,15 @@ class Renderer {
       solidFragmentShader
     );
 
+    this.textBlendPass1ViewportScaleLocation = this.gl.getUniformLocation(
+      this.textBlendPass1Program,
+      "viewportScale"
+    );
+    this.textBlendPass2ViewportScaleLocation = this.gl.getUniformLocation(
+      this.textBlendPass2Program,
+      "viewportScale"
+    );
+
     this.createBuffers();
     this.textBlendVAO = this.createTextBlendVAO();
     this.solidVAO = this.createSolidVAO();
@@ -296,12 +305,8 @@ class Renderer {
     this.gl.bindVertexArray(this.textBlendVAO);
     this.gl.useProgram(this.textBlendPass1Program);
     this.gl.viewport(0, 0, canvasWidth, canvasHeight);
-    const viewportScaleLocation = this.gl.getUniformLocation(
-      this.textBlendPass1Program,
-      "viewportScale"
-    );
     this.gl.uniform2f(
-      viewportScaleLocation,
+      this.textBlendPass1ViewportScaleLocation,
       2 / canvasWidth,
       -2 / canvasHeight
     );
@@ -338,12 +343,8 @@ class Renderer {
       this.gl.ZERO,
       this.gl.ONE
     );
-    const viewportScaleLocation2 = this.gl.getUniformLocation(
-      this.textBlendPass2Program,
-      "viewportScale"
-    );
     this.gl.uniform2f(
-      viewportScaleLocation2,
+      this.textBlendPass2ViewportScaleLocation,
       2 / canvasWidth,
       -2 / canvasHeight
     );
