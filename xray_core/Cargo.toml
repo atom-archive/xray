@@ -2,6 +2,7 @@
 name = "xray_core"
 version = "0.1.0"
 authors = ["Nathan Sobo <nathan@github.com>"]
+license = "MIT"
 
 [dependencies]
 rand = "0.3"
