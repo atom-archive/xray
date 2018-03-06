@@ -303,9 +303,9 @@ class Renderer {
     const textColor = {r: 0, g: 0, b: 0, a: 255};
     const selectionColor = {r: 255, g: 255, b: 0, a: 255};
 
-    const xPositions = new Map();
-    const glyphCount = this.populateGlyphInstances(scrollTop, firstVisibleRow, lines, selections, textColor, xPositions);
-    const selectionSolidCount = this.populateSelectionSolidInstances(scrollTop, canvasWidth, selections, xPositions, selectionColor);
+    const selectionPositions = new Float32Array(selections.length * 2);
+    const glyphCount = this.populateGlyphInstances(scrollTop, firstVisibleRow, lines, selections, textColor, selectionPositions);
+    const selectionSolidCount = this.populateSelectionSolidInstances(scrollTop, canvasWidth, selections, selectionPositions, selectionColor);
     this.atlas.uploadTexture()
 
     this.gl.clearColor(1, 1, 1, 1);
@@ -383,7 +383,7 @@ class Renderer {
     );
   }
 
-  populateGlyphInstances(scrollTop, firstVisibleRow, lines, selections, textColor, xPositions) {
+  populateGlyphInstances(scrollTop, firstVisibleRow, lines, selections, textColor, selectionPositions) {
     const firstVisibleRowY = firstVisibleRow * this.style.computedLineHeight;
 
     let glyphCount = 0;
@@ -399,15 +399,14 @@ class Renderer {
       for (position.column = 0; position.column <= line.length; position.column++) {
         const selection = selections[selectionIndex];
         if (selection) {
-          const isSelectionStart = comparePoints(position, selection.start) === 0;
-          const isSelectionEnd = comparePoints(position, selection.end) === 0;
-          if (isSelectionStart) {
-            xPositions.set(pointToKey(position), x);
-          } else if (isSelectionEnd) {
-            xPositions.set(pointToKey(position), x);
+          if (comparePoints(position, selection.start) === 0) {
+            selectionPositions[selectionIndex * 2] = x;
           }
 
-          if (isSelectionEnd) selectionIndex++;
+          if (comparePoints(position, selection.end) === 0) {
+            selectionPositions[selectionIndex * 2 + 1] = x;
+            selectionIndex++;
+          }
         }
 
         if (position.column < line.length) {
@@ -448,7 +447,7 @@ class Renderer {
     this.glyphInstances[11 + startOffset] = glyph.textureHeight;
   }
 
-  populateSelectionSolidInstances(scrollTop, canvasWidth, selections, xPositions, selectionColor) {
+  populateSelectionSolidInstances(scrollTop, canvasWidth, selections, selectionPositions, selectionColor) {
     const { dpiScale, computedLineHeight } = this.style;
 
     let selectionSolidCount = 0;
@@ -457,8 +456,8 @@ class Renderer {
       const selection = selections[i];
       if (comparePoints(selection.start, selection.end) !== 0) {
         const rowSpan = selection.end.row - selection.start.row;
-        const startX = xPositions.get(pointToKey(selection.start)) * dpiScale;
-        const endX = xPositions.get(pointToKey(selection.end)) * dpiScale;
+        const startX = selectionPositions[i * 2];
+        const endX = selectionPositions[i * 2 + 1];
 
         if (rowSpan === 0) {
           this.updateSolidInstance(
@@ -675,10 +674,6 @@ class Atlas {
       this.shouldUploadTexture = false
     }
   }
-}
-
-function pointToKey({row, column}) {
-  return row + ':' + column
 }
 
 function comparePoints(a, b) {
