@@ -464,9 +464,9 @@ class Renderer {
           this.updateSolidInstance(
             this.selectionSolidInstances,
             selectionSolidCount++,
-            startX,
+            Math.round(startX),
             yForRow(selection.start.row),
-            endX - startX,
+            Math.round(endX - startX),
             yForRow(selection.start.row + 1) - yForRow(selection.start.row),
             selectionColor
           );
@@ -475,9 +475,9 @@ class Renderer {
           this.updateSolidInstance(
             this.selectionSolidInstances,
             selectionSolidCount++,
-            startX,
+            Math.round(startX),
             yForRow(selection.start.row),
-            canvasWidth - startX,
+            Math.round(canvasWidth - startX),
             yForRow(selection.start.row + 1) - yForRow(selection.start.row),
             selectionColor
           );
@@ -489,7 +489,7 @@ class Renderer {
               selectionSolidCount++,
               0,
               yForRow(selection.start.row + 1),
-              canvasWidth,
+              Math.round(canvasWidth),
               yForRow(selection.end.row) - yForRow(selection.start.row + 1),
               selectionColor
             );
@@ -501,7 +501,7 @@ class Renderer {
             selectionSolidCount++,
             0,
             yForRow(selection.end.row),
-            endX,
+            Math.round(endX),
             yForRow(selection.end.row + 1) - yForRow(selection.end.row),
             selectionColor
           );
