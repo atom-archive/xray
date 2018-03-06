@@ -408,16 +408,10 @@ impl Editor {
         }
     }
 
-    fn query_selections(&self, mut range: Range<Point>) -> &[Selection] {
+    fn query_selections(&self, range: Range<Point>) -> &[Selection] {
         let buffer = self.buffer.borrow();
-        let max_point = buffer.max_point();
-        if range.end > max_point {
-            range.end = max_point;
-        }
 
-        let inclusive = range.end == max_point;
         let start = buffer.anchor_before_point(range.start).unwrap();
-        let end = buffer.anchor_after_point(range.end).unwrap();
         let start_index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start).unwrap()) {
             Ok(index) => index,
             Err(index) => {
@@ -428,18 +422,18 @@ impl Editor {
                 }
             }
         };
-        let end_index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &end).unwrap()) {
-            Ok(index) => {
-                if inclusive {
-                    index + 1
-                } else {
-                    index
-                }
-            },
-            Err(index) => index
-        };
 
-        &self.selections[start_index..end_index]
+        if range.end > buffer.max_point() {
+            &self.selections[start_index..]
+        } else {
+            let end = buffer.anchor_after_point(range.end).unwrap();
+            let end_index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &end).unwrap()) {
+                Ok(index) => index,
+                Err(index) => index
+            };
+
+            &self.selections[start_index..end_index]
+        }
     }
 }
 
