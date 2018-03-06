@@ -91,12 +91,15 @@ impl Editor {
 
     pub fn render(&self, params: render::Params) -> render::Frame {
         let buffer = self.buffer.borrow();
-        let mut lines = Vec::new();
-        let mut cur_line = Vec::new();
-        let scroll_bottom = params.scroll_top + params.height;
-        let start = Point::new((params.scroll_top / params.line_height).floor() as u32, 0);
+
+        let max_scroll_top = buffer.max_point().row as f64 * params.line_height;
+        let scroll_top = params.scroll_top.min(max_scroll_top);
+        let scroll_bottom = scroll_top + params.height;
+        let start = Point::new((scroll_top / params.line_height).floor() as u32, 0);
         let end = Point::new((scroll_bottom / params.line_height).ceil() as u32, 0);
 
+        let mut lines = Vec::new();
+        let mut cur_line = Vec::new();
         let mut cur_row = start.row;
         for c in buffer.iter_starting_at_row(start.row) {
             if c == (b'\n' as u16) {
@@ -874,6 +877,32 @@ mod tests {
             assert_eq!(stringify_lines(frame.lines), vec!["def", "ghi", "jkl"]);
             assert_eq!(frame.selections, vec![]);
         }
+    }
+
+    #[test]
+    fn test_render_past_last_line() {
+        let line_height = 4.0;
+        let mut editor = Editor::new( Rc::new(RefCell::new(Buffer::new(1))));
+        editor.buffer.borrow_mut().splice(0..0, "abc\ndef\nghi");
+        editor.add_selection(Point::new(2, 3), Point::new(2, 3));
+
+        let frame = editor.render(render::Params {
+            line_height,
+            scroll_top: 2.0 * line_height,
+            height: 3.0 * line_height,
+        });
+        assert_eq!(frame.first_visible_row, 2);
+        assert_eq!(stringify_lines(frame.lines), vec!["ghi"]);
+        assert_eq!(frame.selections, vec![selection((2, 3), (2, 3))]);
+
+        let frame = editor.render(render::Params {
+            line_height,
+            scroll_top: 3.0 * line_height,
+            height: 3.0 * line_height,
+        });
+        assert_eq!(frame.first_visible_row, 2);
+        assert_eq!(stringify_lines(frame.lines), vec!["ghi"]);
+        assert_eq!(frame.selections, vec![selection((2, 3), (2, 3))]);
     }
 
     fn stringify_lines(lines: Vec<Vec<u16>>) -> Vec<String> {
