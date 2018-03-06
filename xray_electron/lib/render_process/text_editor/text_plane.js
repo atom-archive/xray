@@ -119,6 +119,10 @@ class Renderer {
       this.textBlendPass2Program,
       "viewportScale"
     );
+    this.solidViewportScaleLocation = this.gl.getUniformLocation(
+      this.solidProgram,
+      "viewportScale"
+    );
 
     this.createBuffers();
     this.textBlendVAO = this.createTextBlendVAO();
@@ -261,7 +265,7 @@ class Renderer {
       2,
       this.gl.FLOAT,
       false,
-      GLYPH_INSTANCE_SIZE_IN_BYTES,
+      SOLID_INSTANCE_SIZE_IN_BYTES,
       0
     );
     this.gl.vertexAttribDivisor(shaders.solidAttributes.targetOrigin, 1);
@@ -272,7 +276,7 @@ class Renderer {
       2,
       this.gl.FLOAT,
       false,
-      GLYPH_INSTANCE_SIZE_IN_BYTES,
+      SOLID_INSTANCE_SIZE_IN_BYTES,
       2 * Float32Array.BYTES_PER_ELEMENT
     );
     this.gl.vertexAttribDivisor(shaders.solidAttributes.targetSize, 1);
@@ -283,7 +287,7 @@ class Renderer {
       4,
       this.gl.FLOAT,
       false,
-      GLYPH_INSTANCE_SIZE_IN_BYTES,
+      SOLID_INSTANCE_SIZE_IN_BYTES,
       4 * Float32Array.BYTES_PER_ELEMENT
     );
     this.gl.vertexAttribDivisor(shaders.solidAttributes.colorRGBA, 1);
@@ -293,35 +297,57 @@ class Renderer {
 
   draw({ canvasHeight, canvasWidth, scrollTop, firstVisibleRow, lines, selections }) {
     const { dpiScale } = this.style;
-    const textColor = {r: 0, g: 0, b: 0, a: 1};
-    const selectionColor = {r: 100, g: 100, b: 100, a: 1};
+    const viewportScaleX = 2 / canvasWidth;
+    const viewportScaleY = -2 / canvasHeight;
+
+    const textColor = {r: 0, g: 0, b: 0, a: 255};
+    const selectionColor = {r: 255, g: 255, b: 0, a: 255};
 
     const xPositions = new Map();
     const glyphCount = this.populateGlyphInstances(scrollTop, firstVisibleRow, lines, selections, textColor, xPositions);
-    const selectionSolidCount = this.populateSelectionSolidInstances(scrollTop, selections, xPositions, selectionColor);
-
+    const selectionSolidCount = this.populateSelectionSolidInstances(scrollTop, canvasWidth, selections, xPositions, selectionColor);
     this.atlas.uploadTexture()
 
-    this.gl.bindVertexArray(this.textBlendVAO);
-    this.gl.useProgram(this.textBlendPass1Program);
+    this.gl.clearColor(1, 1, 1, 1);
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
     this.gl.viewport(0, 0, canvasWidth, canvasHeight);
+
+    this.gl.bindVertexArray(this.solidVAO);
+    this.gl.disable(this.gl.BLEND);
+    this.gl.useProgram(this.solidProgram);
     this.gl.uniform2f(
-      this.textBlendPass1ViewportScaleLocation,
-      2 / canvasWidth,
-      -2 / canvasHeight
+      this.solidViewportScaleLocation,
+      viewportScaleX,
+      viewportScaleY
+    );
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.solidInstancesBuffer);
+    this.gl.bufferData(
+      this.gl.ARRAY_BUFFER,
+      this.selectionSolidInstances,
+      this.gl.STREAM_DRAW
+    );
+    this.gl.drawElementsInstanced(
+      this.gl.TRIANGLES,
+      6,
+      this.gl.UNSIGNED_BYTE,
+      0,
+      selectionSolidCount
     );
 
+    this.gl.bindVertexArray(this.textBlendVAO);
+    this.gl.enable(this.gl.BLEND)
+    this.gl.useProgram(this.textBlendPass1Program);
+    this.gl.uniform2f(
+      this.textBlendPass1ViewportScaleLocation,
+      viewportScaleX,
+      viewportScaleY
+    );
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.glyphInstancesBuffer);
     this.gl.bufferData(
       this.gl.ARRAY_BUFFER,
       this.glyphInstances,
       this.gl.STREAM_DRAW
     );
-
-    this.gl.clearColor(1, 1, 1, 1);
-    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
-
-    this.gl.useProgram(this.textBlendPass1Program);
     this.gl.blendFuncSeparate(
       this.gl.ZERO,
       this.gl.ONE_MINUS_SRC_COLOR,
@@ -345,8 +371,8 @@ class Renderer {
     );
     this.gl.uniform2f(
       this.textBlendPass2ViewportScaleLocation,
-      2 / canvasWidth,
-      -2 / canvasHeight
+      viewportScaleX,
+      viewportScaleY
     );
     this.gl.drawElementsInstanced(
       this.gl.TRIANGLES,
@@ -372,11 +398,16 @@ class Renderer {
 
       for (position.column = 0; position.column <= line.length; position.column++) {
         const selection = selections[selectionIndex];
-        if (comparePoints(position, selection.start) === 0) {
-          xPositions.set(pointToKey(position), x);
-        } else if (comparePoints(position, selection.end) === 0) {
-          xPositions.set(pointToKey(position), x);
-          selectionIndex++;
+        if (selection) {
+          const isSelectionStart = comparePoints(position, selection.start) === 0;
+          const isSelectionEnd = comparePoints(position, selection.end) === 0;
+          if (isSelectionStart) {
+            xPositions.set(pointToKey(position), x);
+          } else if (isSelectionEnd) {
+            xPositions.set(pointToKey(position), x);
+          }
+
+          if (isSelectionEnd) selectionIndex++;
         }
 
         if (position.column < line.length) {
@@ -417,18 +448,20 @@ class Renderer {
     this.glyphInstances[11 + startOffset] = glyph.textureHeight;
   }
 
-  populateSelectionSolidInstances(scrollTop, selections, xPositions, selectionColor) {
+  populateSelectionSolidInstances(scrollTop, canvasWidth, selections, xPositions, selectionColor) {
+    const { dpiScale, computedLineHeight } = this.style;
+
     let selectionSolidCount = 0;
 
     for (var i = 0; i < selections.length; i++) {
       const selection = selections[i];
       if (comparePoints(selection.start, selection.end) !== 0) {
         const rowSpan = selection.end.row - selection.start.row;
-        const startX = xPositions.get(pointToKey(selection.start)) * this.style.dpiScale;
-        const endX = xPositions.get(pointToKey(selection.end)) * this.style.dpiScale;
+        const startX = xPositions.get(pointToKey(selection.start)) * dpiScale;
+        const endX = xPositions.get(pointToKey(selection.end)) * dpiScale;
 
         if (rowSpan === 0) {
-          this.updateSelectionSolidInstance(
+          this.updateSolidInstance(
             this.selectionSolidInstances,
             selectionSolidCount++,
             startX,
@@ -439,7 +472,7 @@ class Renderer {
           );
         } else {
           // First line of selection
-          this.updateSelectionSolidInstance(
+          this.updateSolidInstance(
             this.selectionSolidInstances,
             selectionSolidCount++,
             startX,
@@ -451,19 +484,19 @@ class Renderer {
 
           // Lines entirely spanned by selection
           if (rowSpan > 1) {
-            this.updateSelectionSolidInstance(
+            this.updateSolidInstance(
               this.selectionSolidInstances,
               selectionSolidCount++,
               0,
               yForRow(selection.start.row + 1),
               canvasWidth,
-              yForRow(selection.end.row - 1) - yForRow(selection.start.row + 1),
+              yForRow(selection.end.row) - yForRow(selection.start.row + 1),
               selectionColor
             );
           }
 
           // Last line of selection
-          this.updateSelectionSolidInstance(
+          this.updateSolidInstance(
             this.selectionSolidInstances,
             selectionSolidCount++,
             0,
@@ -477,9 +510,7 @@ class Renderer {
     }
 
     function yForRow(row) {
-      return Math.round(
-        (row * this.style.computedLineHeight - scrollTop) * this.style.dpiScale
-      );
+      return Math.round((row * computedLineHeight - scrollTop) * dpiScale);
     }
 
     return selectionSolidCount
