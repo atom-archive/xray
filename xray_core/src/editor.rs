@@ -2,6 +2,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::mem;
+use std::ops::Range;
 use futures::future::Executor;
 use futures::{Future, Stream};
 use notify_cell::NotifyCell;
@@ -93,30 +94,31 @@ impl Editor {
         let mut lines = Vec::new();
         let mut cur_line = Vec::new();
         let scroll_bottom = params.scroll_top + params.height;
-        let start_row = (params.scroll_top / params.line_height).floor() as u32;
-        let end_row = (scroll_bottom / params.line_height).ceil() as u32;
+        let start = Point::new((params.scroll_top / params.line_height).floor() as u32, 0);
+        let end = Point::new((scroll_bottom / params.line_height).ceil() as u32, 0);
 
-        let mut cur_row = start_row;
-        for c in buffer.iter_starting_at_row(start_row) {
+        let mut cur_row = start.row;
+        for c in buffer.iter_starting_at_row(start.row) {
             if c == (b'\n' as u16) {
                 lines.push(cur_line);
                 cur_line = Vec::new();
                 cur_row += 1;
-                if cur_row >= end_row {
+                if cur_row >= end.row {
                     break;
                 }
             } else {
                 cur_line.push(c);
             }
         }
-        if cur_row < end_row {
+        if cur_row < end.row {
             lines.push(cur_line);
         }
 
+        let visible_selections = self.query_selections(start..end);
         render::Frame {
-            first_visible_row: start_row,
+            first_visible_row: start.row,
             lines,
-            selections: self.selections.iter().map(|selection| selection.render(&buffer)).collect()
+            selections: visible_selections.iter().map(|selection| selection.render(&buffer)).collect()
         }
     }
 
@@ -404,6 +406,40 @@ impl Editor {
                 i += 1;
             }
         }
+    }
+
+    fn query_selections(&self, mut range: Range<Point>) -> &[Selection] {
+        let buffer = self.buffer.borrow();
+        let max_point = buffer.max_point();
+        if range.end > max_point {
+            range.end = max_point;
+        }
+
+        let inclusive = range.end == max_point;
+        let start = buffer.anchor_before_point(range.start).unwrap();
+        let end = buffer.anchor_after_point(range.end).unwrap();
+        let start_index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start).unwrap()) {
+            Ok(index) => index,
+            Err(index) => {
+                if index > 0 && buffer.cmp_anchors(&self.selections[index - 1].end, &start).unwrap() == Ordering::Greater {
+                    index - 1
+                } else {
+                    index
+                }
+            }
+        };
+        let end_index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &end).unwrap()) {
+            Ok(index) => {
+                if inclusive {
+                    index + 1
+                } else {
+                    index
+                }
+            },
+            Err(index) => index
+        };
+
+        &self.selections[start_index..end_index]
     }
 }
 
@@ -784,6 +820,70 @@ mod tests {
                 selection((4, 4), (4, 8))
             ]
         );
+    }
+
+    #[test]
+    fn test_render() {
+        let buffer = Rc::new(RefCell::new(Buffer::new(1)));
+        buffer.borrow_mut().splice(0..0, "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
+        let line_height = 6.0;
+
+        {
+            let mut editor = Editor::new(buffer.clone());
+            // Selections starting or ending outside viewport
+            editor.add_selection(Point::new(1, 2), Point::new(3, 1));
+            editor.add_selection(Point::new(5, 2), Point::new(6, 0));
+            // Selection fully inside viewport
+            editor.add_selection(Point::new(3, 2), Point::new(4, 1));
+            // Selection fully outside viewport
+            editor.add_selection(Point::new(6, 3), Point::new(7, 2));
+
+            let frame = editor.render(render::Params {
+                line_height,
+                scroll_top: 2.5 * line_height,
+                height: 3.0 * line_height,
+            });
+            assert_eq!(frame.first_visible_row, 2);
+            assert_eq!(stringify_lines(frame.lines), vec!["ghi", "jkl", "mno", "pqr"]);
+            assert_eq!(
+                frame.selections,
+                vec![selection((1, 2), (3, 1)), selection((3, 2), (4, 1)), selection((5, 2), (6, 0))]
+            );
+        }
+
+        // Selection starting at the end of buffer
+        {
+            let mut editor = Editor::new(buffer.clone());
+            editor.add_selection(Point::new(8, 2), Point::new(8, 2));
+
+            let frame = editor.render(render::Params {
+                line_height,
+                scroll_top: 1.0 * line_height,
+                height: 8.0 * line_height,
+            });
+            assert_eq!(frame.first_visible_row, 1);
+            assert_eq!(stringify_lines(frame.lines), vec!["def", "ghi", "jkl", "mno", "pqr", "stu", "vwx", "yz"]);
+            assert_eq!(frame.selections, vec![selection((8, 2), (8, 2))]);
+        }
+
+        // Selection ending exactly at first visible row
+        {
+            let mut editor = Editor::new(buffer.clone());
+            editor.add_selection(Point::new(0, 2), Point::new(1, 0));
+
+            let frame = editor.render(render::Params {
+                line_height,
+                scroll_top: 1.0 * line_height,
+                height: 3.0 * line_height,
+            });
+            assert_eq!(frame.first_visible_row, 1);
+            assert_eq!(stringify_lines(frame.lines), vec!["def", "ghi", "jkl"]);
+            assert_eq!(frame.selections, vec![]);
+        }
+    }
+
+    fn stringify_lines(lines: Vec<Vec<u16>>) -> Vec<String> {
+        lines.iter().map(|l| String::from_utf16_lossy(l)).collect()
     }
 
     fn render_selections(editor: &Editor) -> Vec<render::Selection> {
