@@ -2,12 +2,15 @@
 
 ## Building and running
 
-This assumes `xray_electron` is cloned as part of the Xray repository and that all of its sibling packages are next to it.
+This assumes `xray_electron` is cloned as part of the Xray repository and that all of its sibling packages are next to it. Also, make sure you have installed the required [system dependencies](../CONTRIBUTING.md#install-system-dependencies) before proceeding.
 
 ```sh
-# Will install and build dependencies.
+# Move to this subdirectory of the repository:
+cd xray_electron
+
+# Install and build dependencies:
 npm install
 
-# To launch Electron:
+# Launch Electron:
 npm start
 ```
