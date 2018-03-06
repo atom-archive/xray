@@ -44,7 +44,7 @@ We provide a feature-rich editor component that can be used on the web and withi
 
 ## Architecture
 
-Martin Fowler defines software architecture those decisions which are both important and hard to change. Since these decisions are hard to change, we need to be sure that our foundational priorities are well-served by these decisions.
+Martin Fowler defines software architecture as those decisions which are both important and hard to change. Since these decisions are hard to change, we need to be sure that our foundational priorities are well-served by these decisions.
 
 ![Architecture](docs/images/architecture.png)
 
@@ -60,7 +60,7 @@ The core of the application is implemented in a pure Rust crate (`/xray_core`) a
 
 All of the core application code other than the view logic should be written in Rust. This will ensure that it has a minimal footprint to load and execute, and Rust's robust type system will help us maintain it more efficiently than dynamically typed code. A language that is fundamentally designed for multi-threading will also make it easier to exploit parallelism whenever the need arises, whereas JavaScript's single-threaded nature makes parallelism awkward and challenging.
 
-Fundamentally, we want to spend our time writing in a language that is fast by default. It's true that it's possible to write slow Rust also possible to write fast JavaScript. It's *also* true that it's much harder to write slow Rust than it is to write slow JavaScript. By spending fewer resources on the implementation of the platform itself, we'll make more resources available to run package code.
+Fundamentally, we want to spend our time writing in a language that is fast by default. It's true that it's possible to write slow Rust, and also possible to write fast JavaScript. It's *also* true that it's much harder to write slow Rust than it is to write slow JavaScript. By spending fewer resources on the implementation of the platform itself, we'll make more resources available to run package code.
 
 ### Packages will run primarily in worker threads
 
