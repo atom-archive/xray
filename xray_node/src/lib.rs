@@ -63,6 +63,17 @@ mod editor {
 
     pub fn init(env: &Env) -> Value<Function> {
         env.define_class("TextEditor", callback!(constructor), vec![
+            Property::new("addSelection").with_method(callback!(add_selection)),
+            Property::new("addSelectionAbove").with_method(callback!(add_selection_above)),
+            Property::new("addSelectionBelow").with_method(callback!(add_selection_below)),
+            Property::new("moveLeft").with_method(callback!(move_left)),
+            Property::new("selectLeft").with_method(callback!(select_left)),
+            Property::new("moveRight").with_method(callback!(move_right)),
+            Property::new("selectRight").with_method(callback!(select_right)),
+            Property::new("moveUp").with_method(callback!(move_up)),
+            Property::new("selectUp").with_method(callback!(select_up)),
+            Property::new("moveDown").with_method(callback!(move_down)),
+            Property::new("selectDown").with_method(callback!(select_down)),
             Property::new("render").with_method(callback!(render)),
             Property::new("destroy").with_method(callback!(destroy))
         ])
@@ -87,6 +98,74 @@ mod editor {
         })).unwrap();
 
         env.wrap(&mut this, editor)?;
+        Ok(None)
+    }
+
+    fn add_selection<'a>(env: &'a Env, mut this: Value<'a, Object>, args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        let start = point_from_js(args[0].try_into::<Object>()?)?;
+        let end = point_from_js(args[1].try_into::<Object>()?)?;
+        editor.add_selection(start, end);
+        Ok(None)
+    }
+
+    fn add_selection_above<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.add_selection_above();
+        Ok(None)
+    }
+
+    fn add_selection_below<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.add_selection_below();
+        Ok(None)
+    }
+
+    fn move_left<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.move_left();
+        Ok(None)
+    }
+
+    fn select_left<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.select_left();
+        Ok(None)
+    }
+
+    fn move_right<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.move_right();
+        Ok(None)
+    }
+
+    fn select_right<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.select_right();
+        Ok(None)
+    }
+
+    fn move_up<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.move_up();
+        Ok(None)
+    }
+
+    fn select_up<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.select_up();
+        Ok(None)
+    }
+
+    fn move_down<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.move_down();
+        Ok(None)
+    }
+
+    fn select_down<'a>(env: &'a Env, mut this: Value<'a, Object>, _args: &[Value<'a, Any>]) -> Result<Option<Value<'a, Any>>> {
+        let editor: &mut Editor = env.unwrap(&mut this)?;
+        editor.select_down();
         Ok(None)
     }
 
@@ -134,5 +213,11 @@ mod editor {
         js_point.set_named_property("row", env.create_int64(point.row as i64))?;
         js_point.set_named_property("column", env.create_int64(point.column as i64))?;
         Ok(js_point)
+    }
+
+    fn point_from_js(js_point: Value<Object>) -> Result<Point> {
+        let row: i64 = js_point.get_named_property("row")?.into();
+        let column: i64 = js_point.get_named_property("column")?.into();
+        Ok(Point::new(row as u32, column as u32))
     }
 }
