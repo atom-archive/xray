@@ -1,5 +1,6 @@
 #include <node_api.h>
 #include <uv.h>
+#include <string.h>
 
 typedef struct extras_callback_scope__ *extras_callback_scope;
 
