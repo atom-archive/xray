@@ -51,6 +51,7 @@ class TextPlane extends React.Component {
       firstVisibleRow: this.props.frameState.firstVisibleRow,
       lines: this.props.frameState.lines,
       selections: this.props.frameState.selections,
+      showCursors: this.props.showCursors,
       computedLineHeight,
     });
   }
@@ -295,17 +296,19 @@ class Renderer {
     return vao
   }
 
-  draw({ canvasHeight, canvasWidth, scrollTop, firstVisibleRow, lines, selections }) {
+  draw({ canvasHeight, canvasWidth, scrollTop, firstVisibleRow, lines, selections, showCursors }) {
     const { dpiScale } = this.style;
     const viewportScaleX = 2 / canvasWidth;
     const viewportScaleY = -2 / canvasHeight;
 
     const textColor = {r: 0, g: 0, b: 0, a: 255};
     const selectionColor = {r: 255, g: 255, b: 0, a: 255};
+    const cursorColor = {r: 0, g: 0, b: 0, a: 255};
+    const cursorWidth = 2;
 
     const selectionPositions = new Float32Array(selections.length * 2);
     const glyphCount = this.populateGlyphInstances(scrollTop, firstVisibleRow, lines, selections, textColor, selectionPositions);
-    const selectionSolidCount = this.populateSelectionSolidInstances(scrollTop, canvasWidth, selections, selectionPositions, selectionColor);
+    const {selectionSolidCount, cursorSolidCount} = this.populateSelectionSolidInstances(scrollTop, canvasWidth, selections, selectionPositions, selectionColor, cursorColor, cursorWidth);
     this.atlas.uploadTexture()
 
     this.gl.clearColor(1, 1, 1, 1);
@@ -314,6 +317,9 @@ class Renderer {
 
     this.drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY);
     this.drawText(glyphCount, viewportScaleX, viewportScaleY);
+    if (showCursors) {
+      this.drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY);
+    }
   }
 
   drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY) {
@@ -390,6 +396,30 @@ class Renderer {
     );
   }
 
+  drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY) {
+    this.gl.bindVertexArray(this.solidVAO);
+    this.gl.disable(this.gl.BLEND);
+    this.gl.useProgram(this.solidProgram);
+    this.gl.uniform2f(
+      this.solidViewportScaleLocation,
+      viewportScaleX,
+      viewportScaleY
+    );
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.solidInstancesBuffer);
+    this.gl.bufferData(
+      this.gl.ARRAY_BUFFER,
+      this.cursorSolidInstances,
+      this.gl.STREAM_DRAW
+    );
+    this.gl.drawElementsInstanced(
+      this.gl.TRIANGLES,
+      6,
+      this.gl.UNSIGNED_BYTE,
+      0,
+      cursorSolidCount
+    );
+  }
+
   populateGlyphInstances(scrollTop, firstVisibleRow, lines, selections, textColor, selectionPositions) {
     const firstVisibleRowY = firstVisibleRow * this.style.computedLineHeight;
 
@@ -454,10 +484,11 @@ class Renderer {
     this.glyphInstances[11 + startOffset] = glyph.textureHeight;
   }
 
-  populateSelectionSolidInstances(scrollTop, canvasWidth, selections, selectionPositions, selectionColor) {
+  populateSelectionSolidInstances(scrollTop, canvasWidth, selections, selectionPositions, selectionColor, cursorColor, cursorWidth) {
     const { dpiScale, computedLineHeight } = this.style;
 
     let selectionSolidCount = 0;
+    let cursorSolidCount = 0;
 
     for (var i = 0; i < selections.length; i++) {
       const selection = selections[i];
@@ -512,6 +543,18 @@ class Renderer {
             selectionColor
           );
         }
+      } else {
+        const startX = selectionPositions[i * 2];
+        const endX = startX + cursorWidth;
+        this.updateSolidInstance(
+          this.cursorSolidInstances,
+          cursorSolidCount++,
+          Math.round(startX),
+          yForRow(selection.start.row),
+          Math.round(endX - startX),
+          yForRow(selection.start.row + 1) - yForRow(selection.start.row),
+          cursorColor
+        );
       }
     }
 
@@ -519,7 +562,7 @@ class Renderer {
       return Math.round((row * computedLineHeight - scrollTop) * dpiScale);
     }
 
-    return selectionSolidCount
+    return {selectionSolidCount, cursorSolidCount}
   }
 
   updateSolidInstance(arrayBuffer, i, x, y, width, height, color) {
