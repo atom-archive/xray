@@ -11,6 +11,3 @@ futures = "0.1.17"
 bindgen = "0.32.1"
 cc = "1.0"
 glob = "0.2.11"
-
-[workspace]
-exclude = ["test_module"]
