@@ -153,27 +153,11 @@ impl Buffer {
     }
 
     pub fn len_for_row(&self, row: u32) -> Result<u32> {
-        let mut cursor = self.fragments.cursor();
-
-        let row_start_offset = {
-            let row_start = Point { row, column: 0 };
-            cursor.seek(&row_start, SeekBias::Left);
-
-            let row_start_fragment = cursor.item().ok_or(Error::OffsetOutOfRange)?;
-            let point_within_fragment = row_start - &cursor.start::<Point>();
-            row_start_fragment.offset_for_point(point_within_fragment)?
-        };
-
-        let row_end_offset = {
-            let next_row_start = Point { row: row + 1, column: 0 };
-            cursor.seek(&next_row_start, SeekBias::Left);
-
-            if let Some(next_row_start_fragment) = cursor.item() {
-                let point_within_fragment = next_row_start - &cursor.start::<Point>();
-                next_row_start_fragment.offset_for_point(point_within_fragment)? - 1
-            } else {
-                self.len()
-            }
+        let row_start_offset = self.offset_for_point(Point::new(row, 0))?;
+        let row_end_offset = if row >= self.max_point().row {
+            self.len()
+        } else {
+            self.offset_for_point(Point::new(row + 1, 0))? - 1
         };
 
         Ok((row_end_offset - row_start_offset) as u32)
@@ -512,6 +496,15 @@ impl Buffer {
                 })
             }
         }
+    }
+
+    fn offset_for_point(&self, point: Point) -> Result<usize> {
+        let mut fragments_cursor = self.fragments.cursor();
+        fragments_cursor.seek(&point, SeekBias::Left);
+        fragments_cursor.item().ok_or(Error::OffsetOutOfRange).map(|fragment| {
+            let overshoot = fragment.offset_for_point(point - &fragments_cursor.start::<Point>()).unwrap();
+            &fragments_cursor.start::<CharacterCount>().0 + &overshoot
+        })
     }
 
     pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<cmp::Ordering> {
@@ -990,6 +983,23 @@ mod tests {
                 Some(self.0.gen_range(b'a', b'z' + 1).into())
             }
         }
+    }
+
+    #[test]
+    fn test_len_for_row() {
+        let mut buffer = Buffer::new(1);
+        buffer.splice(0..0, "abcd\nefg\nhij");
+        buffer.splice(12..12, "kl\nmno");
+        buffer.splice(18..18, "\npqrs\n");
+        buffer.splice(18..21, "\nPQ");
+
+        assert_eq!(buffer.len_for_row(0), Ok(4));
+        assert_eq!(buffer.len_for_row(1), Ok(3));
+        assert_eq!(buffer.len_for_row(2), Ok(5));
+        assert_eq!(buffer.len_for_row(3), Ok(3));
+        assert_eq!(buffer.len_for_row(4), Ok(4));
+        assert_eq!(buffer.len_for_row(5), Ok(0));
+        assert_eq!(buffer.len_for_row(6), Err(Error::OffsetOutOfRange));
     }
 
     #[test]

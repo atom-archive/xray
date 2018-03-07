@@ -530,7 +530,9 @@ mod tests {
     #[test]
     fn test_cursor_movement() {
         let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
-        editor.buffer.borrow_mut().splice(0..0, "abc\n\ndef");
+        editor.buffer.borrow_mut().splice(0..0, "abc");
+        editor.buffer.borrow_mut().splice(3..3, "\n");
+        editor.buffer.borrow_mut().splice(4..4, "\ndef");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
         editor.move_right();
@@ -601,7 +603,10 @@ mod tests {
     #[test]
     fn test_selection_movement() {
         let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
-        editor.buffer.borrow_mut().splice(0..0, "abc\n\ndef");
+        editor.buffer.borrow_mut().splice(0..0, "abc");
+        editor.buffer.borrow_mut().splice(3..3, "\n");
+        editor.buffer.borrow_mut().splice(4..4, "\ndef");
+
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
         editor.select_right();
