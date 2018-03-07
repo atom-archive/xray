@@ -312,6 +312,11 @@ class Renderer {
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
     this.gl.viewport(0, 0, canvasWidth, canvasHeight);
 
+    this.drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY);
+    this.drawText(glyphCount, viewportScaleX, viewportScaleY);
+  }
+
+  drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY) {
     this.gl.bindVertexArray(this.solidVAO);
     this.gl.disable(this.gl.BLEND);
     this.gl.useProgram(this.solidProgram);
@@ -333,7 +338,9 @@ class Renderer {
       0,
       selectionSolidCount
     );
+  }
 
+  drawText(glyphCount, viewportScaleX, viewportScaleY) {
     this.gl.bindVertexArray(this.textBlendVAO);
     this.gl.enable(this.gl.BLEND)
     this.gl.useProgram(this.textBlendPass1Program);
