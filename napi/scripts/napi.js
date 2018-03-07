@@ -26,16 +26,21 @@ process.env.NODE_MAJOR_VERSION = nodeMajorVersion
 
 const platform = os.platform()
 var libExt = ''
+var platformArgs = ''
 
+// Platform based massaging for build commands
 switch(platform) {
 	case 'darwin':
 		libExt = '.dylib'
+		platformArgs = '-undefined dynamic_lookup -export_dynamic'
 		break;
 	case 'win32':
 		libExt = '.dll'
+		platformArgs = '-undefined dynamic_lookup -export_dynamic'
 		break;
 	case 'linux':
 		libExt = '.so'
+		platformArgs = '-undefined=dynamic_lookup -export_dynamic'
 		break;
 	default:
 		console.error('Operating system not currently supported or recognized by the build script')
@@ -46,7 +51,7 @@ switch (subcommand) {
   case 'build':
     const releaseFlag = argv.release ? '--release' : ''
     const targetDir = argv.release ? 'release' : 'debug'
-    cp.execSync(`cargo rustc ${releaseFlag} -- -Clink-args=\"-undefined,dynamic_lookup -export_dynamic\"`, {stdio: 'inherit'})
+    cp.execSync(`cargo rustc ${releaseFlag} -- -Clink-args=\"${platformArgs}\"`, {stdio: 'inherit'})
     cp.execSync(`cp target/${targetDir}/lib${moduleName}${libExt} target/${targetDir}/${moduleName}.node`, {stdio: 'inherit'})
     break;
   case 'check':
