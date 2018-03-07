@@ -6,8 +6,11 @@ use std::ops::Range;
 use futures::future::Executor;
 use futures::{Future, Stream};
 use notify_cell::NotifyCell;
-use buffer::{Buffer, Version, Point, Anchor};
+use buffer::{self, Buffer, Point, Anchor};
 use movement;
+
+#[derive(Clone)]
+pub struct Version(buffer::Version, usize);
 
 pub struct Editor {
     buffer: Rc<RefCell<Buffer>>,
@@ -48,12 +51,12 @@ pub mod render {
 
 impl Editor {
     pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
-        let version;
+        let buffer_version;
         let selections;
 
         {
             let buffer = buffer.borrow();
-            version = buffer.version.get().unwrap();
+            buffer_version = buffer.version.get().unwrap();
             selections = vec![Selection {
                 start: buffer.anchor_before_offset(0).unwrap(),
                 end: buffer.anchor_before_offset(0).unwrap(),
@@ -62,6 +65,7 @@ impl Editor {
             }];
         }
 
+        let version = Version(buffer_version, 0);
         Self {
             version: Rc::new(NotifyCell::new(version)),
             buffer,
@@ -77,7 +81,7 @@ impl Editor {
         let version_cell = self.version.clone();
         let buffer_observation = self.buffer.borrow().version.observe().for_each(
             move |buffer_version| {
-                version_cell.set(buffer_version);
+                version_cell.set(Version(buffer_version, 0));
                 Ok(())
             },
         );
@@ -147,6 +151,7 @@ impl Editor {
         }
 
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn add_selection_above(&mut self) {
@@ -202,6 +207,7 @@ impl Editor {
         }
 
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn add_selection_below(&mut self) {
@@ -258,6 +264,7 @@ impl Editor {
         }
 
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn move_left(&mut self) {
@@ -279,6 +286,7 @@ impl Editor {
             }
         }
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn select_left(&mut self) {
@@ -292,6 +300,7 @@ impl Editor {
             }
         }
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn move_right(&mut self) {
@@ -313,6 +322,7 @@ impl Editor {
             }
         }
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn select_right(&mut self) {
@@ -326,6 +336,7 @@ impl Editor {
             }
         }
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn move_up(&mut self) {
@@ -347,6 +358,7 @@ impl Editor {
             }
         }
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn select_up(&mut self) {
@@ -360,6 +372,7 @@ impl Editor {
             }
         }
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn move_down(&mut self) {
@@ -381,6 +394,7 @@ impl Editor {
             }
         }
         self.merge_selections();
+        self.inc_version();
     }
 
     pub fn select_down(&mut self) {
@@ -394,6 +408,7 @@ impl Editor {
             }
         }
         self.merge_selections();
+        self.inc_version();
     }
 
     fn merge_selections(&mut self) {
@@ -437,6 +452,12 @@ impl Editor {
 
             &self.selections[start_index..end_index]
         }
+    }
+
+    fn inc_version(&mut self) {
+        self.version.get().map(|old_version| {
+            self.version.set(Version(old_version.0, old_version.1 + 1));
+        });
     }
 }
 
