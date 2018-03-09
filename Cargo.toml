@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "napi",
+    "xray_core",
+    "xray_node",
+]
+exclude = ["napi/test_module"]
