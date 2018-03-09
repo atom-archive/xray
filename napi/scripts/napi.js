@@ -20,31 +20,30 @@ const argv = parseArgs(process.argv.slice(2), {
 const subcommand = argv._[0] || 'build'
 
 const nodeIncludePath = path.join(process.argv[0], '..', '..', 'include', 'node')
-const moduleName = path.basename(process.cwd());
+const moduleName = path.basename(process.cwd())
 process.env.NODE_INCLUDE_PATH = nodeIncludePath
 process.env.NODE_MAJOR_VERSION = nodeMajorVersion
 
 const platform = os.platform()
-var libExt = ''
-var platformArgs = ''
+let libExt, platformArgs
 
 // Platform based massaging for build commands
-switch(platform) {
-	case 'darwin':
-		libExt = '.dylib'
-		platformArgs = '-undefined dynamic_lookup -export_dynamic'
-		break;
-	case 'win32':
-		libExt = '.dll'
-		platformArgs = '-undefined dynamic_lookup -export_dynamic'
-		break;
-	case 'linux':
-		libExt = '.so'
-		platformArgs = '-undefined=dynamic_lookup -export_dynamic'
-		break;
-	default:
-		console.error('Operating system not currently supported or recognized by the build script')
-		process.exit(1)
+switch (platform) {
+  case 'darwin':
+    libExt = '.dylib'
+    platformArgs = '-undefined dynamic_lookup -export_dynamic'
+    break
+  case 'win32':
+    libExt = '.dll'
+    platformArgs = '-undefined dynamic_lookup -export_dynamic'
+    break
+  case 'linux':
+    libExt = '.so'
+    platformArgs = '-undefined=dynamic_lookup -export_dynamic'
+    break
+  default:
+    console.error('Operating system not currently supported or recognized by the build script')
+    process.exit(1)
 }
 
 switch (subcommand) {
@@ -53,7 +52,7 @@ switch (subcommand) {
     const targetDir = argv.release ? 'release' : 'debug'
     cp.execSync(`cargo rustc ${releaseFlag} -- -Clink-args=\"${platformArgs}\"`, {stdio: 'inherit'})
     cp.execSync(`cp target/${targetDir}/lib${moduleName}${libExt} target/${targetDir}/${moduleName}.node`, {stdio: 'inherit'})
-    break;
+    break
   case 'check':
     cp.execSync(`cargo check`, {stdio: 'inherit'})
   case 'doc':
