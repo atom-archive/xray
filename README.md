@@ -99,7 +99,7 @@ Our use of a CRDT is similar to the Xi editor, but the approach we're exploring 
 
 We should avoid implementing synchronous APIs that depend on open-ended computations of derived state. For example, when soft wrapping is enabled in Atom, we synchronously update a display index that maps display coordinates to buffer coordinates, which can block the UI.
 
-In Xray, we want avoid making these kinds of promises in our API. For example, we will allow the display index to be accessed synchronously after a buffer edit, but only provide an interpolated version of its state that can be produced in logarithmic time. This means it will be spatially consistent with the underlying buffer, but may contain lines that have not yet been soft-wrapped.
+In Xray, we want to avoid making these kinds of promises in our API. For example, we will allow the display index to be accessed synchronously after a buffer edit, but only provide an interpolated version of its state that can be produced in logarithmic time. This means it will be spatially consistent with the underlying buffer, but may contain lines that have not yet been soft-wrapped.
 
 We can expose an asynchronous API that allows a package author to wait until the display layer is up to date with a specific version of the buffer. In the user interface, we can display a progress bar for any derived state updates that exceed 50ms, which may occur when the user pastes multiple megabytes of text into the editor.
 
