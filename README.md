@@ -99,7 +99,7 @@ Our use of a CRDT is similar to the Xi editor, but the approach we're exploring 
 
 We should avoid implementing synchronous APIs that depend on open-ended computations of derived state. For example, when soft wrapping is enabled in Atom, we synchronously update a display index that maps display coordinates to buffer coordinates, which can block the UI.
 
-In Xray, we want avoid making these kinds of promises in our API. For example, we will allow the display index to be accessed synchronously after a buffer edit, but only provide an interpolated version of its state that can be produced in logarithmic time. This means it will be spatially consistent with the underlying buffer, but may contain lines that have not yet been soft-wrapped.
+In Xray, we want to avoid making these kinds of promises in our API. For example, we will allow the display index to be accessed synchronously after a buffer edit, but only provide an interpolated version of its state that can be produced in logarithmic time. This means it will be spatially consistent with the underlying buffer, but may contain lines that have not yet been soft-wrapped.
 
 We can expose an asynchronous API that allows a package author to wait until the display layer is up to date with a specific version of the buffer. In the user interface, we can display a progress bar for any derived state updates that exceed 50ms, which may occur when the user pastes multiple megabytes of text into the editor.
 
@@ -113,7 +113,7 @@ Early on, we should design the application process to be capable of connecting t
 
 ### React will be used for presentation
 
-By using React, we completely eliminate the view framework as a concern that we need to deal with and give package authors access to a tool they're likely to be familiar with. We also raise the level of abstraction above basic DOM APIs. The risk of using React is of course that it is not standardized and could have breaking API changes. To mitigate this risk, we will require packages to declare which version of React they depend on. We will attempt use this version information to provide shims to older versions of React when we upgrade the bundled version. When it's not possible to shim breaking changes, we'll use the version information to present a warning.
+By using React, we completely eliminate the view framework as a concern that we need to deal with and give package authors access to a tool they're likely to be familiar with. We also raise the level of abstraction above basic DOM APIs. The risk of using React is of course that it is not standardized and could have breaking API changes. To mitigate this risk, we will require packages to declare which version of React they depend on. We will attempt using this version information to provide shims to older versions of React when we upgrade the bundled version. When it's not possible to shim breaking changes, we'll use the version information to present a warning.
 
 ### Styling will be specified in JS
 
