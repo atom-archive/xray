@@ -49,23 +49,29 @@ Martin Fowler defines software architecture as those decisions which are both im
 
 ![Architecture](docs/images/architecture.png)
 
-### The UI is built with Electron
+### The UI is built with web technology
 
-Electron adds a lot of overhead, which detracts from our top priority of high-performance. However, Electron is also the best approach that we know of to deliver a cross-platform, extensible user interface. Atom proved that developers want to add non-trivial UI elements to their editor, and we still see web technologies as the most viable way to offer them that ability. We also want to provide extension authors with a scripting API, and the JavaScript VM that ships with Electron is well suited to that task.
+Web tech adds a lot of overhead, which detracts from our top priority of high-performance. However, web standards are also the best approach that we know of to deliver a cross-platform, extensible user interface. Atom proved that developers want to add non-trivial UI elements to their editor, and we still see web technologies as the most viable way to offer them that ability.
 
-The fundamental question is whether we can gain Electron's benefits for extensibility while still meeting our desired performance goals. Our hypothesis is that it's possible–with the right architecture.
+The fundamental question is whether we can gain the web's benefits for extensibility while still meeting our desired performance goals. Our hypothesis is that it's possible–with the right architecture.
 
 ### Core application logic is written in Rust
 
-The core of the application is implemented in a pure Rust crate (`/xray_core`) and made accessible to JavaScript through N-API bindings (`/xray_node`). This module is loaded into the Electron application (`/xray_electron`) via Node's native add-on system. The binding layer will be responsible for exposing a thread-safe API to JS so that the same native module can be used in the render thread and worker threads.
+While the UI will be web-based, the core of the application is implemented in a server process written in Rust. We place as much logic as possible in a library crate located in `/xray_core`, then expose this logic as a server when running Xray on on the desktop (`/xray_server`) and a web-assembly library running on a worker thread when running Xray in the browser (`/xray_wasm`). We communicate between the UI and the back end process via JSON RPC.
 
 All of the core application code other than the view logic should be written in Rust. This will ensure that it has a minimal footprint to load and execute, and Rust's robust type system will help us maintain it more efficiently than dynamically typed code. A language that is fundamentally designed for multi-threading will also make it easier to exploit parallelism whenever the need arises, whereas JavaScript's single-threaded nature makes parallelism awkward and challenging.
 
 Fundamentally, we want to spend our time writing in a language that is fast by default. It's true that it's possible to write slow Rust, and also possible to write fast JavaScript. It's *also* true that it's much harder to write slow Rust than it is to write slow JavaScript. By spending fewer resources on the implementation of the platform itself, we'll make more resources available to run package code.
 
-### Packages will run primarily in worker threads
+### I/O will be centralized in the server
 
-A misbehaving package should not be able to impact the responsiveness of the application. The best way to guarantee this while preserving ease of development is to activate packages on worker threads. We can do a worker thread per package or run packages in their own contexts across a pool of threads.
+The server will serialize buffer loads and saves on a per-path basis, and maintains a persistent database of CRDT operations for each file. As edits are performed in windows, they will be streamed to the host process to be stored and echoed out to any other windows with the same open buffer. This will enable unsaved changes to always be incrementally preserved in case of a crash or power failure and preserves the history associated with a file indefinitely.
+
+Early on, we should design the application process to be capable of connecting to multiple workspace servers to facilitate real-time collaboration or editing files on a remote server by running a headless host process. To support these use cases, all code paths that touch the file system or spawn subprocesses will occur in the server process. The UI will not make use of the I/O facilities provided by Electron, and instead interact with the server via RPC.
+
+### Packages will run in a JavaScript VM in the server process
+
+A misbehaving package should not be able to impact the responsiveness of the application. The best way to guarantee this while preserving ease of development is to activate packages on their own threads. We can run a worker thread per package or run packages in their own contexts across a pool of threads.
 
 Packages *can* run code on the render thread by specifying versioned components in their `package.json`.
 
@@ -75,9 +81,9 @@ Packages *can* run code on the render thread by specifying versioned components 
 }
 ```
 
-If a package called `my-todos` had the above entry in its `package.json`, it could request that the workspace attach that component by referring to `myTodos.TodoList` when adding an item. On package installation, we can automatically update the V8 snapshot to include the components of every installed package. Components will only be dynamically loaded from the provided paths in development mode.
+If a package called `my-todos` had the above entry in its `package.json`, it could request that the workspace attach that component by referring to `myTodos.TodoList` when adding an item. During package installation on the desktop, we can automatically update the V8 snapshot of the UI to include the components of every installed package. Components will only be dynamically loaded from the provided paths in development mode.
 
-APIs for interacting with the core application state and the underlying operating system will only be available within worker threads, discouraging package authors from putting too much logic into their views. We'll use a combination of asynchronous channels and CRDTs to present convenient APIs to package authors within worker threads.
+Custom views will only have access to the DOM and an asynchronous channel to communicate with the package's back end running on the server. APIs for interacting with the core application state and the underlying operating system will only be available within the server process, discouraging package authors from putting too much logic into their views. We'll use a combination of asynchronous channels and CRDTs to present convenient APIs to package authors within worker threads.
 
 ### Text is stored in a copy-on-write CRDT
 
@@ -103,14 +109,6 @@ We should avoid implementing synchronous APIs that depend on open-ended computat
 In Xray, we want to avoid making these kinds of promises in our API. For example, we will allow the display index to be accessed synchronously after a buffer edit, but only provide an interpolated version of its state that can be produced in logarithmic time. This means it will be spatially consistent with the underlying buffer, but may contain lines that have not yet been soft-wrapped.
 
 We can expose an asynchronous API that allows a package author to wait until the display layer is up to date with a specific version of the buffer. In the user interface, we can display a progress bar for any derived state updates that exceed 50ms, which may occur when the user pastes multiple megabytes of text into the editor.
-
-### System interaction will be centralized in a "workspace server"
-
-File system interactions will be routed through a central server called the *workspace server*.
-
-The server will serialize buffer loads and saves on a per-path basis, and maintains a persistent database of CRDT operations for each file. As edits are performed in windows, they will be streamed to the host process to be stored and echoed out to any other windows with the same open buffer. This will enable unsaved changes to always be incrementally preserved in case of a crash or power failure and preserves the history associated with a file indefinitely.
-
-Early on, we should design the application process to be capable of connecting to multiple workspace servers to facilitate real-time collaboration or editing files on a remote server by running a headless host process. To support these use cases, we should prefer implementing most code paths that touch the file system or spawn subprocesses in the host process and interacting with them via RPC.
 
 ### React will be used for presentation
 
