@@ -3,5 +3,7 @@ members = [
     "napi",
     "xray_core",
     "xray_node",
+    "xray_server",
+    "xray_cli",
 ]
 exclude = ["napi/test_module"]
