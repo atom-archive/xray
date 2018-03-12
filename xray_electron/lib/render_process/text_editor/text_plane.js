@@ -44,14 +44,17 @@ class TextPlane extends React.Component {
       });
     }
 
-    this.renderer.drawLines({
+    this.renderer.draw({
+      canvasWidth: this.props.width * window.devicePixelRatio,
+      canvasHeight: this.props.height * window.devicePixelRatio,
       scrollTop: this.props.scrollTop,
       firstVisibleRow: this.props.frameState.firstVisibleRow,
-      lines: this.props.frameState.lines
+      lines: this.props.frameState.lines,
+      selections: this.props.frameState.selections,
+      showCursors: this.props.showCursors,
+      computedLineHeight,
     });
   }
-
-  getLineHeight() {}
 }
 
 TextPlane.contextTypes = {
@@ -65,6 +68,7 @@ const UNIT_QUAD_VERTICES = new Float32Array([1, 1, 1, 0, 0, 0, 0, 1]);
 const UNIT_QUAD_ELEMENT_INDICES = new Uint8Array([0, 1, 3, 1, 2, 3]);
 const MAX_GLYPH_INSTANCES = 1 << 16;
 const GLYPH_INSTANCE_SIZE_IN_BYTES = 12 * Float32Array.BYTES_PER_ELEMENT;
+const SOLID_INSTANCE_SIZE_IN_BYTES = 8 * Float32Array.BYTES_PER_ELEMENT;
 const SUBPIXEL_DIVISOR = 4;
 
 class Renderer {
@@ -86,6 +90,14 @@ class Renderer {
       shaders.textBlendPass2Fragment,
       this.gl.FRAGMENT_SHADER
     );
+    const solidVertexShader = this.createShader(
+      shaders.solidVertex,
+      this.gl.VERTEX_SHADER
+    );
+    const solidFragmentShader = this.createShader(
+      shaders.solidFragment,
+      this.gl.FRAGMENT_SHADER
+    );
 
     this.textBlendPass1Program = this.createProgram(
       textBlendVertexShader,
@@ -95,26 +107,36 @@ class Renderer {
       textBlendVertexShader,
       textBlendPass2FragmentShader
     );
+    this.solidProgram = this.createProgram(
+      solidVertexShader,
+      solidFragmentShader
+    );
 
-    // this.textBlendVAO = this.gl.createVertexArray();
-    // this.gl.bindVertexArray(this.textBlendVAO);
+    this.textBlendPass1ViewportScaleLocation = this.gl.getUniformLocation(
+      this.textBlendPass1Program,
+      "viewportScale"
+    );
+    this.textBlendPass2ViewportScaleLocation = this.gl.getUniformLocation(
+      this.textBlendPass2Program,
+      "viewportScale"
+    );
+    this.solidViewportScaleLocation = this.gl.getUniformLocation(
+      this.solidProgram,
+      "viewportScale"
+    );
 
+    this.createBuffers();
+    this.textBlendVAO = this.createTextBlendVAO();
+    this.solidVAO = this.createSolidVAO();
+  }
+
+  createBuffers() {
     this.unitQuadVerticesBuffer = this.gl.createBuffer();
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.unitQuadVerticesBuffer);
     this.gl.bufferData(
       this.gl.ARRAY_BUFFER,
       UNIT_QUAD_VERTICES,
-      gl.STATIC_DRAW
-    );
-
-    this.gl.enableVertexAttribArray(shaders.attributes.unitQuadVertex);
-    this.gl.vertexAttribPointer(
-      shaders.attributes.unitQuadVertex,
-      2,
-      this.gl.FLOAT,
-      false,
-      0,
-      0
+      this.gl.STATIC_DRAW
     );
 
     this.unitQuadElementIndicesBuffer = this.gl.createBuffer();
@@ -125,140 +147,220 @@ class Renderer {
     this.gl.bufferData(
       this.gl.ELEMENT_ARRAY_BUFFER,
       UNIT_QUAD_ELEMENT_INDICES,
-      gl.STATIC_DRAW
+      this.gl.STATIC_DRAW
     );
 
     this.glyphInstances = new Float32Array(MAX_GLYPH_INSTANCES);
     this.glyphInstancesBuffer = this.gl.createBuffer();
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.glyphInstancesBuffer);
-    this.gl.bufferData(
-      this.gl.ARRAY_BUFFER,
-      this.glyphInstances,
-      this.gl.STREAM_DRAW
+
+    this.selectionSolidInstances = new Float32Array(MAX_GLYPH_INSTANCES);
+    this.cursorSolidInstances = new Float32Array(MAX_GLYPH_INSTANCES);
+    this.solidInstancesBuffer = this.gl.createBuffer();
+  }
+
+  createTextBlendVAO() {
+    const vao = this.gl.createVertexArray();
+    this.gl.bindVertexArray(vao);
+
+    this.gl.bindBuffer(
+      this.gl.ELEMENT_ARRAY_BUFFER,
+      this.unitQuadElementIndicesBuffer
     );
 
-    this.gl.enableVertexAttribArray(shaders.attributes.targetOrigin);
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.unitQuadVerticesBuffer);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.unitQuadVertex);
     this.gl.vertexAttribPointer(
-      shaders.attributes.targetOrigin,
+      shaders.textBlendAttributes.unitQuadVertex,
+      2,
+      this.gl.FLOAT,
+      false,
+      0,
+      0
+    );
+
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.glyphInstancesBuffer);
+
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.targetOrigin);
+    this.gl.vertexAttribPointer(
+      shaders.textBlendAttributes.targetOrigin,
       2,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       0
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.targetOrigin, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.targetOrigin, 1);
 
-    this.gl.enableVertexAttribArray(shaders.attributes.targetSize);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.targetSize);
     this.gl.vertexAttribPointer(
-      shaders.attributes.targetSize,
+      shaders.textBlendAttributes.targetSize,
       2,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       2 * Float32Array.BYTES_PER_ELEMENT
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.targetSize, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.targetSize, 1);
 
-    this.gl.enableVertexAttribArray(shaders.attributes.textColorRGBA);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.textColorRGBA);
     this.gl.vertexAttribPointer(
-      shaders.attributes.textColorRGBA,
+      shaders.textBlendAttributes.textColorRGBA,
       4,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       4 * Float32Array.BYTES_PER_ELEMENT
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.textColorRGBA, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.textColorRGBA, 1);
 
-    this.gl.enableVertexAttribArray(shaders.attributes.atlasOrigin);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.atlasOrigin);
     this.gl.vertexAttribPointer(
-      shaders.attributes.atlasOrigin,
+      shaders.textBlendAttributes.atlasOrigin,
       2,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       8 * Float32Array.BYTES_PER_ELEMENT
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.atlasOrigin, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.atlasOrigin, 1);
 
-    this.gl.enableVertexAttribArray(shaders.attributes.atlasSize);
+    this.gl.enableVertexAttribArray(shaders.textBlendAttributes.atlasSize);
     this.gl.vertexAttribPointer(
-      shaders.attributes.atlasSize,
+      shaders.textBlendAttributes.atlasSize,
       2,
       this.gl.FLOAT,
       false,
       GLYPH_INSTANCE_SIZE_IN_BYTES,
       10 * Float32Array.BYTES_PER_ELEMENT
     );
-    this.gl.vertexAttribDivisor(shaders.attributes.atlasSize, 1);
+    this.gl.vertexAttribDivisor(shaders.textBlendAttributes.atlasSize, 1);
+
+    return vao
   }
 
-  drawLines({ scrollTop, firstVisibleRow, lines }) {
+  createSolidVAO() {
+    const vao = this.gl.createVertexArray();
+    this.gl.bindVertexArray(vao);
+
+    this.gl.bindBuffer(
+      this.gl.ELEMENT_ARRAY_BUFFER,
+      this.unitQuadElementIndicesBuffer
+    );
+
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.unitQuadVerticesBuffer);
+    this.gl.enableVertexAttribArray(shaders.solidAttributes.unitQuadVertex);
+    this.gl.vertexAttribPointer(
+      shaders.solidAttributes.unitQuadVertex,
+      2,
+      this.gl.FLOAT,
+      false,
+      0,
+      0
+    );
+
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.solidInstancesBuffer);
+
+    this.gl.enableVertexAttribArray(shaders.solidAttributes.targetOrigin);
+    this.gl.vertexAttribPointer(
+      shaders.solidAttributes.targetOrigin,
+      2,
+      this.gl.FLOAT,
+      false,
+      SOLID_INSTANCE_SIZE_IN_BYTES,
+      0
+    );
+    this.gl.vertexAttribDivisor(shaders.solidAttributes.targetOrigin, 1);
+
+    this.gl.enableVertexAttribArray(shaders.solidAttributes.targetSize);
+    this.gl.vertexAttribPointer(
+      shaders.solidAttributes.targetSize,
+      2,
+      this.gl.FLOAT,
+      false,
+      SOLID_INSTANCE_SIZE_IN_BYTES,
+      2 * Float32Array.BYTES_PER_ELEMENT
+    );
+    this.gl.vertexAttribDivisor(shaders.solidAttributes.targetSize, 1);
+
+    this.gl.enableVertexAttribArray(shaders.solidAttributes.colorRGBA);
+    this.gl.vertexAttribPointer(
+      shaders.solidAttributes.colorRGBA,
+      4,
+      this.gl.FLOAT,
+      false,
+      SOLID_INSTANCE_SIZE_IN_BYTES,
+      4 * Float32Array.BYTES_PER_ELEMENT
+    );
+    this.gl.vertexAttribDivisor(shaders.solidAttributes.colorRGBA, 1);
+
+    return vao
+  }
+
+  draw({ canvasHeight, canvasWidth, scrollTop, firstVisibleRow, lines, selections, showCursors }) {
     const { dpiScale } = this.style;
+    const viewportScaleX = 2 / canvasWidth;
+    const viewportScaleY = -2 / canvasHeight;
 
-    const firstVisibleRowY = firstVisibleRow * this.style.computedLineHeight;
-    let y = Math.round((firstVisibleRowY - scrollTop) * dpiScale);
-    let instances = 0;
-    for (var i = 0; i < lines.length; i++) {
-      let x = 0;
-      const line = lines[i];
-      for (var j = 0; j < line.length; j++) {
-        const char = line[j];
-        const variantIndex =
-          Math.round(x * SUBPIXEL_DIVISOR) % SUBPIXEL_DIVISOR;
-        const glyph = this.atlas.getGlyph(char, variantIndex);
+    const textColor = {r: 0, g: 0, b: 0, a: 255};
+    const selectionColor = {r: 255, g: 255, b: 0, a: 255};
+    const cursorColor = {r: 0, g: 0, b: 0, a: 255};
+    const cursorWidth = 2;
 
-        // targetOrigin
-        this.glyphInstances[0 + 12 * instances] = Math.round(x - glyph.variantOffset);
-        this.glyphInstances[1 + 12 * instances] = y;
-        // targetSize
-        this.glyphInstances[2 + 12 * instances] = glyph.width;
-        this.glyphInstances[3 + 12 * instances] = glyph.height;
-        // textColorRGBA
-        this.glyphInstances[4 + 12 * instances] = 0;
-        this.glyphInstances[5 + 12 * instances] = 0;
-        this.glyphInstances[6 + 12 * instances] = 0;
-        this.glyphInstances[7 + 12 * instances] = 1;
-        // atlasOrigin
-        this.glyphInstances[8 + 12 * instances] = glyph.textureU;
-        this.glyphInstances[9 + 12 * instances] = glyph.textureV;
-        // atlasSize
-        this.glyphInstances[10 + 12 * instances] = glyph.textureWidth;
-        this.glyphInstances[11 + 12 * instances] = glyph.textureHeight;
-
-        x += glyph.subpixelWidth;
-        instances++;
-      }
-
-      x = 0;
-      y += Math.round(this.style.computedLineHeight * dpiScale);
-    }
-
+    const selectionPositions = new Float32Array(selections.length * 2);
+    const glyphCount = this.populateGlyphInstances(scrollTop, firstVisibleRow, lines, selections, textColor, selectionPositions);
+    const {selectionSolidCount, cursorSolidCount} = this.populateSelectionSolidInstances(scrollTop, canvasWidth, selections, selectionPositions, selectionColor, cursorColor, cursorWidth);
     this.atlas.uploadTexture()
 
-    this.gl.useProgram(this.textBlendPass1Program);
-    this.gl.viewport(0, 0, this.gl.canvas.width, this.gl.canvas.height);
-    const viewportScaleLocation = this.gl.getUniformLocation(
-      this.textBlendPass1Program,
-      "viewportScale"
-    );
-    this.gl.uniform2f(
-      viewportScaleLocation,
-      2 / this.gl.canvas.width,
-      -2 / this.gl.canvas.height
-    );
+    this.gl.clearColor(1, 1, 1, 1);
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+    this.gl.viewport(0, 0, canvasWidth, canvasHeight);
 
+    this.drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY);
+    this.drawText(glyphCount, viewportScaleX, viewportScaleY);
+    if (showCursors) {
+      this.drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY);
+    }
+  }
+
+  drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY) {
+    this.gl.bindVertexArray(this.solidVAO);
+    this.gl.disable(this.gl.BLEND);
+    this.gl.useProgram(this.solidProgram);
+    this.gl.uniform2f(
+      this.solidViewportScaleLocation,
+      viewportScaleX,
+      viewportScaleY
+    );
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.solidInstancesBuffer);
+    this.gl.bufferData(
+      this.gl.ARRAY_BUFFER,
+      this.selectionSolidInstances,
+      this.gl.STREAM_DRAW
+    );
+    this.gl.drawElementsInstanced(
+      this.gl.TRIANGLES,
+      6,
+      this.gl.UNSIGNED_BYTE,
+      0,
+      selectionSolidCount
+    );
+  }
+
+  drawText(glyphCount, viewportScaleX, viewportScaleY) {
+    this.gl.bindVertexArray(this.textBlendVAO);
+    this.gl.enable(this.gl.BLEND)
+    this.gl.useProgram(this.textBlendPass1Program);
+    this.gl.uniform2f(
+      this.textBlendPass1ViewportScaleLocation,
+      viewportScaleX,
+      viewportScaleY
+    );
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.glyphInstancesBuffer);
     this.gl.bufferData(
       this.gl.ARRAY_BUFFER,
       this.glyphInstances,
       this.gl.STREAM_DRAW
     );
-
-    this.gl.clearColor(1, 1, 1, 1);
-    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
-
-    this.gl.useProgram(this.textBlendPass1Program);
     this.gl.blendFuncSeparate(
       this.gl.ZERO,
       this.gl.ONE_MINUS_SRC_COLOR,
@@ -270,7 +372,7 @@ class Renderer {
       6,
       this.gl.UNSIGNED_BYTE,
       0,
-      instances
+      glyphCount
     );
 
     this.gl.useProgram(this.textBlendPass2Program);
@@ -280,22 +382,202 @@ class Renderer {
       this.gl.ZERO,
       this.gl.ONE
     );
-    const viewportScaleLocation2 = this.gl.getUniformLocation(
-      this.textBlendPass2Program,
-      "viewportScale"
-    );
     this.gl.uniform2f(
-      viewportScaleLocation2,
-      2 / this.gl.canvas.width,
-      -2 / this.gl.canvas.height
+      this.textBlendPass2ViewportScaleLocation,
+      viewportScaleX,
+      viewportScaleY
     );
     this.gl.drawElementsInstanced(
       this.gl.TRIANGLES,
       6,
       this.gl.UNSIGNED_BYTE,
       0,
-      instances
+      glyphCount
     );
+  }
+
+  drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY) {
+    this.gl.bindVertexArray(this.solidVAO);
+    this.gl.disable(this.gl.BLEND);
+    this.gl.useProgram(this.solidProgram);
+    this.gl.uniform2f(
+      this.solidViewportScaleLocation,
+      viewportScaleX,
+      viewportScaleY
+    );
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.solidInstancesBuffer);
+    this.gl.bufferData(
+      this.gl.ARRAY_BUFFER,
+      this.cursorSolidInstances,
+      this.gl.STREAM_DRAW
+    );
+    this.gl.drawElementsInstanced(
+      this.gl.TRIANGLES,
+      6,
+      this.gl.UNSIGNED_BYTE,
+      0,
+      cursorSolidCount
+    );
+  }
+
+  populateGlyphInstances(scrollTop, firstVisibleRow, lines, selections, textColor, selectionPositions) {
+    const firstVisibleRowY = firstVisibleRow * this.style.computedLineHeight;
+
+    let glyphCount = 0;
+    let selectionIndex = 0;
+    let y = Math.round((firstVisibleRowY - scrollTop) * this.style.dpiScale);
+    const position = {}
+
+    for (var i = 0; i < lines.length; i++) {
+      position.row = firstVisibleRow + i;
+      let x = 0;
+      const line = lines[i];
+
+      for (position.column = 0; position.column <= line.length; position.column++) {
+        const selection = selections[selectionIndex];
+        if (selection) {
+          if (comparePoints(position, selection.start) === 0) {
+            selectionPositions[selectionIndex * 2] = x;
+          }
+
+          if (comparePoints(position, selection.end) === 0) {
+            selectionPositions[selectionIndex * 2 + 1] = x;
+            selectionIndex++;
+          }
+        }
+
+        if (position.column < line.length) {
+          const char = line[position.column];
+          const variantIndex = Math.round(x * SUBPIXEL_DIVISOR) % SUBPIXEL_DIVISOR;
+          const glyph = this.atlas.getGlyph(char, variantIndex);
+
+          this.updateGlyphInstance(glyphCount++, Math.round(x - glyph.variantOffset), y, glyph, textColor);
+
+          x += glyph.subpixelWidth;
+        }
+      }
+
+      y += Math.round(this.style.computedLineHeight * this.style.dpiScale);
+    }
+
+    return glyphCount
+  }
+
+  updateGlyphInstance(i, x, y, glyph, color) {
+    const startOffset = 12 * i;
+    // targetOrigin
+    this.glyphInstances[0 + startOffset] = x;
+    this.glyphInstances[1 + startOffset] = y;
+    // targetSize
+    this.glyphInstances[2 + startOffset] = glyph.width;
+    this.glyphInstances[3 + startOffset] = glyph.height;
+    // textColorRGBA
+    this.glyphInstances[4 + startOffset] = color.r;
+    this.glyphInstances[5 + startOffset] = color.g;
+    this.glyphInstances[6 + startOffset] = color.b;
+    this.glyphInstances[7 + startOffset] = color.a;
+    // atlasOrigin
+    this.glyphInstances[8 + startOffset] = glyph.textureU;
+    this.glyphInstances[9 + startOffset] = glyph.textureV;
+    // atlasSize
+    this.glyphInstances[10 + startOffset] = glyph.textureWidth;
+    this.glyphInstances[11 + startOffset] = glyph.textureHeight;
+  }
+
+  populateSelectionSolidInstances(scrollTop, canvasWidth, selections, selectionPositions, selectionColor, cursorColor, cursorWidth) {
+    const { dpiScale, computedLineHeight } = this.style;
+
+    let selectionSolidCount = 0;
+    let cursorSolidCount = 0;
+
+    for (var i = 0; i < selections.length; i++) {
+      const selection = selections[i];
+      if (comparePoints(selection.start, selection.end) !== 0) {
+        const rowSpan = selection.end.row - selection.start.row;
+        const startX = selectionPositions[i * 2];
+        const endX = selectionPositions[i * 2 + 1];
+
+        if (rowSpan === 0) {
+          this.updateSolidInstance(
+            this.selectionSolidInstances,
+            selectionSolidCount++,
+            Math.round(startX),
+            yForRow(selection.start.row),
+            Math.round(endX - startX),
+            yForRow(selection.start.row + 1) - yForRow(selection.start.row),
+            selectionColor
+          );
+        } else {
+          // First line of selection
+          this.updateSolidInstance(
+            this.selectionSolidInstances,
+            selectionSolidCount++,
+            Math.round(startX),
+            yForRow(selection.start.row),
+            Math.round(canvasWidth - startX),
+            yForRow(selection.start.row + 1) - yForRow(selection.start.row),
+            selectionColor
+          );
+
+          // Lines entirely spanned by selection
+          if (rowSpan > 1) {
+            this.updateSolidInstance(
+              this.selectionSolidInstances,
+              selectionSolidCount++,
+              0,
+              yForRow(selection.start.row + 1),
+              Math.round(canvasWidth),
+              yForRow(selection.end.row) - yForRow(selection.start.row + 1),
+              selectionColor
+            );
+          }
+
+          // Last line of selection
+          this.updateSolidInstance(
+            this.selectionSolidInstances,
+            selectionSolidCount++,
+            0,
+            yForRow(selection.end.row),
+            Math.round(endX),
+            yForRow(selection.end.row + 1) - yForRow(selection.end.row),
+            selectionColor
+          );
+        }
+      } else {
+        const startX = selectionPositions[i * 2];
+        const endX = startX + cursorWidth;
+        this.updateSolidInstance(
+          this.cursorSolidInstances,
+          cursorSolidCount++,
+          Math.round(startX),
+          yForRow(selection.start.row),
+          Math.round(endX - startX),
+          yForRow(selection.start.row + 1) - yForRow(selection.start.row),
+          cursorColor
+        );
+      }
+    }
+
+    function yForRow(row) {
+      return Math.round((row * computedLineHeight - scrollTop) * dpiScale);
+    }
+
+    return {selectionSolidCount, cursorSolidCount}
+  }
+
+  updateSolidInstance(arrayBuffer, i, x, y, width, height, color) {
+    const startOffset = 8 * i;
+    // targetOrigin
+    arrayBuffer[0 + startOffset] = x;
+    arrayBuffer[1 + startOffset] = y;
+    // targetSize
+    arrayBuffer[2 + startOffset] = width;
+    arrayBuffer[3 + startOffset] = height;
+    // colorRGBA
+    arrayBuffer[4 + startOffset] = color.r;
+    arrayBuffer[5 + startOffset] = color.g;
+    arrayBuffer[6 + startOffset] = color.b;
+    arrayBuffer[7 + startOffset] = color.a;
   }
 
   createProgram(vertexShader, fragmentShader) {
@@ -442,4 +724,8 @@ class Atlas {
       this.shouldUploadTexture = false
     }
   }
+}
+
+function comparePoints(a, b) {
+  return (a.row - b.row) || (a.column - b.column)
 }

@@ -24,7 +24,8 @@ class TextEditorContainer extends React.Component {
       scrollTop: 0,
       height: 0,
       width: 0,
-      editorVersion: 0
+      editorVersion: 0,
+      showCursors: true
     };
   }
 
@@ -37,6 +38,10 @@ class TextEditorContainer extends React.Component {
     });
 
     element.addEventListener('wheel', this.onWheel, {passive: true});
+
+    this.state.cursorBlinkIntervalHandle = window.setInterval(() => {
+      this.setState({ showCursors: !this.state.showCursors });
+    }, 500);
   }
 
   componentWillUnmount() {
@@ -44,6 +49,7 @@ class TextEditorContainer extends React.Component {
     element.removeEventListener('wheel', this.onWheel, {passive: true});
     this.state.editor.destroy();
     this.state.resizeObserver.disconnect();
+    window.clearInterval(this.state.cursorBlinkIntervalHandle);
   }
 
   componentDidResize({width, height}) {
@@ -67,12 +73,13 @@ class TextEditorContainer extends React.Component {
   }
 
   render() {
-    const { scrollTop, width, height } = this.state;
+    const { scrollTop, width, height, showCursors } = this.state;
 
     return $(TextEditor, {
       scrollTop,
       width,
       height,
+      showCursors,
       frameState: this.computeFrameState()
     })
   }
@@ -102,6 +109,7 @@ function TextEditor(props) {
       scrollTop: props.scrollTop,
       width: props.width,
       height: props.height,
+      showCursors: props.showCursors,
       frameState: props.frameState
     })
   );
