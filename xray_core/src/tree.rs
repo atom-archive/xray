@@ -480,6 +480,8 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
 
 #[cfg(test)]
 mod tests {
+    extern crate rand;
+
     use super::*;
 
     #[derive(Default, Eq, PartialEq, Clone, Debug)]
@@ -582,7 +584,7 @@ mod tests {
     #[test]
     fn random() {
         for seed in 0..100 {
-            use rand::{Rng, SeedableRng, StdRng};
+            use self::rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut tree = Tree::<u16>::new();
