@@ -51,7 +51,8 @@ switch (subcommand) {
     const releaseFlag = argv.release ? '--release' : ''
     const targetDir = argv.release ? 'release' : 'debug'
     cp.execSync(`cargo rustc ${releaseFlag} -- -Clink-args=\"${platformArgs}\"`, {stdio: 'inherit'})
-    cp.execSync(`cp target/${targetDir}/lib${moduleName}${libExt} target/${targetDir}/${moduleName}.node`, {stdio: 'inherit'})
+    cp.execSync(`mkdir -p target/${targetDir}`);
+    cp.execSync(`cp ../target/${targetDir}/lib${moduleName}${libExt} target/${targetDir}/${moduleName}.node`, {stdio: 'inherit'})
     break
   case 'check':
     cp.execSync(`cargo check`, {stdio: 'inherit'})
