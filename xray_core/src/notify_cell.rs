@@ -88,12 +88,13 @@ impl<T: Clone> Drop for NotifyCell<T> {
 
 #[cfg(test)]
 mod tests {
+    extern crate rand;
     extern crate futures_cpupool;
 
     use super::*;
     use std::collections::BTreeSet;
     use futures::Future;
-    use rand::{self, Rng};
+    use self::rand::Rng;
     use self::futures_cpupool::CpuPool;
 
     #[test]

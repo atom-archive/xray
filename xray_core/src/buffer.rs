@@ -927,6 +927,8 @@ fn find_insertion_index<T: Ord>(v: &Vec<T>, x: &T) -> usize {
 
 #[cfg(test)]
 mod tests {
+    extern crate rand;
+
     use super::*;
     use std::cmp::Ordering;
 
@@ -955,7 +957,7 @@ mod tests {
 
     #[test]
     fn random_splice() {
-        use rand::{Rng, SeedableRng, StdRng};
+        use self::rand::{Rng, SeedableRng, StdRng};
 
         for seed in 0..100 {
             println!("{:?}", seed);
@@ -1079,7 +1081,7 @@ mod tests {
     #[test]
     fn fragment_ids() {
         for seed in 0..10 {
-            use rand::{Rng, SeedableRng, StdRng};
+            use self::rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut ids = vec![FragmentId(vec![0]), FragmentId(vec![4])];
