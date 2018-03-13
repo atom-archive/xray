@@ -3,6 +3,7 @@ use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::iter;
 use std::ops::{Add, AddAssign, Sub, Range};
+use std::rc::Rc;
 use std::result;
 use std::sync::Arc;
 use super::tree::{self, Tree, SeekBias};
@@ -87,7 +88,7 @@ struct ChangeId {
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
-struct FragmentId(Vec<u16>);
+struct FragmentId(Rc<Vec<u16>>);
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct Fragment {
@@ -722,11 +723,11 @@ impl<'a> From<Vec<u16>> for Text {
 
 impl FragmentId {
     fn min_value() -> Self {
-        FragmentId(vec![0 as u16])
+        FragmentId(Rc::new(vec![0 as u16]))
     }
 
     fn max_value() -> Self {
-        FragmentId(vec![u16::max_value()])
+        FragmentId(Rc::new(vec![u16::max_value()]))
     }
 
     fn between(left: &Self, right: &Self) -> Self {
@@ -748,7 +749,7 @@ impl FragmentId {
             }
         }
 
-        FragmentId(new_entries)
+        FragmentId(Rc::new(new_entries))
     }
 }
 
