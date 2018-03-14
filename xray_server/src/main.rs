@@ -4,16 +4,19 @@ mod app;
 
 extern crate bytes;
 extern crate futures;
+extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+extern crate serde_json;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_process;
 extern crate tokio_uds;
 
+
 use std::env;
 use std::fs;
-use futures::{Future, Sink, Stream};
+use futures::Stream;
 use tokio_core::reactor::Core;
 use tokio_io::AsyncRead;
 use tokio_uds::UnixListener;
@@ -29,7 +32,7 @@ fn main() {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
 
-    fs::remove_file(&socket_path);
+    let _ = fs::remove_file(&socket_path);
     let listener = UnixListener::bind(socket_path, &handle).unwrap();
 
     let handle_connections = listener.incoming().for_each(move |(socket, _)| {

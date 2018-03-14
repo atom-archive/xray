@@ -1,9 +1,7 @@
-extern crate serde;
-extern crate serde_json;
-
 use std::io;
 use bytes::BytesMut;
-use self::serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
+use serde_json;
 use tokio_io::codec::{Decoder, Encoder};
 use std::marker::PhantomData;
 
@@ -14,8 +12,8 @@ pub struct JsonLinesCodec<In, Out> {
 
 impl<In, Out> JsonLinesCodec<In, Out>
 where
-    In: for<'a> serde::Deserialize<'a>,
-    Out: serde::Serialize,
+    In: for<'a> Deserialize<'a>,
+    Out: Serialize,
 {
     pub fn new() -> Self {
         JsonLinesCodec {
@@ -27,8 +25,8 @@ where
 
 impl<In, Out> Decoder for JsonLinesCodec<In, Out>
 where
-    In: for<'a> serde::Deserialize<'a>,
-    Out: serde::Serialize,
+    In: for<'a> Deserialize<'a>,
+    Out: Serialize,
 {
     type Item = In;
     type Error = io::Error;
@@ -46,8 +44,8 @@ where
 
 impl<In, Out> Encoder for JsonLinesCodec<In, Out>
 where
-    In: for<'a> serde::Deserialize<'a>,
-    Out: serde::Serialize,
+    In: for<'a> Deserialize<'a>,
+    Out: Serialize,
 {
     type Item = Out;
     type Error = io::Error;
