@@ -1,12 +1,14 @@
 mod messages;
 mod json_lines_codec;
 mod app;
+mod workspace;
 
 extern crate bytes;
 extern crate futures;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
 extern crate serde_json;
 extern crate tokio_core;
 extern crate tokio_io;
