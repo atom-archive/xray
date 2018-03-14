@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum IncomingMessage {
-    StartWindow,
+    StartWindow { workspace_id: usize },
     StartApplication,
     OpenWorkspace { paths: Vec<PathBuf> },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum OutgoingMessage {
     Acknowledge,

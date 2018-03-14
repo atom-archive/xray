@@ -35,9 +35,8 @@ where
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if let Some(index) = buf.iter().position(|byte| *byte == b'\n') {
-            let line = buf.split_to(index);
-            buf.split_to(1);
-            let item = serde_json::from_slice(line.as_ref())?;
+            let line = buf.split_to(index + 1);
+            let item = serde_json::from_slice(&line[0..line.len() - 1])?;
             Ok(Some(item))
         } else {
             Ok(None)

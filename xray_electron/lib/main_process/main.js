@@ -18,7 +18,7 @@ class XrayApplication {
   constructor (serverPath, socketPath) {
     this.serverPath = serverPath;
     this.socketPath = socketPath;
-    this.messageChunks = [];
+    this.currentMessageFragments = [];
     this.windowsByWorkspaceId = new Map();
     this.readyPromise = new Promise(resolve => app.on('ready', resolve));
   }
@@ -41,7 +41,7 @@ class XrayApplication {
     serverProcess.on('error', console.error);
     serverProcess.on('exit', () => app.quit());
 
-    this.serverSocket.on('data', this._handleChunk);
+    this.serverSocket.on('data', this._handleInput.bind(this));
     this._sendMessage({type: 'StartApplication'});
 
     if (initialMessage) {
@@ -65,17 +65,19 @@ class XrayApplication {
     }
   }
 
-  _handleChunk (chunk) {
-    const newlineIndex = chunk.indexOf('\n');
-    if (newlineIndex !== -1) {
-      this.messageChunks.push(chunk.slice(0, newlineIndex));
-      this.handleMessage(JSON.parse(Buffer.concat(this.messageChunks)));
-      this.messageChunks.length = 0;
-      if (newlineIndex + 1 < chunk.length) {
-        this.messageChunks.push(chunk.slice(newlineIndex + 1));
+  _handleInput (input) {
+    let searchStartIndex = 0;
+    while (searchStartIndex < input.length) {
+      const newlineIndex = input.indexOf('\n', searchStartIndex);
+      if (newlineIndex !== -1) {
+        this.currentMessageFragments.push(input.slice(searchStartIndex, newlineIndex));
+        this._handleMessage(JSON.parse(Buffer.concat(this.currentMessageFragments)));
+        this.currentMessageFragments.length = 0;
+        searchStartIndex = newlineIndex + 1;
+      } else {
+        this.currentMessageFragments.push(input.slice(searchStartIndex));
+        break;
       }
-    } else {
-      this.messageChunks.push(chunk);
     }
   }
 
