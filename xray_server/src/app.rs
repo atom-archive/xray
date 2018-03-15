@@ -19,8 +19,8 @@ pub struct App {
 
 struct Shared {
     next_workspace_id: usize,
-    application_sender: Option<OutboundSender>,
-    window_senders: HashMap<usize, OutboundSender>,
+    app_channel: Option<OutboundSender>,
+    window_channels: HashMap<usize, OutboundSender>,
     workspace_views: HashMap<usize, WorkspaceView>,
 }
 
@@ -43,8 +43,8 @@ impl App {
         Self {
             shared: Rc::new(RefCell::new(Shared {
                 next_workspace_id: 1,
-                application_sender: None,
-                window_senders: HashMap::new(),
+                app_channel: None,
+                window_channels: HashMap::new(),
                 workspace_views: HashMap::new(),
             })),
         }
@@ -114,12 +114,12 @@ impl Client {
     }
 
     fn start_application(&self) {
-        self.app_state.borrow_mut().application_sender = Some(self.channel.clone());
+        self.app_state.borrow_mut().app_channel = Some(self.channel.clone());
         self.channel.unbounded_send(OutgoingMessage::Acknowledge);
     }
 
     fn start_window(&mut self, workspace_id: usize) {
-        self.app_state.borrow_mut().window_senders.insert(workspace_id, self.channel.clone());
+        self.app_state.borrow_mut().window_channels.insert(workspace_id, self.channel.clone());
         self.channel.unbounded_send(OutgoingMessage::WindowState { });
     }
 
@@ -129,8 +129,8 @@ impl Client {
         let workspace_id = app_state.next_workspace_id;
         app_state.next_workspace_id += 1;
         app_state.workspace_views.insert(workspace_id, WorkspaceView::new());
-        if let Some(ref mut sender) = app_state.application_sender {
-            sender.unbounded_send(OutgoingMessage::OpenWindow { workspace_id });
+        if let Some(ref mut app_channel) = app_state.app_channel {
+            app_channel.unbounded_send(OutgoingMessage::OpenWindow { workspace_id });
         }
         self.channel.unbounded_send(OutgoingMessage::Acknowledge);
     }
