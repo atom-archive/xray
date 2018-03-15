@@ -6,8 +6,9 @@ use window::{self, ViewId};
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum IncomingMessage {
+    StartApp,
+    StartCli,
     StartWindow { window_id: WindowId },
-    StartApplication,
     OpenWorkspace { paths: Vec<PathBuf> },
     Action {
         view_id: ViewId,
