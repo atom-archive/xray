@@ -1,15 +1,16 @@
 use std::path::PathBuf;
 use serde_json;
+use app::WindowId;
+use window::ViewId;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum IncomingMessage {
-    StartWindow { workspace_id: usize },
+    StartWindow { window_id: WindowId },
     StartApplication,
     OpenWorkspace { paths: Vec<PathBuf> },
     Action {
-        view_type: String,
-        view_id: usize,
+        view_id: ViewId,
         action: serde_json::Value,
     },
 }
@@ -18,6 +19,6 @@ pub enum IncomingMessage {
 #[serde(tag = "type")]
 pub enum OutgoingMessage {
     Acknowledge,
-    OpenWindow { workspace_id: usize },
+    OpenWindow { window_id: WindowId },
     WindowState {  },
 }

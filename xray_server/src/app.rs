@@ -9,19 +9,21 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use serde_json;
-use workspace::WorkspaceView;
+use workspace::WorkspaceHandle;
+use window::{Window, ViewId};
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
+pub type WindowId = usize;
 
 pub struct App {
     shared: Rc<RefCell<Shared>>,
 }
 
 struct Shared {
-    next_workspace_id: usize,
     app_channel: Option<OutboundSender>,
-    window_channels: HashMap<usize, OutboundSender>,
-    workspace_views: HashMap<usize, WorkspaceView>,
+    next_window_id: WindowId,
+    windows: HashMap<WindowId, Window>,
+    window_channels: HashMap<WindowId, OutboundSender>,
 }
 
 struct Client {
@@ -34,7 +36,7 @@ enum ClientState {
     Unknown,
     Application,
     Window {
-        workspace_id: usize
+        window_id: WindowId
     },
 }
 
@@ -42,10 +44,10 @@ impl App {
     pub fn new() -> Self {
         Self {
             shared: Rc::new(RefCell::new(Shared {
-                next_workspace_id: 1,
+                next_window_id: 1,
                 app_channel: None,
+                windows: HashMap::new(),
                 window_channels: HashMap::new(),
-                workspace_views: HashMap::new(),
             })),
         }
     }
@@ -86,9 +88,9 @@ impl Client {
                         self.start_application();
                         self.state = ClientState::Application;
                     }
-                    IncomingMessage::StartWindow { workspace_id } => {
-                        self.start_window(workspace_id);
-                        self.state = ClientState::Window { workspace_id };
+                    IncomingMessage::StartWindow { window_id } => {
+                        self.start_window(window_id);
+                        self.state = ClientState::Window { window_id };
                     }
                     IncomingMessage::OpenWorkspace { paths } => {
                         self.open_workspace(paths);
@@ -97,15 +99,10 @@ impl Client {
                 }
             },
             &ClientState::Application => {},
-            &ClientState::Window { workspace_id } => {
+            &ClientState::Window { window_id } => {
                 match message {
-                    IncomingMessage::Action{view_type, view_id, action} => {
-                        self.handle_action(
-                            workspace_id,
-                            view_type,
-                            view_id,
-                            action,
-                        )
+                    IncomingMessage::Action { view_id, action } => {
+                        self.dispatch_action(window_id, view_id, action)
                     }
                     _ => panic!("Unexpected message")
                 }
@@ -118,28 +115,39 @@ impl Client {
         self.channel.unbounded_send(OutgoingMessage::Acknowledge);
     }
 
-    fn start_window(&mut self, workspace_id: usize) {
-        self.app_state.borrow_mut().window_channels.insert(workspace_id, self.channel.clone());
+    fn start_window(&self, window_id: WindowId) {
+        self.app_state.borrow_mut().window_channels.insert(window_id, self.channel.clone());
         self.channel.unbounded_send(OutgoingMessage::WindowState { });
     }
 
-    fn open_workspace(&mut self, paths: Vec<PathBuf>) {
-        let mut app_state = self.app_state.borrow_mut();
-
-        let workspace_id = app_state.next_workspace_id;
-        app_state.next_workspace_id += 1;
-        app_state.workspace_views.insert(workspace_id, WorkspaceView::new());
-        if let Some(ref mut app_channel) = app_state.app_channel {
-            app_channel.unbounded_send(OutgoingMessage::OpenWindow { workspace_id });
-        }
+    fn open_workspace(&self, paths: Vec<PathBuf>) {
+        self.app_state.borrow_mut().open_workspace(paths);
         self.channel.unbounded_send(OutgoingMessage::Acknowledge);
     }
 
-    fn handle_action(&mut self, workspace_id: usize, view_type: String, view_id: usize, action: serde_json::Value) {
-        let mut app_state = self.app_state.borrow_mut();
+    fn dispatch_action(&self, window_id: WindowId, view_id: ViewId, action: serde_json::Value) {
+        self.app_state.borrow_mut().dispatch_action(window_id, view_id, action)
+    }
+}
 
-        if let Some(ref mut workspace_view) = app_state.workspace_views.get_mut(&workspace_id) {
-            workspace_view.handle_action(view_type, view_id, action);
+impl Shared {
+    fn open_workspace(&mut self, paths: Vec<PathBuf>) {
+        let window_id = self.next_window_id;
+        self.next_window_id += 1;
+
+        let workspace = WorkspaceHandle::new(paths);
+        let window = Window::new(workspace);
+        self.windows.insert(window_id, window);
+
+        if let Some(ref mut app_channel) = self.app_channel {
+            app_channel.unbounded_send(OutgoingMessage::OpenWindow { window_id });
         }
+    }
+
+    fn dispatch_action(&mut self, window_id: WindowId, view_id: ViewId, action: serde_json::Value) {
+        match self.windows.get_mut(&window_id) {
+            Some(ref mut window) => window.dispatch_action(view_id, action),
+            None => unimplemented!()
+        };
     }
 }
