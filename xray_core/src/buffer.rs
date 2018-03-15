@@ -386,10 +386,11 @@ impl Buffer {
         let mut cursor = self.fragments.cursor();
         cursor.seek(&CharacterCount(offset), seek_bias);
         let fragment = cursor.item().unwrap();
-
+        let offset_in_fragment = offset - cursor.start::<CharacterCount>().0;
+        let offset_in_insertion = fragment.start_offset + offset_in_fragment;
         Ok(Anchor(AnchorInner::Middle {
             insertion_id: fragment.insertion.id,
-            offset: offset - cursor.start::<CharacterCount>().0,
+            offset: offset_in_insertion,
             bias
         }))
     }
@@ -429,10 +430,11 @@ impl Buffer {
         let mut cursor = self.fragments.cursor();
         cursor.seek(&point, seek_bias);
         let fragment = cursor.item().unwrap();
-
+        let offset_in_fragment = fragment.offset_for_point(point - &cursor.start::<Point>())?;
+        let offset_in_insertion = fragment.start_offset + offset_in_fragment;
         Ok(Anchor(AnchorInner::Middle {
             insertion_id: fragment.insertion.id,
-            offset: fragment.offset_for_point(point - &cursor.start::<Point>())?,
+            offset: offset_in_insertion,
             bias
         }))
     }
@@ -486,12 +488,12 @@ impl Buffer {
                     fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
                     fragments_cursor.item().ok_or(Error::InvalidAnchor).and_then(|fragment| {
                         let overshoot = if fragment.is_visible() {
-                            fragment.point_for_offset(offset)?
+                            offset - fragment.start_offset
                         } else {
-                            Point {row: 0, column: 0}
+                            0
                         };
 
-                        Ok(fragments_cursor.start::<Point>() + &overshoot)
+                        Ok(fragments_cursor.start::<Point>() + &fragment.point_for_offset(overshoot)?)
                     })
                 })
             }
@@ -798,7 +800,8 @@ impl Fragment {
 
     fn point_for_offset(&self, offset: usize) -> Result<Point> {
         let text = &self.insertion.text;
-        return Ok(text.point_for_offset(offset)? - &text.point_for_offset(self.start_offset)?)
+        let offset_in_insertion = self.start_offset + offset;
+        Ok(text.point_for_offset(offset_in_insertion)? - &text.point_for_offset(self.start_offset)?)
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize> {
