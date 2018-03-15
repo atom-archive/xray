@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use serde_json;
 use app::WindowId;
-use window::ViewId;
+use window::{self, ViewId};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum IncomingMessage {
     StartWindow { window_id: WindowId },
@@ -15,10 +15,10 @@ pub enum IncomingMessage {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 #[serde(tag = "type")]
 pub enum OutgoingMessage {
     Acknowledge,
     OpenWindow { window_id: WindowId },
-    WindowState {  },
+    WindowUpdate(window::WindowUpdate),
 }

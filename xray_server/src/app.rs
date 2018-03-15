@@ -11,6 +11,7 @@ use std::rc::Rc;
 use serde_json;
 use workspace::WorkspaceHandle;
 use window::{Window, ViewId};
+use tokio_core::reactor;
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
 pub type WindowId = usize;
@@ -23,7 +24,7 @@ struct Shared {
     app_channel: Option<OutboundSender>,
     next_window_id: WindowId,
     windows: HashMap<WindowId, Window>,
-    window_channels: HashMap<WindowId, OutboundSender>,
+    reactor: reactor::Handle,
 }
 
 struct Client {
@@ -41,33 +42,34 @@ enum ClientState {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(reactor: reactor::Handle) -> Self {
         Self {
             shared: Rc::new(RefCell::new(Shared {
                 next_window_id: 1,
                 app_channel: None,
                 windows: HashMap::new(),
-                window_channels: HashMap::new(),
+                reactor,
             })),
         }
     }
 
-    pub fn add_connection<'a, S>(&mut self, socket: S) -> Box<'a + Future<Item = (), Error = ()>>
+    pub fn add_connection<'a, S>(&mut self, socket: S)
     where
-        S: 'a + Stream<Item = IncomingMessage, Error = io::Error> + Sink<SinkItem = OutgoingMessage>,
+        S: 'static + Stream<Item = IncomingMessage, Error = io::Error> + Sink<SinkItem = OutgoingMessage>,
     {
         let (outgoing, incoming) = socket.split();
         let (tx, rx) = mpsc::unbounded();
-
         let mut client = Client::new(tx, self.shared.clone());
-        let handle_incoming = incoming.for_each(move |message| {
+
+        let mut shared = self.shared.borrow_mut();
+        shared.reactor.spawn(incoming.for_each(move |message| {
             client.handle_message(message);
             Ok(())
-        });
+        }).then(|_| Ok(())));
 
-        let send_outgoing = outgoing.send_all(rx.map_err(|_| unreachable!())).then(|_| Ok(()));
+        // let send_outgoing = outgoing.send_all(rx.map_err(|_| unreachable!())).then(|_| Ok(()));
 
-        Box::new(handle_incoming.select(send_outgoing).then(|_| Ok(())))
+        // Box::new(handle_incoming.select(send_outgoing).then(|_| Ok(())))
     }
 }
 
@@ -116,8 +118,17 @@ impl Client {
     }
 
     fn start_window(&self, window_id: WindowId) {
-        self.app_state.borrow_mut().window_channels.insert(window_id, self.channel.clone());
-        self.channel.unbounded_send(OutgoingMessage::WindowState { });
+        let mut app_state = self.app_state.borrow_mut();
+        if let Some(window_updates) = app_state.windows.get_mut(&window_id).unwrap().updates() {
+            let outgoing_messages = window_updates.map(|update| OutgoingMessage::WindowUpdate(update));
+            app_state.reactor.spawn(
+                self.channel.clone()
+                    .send_all(outgoing_messages.map_err(|_| unreachable!()))
+                    .then(|_| Ok(()))
+            );
+        } else {
+            unimplemented!();
+        }
     }
 
     fn open_workspace(&self, paths: Vec<PathBuf>) {
