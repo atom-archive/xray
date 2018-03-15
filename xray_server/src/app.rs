@@ -24,10 +24,18 @@ struct Shared {
     workspace_views: HashMap<usize, WorkspaceView>,
 }
 
-enum Client {
+struct Client {
+    channel: OutboundSender,
+    state: ClientState,
+    app_state: Rc<RefCell<Shared>>
+}
+
+enum ClientState {
     Unknown,
     Application,
-    Window{workspace_id: usize},
+    Window {
+        workspace_id: usize
+    },
 }
 
 impl App {
@@ -49,10 +57,9 @@ impl App {
         let (outgoing, incoming) = socket.split();
         let (tx, rx) = mpsc::unbounded();
 
-        let shared = self.shared.clone();
-        let mut client = Client::Unknown;
+        let mut client = Client::new(tx, self.shared.clone());
         let handle_incoming = incoming.for_each(move |message| {
-            shared.borrow_mut().handle_message(&tx, message, &mut client);
+            client.handle_message(message);
             Ok(())
         });
 
@@ -62,32 +69,38 @@ impl App {
     }
 }
 
-impl Shared {
-    fn handle_message(&mut self, sender: &OutboundSender, message: IncomingMessage, client: &mut Client) {
-        match client {
-            &mut Client::Unknown => {
+impl Client {
+    fn new(channel: OutboundSender, app_state: Rc<RefCell<Shared>>) -> Self {
+        Self {
+            channel,
+            state: ClientState::Unknown,
+            app_state
+        }
+    }
+
+    fn handle_message(&mut self, message: IncomingMessage) {
+        match &self.state {
+            &ClientState::Unknown => {
                 match message {
                     IncomingMessage::StartApplication => {
-                        self.start_application(sender);
-                        *client = Client::Application;
+                        self.start_application();
+                        self.state = ClientState::Application;
                     }
                     IncomingMessage::StartWindow { workspace_id } => {
-                        self.start_window(sender, workspace_id);
-                        *client = Client::Window{workspace_id};
+                        self.start_window(workspace_id);
+                        self.state = ClientState::Window { workspace_id };
                     }
                     IncomingMessage::OpenWorkspace { paths } => {
-                        self.open_workspace(sender, paths);
+                        self.open_workspace(paths);
                     },
                     _ => panic!("Unexpected message"),
                 }
             },
-            &mut Client::Application => {
-            },
-            &mut Client::Window{ workspace_id } => {
+            &ClientState::Application => {},
+            &ClientState::Window { workspace_id } => {
                 match message {
                     IncomingMessage::Action{view_type, view_id, action} => {
                         self.handle_action(
-                            sender,
                             workspace_id,
                             view_type,
                             view_id,
@@ -100,35 +113,32 @@ impl Shared {
         }
     }
 
-    fn start_application(&mut self, sender: &OutboundSender) {
-        self.application_sender = Some(sender.clone());
-        sender.unbounded_send(OutgoingMessage::Acknowledge);
+    fn start_application(&self) {
+        self.app_state.borrow_mut().application_sender = Some(self.channel.clone());
+        self.channel.unbounded_send(OutgoingMessage::Acknowledge);
     }
 
-    fn start_window(&mut self, sender: &OutboundSender, workspace_id: usize) {
-        self.window_senders.insert(workspace_id, sender.clone());
-        sender.unbounded_send(OutgoingMessage::WindowState{});
+    fn start_window(&mut self, workspace_id: usize) {
+        self.app_state.borrow_mut().window_senders.insert(workspace_id, self.channel.clone());
+        self.channel.unbounded_send(OutgoingMessage::WindowState { });
     }
 
-    fn open_workspace(&mut self, sender: &OutboundSender, paths: Vec<PathBuf>) {
-        let workspace_id = self.next_workspace_id;
-        self.next_workspace_id += 1;
-        self.workspace_views.insert(workspace_id, WorkspaceView::new());
-        if let Some(ref mut sender) = self.application_sender {
-            sender.unbounded_send(OutgoingMessage::OpenWindow{ workspace_id });
+    fn open_workspace(&mut self, paths: Vec<PathBuf>) {
+        let mut app_state = self.app_state.borrow_mut();
+
+        let workspace_id = app_state.next_workspace_id;
+        app_state.next_workspace_id += 1;
+        app_state.workspace_views.insert(workspace_id, WorkspaceView::new());
+        if let Some(ref mut sender) = app_state.application_sender {
+            sender.unbounded_send(OutgoingMessage::OpenWindow { workspace_id });
         }
-        sender.unbounded_send(OutgoingMessage::Acknowledge);
+        self.channel.unbounded_send(OutgoingMessage::Acknowledge);
     }
 
-    fn handle_action(
-        &mut self,
-        sender: &OutboundSender,
-        workspace_id: usize,
-        view_type: String,
-        view_id: usize,
-        action: serde_json::Value,
-    ) {
-        if let &mut Some(ref mut workspace_view) = &mut self.workspace_views.get_mut(&workspace_id) {
+    fn handle_action(&mut self, workspace_id: usize, view_type: String, view_id: usize, action: serde_json::Value) {
+        let mut app_state = self.app_state.borrow_mut();
+
+        if let Some(ref mut workspace_view) = app_state.workspace_views.get_mut(&workspace_id) {
             workspace_view.handle_action(view_type, view_id, action);
         }
     }
