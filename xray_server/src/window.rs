@@ -68,7 +68,7 @@ impl Window {
     }
 
     pub fn dispatch_action(&self, view_id: ViewId, action: serde_json::Value) {
-        let view = self.0.borrow().views.get(&view_id).map(|&(ref view, _)| view.clone());
+        let view = self.0.borrow().get_view(view_id);
         view.map(|view| view.borrow_mut().dispatch_action(action));
     }
 
@@ -103,7 +103,7 @@ impl Stream for WindowUpdateStream {
 
         for id in inner.inserted.iter() {
             if !inner.removed.contains(&id) {
-                let &(ref view, _) = inner.views.get(&id).unwrap();
+                let view = inner.get_view(*id).unwrap();
                 let view = view.borrow();
                 window_update.updated.push(ViewUpdate {
                     view_id: *id,
@@ -152,6 +152,10 @@ impl Inner {
         inner.inserted.insert(view_id);
         inner.update_stream_task.take().map(|task| task.notify());
         view_id
+    }
+
+    fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<Box<View>>>> {
+        self.views.get(&id).map(|&(ref view, _)| view.clone())
     }
 }
 
