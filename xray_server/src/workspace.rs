@@ -2,7 +2,7 @@ use serde_json;
 use std::cell::{RefCell, Ref, RefMut};
 use std::path::PathBuf;
 use std::rc::Rc;
-use window::View;
+use window::{View, WindowHandle, ViewHandle};
 
 #[derive(Clone)]
 pub struct WorkspaceHandle(Rc<RefCell<Workspace>>);
@@ -12,7 +12,18 @@ pub struct Workspace {
 }
 
 pub struct WorkspaceView {
-    workspace: WorkspaceHandle
+    workspace: WorkspaceHandle,
+    window_handle: Option<WindowHandle>,
+    modal_panel: Option<ViewHandle>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum Action {
+    ToggleFileFinder,
+}
+
+struct FileFinderView {
 }
 
 impl WorkspaceHandle {
@@ -35,62 +46,61 @@ impl Workspace {
     }
 }
 
-impl WorkspaceView {
-    pub fn new(workspace: WorkspaceHandle) -> Self {
-        Self { workspace }
-    }
-}
-
 impl View for WorkspaceView {
     fn component_name(&self) -> &'static str {
         "Workspace"
     }
 
     fn render(&self) -> serde_json::Value {
-        json!({})
+        let ref window_handle = self.window_handle.as_ref().unwrap();
+
+        json!({
+            "modal": self.modal_panel.as_ref().map(|handle| {
+                window_handle.render_view(handle)
+            })
+        })
+    }
+
+    fn set_window_handle(&mut self, window_handle: WindowHandle) {
+        self.window_handle = Some(window_handle);
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value) {
-
+        match serde_json::from_value(action) {
+            Ok(Action::ToggleFileFinder) => self.toggle_file_finder(),
+            _ => eprintln!("Unrecognized action"),
+        }
     }
 }
 
-// #[derive(Deserialize)]
-// #[serde(tag = "type")]
-// enum Action {
-//     ToggleFileFinder,
-// }
-//
-// struct FileFinderView {
-// }
-//
-// impl View for FileFinderView {
-//     fn type_name(&self) -> &str { "FileFinderView" }
-//     fn id(&self) -> usize { 0 }
-//     fn render(&self) -> serde_json::Value { json!({}) }
-//     fn handle_action(&self, action: serde_json::Value) {}
-// }
-//
-//
-//
-//
-// impl WorkspaceView {
-//     pub fn new() -> Self {
-//         WorkspaceView{ modal_panel: None }
-//     }
-//
-//     pub fn handle_action(&mut self, view_type: String, view_id: usize, action: serde_json::Value) {
-//         match serde_json::from_value(action) {
-//             Ok(Action::ToggleFileFinder) => self.toggle_file_finder(),
-//             _ => eprintln!("Unrecognized action"),
-//         }
-//     }
-//
-//     fn toggle_file_finder(&mut self) {
-//         if self.modal_panel.is_some() {
-//             self.modal_panel = None;
-//         } else {
-//             self.modal_panel = Some(Box::new(FileFinderView{}));
-//         }
-//     }
-// }
+impl WorkspaceView {
+    pub fn new(workspace: WorkspaceHandle) -> Self {
+        WorkspaceView {
+            workspace,
+            modal_panel: None,
+            window_handle: None,
+        }
+    }
+
+    fn toggle_file_finder(&mut self) {
+        let ref mut window_handle = self.window_handle.as_mut().unwrap();
+        if self.modal_panel.is_some() {
+            self.modal_panel = None;
+        } else {
+            self.modal_panel = Some(window_handle.add_view(Box::new(FileFinderView { })));
+        }
+        window_handle.updated();
+    }
+}
+
+impl View for FileFinderView {
+    fn component_name(&self) -> &'static str { "FileFinderView" }
+
+    fn render(&self) -> serde_json::Value {
+        json!({
+            "files": ""
+        })
+    }
+
+    fn dispatch_action(&mut self, action: serde_json::Value) {}
+}

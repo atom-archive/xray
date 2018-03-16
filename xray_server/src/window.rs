@@ -18,7 +18,6 @@ pub trait View {
 
 pub struct Window(Rc<RefCell<Inner>>);
 pub struct UpdateStream(Weak<RefCell<Inner>>);
-pub struct WindowHandle(Weak<RefCell<Inner>>);
 
 pub struct Inner {
     workspace: WorkspaceHandle,
@@ -31,9 +30,14 @@ pub struct Inner {
     task: Option<Task>,
 }
 
+pub struct WindowHandle {
+    owner: ViewId,
+    inner: Weak<RefCell<Inner>>
+}
+
 pub struct ViewHandle {
-    view_id: ViewId,
-    window_handle: WindowHandle
+    owned: ViewId,
+    inner: Weak<RefCell<Inner>>
 }
 
 #[derive(Serialize, Debug)]
@@ -61,7 +65,7 @@ impl Window {
             task: None,
             created_update_stream: false,
         })));
-        window.handle().add_view(Box::new(WorkspaceView::new(workspace)));
+        Inner::add_view(Rc::downgrade(&window.0), Box::new(WorkspaceView::new(workspace)));
         window
     }
 
@@ -78,10 +82,6 @@ impl Window {
             inner.created_update_stream = true;
             Some(UpdateStream(Rc::downgrade(&self.0)))
         }
-    }
-
-    fn handle(&self) -> WindowHandle {
-        WindowHandle(Rc::downgrade(&self.0))
     }
 }
 
@@ -137,27 +137,47 @@ impl Stream for UpdateStream {
     }
 }
 
-impl WindowHandle {
-    pub fn add_view(&self, mut view: Box<View>) -> ViewHandle {
-        let inner = self.0.upgrade().unwrap();
+impl Inner {
+    pub fn add_view(inner_ref: Weak<RefCell<Inner>>, mut view: Box<View>) -> ViewId {
+        let inner = inner_ref.upgrade().unwrap();
         let mut inner = inner.borrow_mut();
         let view_id = inner.next_view_id;
         inner.next_view_id += 1;
-        view.set_window_handle(WindowHandle(self.0.clone()));
+        view.set_window_handle(WindowHandle{owner: view_id, inner: inner_ref});
         inner.views.insert(view_id, view);
         inner.inserted.insert(view_id);
         inner.task.take().map(|task| task.notify());
+        view_id
+    }
+}
 
-        ViewHandle {
-            view_id,
-            window_handle: WindowHandle(self.0.clone())
-        }
+impl WindowHandle {
+    pub fn add_view(&self, view: Box<View>) -> ViewHandle {
+        let view_id = Inner::add_view(self.inner.clone(), view);
+        ViewHandle { owned: view_id, inner: self.inner.clone() }
+    }
+
+    // TODO - This should probably be `get_view` and return a reference to the `View`,
+    // but I couldn't figure out how to get that to work with the borrow checker.
+    pub fn render_view(&self, handle: &ViewHandle) -> serde_json::Value {
+        let inner = self.inner.upgrade().unwrap();
+        let inner = inner.borrow_mut();
+        inner.views.get(&handle.owned).unwrap().render()
+    }
+
+    pub fn updated(&mut self) {
+        let inner = self.inner.upgrade().unwrap();
+        let mut inner = inner.borrow_mut();
+        inner.updated.insert(self.owner);
+        inner.task.take().map(|task| task.notify());
     }
 }
 
 impl Drop for ViewHandle {
     fn drop(&mut self) {
-        let window_inner = self.window_handle.0.upgrade().unwrap();
-        window_inner.borrow_mut().views.remove(&self.view_id);
+        let inner = self.inner.upgrade().unwrap();
+        let mut inner = inner.borrow_mut();
+        inner.views.remove(&self.owned);
+        inner.task.take().map(|task| task.notify());
     }
 }
