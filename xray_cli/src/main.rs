@@ -45,13 +45,10 @@ fn main() {
     let socket_path = args.flag_socket_path.as_ref().map_or(DEFAULT_SOCKET_PATH, |path| path.as_str());
 
     if let Ok(mut socket) = UnixStream::connect(socket_path) {
-        if let Err(error) = write_to_socket(&mut socket, message) {
-            eprintln!(
-                "Failed to write to {}: {}",
-                socket_path,
-                error.description()
-            );
-        }
+        write_to_socket(&mut socket, json!({ "type": "StartCli" }))
+            .expect("Failed to write to socket");
+        write_to_socket(&mut socket, message)
+            .expect("Failed to write to socket");
         return;
     }
 
