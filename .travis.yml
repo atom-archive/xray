@@ -2,13 +2,8 @@ language: node_js
 node_js:
   - "8.9.3"
 
-addons:
-  apt:
-    packages:
-      - libclang
-      - clang
-
 install:
+  - sudo apt-get install libclang clang -y
   - curl https://sh.rustup.rs -sSf | sh
   - cd xray_electron
   - npm install
