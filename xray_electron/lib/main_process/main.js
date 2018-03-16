@@ -2,7 +2,7 @@ const {app, BrowserWindow} = require('electron');
 const {spawn} = require('child_process');
 const path = require('path');
 const url = require('url');
-const net = require('net');
+const XrayClient = require('../shared/xray_client');
 
 const SERVER_PATH = path.join(__dirname, '..', '..', '..', 'target', 'debug', 'xray_server');
 
@@ -18,78 +18,54 @@ class XrayApplication {
   constructor (serverPath, socketPath) {
     this.serverPath = serverPath;
     this.socketPath = socketPath;
-    this.currentMessageFragments = [];
-    this.windowsByWorkspaceId = new Map();
+    this.windowsById = new Map();
     this.readyPromise = new Promise(resolve => app.on('ready', resolve));
+    this.xrayClient = new XrayClient();
   }
 
   async start (initialMessage) {
     const serverProcess = spawn(this.serverPath, [], {stdio: ['ignore', 'pipe', 'inherit']});
     app.on('before-quit', () => serverProcess.kill());
 
-    let serverStdout = '';
-    this.serverSocket = await new Promise((resolve, reject) => {
-      serverProcess.stdout.on('data', data => {
-        serverStdout += data.toString('utf8');
-        if (serverStdout.includes('Listening\n')) {
-          const socket = net.connect(SOCKET_PATH, () => resolve(socket));
-          socket.on('error', reject);
-        }
-      });
-    })
-
     serverProcess.on('error', console.error);
     serverProcess.on('exit', () => app.quit());
 
-    this.serverSocket.on('data', this._handleInput.bind(this));
-    this._sendMessage({type: 'StartApplication'});
+    await new Promise(resolve => {
+      let serverStdout = '';
+      serverProcess.stdout.on('data', data => {
+        serverStdout += data.toString('utf8');
+        if (serverStdout.includes('Listening\n')) resolve()
+      });
+    });
 
+    await this.xrayClient.start(this.socketPath);
+    this.xrayClient.addMessageListener(this._handleMessage.bind(this));
+    this.xrayClient.sendMessage({type: 'StartApp'});
     if (initialMessage) {
-      this._sendMessage(JSON.parse(initialMessage));
+      this.xrayClient.sendMessage(JSON.parse(initialMessage));
     }
-  }
-
-  _sendMessage (message) {
-    this.serverSocket.write(JSON.stringify(message));
-    this.serverSocket.write('\n');
   }
 
   async _handleMessage (message) {
     await this.readyPromise;
     switch (message.type) {
       case 'OpenWindow': {
-        const workspaceId = message.workspaceId;
-        this._createWindow(workspaceId);
+        this._createWindow(message.window_id);
         break;
       }
     }
   }
 
-  _handleInput (input) {
-    let searchStartIndex = 0;
-    while (searchStartIndex < input.length) {
-      const newlineIndex = input.indexOf('\n', searchStartIndex);
-      if (newlineIndex !== -1) {
-        this.currentMessageFragments.push(input.slice(searchStartIndex, newlineIndex));
-        this._handleMessage(JSON.parse(Buffer.concat(this.currentMessageFragments)));
-        this.currentMessageFragments.length = 0;
-        searchStartIndex = newlineIndex + 1;
-      } else {
-        this.currentMessageFragments.push(input.slice(searchStartIndex));
-        break;
-      }
-    }
-  }
-
-  _createWindow (workspaceId) {
-    const window = new BrowserWindow({width: 800, height: 600});
+  _createWindow (windowId) {
+    const window = new BrowserWindow({width: 800, height: 600, webSecurity: false});
     window.loadURL(url.format({
-      pathname: path.join(__dirname, `../../index.html?workspaceId=${workspaceId}&socketPath=${this.socketPath}`),
+      pathname: path.join(__dirname, '../../index.html'),
+      search: `windowId=${windowId}&socketPath=${encodeURIComponent(this.socketPath)}`,
       protocol: 'file:',
       slashes: true
     }));
-    this.windowsByWorkspaceId.set(workspaceId, window);
-    window.on('closed', () => this.windowsByWorkspaceId.delete(workspaceId));
+    this.windowsById.set(windowId, window);
+    window.on('closed', () => this.windowsById.delete(windowId));
   }
 }
 
