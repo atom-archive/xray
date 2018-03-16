@@ -25,7 +25,7 @@ pub struct WindowUpdateStream(Weak<RefCell<Inner>>);
 pub struct Inner {
     workspace: WorkspaceHandle,
     next_view_id: ViewId,
-    views: HashMap<ViewId, (Rc<RefCell<Box<View>>>, ViewUpdateStream)>,
+    views: HashMap<ViewId, (Rc<RefCell<View>>, ViewUpdateStream)>,
     inserted: HashSet<ViewId>,
     removed: HashSet<ViewId>,
     created_update_stream: bool,
@@ -63,7 +63,7 @@ impl Window {
             created_update_stream: false,
             update_stream_task: None,
         })));
-        Inner::add_view(Rc::downgrade(&window.0), Box::new(WorkspaceView::new(workspace)));
+        Inner::add_view(Rc::downgrade(&window.0), WorkspaceView::new(workspace));
         window
     }
 
@@ -140,7 +140,7 @@ impl Stream for WindowUpdateStream {
 }
 
 impl Inner {
-    pub fn add_view(inner_ref: Weak<RefCell<Inner>>, mut view: Box<View>) -> ViewId {
+    pub fn add_view<T: 'static + View>(inner_ref: Weak<RefCell<Inner>>, mut view: T) -> ViewId {
         let inner = inner_ref.upgrade().unwrap();
         let mut inner = inner.borrow_mut();
         let view_id = inner.next_view_id;
@@ -154,13 +154,13 @@ impl Inner {
         view_id
     }
 
-    fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<Box<View>>>> {
+    fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<View>>> {
         self.views.get(&id).map(|&(ref view, _)| view.clone())
     }
 }
 
 impl WindowHandle {
-    pub fn add_view(&self, view: Box<View>) -> ViewHandle {
+    pub fn add_view<T: 'static + View>(&self, view: T) -> ViewHandle {
         let view_id = Inner::add_view(self.0.clone(), view);
         ViewHandle { view_id, inner: self.0.clone() }
     }

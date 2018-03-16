@@ -93,7 +93,7 @@ impl WorkspaceView {
         if self.modal_panel.is_some() {
             self.modal_panel = None;
         } else {
-            self.modal_panel = Some(window_handle.add_view(Box::new(FileFinderView { updates: NotifyCell::new(()) })));
+            self.modal_panel = Some(window_handle.add_view(FileFinderView { updates: NotifyCell::new(()) }));
         }
         self.updates.set(());
     }
