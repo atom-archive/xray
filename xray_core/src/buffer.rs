@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::iter;
@@ -25,22 +26,24 @@ pub struct Buffer {
     lamport_clock: LamportTimestamp,
     fragments: Tree<Fragment>,
     insertions: HashMap<ChangeId, Tree<FragmentMapping>>,
+    anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
+    offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: NotifyCell<Version>
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Version(LocalTimestamp);
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
 pub struct Point {
     pub row: u32,
     pub column: u32
 }
 
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub struct Anchor(AnchorInner);
 
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
 enum AnchorInner {
     Start,
     End,
@@ -51,7 +54,7 @@ enum AnchorInner {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
 enum AnchorBias {
     Left,
     Right
@@ -85,7 +88,7 @@ struct ChangeId {
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
-struct FragmentId(Vec<u16>);
+struct FragmentId(Arc<Vec<u16>>);
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct Fragment {
@@ -144,6 +147,8 @@ impl Buffer {
             lamport_clock: 0,
             fragments,
             insertions: HashMap::new(),
+            anchor_cache: RefCell::new(HashMap::new()),
+            offset_cache: RefCell::new(HashMap::new()),
             version: NotifyCell::new(Version(0))
         }
     }
@@ -192,6 +197,8 @@ impl Buffer {
                 local_timestamp: self.local_clock
             };
             self.splice_fragments(change_id, old_range, new_text);
+            self.anchor_cache.borrow_mut().clear();
+            self.offset_cache.borrow_mut().clear();
             self.version.set(Version(self.local_clock));
         }
     }
@@ -386,12 +393,16 @@ impl Buffer {
         let mut cursor = self.fragments.cursor();
         cursor.seek(&CharacterCount(offset), seek_bias);
         let fragment = cursor.item().unwrap();
-
-        Ok(Anchor(AnchorInner::Middle {
+        let offset_in_fragment = offset - cursor.start::<CharacterCount>().0;
+        let offset_in_insertion = fragment.start_offset + offset_in_fragment;
+        let point = cursor.start::<Point>() + &fragment.point_for_offset(offset_in_fragment)?;
+        let anchor = Anchor(AnchorInner::Middle {
             insertion_id: fragment.insertion.id,
-            offset: offset - cursor.start::<CharacterCount>().0,
+            offset: offset_in_insertion,
             bias
-        }))
+        });
+        self.cache_position(Some(anchor.clone()), offset, point);
+        Ok(anchor)
     }
 
     pub fn anchor_before_point(&self, point: Point) -> Result<Anchor> {
@@ -429,88 +440,103 @@ impl Buffer {
         let mut cursor = self.fragments.cursor();
         cursor.seek(&point, seek_bias);
         let fragment = cursor.item().unwrap();
-
-        Ok(Anchor(AnchorInner::Middle {
+        let offset_in_fragment = fragment.offset_for_point(point - &cursor.start::<Point>())?;
+        let offset_in_insertion = fragment.start_offset + offset_in_fragment;
+        let anchor = Anchor(AnchorInner::Middle {
             insertion_id: fragment.insertion.id,
-            offset: fragment.offset_for_point(point - &cursor.start::<Point>())?,
+            offset: offset_in_insertion,
             bias
-        }))
+        });
+        let offset = cursor.start::<CharacterCount>().0 + offset_in_fragment;
+        self.cache_position(Some(anchor.clone()), offset, point);
+        Ok(anchor)
     }
 
     pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<usize> {
-        match &anchor.0 {
-            &AnchorInner::Start => Ok(0),
-            &AnchorInner::End => Ok(self.len()),
-            &AnchorInner::Middle { ref insertion_id, offset, ref bias } => {
-                let seek_bias = match bias {
-                    &AnchorBias::Left => SeekBias::Left,
-                    &AnchorBias::Right => SeekBias::Right,
-                };
-
-                let splits = self.insertions.get(&insertion_id).ok_or(Error::InvalidAnchor)?;
-                let mut splits_cursor = splits.cursor();
-                splits_cursor.seek(&InsertionOffset(offset), seek_bias);
-
-                splits_cursor.item().and_then(|split| {
-                    let mut fragments_cursor = self.fragments.cursor();
-                    fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
-
-                    fragments_cursor.item().map(|fragment| {
-                        let overshoot = if fragment.is_visible() {
-                            offset - fragment.start_offset
-                        } else {
-                            0
-                        };
-                        fragments_cursor.start::<CharacterCount>().0 + overshoot
-                    })
-                }).ok_or(Error::InvalidAnchor)
-            }
-        }
+        Ok(self.position_for_anchor(anchor)?.0)
     }
 
     pub fn point_for_anchor(&self, anchor: &Anchor) -> Result<Point> {
+        Ok(self.position_for_anchor(anchor)?.1)
+    }
+
+    fn position_for_anchor(&self, anchor: &Anchor) -> Result<(usize, Point)> {
         match &anchor.0 {
-            &AnchorInner::Start => Ok(Point {row: 0, column: 0}),
-            &AnchorInner::End => Ok(self.fragments.len::<Point>()),
+            &AnchorInner::Start => Ok((0, Point {row: 0, column: 0})),
+            &AnchorInner::End => Ok((self.len(), self.fragments.len::<Point>())),
             &AnchorInner::Middle { ref insertion_id, offset, ref bias } => {
-                let seek_bias = match bias {
-                    &AnchorBias::Left => SeekBias::Left,
-                    &AnchorBias::Right => SeekBias::Right,
+                let cached_position = {
+                    let anchor_cache = self.anchor_cache.try_borrow().ok();
+                    anchor_cache.as_ref().and_then(|cache| cache.get(anchor).cloned())
                 };
 
-                let splits = self.insertions.get(&insertion_id).ok_or(Error::InvalidAnchor)?;
-                let mut splits_cursor = splits.cursor();
-                splits_cursor.seek(&InsertionOffset(offset), seek_bias);
-                splits_cursor.item().ok_or(Error::InvalidAnchor).and_then(|split| {
-                    let mut fragments_cursor = self.fragments.cursor();
-                    fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
-                    fragments_cursor.item().ok_or(Error::InvalidAnchor).and_then(|fragment| {
-                        let overshoot = if fragment.is_visible() {
-                            fragment.point_for_offset(offset)?
-                        } else {
-                            Point {row: 0, column: 0}
-                        };
+                if let Some(cached_position) = cached_position {
+                    Ok(cached_position)
+                } else {
+                    let seek_bias = match bias {
+                        &AnchorBias::Left => SeekBias::Left,
+                        &AnchorBias::Right => SeekBias::Right,
+                    };
 
-                        Ok(fragments_cursor.start::<Point>() + &overshoot)
+                    let splits = self.insertions.get(&insertion_id).ok_or(Error::InvalidAnchor)?;
+                    let mut splits_cursor = splits.cursor();
+                    splits_cursor.seek(&InsertionOffset(offset), seek_bias);
+                    splits_cursor.item().ok_or(Error::InvalidAnchor).and_then(|split| {
+                        let mut fragments_cursor = self.fragments.cursor();
+                        fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
+                        fragments_cursor.item().ok_or(Error::InvalidAnchor).and_then(|fragment| {
+                            let overshoot = if fragment.is_visible() {
+                                offset - fragment.start_offset
+                            } else {
+                                0
+                            };
+                            let offset = fragments_cursor.start::<CharacterCount>().0 + overshoot;
+                            let point = fragments_cursor.start::<Point>() + &fragment.point_for_offset(overshoot)?;
+                            self.cache_position(Some(anchor.clone()), offset, point);
+                            Ok((offset, point))
+                        })
                     })
-                })
+                }
             }
         }
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize> {
-        let mut fragments_cursor = self.fragments.cursor();
-        fragments_cursor.seek(&point, SeekBias::Left);
-        fragments_cursor.item().ok_or(Error::OffsetOutOfRange).map(|fragment| {
-            let overshoot = fragment.offset_for_point(point - &fragments_cursor.start::<Point>()).unwrap();
-            &fragments_cursor.start::<CharacterCount>().0 + &overshoot
-        })
+        let cached_offset = {
+            let offset_cache = self.offset_cache.try_borrow().ok();
+            offset_cache.as_ref().and_then(|cache| cache.get(&point).cloned())
+        };
+
+        if let Some(cached_offset) = cached_offset {
+            Ok(cached_offset)
+        } else {
+            let mut fragments_cursor = self.fragments.cursor();
+            fragments_cursor.seek(&point, SeekBias::Left);
+            fragments_cursor.item().ok_or(Error::OffsetOutOfRange).map(|fragment| {
+                let overshoot = fragment.offset_for_point(point - &fragments_cursor.start::<Point>()).unwrap();
+                let offset = &fragments_cursor.start::<CharacterCount>().0 + &overshoot;
+                self.cache_position(None, offset, point);
+                offset
+            })
+        }
     }
 
     pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<cmp::Ordering> {
         let a_offset = self.offset_for_anchor(a)?;
         let b_offset = self.offset_for_anchor(b)?;
         Ok(a_offset.cmp(&b_offset))
+    }
+
+    fn cache_position(&self, anchor: Option<Anchor>, offset: usize, point: Point) {
+        anchor.map(|anchor| {
+            if let Ok(mut anchor_cache) = self.anchor_cache.try_borrow_mut() {
+                anchor_cache.insert(anchor, (offset, point));
+            }
+        });
+
+        if let Ok(mut offset_cache) = self.offset_cache.try_borrow_mut() {
+            offset_cache.insert(point, offset);
+        }
     }
 }
 
@@ -708,13 +734,18 @@ impl<'a> From<Vec<u16>> for Text {
     }
 }
 
+lazy_static! {
+    static ref FRAGMENT_ID_MIN_VALUE: FragmentId = FragmentId(Arc::new(vec![0 as u16]));
+    static ref FRAGMENT_ID_MAX_VALUE: FragmentId = FragmentId(Arc::new(vec![u16::max_value()]));
+}
+
 impl FragmentId {
     fn min_value() -> Self {
-        FragmentId(vec![0 as u16])
+        FRAGMENT_ID_MIN_VALUE.clone()
     }
 
     fn max_value() -> Self {
-        FragmentId(vec![u16::max_value()])
+        FRAGMENT_ID_MAX_VALUE.clone()
     }
 
     fn between(left: &Self, right: &Self) -> Self {
@@ -736,7 +767,7 @@ impl FragmentId {
             }
         }
 
-        FragmentId(new_entries)
+        FragmentId(Arc::new(new_entries))
     }
 }
 
@@ -798,7 +829,8 @@ impl Fragment {
 
     fn point_for_offset(&self, offset: usize) -> Result<Point> {
         let text = &self.insertion.text;
-        return Ok(text.point_for_offset(offset)? - &text.point_for_offset(self.start_offset)?)
+        let offset_in_insertion = self.start_offset + offset;
+        Ok(text.point_for_offset(offset_in_insertion)? - &text.point_for_offset(self.start_offset)?)
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize> {
@@ -1084,7 +1116,7 @@ mod tests {
             use self::rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut ids = vec![FragmentId(vec![0]), FragmentId(vec![4])];
+            let mut ids = vec![FragmentId(Arc::new(vec![0])), FragmentId(Arc::new(vec![4]))];
             for _i in 0..100 {
                 let index = rng.gen_range::<usize>(1, ids.len());
 
