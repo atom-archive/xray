@@ -43,6 +43,10 @@ impl App {
     {
         let (outgoing, incoming) = socket.split();
         let inner = self.inner.clone();
+        let incoming = incoming.map_err(|error| {
+            eprintln!("Error reading incoming message: {:?}", error);
+            error
+        });
         self.inner.borrow_mut().reactor.spawn(incoming.into_future().map(|(first_message, incoming)| {
             first_message.map(|first_message| {
                 match first_message {

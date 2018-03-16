@@ -25,7 +25,7 @@ pub struct WindowUpdateStream(Weak<RefCell<Inner>>);
 pub struct Inner {
     workspace: WorkspaceHandle,
     next_view_id: ViewId,
-    views: HashMap<ViewId, (Box<View>, ViewUpdateStream)>,
+    views: HashMap<ViewId, (Rc<RefCell<Box<View>>>, ViewUpdateStream)>,
     inserted: HashSet<ViewId>,
     removed: HashSet<ViewId>,
     created_update_stream: bool,
@@ -68,8 +68,8 @@ impl Window {
     }
 
     pub fn dispatch_action(&self, view_id: ViewId, action: serde_json::Value) {
-        let mut inner = self.0.borrow_mut();
-        inner.views.get_mut(&view_id).map(|view| view.0.dispatch_action(action));
+        let view = self.0.borrow().views.get(&view_id).map(|&(ref view, _)| view.clone());
+        view.map(|view| view.borrow_mut().dispatch_action(action));
     }
 
     pub fn updates(&mut self) -> Option<WindowUpdateStream> {
@@ -103,11 +103,12 @@ impl Stream for WindowUpdateStream {
 
         for id in inner.inserted.iter() {
             if !inner.removed.contains(&id) {
-                let view = inner.views.get(&id).unwrap();
+                let &(ref view, _) = inner.views.get(&id).unwrap();
+                let view = view.borrow();
                 window_update.updated.push(ViewUpdate {
                     view_id: *id,
-                    component_name: view.0.component_name(),
-                    props: view.0.render()
+                    component_name: view.component_name(),
+                    props: view.render()
                 });
             }
         }
@@ -116,6 +117,7 @@ impl Stream for WindowUpdateStream {
             let result = updates.poll();
             if !inner.inserted.contains(&id) {
                 if let Ok(Async::Ready(Some(()))) = result {
+                    let view = view.borrow();
                     window_update.updated.push(ViewUpdate {
                         view_id: *id,
                         component_name: view.component_name(),
@@ -145,7 +147,8 @@ impl Inner {
         inner.next_view_id += 1;
         view.set_window_handle(WindowHandle(inner_ref));
         let updates = view.updates();
-        inner.views.insert(view_id, (view, updates));
+
+        inner.views.insert(view_id, (Rc::new(RefCell::new(view)), updates));
         inner.inserted.insert(view_id);
         inner.update_stream_task.take().map(|task| task.notify());
         view_id
@@ -164,6 +167,7 @@ impl Drop for ViewHandle {
         let inner = self.inner.upgrade().unwrap();
         let mut inner = inner.borrow_mut();
         inner.views.remove(&self.view_id);
+        inner.removed.insert(self.view_id);
         inner.update_stream_task.take().map(|task| task.notify());
     }
 }

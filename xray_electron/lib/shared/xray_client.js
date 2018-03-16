@@ -11,7 +11,13 @@ class XrayClient {
 
   start (socketPath) {
     return new Promise((resolve, reject) => {
-      this.socket = net.connect(socketPath, resolve);
+      this.socket = net.connect(socketPath, (error) => {
+        if (error) {
+          reject(error)
+        } else {
+          resolve()
+        }
+      });
       this.socket.on('data', this._handleInput.bind(this));
       this.socket.on('error', reject)
     })

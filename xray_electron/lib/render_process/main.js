@@ -13,7 +13,8 @@ const XrayClient = require('../shared/xray_client');
 const ThemeProvider = require("./theme_provider");
 const TextEditor = require("./text_editor/text_editor");
 
-const {socketPath, windowId} = QueryString.parse(window.location.search);
+let {socketPath, windowId} = QueryString.parse(window.location.search.replace('?', ''));
+windowId = Number(windowId)
 
 const xrayClient = new XrayClient();
 xrayClient.start(socketPath).then(() => {
