@@ -5,5 +5,6 @@ node_js:
 
 install:
   - curl https://sh.rustup.rs -sSf | sh -s -- -y
+  - source $HOME/.cargo/env
   - cd xray_electron
   - npm install
