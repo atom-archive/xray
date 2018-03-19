@@ -1,12 +1,12 @@
 process.env.NODE_ENV = "production";
 
 const App = require("./app");
-const FileFinderComponent = require("./file_finder_component");
+const FileFinder = require("./file_finder");
 const QueryString = require("querystring");
 const React = require("react");
 const ReactDOM = require("react-dom");
 const ViewRegistry = require("./view_registry");
-const WorkspaceComponent = require("./workspace_component");
+const Workspace = require("./workspace");
 const XrayClient = require("../shared/xray_client");
 const $ = React.createElement;
 
@@ -46,8 +46,8 @@ function buildViewRegistry(client) {
       client.sendMessage(action);
     }
   });
-  viewRegistry.addComponent("Workspace", WorkspaceComponent);
-  viewRegistry.addComponent("FileFinderView", FileFinderComponent);
+  viewRegistry.addComponent("Workspace", Workspace);
+  viewRegistry.addComponent("FileFinder", FileFinder);
   return viewRegistry;
 }
 

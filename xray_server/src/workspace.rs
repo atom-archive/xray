@@ -100,7 +100,7 @@ impl WorkspaceView {
 }
 
 impl View for FileFinderView {
-    fn component_name(&self) -> &'static str { "FileFinderView" }
+    fn component_name(&self) -> &'static str { "FileFinder" }
 
     fn render(&self) -> serde_json::Value {
         json!({

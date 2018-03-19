@@ -3,7 +3,7 @@ const ReactDOM = require("react-dom");
 const View = require("./view");
 const $ = React.createElement;
 
-module.exports = class WorkspaceComponent extends React.Component {
+module.exports = class Workspace extends React.Component {
   render() {
     const modalView =
       this.props.modal == null ? null : $(View, { id: this.props.modal });
