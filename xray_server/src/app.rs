@@ -102,18 +102,20 @@ impl App {
         let inner_clone = inner.clone();
         let mut inner = inner.borrow_mut();
         if let Some(window_updates) = inner.windows.get_mut(&window_id).unwrap().updates() {
-            inner.reactor.spawn(
-                incoming.for_each(move |message| {
-                    inner_clone.borrow_mut().handle_window_message(window_id, message);
-                    Ok(())
-                }).then(|_| Ok(()))
-            );
+            let receive_incoming = incoming.for_each(move |message| {
+                inner_clone.borrow_mut().handle_window_message(window_id, message);
+                Ok(())
+            }).then(|_| Ok(()));
 
             let outgoing_messages = window_updates.map(|update| OutgoingMessage::UpdateWindow(update));
+            let send_outgoing = outgoing
+                .send_all(outgoing_messages.map_err(|_| unreachable!()))
+                .then(|_| Ok(()));
+
             inner.reactor.spawn(
-                outgoing
-                    .send_all(outgoing_messages.map_err(|_| unreachable!()))
-                    .then(|_| Ok(()))
+                receive_incoming
+                    .select(send_outgoing)
+                    .then(|_: Result<((), _), ((), _)>| Ok(()))
             );
         } else {
             unimplemented!();
