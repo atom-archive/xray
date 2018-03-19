@@ -1,5 +1,5 @@
 const test = require("tape");
-const ViewRegistry = require("../lib/render_process/view_registry");
+const ViewRegistry = require("../../lib/render_process/view_registry");
 
 test("ViewRegistry", t => {
   t.test("props", t => {

@@ -1,10 +1,10 @@
 const test = require("tape");
 const React = require("react");
 const $ = React.createElement;
-const enzyme = require("./enzyme");
+const enzyme = require("./helpers/enzyme");
 const propTypes = require("prop-types");
-const View = require("../lib/render_process/view");
-const ViewRegistry = require("../lib/render_process/view_registry");
+const View = require("../../lib/render_process/view");
+const ViewRegistry = require("../../lib/render_process/view_registry");
 
 test("View", t => {
   t.test("basic rendering", t => {
