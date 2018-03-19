@@ -20,7 +20,11 @@ pub trait View {
 }
 
 pub struct Window(Rc<RefCell<Inner>>);
-pub struct WindowUpdateStream(Weak<RefCell<Inner>>);
+pub struct WindowUpdateStream {
+    counter: usize,
+    polled_once: bool,
+    inner: Weak<RefCell<Inner>>
+}
 
 pub struct Inner {
     workspace: WorkspaceHandle,
@@ -28,7 +32,7 @@ pub struct Inner {
     views: HashMap<ViewId, (Rc<RefCell<View>>, ViewUpdateStream)>,
     inserted: HashSet<ViewId>,
     removed: HashSet<ViewId>,
-    created_update_stream: bool,
+    update_stream_counter: usize,
     update_stream_task: Option<Task>,
 }
 
@@ -60,7 +64,7 @@ impl Window {
             views: HashMap::new(),
             inserted: HashSet::new(),
             removed: HashSet::new(),
-            created_update_stream: false,
+            update_stream_counter: 0,
             update_stream_task: None,
         })));
         Inner::add_view(Rc::downgrade(&window.0), WorkspaceView::new(workspace));
@@ -72,13 +76,13 @@ impl Window {
         view.map(|view| view.borrow_mut().dispatch_action(action));
     }
 
-    pub fn updates(&mut self) -> Option<WindowUpdateStream> {
+    pub fn updates(&mut self) -> WindowUpdateStream {
         let mut inner = self.0.borrow_mut();
-        if inner.created_update_stream {
-            None
-        } else {
-            inner.created_update_stream = true;
-            Some(WindowUpdateStream(Rc::downgrade(&self.0)))
+        inner.update_stream_counter += 1;
+        WindowUpdateStream {
+            counter: inner.update_stream_counter,
+            polled_once: false,
+            inner: Rc::downgrade(&self.0)
         }
     }
 }
@@ -88,7 +92,7 @@ impl Stream for WindowUpdateStream {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let inner = match self.0.upgrade() {
+        let inner = match self.inner.upgrade() {
             None => return Ok(Async::Ready(None)),
             Some(inner) => inner
         };
@@ -96,27 +100,20 @@ impl Stream for WindowUpdateStream {
         let mut inner = inner.borrow_mut();
         let inner = inner.deref_mut();
 
-        let mut window_update = WindowUpdate {
-            updated: Vec::new(),
-            removed: inner.removed.iter().cloned().collect(),
-        };
-
-        for id in inner.inserted.iter() {
-            if !inner.removed.contains(&id) {
-                let view = inner.get_view(*id).unwrap();
-                let view = view.borrow();
-                window_update.updated.push(ViewUpdate {
-                    view_id: *id,
-                    component_name: view.component_name(),
-                    props: view.render()
-                });
-            }
+        if self.counter < inner.update_stream_counter {
+            return Ok(Async::Ready(None));
         }
 
-        for (id, &mut (ref view, ref mut updates)) in inner.views.iter_mut() {
-            let result = updates.poll();
-            if !inner.inserted.contains(&id) {
-                if let Ok(Async::Ready(Some(()))) = result {
+        let mut window_update;
+        if self.polled_once {
+            window_update = WindowUpdate {
+                updated: Vec::new(),
+                removed: inner.removed.iter().cloned().collect(),
+            };
+
+            for id in inner.inserted.iter() {
+                if !inner.removed.contains(&id) {
+                    let view = inner.get_view(*id).unwrap();
                     let view = view.borrow();
                     window_update.updated.push(ViewUpdate {
                         view_id: *id,
@@ -125,6 +122,37 @@ impl Stream for WindowUpdateStream {
                     });
                 }
             }
+
+            for (id, &mut (ref view, ref mut updates)) in inner.views.iter_mut() {
+                let result = updates.poll();
+                if !inner.inserted.contains(&id) {
+                    if let Ok(Async::Ready(Some(()))) = result {
+                        let view = view.borrow();
+                        window_update.updated.push(ViewUpdate {
+                            view_id: *id,
+                            component_name: view.component_name(),
+                            props: view.render()
+                        });
+                    }
+                }
+            }
+        } else {
+            window_update = WindowUpdate {
+                updated: Vec::new(),
+                removed: Vec::new(),
+            };
+
+            for (id, &mut (ref view, ref mut updates)) in inner.views.iter_mut() {
+                let _ = updates.poll();
+                let view = view.borrow();
+                window_update.updated.push(ViewUpdate {
+                    view_id: *id,
+                    component_name: view.component_name(),
+                    props: view.render()
+                });
+            }
+
+            self.polled_once = true;
         }
 
         inner.inserted.clear();

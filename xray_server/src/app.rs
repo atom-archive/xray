@@ -101,25 +101,22 @@ impl App {
     {
         let inner_clone = inner.clone();
         let mut inner = inner.borrow_mut();
-        if let Some(window_updates) = inner.windows.get_mut(&window_id).unwrap().updates() {
-            let receive_incoming = incoming.for_each(move |message| {
-                inner_clone.borrow_mut().handle_window_message(window_id, message);
-                Ok(())
-            }).then(|_| Ok(()));
+        let window_updates = inner.windows.get_mut(&window_id).unwrap().updates();
+        let receive_incoming = incoming.for_each(move |message| {
+            inner_clone.borrow_mut().handle_window_message(window_id, message);
+            Ok(())
+        }).then(|_| Ok(()));
 
-            let outgoing_messages = window_updates.map(|update| OutgoingMessage::UpdateWindow(update));
-            let send_outgoing = outgoing
-                .send_all(outgoing_messages.map_err(|_| unreachable!()))
-                .then(|_| Ok(()));
+        let outgoing_messages = window_updates.map(|update| OutgoingMessage::UpdateWindow(update));
+        let send_outgoing = outgoing
+            .send_all(outgoing_messages.map_err(|_| unreachable!()))
+            .then(|_| Ok(()));
 
-            inner.reactor.spawn(
-                receive_incoming
-                    .select(send_outgoing)
-                    .then(|_: Result<((), _), ((), _)>| Ok(()))
-            );
-        } else {
-            unimplemented!();
-        }
+        inner.reactor.spawn(
+            receive_incoming
+                .select(send_outgoing)
+                .then(|_: Result<((), _), ((), _)>| Ok(()))
+        );
     }
 
     fn handle_app_messages<I>(inner: Rc<RefCell<Inner>>, incoming: I)
