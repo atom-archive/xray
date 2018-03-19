@@ -109,7 +109,7 @@ impl App {
                 }).then(|_| Ok(()))
             );
 
-            let outgoing_messages = window_updates.map(|update| OutgoingMessage::WindowUpdate(update));
+            let outgoing_messages = window_updates.map(|update| OutgoingMessage::UpdateWindow(update));
             inner.reactor.spawn(
                 outgoing
                     .send_all(outgoing_messages.map_err(|_| unreachable!()))

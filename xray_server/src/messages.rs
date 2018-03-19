@@ -21,5 +21,5 @@ pub enum IncomingMessage {
 pub enum OutgoingMessage {
     Acknowledge,
     OpenWindow { window_id: WindowId },
-    WindowUpdate(window::WindowUpdate),
+    UpdateWindow(window::WindowUpdate),
 }

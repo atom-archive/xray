@@ -21,7 +21,7 @@ async function start() {
   let initialRender = true;
   xrayClient.addMessageListener(message => {
     switch (message.type) {
-      case "WindowUpdate":
+      case "UpdateWindow":
         viewRegistry.update(message);
         if (initialRender) {
           ReactDOM.render(
