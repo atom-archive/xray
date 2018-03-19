@@ -26,7 +26,14 @@ enum Action {
 }
 
 struct FileFinderView {
+    query: String,
     updates: NotifyCell<()>
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum FileFinderAction {
+    UpdateQuery { query: String }
 }
 
 impl WorkspaceHandle {
@@ -93,7 +100,7 @@ impl WorkspaceView {
         if self.modal_panel.is_some() {
             self.modal_panel = None;
         } else {
-            self.modal_panel = Some(window_handle.add_view(FileFinderView { updates: NotifyCell::new(()) }));
+            self.modal_panel = Some(window_handle.add_view(FileFinderView::new()));
         }
         self.updates.set(());
     }
@@ -104,7 +111,7 @@ impl View for FileFinderView {
 
     fn render(&self) -> serde_json::Value {
         json!({
-            "files": ""
+            "query": self.query.as_str()
         })
     }
 
@@ -112,5 +119,26 @@ impl View for FileFinderView {
         Box::new(self.updates.observe())
     }
 
-    fn dispatch_action(&mut self, action: serde_json::Value) {}
+    fn dispatch_action(&mut self, action: serde_json::Value) {
+        match serde_json::from_value(action) {
+            Ok(FileFinderAction::UpdateQuery { query }) => self.update_query(query),
+            _ => eprintln!("Unrecognized action"),
+        }
+    }
+}
+
+impl FileFinderView {
+    fn new() -> Self {
+        Self {
+            query: String::new(),
+            updates: NotifyCell::new(())
+        }
+    }
+
+    fn update_query(&mut self, query: String) {
+        if self.query != query {
+            self.query = query;
+            self.updates.set(());
+        }
+    }
 }

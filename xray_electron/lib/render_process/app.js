@@ -2,8 +2,8 @@ const fs = require("fs");
 const path = require("path");
 const propTypes = require("prop-types");
 const React = require("react");
-const Styletron = require("styletron-client");
-const { StyletronProvider } = require("styletron-react");
+const { Client: StyletronClient } = require("styletron-engine-atomic");
+const { Provider: StyletronProvider } = require("styletron-react");
 const TextEditor = require("./text_editor/text_editor");
 const ThemeProvider = require("./theme_provider");
 const View = require('./view')
@@ -20,6 +20,7 @@ const theme = {
   }
 };
 
+const styletronInstance = new StyletronClient();
 class App extends React.Component {
   constructor(props) {
     super(props);
@@ -32,7 +33,7 @@ class App extends React.Component {
   render() {
     return $(
       StyletronProvider,
-      { styletron: new Styletron() },
+      { value: styletronInstance },
       $(ThemeProvider, { theme: theme }, $(View, { id: 0 }))
     );
   }
