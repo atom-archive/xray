@@ -1,64 +1,54 @@
-process.env.NODE_ENV = "production"
+process.env.NODE_ENV = "production";
 
-const fs = require("fs");
+const App = require("./app");
+const FileFinderComponent = require("./file_finder_component");
 const QueryString = require("querystring");
-const path = require("path");
-const xray = require("xray");
 const React = require("react");
 const ReactDOM = require("react-dom");
-const Styletron = require("styletron-client");
-const { StyletronProvider } = require("styletron-react");
-const XrayClient = require('../shared/xray_client');
-
-const ThemeProvider = require("./theme_provider");
-const TextEditor = require("./text_editor/text_editor");
-
-let {socketPath, windowId} = QueryString.parse(window.location.search.replace('?', ''));
-windowId = Number(windowId)
-
-const xrayClient = new XrayClient();
-xrayClient.start(socketPath).then(() => {
-  console.log('started!!!');
-
-  xrayClient.addMessageListener(message => {
-    console.log("MESSAGE", message);
-  });
-
-  xrayClient.sendMessage({
-    type: 'StartWindow',
-    window_id: windowId
-  });
-
-  setInterval(() => {
-    xrayClient.sendMessage({
-      type: 'Action',
-      view_id: 0,
-      action: {
-        type: 'ToggleFileFinder'
-      }
-    });
-  }, 1000);
-});
-
+const ViewRegistry = require("./view_registry");
+const WorkspaceComponent = require("./workspace_component");
+const XrayClient = require("../shared/xray_client");
 const $ = React.createElement;
 
-const theme = {
-  editor: {
-    fontFamily: "Menlo",
-    backgroundColor: "white",
-    baseTextColor: "black",
-    fontSize: 14,
-    lineHeight: 1.5
-  }
+async function start() {
+  const url = window.location.search.replace("?", "");
+  const { socketPath, windowId } = QueryString.parse(url);
+
+  const xrayClient = new XrayClient();
+  await xrayClient.start(socketPath);
+  const viewRegistry = buildViewRegistry(xrayClient);
+
+  let initialRender = true;
+  xrayClient.addMessageListener(message => {
+    switch (message.type) {
+      case "WindowUpdate":
+        viewRegistry.update(message);
+        if (initialRender) {
+          ReactDOM.render(
+            $(App, { viewRegistry }),
+            document.getElementById("app")
+          );
+          initialRender = false;
+        }
+        break;
+      default:
+        console.warn("Received unexpected message", message);
+    }
+  });
+
+  xrayClient.sendMessage({ type: "StartWindow", window_id: Number(windowId) });
 }
 
-ReactDOM.render(
-  $(
-    StyletronProvider,
-    { styletron: new Styletron() },
-    $(ThemeProvider, { theme: theme }, $(TextEditor, {
-      initialText: fs.readFileSync(path.join(__dirname, '../../node_modules/react/cjs/react.development.js'), 'utf8')
-    }))
-  ),
-  document.getElementById("app")
-);
+function buildViewRegistry(client) {
+  const viewRegistry = new ViewRegistry({
+    onAction: action => {
+      action.type = "Action";
+      client.sendMessage(action);
+    }
+  });
+  viewRegistry.addComponent("Workspace", WorkspaceComponent);
+  viewRegistry.addComponent("FileFinderView", FileFinderComponent);
+  return viewRegistry;
+}
+
+start();
