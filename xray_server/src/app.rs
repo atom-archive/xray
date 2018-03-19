@@ -70,28 +70,29 @@ impl App {
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>
     {
-        {
-            let mut inner = inner.borrow_mut();
-            let (tx, rx) = mpsc::unbounded();
-            if inner.app_channel.is_some() {
-                eprintln!("Redundant app client");
-                return;
-            }
-
-            inner.app_channel = Some(tx);
-            inner.reactor.spawn(
-                outgoing.send_all(rx.map_err(|_| unreachable!())).then(|_| Ok(()))
-            );
+        let mut inner_borrow = inner.borrow_mut();
+        let (tx, rx) = mpsc::unbounded();
+        if inner_borrow.app_channel.is_some() {
+            eprintln!("Redundant app client");
+            return;
         }
 
-        Self::handle_app_messages(inner, incoming);
+        inner_borrow.app_channel = Some(tx);
+
+        let receive_incoming = Self::handle_app_messages(inner.clone(), incoming);
+        let send_outgoing = outgoing.send_all(rx.map_err(|_| unreachable!())).then(|_| Ok(()));
+        inner_borrow.reactor.spawn(
+            receive_incoming
+                .select(send_outgoing)
+                .then(|_: Result<((), _), ((), _)>| Ok(()))
+        );
     }
 
     fn start_cli<I>(inner: Rc<RefCell<Inner>>, incoming: I)
     where
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>
     {
-        Self::handle_app_messages(inner, incoming);
+        inner.borrow_mut().reactor.spawn(Self::handle_app_messages(inner.clone(), incoming));
     }
 
     fn start_window<O, I>(inner: Rc<RefCell<Inner>>, outgoing: O, incoming: I, window_id: WindowId)
@@ -119,18 +120,14 @@ impl App {
         );
     }
 
-    fn handle_app_messages<I>(inner: Rc<RefCell<Inner>>, incoming: I)
+    fn handle_app_messages<I>(inner: Rc<RefCell<Inner>>, incoming: I) -> Box<Future<Item = (), Error = ()>>
     where
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>
     {
-        let inner_clone = inner.clone();
-        let inner = inner.borrow_mut();
-        inner.reactor.spawn(
-            incoming.for_each(move |message| {
-                inner_clone.borrow_mut().handle_app_message(message);
-                Ok(())
-            }).then(|_| Ok(()))
-        );
+        Box::new(incoming.for_each(move |message| {
+            inner.borrow_mut().handle_app_message(message);
+            Ok(())
+        }).then(|_| Ok(())))
     }
 }
 
