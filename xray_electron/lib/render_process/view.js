@@ -16,7 +16,17 @@ class View extends React.Component {
   }
 
   componentWillReceiveProps(props, context) {
-    this.handlePropsChange(props, context);
+    const { viewRegistry } = context;
+
+    if (this.state.viewId !== props.id) {
+      this.state.disposePropsWatch();
+      this.setState({
+        viewId: props.id,
+        disposePropsWatch: viewRegistry.watchProps(props.id, () => {
+          this.setState({ version: this.state.version + 1 });
+        })
+      });
+    }
   }
 
   componentWillUnmount() {
@@ -29,21 +39,7 @@ class View extends React.Component {
     const component = viewRegistry.getComponent(id);
     const props = viewRegistry.getProps(id);
     const dispatch = action => viewRegistry.dispatchAction(id, action);
-    return $(component, Object.assign({ dispatch, key: id }, props));
-  }
-
-  handlePropsChange(props, context) {
-    const { viewRegistry } = context;
-
-    if (this.state.viewId !== props.id) {
-      this.state.disposePropsWatch();
-      this.setState({
-        viewId: props.id,
-        disposePropsWatch: viewRegistry.watchProps(props.id, () => {
-          this.setState({ version: this.state.version + 1 });
-        })
-      });
-    }
+    return $(component, Object.assign({ dispatch }, props));
   }
 }
 
