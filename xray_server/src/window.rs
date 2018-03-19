@@ -168,10 +168,12 @@ impl WindowHandle {
 
 impl Drop for ViewHandle {
     fn drop(&mut self) {
-        let inner = self.inner.upgrade().unwrap();
-        let mut inner = inner.borrow_mut();
-        inner.views.remove(&self.view_id);
-        inner.removed.insert(self.view_id);
-        inner.update_stream_task.take().map(|task| task.notify());
+        let inner = self.inner.upgrade();
+        if let Some(inner) = inner {
+            let mut inner = inner.borrow_mut();
+            inner.views.remove(&self.view_id);
+            inner.removed.insert(self.view_id);
+            inner.update_stream_task.take().map(|task| task.notify());
+        }
     }
 }
