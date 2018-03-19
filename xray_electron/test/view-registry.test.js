@@ -1,5 +1,5 @@
 const test = require("tape");
-const ViewRegistry = require("../lib/render_process/view_registry.js");
+const ViewRegistry = require("../lib/render_process/view_registry");
 
 test("ViewRegistry", t => {
   t.test("props", t => {
@@ -89,5 +89,27 @@ test("ViewRegistry", t => {
     t.end();
   });
 
-  t.skip("dispatching actions");
+  t.test("dispatching actions", t => {
+    const actions = [];
+    const registry = new ViewRegistry({ onAction: a => actions.push(a) });
+
+    registry.update({
+      updated: [
+        { component_name: "component-1", view_id: 1, props: {} },
+        { component_name: "component-2", view_id: 2, props: {} }
+      ],
+      removed: []
+    });
+
+    registry.dispatchAction(1, { a: 1, b: 2 });
+    registry.dispatchAction(2, { c: 3 });
+    t.throws(() => registry.dispatchAction(3, { d: 4 }));
+
+    t.deepEqual(actions, [
+      { view_id: 1, action: { a: 1, b: 2 } },
+      { view_id: 2, action: { c: 3 } }
+    ]);
+
+    t.end();
+  });
 });

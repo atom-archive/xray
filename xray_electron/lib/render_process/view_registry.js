@@ -1,7 +1,8 @@
 const assert = require("assert");
 
 module.exports = class ViewRegistry {
-  constructor() {
+  constructor({ onAction } = {}) {
+    this.onAction = onAction;
     this.componentsByName = new Map();
     this.viewsById = new Map();
     this.propListenersByViewId = new Map();
@@ -65,5 +66,10 @@ module.exports = class ViewRegistry {
       const callbackIndex = listeners.indexOf(callback);
       if (callbackIndex !== -1) listeners.splice(callbackIndex, 1);
     };
+  }
+
+  dispatchAction(id, action) {
+    assert(this.viewsById.has(id));
+    this.onAction({ view_id: id, action });
   }
 };
