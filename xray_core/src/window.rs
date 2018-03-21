@@ -179,25 +179,6 @@ impl Stream for WindowUpdateStream {
 }
 
 impl Inner {
-    pub fn add_view<T: 'static + View>(inner_ref: Weak<RefCell<Inner>>, mut view: T) -> ViewId {
-        let inner = inner_ref.upgrade().unwrap();
-
-        let view_id = {
-            let mut inner = inner.borrow_mut();
-            inner.next_view_id += 1;
-            inner.next_view_id - 1
-        };
-
-        view.did_mount(WindowHandle(inner_ref));
-        let updates = view.updates();
-
-        let mut inner = inner.borrow_mut();
-        inner.views.insert(view_id, (Rc::new(RefCell::new(view)), RefCell::new(updates)));
-        inner.inserted.insert(view_id);
-        inner.update_stream_task.take().map(|task| task.notify());
-        view_id
-    }
-
     fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<View>>> {
         self.views.get(&id).map(|&(ref view, _)| view.clone())
     }
@@ -210,8 +191,22 @@ impl WindowHandle {
         inner.height
     }
 
-    pub fn add_view<T: 'static + View>(&self, view: T) -> ViewHandle {
-        let view_id = Inner::add_view(self.0.clone(), view);
+    pub fn add_view<T: 'static + View>(&self, mut view: T) -> ViewHandle {
+        let view_id = {
+            let inner = self.0.upgrade().unwrap();
+            let mut inner = inner.borrow_mut();
+            inner.next_view_id += 1;
+            inner.next_view_id - 1
+        };
+
+        view.did_mount(WindowHandle(self.0.clone()));
+        let updates = view.updates();
+
+        let inner = self.0.upgrade().unwrap();
+        let mut inner = inner.borrow_mut();
+        inner.views.insert(view_id, (Rc::new(RefCell::new(view)), RefCell::new(updates)));
+        inner.inserted.insert(view_id);
+        inner.update_stream_task.take().map(|task| task.notify());
         ViewHandle { view_id, inner: self.0.clone() }
     }
 }
