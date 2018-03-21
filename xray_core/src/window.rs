@@ -13,7 +13,7 @@ pub type ViewUpdateStream = Box<Stream<Item = (), Error = ()>>;
 
 pub trait View {
     fn component_name(&self) -> &'static str;
-    fn set_window_handle(&mut self, _handle: WindowHandle) {}
+    fn did_mount(&mut self, _handle: WindowHandle) {}
     fn render(&self) -> serde_json::Value;
     fn updates(&self) -> ViewUpdateStream;
     fn dispatch_action(&mut self, serde_json::Value);
@@ -173,7 +173,7 @@ impl Inner {
         let mut inner = inner.borrow_mut();
         let view_id = inner.next_view_id;
         inner.next_view_id += 1;
-        view.set_window_handle(WindowHandle(inner_ref));
+        view.did_mount(WindowHandle(inner_ref));
         let updates = view.updates();
 
         inner.views.insert(view_id, (Rc::new(RefCell::new(view)), updates));

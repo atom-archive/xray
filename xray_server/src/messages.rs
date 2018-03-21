@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use serde_json;
 use app::WindowId;
-use window::{self, ViewId};
+use xray_core::window::{self, ViewId};
 
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]

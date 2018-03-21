@@ -3,20 +3,24 @@ use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::mem;
 use std::ops::Range;
-use futures::future::Executor;
-use futures::{Future, Stream};
+use serde_json;
 use notify_cell::NotifyCell;
-use buffer::{self, Buffer, Point, Anchor};
+use buffer::{Buffer, Point, Anchor};
 use movement;
+use window::{View, ViewUpdateStream};
 
-#[derive(Clone)]
-pub struct Version(buffer::Version, usize);
+pub struct Measurements {
+    pub scroll_top: f64,
+    pub height: f64,
+    pub line_height: f64,
+}
 
-pub struct Editor {
+pub struct BufferView {
     buffer: Rc<RefCell<Buffer>>,
-    pub version: Rc<NotifyCell<Version>>,
+    updates: NotifyCell<()>,
     dropped: NotifyCell<bool>,
-    selections: Vec<Selection>
+    selections: Vec<Selection>,
+    measurements: Measurements,
 }
 
 struct Selection {
@@ -26,37 +30,19 @@ struct Selection {
     goal_column: Option<u32>
 }
 
-pub mod render {
-    use super::Point;
-
-    pub struct Params {
-        pub scroll_top: f64,
-        pub height: f64,
-        pub line_height: f64
-    }
-
-    pub struct Frame {
-        pub first_visible_row: u32,
-        pub lines: Vec<Vec<u16>>,
-        pub selections: Vec<Selection>
-    }
-
-    #[derive(Debug, Eq, PartialEq)]
-    pub struct Selection {
-        pub start: Point,
-        pub end: Point,
-        pub reversed: bool
-    }
+#[derive(Debug, Eq, PartialEq, Serialize)]
+struct SelectionProps {
+    pub start: Point,
+    pub end: Point,
+    pub reversed: bool
 }
 
-impl Editor {
-    pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
-        let buffer_version;
+impl BufferView {
+    pub fn new(buffer: Rc<RefCell<Buffer>>, measurements: Measurements) -> Self {
         let selections;
 
         {
             let buffer = buffer.borrow();
-            buffer_version = buffer.version.get().unwrap();
             selections = vec![Selection {
                 start: buffer.anchor_before_offset(0).unwrap(),
                 end: buffer.anchor_before_offset(0).unwrap(),
@@ -65,68 +51,17 @@ impl Editor {
             }];
         }
 
-        let version = Version(buffer_version, 0);
         Self {
-            version: Rc::new(NotifyCell::new(version)),
+            updates: NotifyCell::new(()),
             buffer,
             selections,
             dropped: NotifyCell::new(false),
+            measurements
         }
     }
 
-    pub fn run<E>(&self, executor: &E)
-    where
-        E: Executor<Box<Future<Item = (), Error = ()>>>,
-    {
-        let version_cell = self.version.clone();
-        let buffer_observation = self.buffer.borrow().version.observe().for_each(
-            move |buffer_version| {
-                version_cell.set(Version(buffer_version, 0));
-                Ok(())
-            },
-        );
-        let drop_observation = self.dropped.observe().into_future();
-        executor.execute(Box::new(
-            buffer_observation
-                .select2(drop_observation)
-                .then(|_| Ok(())),
-        )).unwrap();
-    }
-
-    pub fn render(&self, params: render::Params) -> render::Frame {
-        let buffer = self.buffer.borrow();
-
-        let max_scroll_top = buffer.max_point().row as f64 * params.line_height;
-        let scroll_top = params.scroll_top.min(max_scroll_top);
-        let scroll_bottom = scroll_top + params.height;
-        let start = Point::new((scroll_top / params.line_height).floor() as u32, 0);
-        let end = Point::new((scroll_bottom / params.line_height).ceil() as u32, 0);
-
-        let mut lines = Vec::new();
-        let mut cur_line = Vec::new();
-        let mut cur_row = start.row;
-        for c in buffer.iter_starting_at_row(start.row) {
-            if c == (b'\n' as u16) {
-                lines.push(cur_line);
-                cur_line = Vec::new();
-                cur_row += 1;
-                if cur_row >= end.row {
-                    break;
-                }
-            } else {
-                cur_line.push(c);
-            }
-        }
-        if cur_row < end.row {
-            lines.push(cur_line);
-        }
-
-        let visible_selections = self.query_selections(start..end);
-        render::Frame {
-            first_visible_row: start.row,
-            lines,
-            selections: visible_selections.iter().map(|selection| selection.render(&buffer)).collect()
-        }
+    pub fn set_measurements(&mut self, measurements: Measurements) {
+        self.measurements = measurements;
     }
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
@@ -151,7 +86,7 @@ impl Editor {
         }
 
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn add_selection_above(&mut self) {
@@ -207,7 +142,7 @@ impl Editor {
         }
 
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn add_selection_below(&mut self) {
@@ -264,7 +199,7 @@ impl Editor {
         }
 
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn move_left(&mut self) {
@@ -286,7 +221,7 @@ impl Editor {
             }
         }
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn select_left(&mut self) {
@@ -300,7 +235,7 @@ impl Editor {
             }
         }
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn move_right(&mut self) {
@@ -322,7 +257,7 @@ impl Editor {
             }
         }
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn select_right(&mut self) {
@@ -336,7 +271,7 @@ impl Editor {
             }
         }
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn move_up(&mut self) {
@@ -358,7 +293,7 @@ impl Editor {
             }
         }
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn select_up(&mut self) {
@@ -372,7 +307,7 @@ impl Editor {
             }
         }
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn move_down(&mut self) {
@@ -394,7 +329,7 @@ impl Editor {
             }
         }
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     pub fn select_down(&mut self) {
@@ -408,7 +343,7 @@ impl Editor {
             }
         }
         self.merge_selections();
-        self.inc_version();
+        self.updated();
     }
 
     fn merge_selections(&mut self) {
@@ -454,14 +389,67 @@ impl Editor {
         }
     }
 
-    fn inc_version(&mut self) {
-        self.version.get().map(|old_version| {
-            self.version.set(Version(old_version.0, old_version.1 + 1));
-        });
+    fn updated(&mut self) {
+        self.updates.set(());
     }
 }
 
-impl Drop for Editor {
+impl View for BufferView {
+    fn component_name(&self) -> &'static str {
+        "BufferView"
+    }
+
+    fn render(&self) -> serde_json::Value {
+        let buffer = self.buffer.borrow();
+
+        let max_scroll_top = buffer.max_point().row as f64 * self.measurements.line_height;
+        let scroll_top = self.measurements.scroll_top.min(max_scroll_top);
+        let scroll_bottom = scroll_top + self.measurements.height;
+        let start = Point::new((scroll_top / self.measurements.line_height).floor() as u32, 0);
+        let end = Point::new((scroll_bottom / self.measurements.line_height).ceil() as u32, 0);
+
+        let mut lines = Vec::new();
+        let mut cur_line = Vec::new();
+        let mut cur_row = start.row;
+        for c in buffer.iter_starting_at_row(start.row) {
+            if c == (b'\n' as u16) {
+                lines.push(String::from_utf16_lossy(&cur_line));
+                cur_line = Vec::new();
+                cur_row += 1;
+                if cur_row >= end.row {
+                    break;
+                }
+            } else {
+                cur_line.push(c);
+            }
+        }
+        if cur_row < end.row {
+            lines.push(String::from_utf16_lossy(&cur_line));
+        }
+
+        let visible_selections = self.query_selections(start..end);
+        json!({
+            "first_visible_row": start.row,
+            "lines": lines,
+            "selections": visible_selections.iter()
+                .map(|selection| selection.render(&buffer))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn updates(&self) -> ViewUpdateStream {
+        Box::new(self.updates.observe())
+    }
+
+    fn dispatch_action(&mut self, action: serde_json::Value) {
+        // match serde_json::from_value(action) {
+            // Ok(BufferViewAction::ToggleFileFinder) => self.toggle_file_finder(),
+            // _ => eprintln!("Unrecognized action"),
+        // }
+    }
+}
+
+impl Drop for BufferView {
     fn drop(&mut self) {
         self.dropped.set(true);
     }
@@ -500,8 +488,8 @@ impl Selection {
         }
     }
 
-    fn render(&self, buffer: &Buffer) -> render::Selection {
-        render::Selection {
+    fn render(&self, buffer: &Buffer) -> SelectionProps {
+        SelectionProps {
             start: buffer.point_for_anchor(&self.start).unwrap(),
             end: buffer.point_for_anchor(&self.end).unwrap(),
             reversed: self.reversed
@@ -517,19 +505,15 @@ mod tests {
     use self::tokio_core::reactor::Core;
     use futures::future;
 
-    #[test]
-    fn test_version_updates() {
-        let mut event_loop = Core::new().unwrap();
-        let buffer = Rc::new(RefCell::new(Buffer::new(1)));
-        let editor = Editor::new(buffer.clone());
-        editor.run(&event_loop);
-        buffer.borrow_mut().splice(0..0, "test");
-        event_loop.run(editor.version.observe().take(1).into_future());
-    }
+    const DEFAULT_MEASUREMENTS: Measurements = Measurements{
+        height: 100.0,
+        line_height: 10.0,
+        scroll_top: 0.0,
+    };
 
     #[test]
     fn test_cursor_movement() {
-        let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))),DEFAULT_MEASUREMENTS);
         editor.buffer.borrow_mut().splice(0..0, "abc");
         editor.buffer.borrow_mut().splice(3..3, "\n");
         editor.buffer.borrow_mut().splice(4..4, "\ndef");
@@ -602,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_selection_movement() {
-        let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))), DEFAULT_MEASUREMENTS);
         editor.buffer.borrow_mut().splice(0..0, "abc");
         editor.buffer.borrow_mut().splice(3..3, "\n");
         editor.buffer.borrow_mut().splice(4..4, "\ndef");
@@ -673,7 +657,7 @@ mod tests {
 
     #[test]
     fn test_add_selection() {
-        let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))), DEFAULT_MEASUREMENTS);
         editor.buffer.borrow_mut().splice(0..0, "abcd\nefgh\nijkl\nmnop");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
@@ -724,7 +708,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_above() {
-        let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))), DEFAULT_MEASUREMENTS);
         editor.buffer.borrow_mut().splice(0..0, "\
             abcdefghijk\n\
             lmnop\n\
@@ -790,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_below() {
-        let mut editor = Editor::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))), DEFAULT_MEASUREMENTS);
         editor.buffer.borrow_mut().splice(0..0, "\
             abcdefgh\n\
             ijklm\n\
@@ -852,7 +836,11 @@ mod tests {
         let line_height = 6.0;
 
         {
-            let mut editor = Editor::new(buffer.clone());
+            let mut editor = BufferView::new(buffer.clone(), Measurements {
+                line_height,
+                scroll_top: 2.5 * line_height,
+                height: 3.0 * line_height,
+            });
             // Selections starting or ending outside viewport
             editor.add_selection(Point::new(1, 2), Point::new(3, 1));
             editor.add_selection(Point::new(5, 2), Point::new(6, 0));
@@ -861,102 +849,99 @@ mod tests {
             // Selection fully outside viewport
             editor.add_selection(Point::new(6, 3), Point::new(7, 2));
 
-            let frame = editor.render(render::Params {
-                line_height,
-                scroll_top: 2.5 * line_height,
-                height: 3.0 * line_height,
-            });
-            assert_eq!(frame.first_visible_row, 2);
-            assert_eq!(stringify_lines(frame.lines), vec!["ghi", "jkl", "mno", "pqr"]);
+            let frame = editor.render();
+            assert_eq!(frame["first_visible_row"], 2);
+            assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi", "jkl", "mno", "pqr"]);
             assert_eq!(
-                frame.selections,
-                vec![selection((1, 2), (3, 1)), selection((3, 2), (4, 1)), selection((5, 2), (6, 0))]
+                frame["selections"],
+                json!([selection((1, 2), (3, 1)), selection((3, 2), (4, 1)), selection((5, 2), (6, 0))])
             );
         }
 
         // Selection starting at the end of buffer
         {
-            let mut editor = Editor::new(buffer.clone());
-            editor.add_selection(Point::new(8, 2), Point::new(8, 2));
-
-            let frame = editor.render(render::Params {
+            let mut editor = BufferView::new(buffer.clone(), Measurements {
                 line_height,
                 scroll_top: 1.0 * line_height,
                 height: 8.0 * line_height,
             });
-            assert_eq!(frame.first_visible_row, 1);
-            assert_eq!(stringify_lines(frame.lines), vec!["def", "ghi", "jkl", "mno", "pqr", "stu", "vwx", "yz"]);
-            assert_eq!(frame.selections, vec![selection((8, 2), (8, 2))]);
+            editor.add_selection(Point::new(8, 2), Point::new(8, 2));
+
+            let frame = editor.render();
+            assert_eq!(frame["first_visible_row"], 1);
+            assert_eq!(stringify_lines(&frame["lines"]), vec!["def", "ghi", "jkl", "mno", "pqr", "stu", "vwx", "yz"]);
+            assert_eq!(frame["selections"], json!([selection((8, 2), (8, 2))]));
         }
 
         // Selection ending exactly at first visible row
         {
-            let mut editor = Editor::new(buffer.clone());
-            editor.add_selection(Point::new(0, 2), Point::new(1, 0));
-
-            let frame = editor.render(render::Params {
+            let mut editor = BufferView::new(buffer.clone(), Measurements {
                 line_height,
                 scroll_top: 1.0 * line_height,
                 height: 3.0 * line_height,
             });
-            assert_eq!(frame.first_visible_row, 1);
-            assert_eq!(stringify_lines(frame.lines), vec!["def", "ghi", "jkl"]);
-            assert_eq!(frame.selections, vec![]);
+            editor.add_selection(Point::new(0, 2), Point::new(1, 0));
+
+            let frame = editor.render();
+            assert_eq!(frame["first_visible_row"], 1);
+            assert_eq!(stringify_lines(&frame["lines"]), vec!["def", "ghi", "jkl"]);
+            assert_eq!(frame["selections"], json!([]));
         }
     }
 
     #[test]
     fn test_render_past_last_line() {
         let line_height = 4.0;
-        let mut editor = Editor::new( Rc::new(RefCell::new(Buffer::new(1))));
-        editor.buffer.borrow_mut().splice(0..0, "abc\ndef\nghi");
-        editor.add_selection(Point::new(2, 3), Point::new(2, 3));
-
-        let frame = editor.render(render::Params {
+        let mut editor = BufferView::new( Rc::new(RefCell::new(Buffer::new(1))), Measurements {
             line_height,
             scroll_top: 2.0 * line_height,
             height: 3.0 * line_height,
         });
-        assert_eq!(frame.first_visible_row, 2);
-        assert_eq!(stringify_lines(frame.lines), vec!["ghi"]);
-        assert_eq!(frame.selections, vec![selection((2, 3), (2, 3))]);
+        editor.buffer.borrow_mut().splice(0..0, "abc\ndef\nghi");
+        editor.add_selection(Point::new(2, 3), Point::new(2, 3));
 
-        let frame = editor.render(render::Params {
+        let frame = editor.render();
+        assert_eq!(frame["first_visible_row"], 2);
+        assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi"]);
+        assert_eq!(frame["selections"], json!([selection((2, 3), (2, 3))]));
+
+        editor.set_measurements(Measurements {
             line_height,
             scroll_top: 3.0 * line_height,
             height: 3.0 * line_height,
         });
-        assert_eq!(frame.first_visible_row, 2);
-        assert_eq!(stringify_lines(frame.lines), vec!["ghi"]);
-        assert_eq!(frame.selections, vec![selection((2, 3), (2, 3))]);
+        let frame = editor.render();
+        assert_eq!(frame["first_visible_row"], 2);
+        assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi"]);
+        assert_eq!(frame["selections"], json!([selection((2, 3), (2, 3))]));
     }
 
-    fn stringify_lines(lines: Vec<Vec<u16>>) -> Vec<String> {
-        lines.iter().map(|l| String::from_utf16_lossy(l)).collect()
+    fn stringify_lines(lines: &serde_json::Value) -> Vec<String> {
+        lines.as_array().unwrap().iter().map(|line| line.as_str().unwrap().into()).collect()
     }
 
-    fn render_selections(editor: &Editor) -> Vec<render::Selection> {
+    fn render_selections(editor: &BufferView) -> Vec<SelectionProps> {
         editor.selections.iter().map(|s| s.render(&editor.buffer.borrow())).collect()
     }
 
-    fn empty_selection(row: u32, column: u32) -> render::Selection {
-        render::Selection {
+    fn empty_selection(row: u32, column: u32) -> SelectionProps {
+        SelectionProps {
             start: Point::new(row, column),
             end: Point::new(row, column),
             reversed: false
         }
     }
 
-    fn selection(start: (u32, u32), end: (u32, u32)) -> render::Selection {
-        render::Selection {
+    fn selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
+        SelectionProps {
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
             reversed: false
         }
     }
 
-    fn rev_selection(start: (u32, u32), end: (u32, u32)) -> render::Selection {
-        render::Selection {
+    fn rev_selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
+        SelectionProps {
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
             reversed: true

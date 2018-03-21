@@ -34,7 +34,7 @@ pub struct Buffer {
 #[derive(Clone, Copy, Debug)]
 pub struct Version(LocalTimestamp);
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
 pub struct Point {
     pub row: u32,
     pub column: u32
@@ -81,7 +81,7 @@ pub struct Text {
     newline_offsets: Vec<usize>
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize)]
 struct ChangeId {
     replica_id: ReplicaId,
     local_timestamp: LocalTimestamp

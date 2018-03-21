@@ -1,8 +1,6 @@
 mod messages;
 mod json_lines_codec;
 mod app;
-mod window;
-mod workspace;
 
 extern crate bytes;
 extern crate futures;
