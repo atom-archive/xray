@@ -8,7 +8,7 @@ use std::io::BufReader;
 use std::io::prelude::*;
 use window::{View, ViewUpdateStream, WindowHandle, ViewHandle};
 use buffer::Buffer;
-use buffer_view::{BufferView, Measurements};
+use buffer_view::BufferView;
 use notify_cell::NotifyCell;
 
 pub struct Workspace {
@@ -98,11 +98,9 @@ impl WorkspaceView {
         let mut buffer = Buffer::new(1);
         buffer.splice(0..0, contents.as_str());
 
-        BufferView::new(Rc::new(RefCell::new(buffer)), Measurements{
-            height: 100.0,
-            line_height: 12.0,
-            scroll_top: 0.0,
-        })
+        let mut buffer_view = BufferView::new(Rc::new(RefCell::new(buffer)));
+        buffer_view.set_line_height(20.0);
+        buffer_view
     }
 }
 

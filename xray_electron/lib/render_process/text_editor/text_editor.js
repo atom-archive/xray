@@ -15,7 +15,9 @@ class TextEditorContainer extends React.Component {
     }
 
     this.state = {
-      resizeObserver: new ResizeObserver((entries) => this.componentDidResize(entries[0].contentRect)),
+      resizeObserver: new ResizeObserver(([{contentRect}]) =>
+        this.componentDidResize({width: contentRect.width, height: contentRect.height})
+      ),
       scrollTop: 0,
       height: 0,
       width: 0,
@@ -45,13 +47,13 @@ class TextEditorContainer extends React.Component {
     window.clearInterval(this.state.cursorBlinkIntervalHandle);
   }
 
-  componentDidResize({width, height}) {
-    this.setMeasurements({width, height})
-  }
-
-  setMeasurements(measurements) {
+  componentDidResize(measurements) {
     this.setState(measurements)
-    this.props.dispatch({type: 'SetMeasurements', measurements})
+    this.props.dispatch({
+      type: 'SetDimensions',
+      width: measurements.width,
+      height: measurements.height
+    })
   }
 
   render() {
@@ -67,9 +69,9 @@ class TextEditorContainer extends React.Component {
   }
 
   onWheel (event) {
-    this.setMeasurements({
-      scrollTop: Math.max(0, this.state.scrollTop + event.deltaY)
-    });
+    const scrollTop = Math.max(0, this.state.scrollTop + event.deltaY)
+    this.setState({scrollTop})
+    this.props.dispatch({type: 'SetScrollTop', value: scrollTop})
   }
 }
 

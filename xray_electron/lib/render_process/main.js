@@ -37,7 +37,11 @@ async function start() {
     }
   });
 
-  xrayClient.sendMessage({ type: "StartWindow", window_id: Number(windowId) });
+  xrayClient.sendMessage({
+    type: "StartWindow",
+    window_id: Number(windowId),
+    height: window.innerHeight
+  });
 }
 
 function buildViewRegistry(client) {

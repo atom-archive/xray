@@ -7,20 +7,17 @@ use serde_json;
 use notify_cell::NotifyCell;
 use buffer::{Buffer, Point, Anchor};
 use movement;
-use window::{View, ViewUpdateStream};
-
-pub struct Measurements {
-    pub scroll_top: f64,
-    pub height: f64,
-    pub line_height: f64,
-}
+use window::{View, ViewUpdateStream, WindowHandle};
 
 pub struct BufferView {
     buffer: Rc<RefCell<Buffer>>,
     updates: NotifyCell<()>,
     dropped: NotifyCell<bool>,
     selections: Vec<Selection>,
-    measurements: Measurements,
+    height: f64,
+    width: f64,
+    line_height: f64,
+    scroll_top: f64,
 }
 
 struct Selection {
@@ -37,8 +34,15 @@ struct SelectionProps {
     pub reversed: bool
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum BufferViewAction {
+    SetScrollTop{value: f64},
+    SetDimensions{width: u64, height: u64},
+}
+
 impl BufferView {
-    pub fn new(buffer: Rc<RefCell<Buffer>>, measurements: Measurements) -> Self {
+    pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
         let selections;
 
         {
@@ -56,12 +60,35 @@ impl BufferView {
             buffer,
             selections,
             dropped: NotifyCell::new(false),
-            measurements
+            height: 0.0,
+            width: 0.0,
+            line_height: 10.0,
+            scroll_top: 0.0,
         }
     }
 
-    pub fn set_measurements(&mut self, measurements: Measurements) {
-        self.measurements = measurements;
+    pub fn set_height(&mut self, height: f64) -> &mut Self {
+        self.height = height;
+        self.updated();
+        self
+    }
+
+    pub fn set_width(&mut self, width: f64) -> &mut Self {
+        self.width = width;
+        self.updated();
+        self
+    }
+
+    pub fn set_line_height(&mut self, line_height: f64) -> &mut Self {
+        self.line_height = line_height;
+        self.updated();
+        self
+    }
+
+    pub fn set_scroll_top(&mut self, scroll_top: f64) -> &mut Self {
+        self.scroll_top = scroll_top;
+        self.updated();
+        self
     }
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
@@ -399,14 +426,18 @@ impl View for BufferView {
         "BufferView"
     }
 
+    fn did_mount(&mut self, window_handle: WindowHandle) {
+        self.height = window_handle.height();
+    }
+
     fn render(&self) -> serde_json::Value {
         let buffer = self.buffer.borrow();
 
-        let max_scroll_top = buffer.max_point().row as f64 * self.measurements.line_height;
-        let scroll_top = self.measurements.scroll_top.min(max_scroll_top);
-        let scroll_bottom = scroll_top + self.measurements.height;
-        let start = Point::new((scroll_top / self.measurements.line_height).floor() as u32, 0);
-        let end = Point::new((scroll_bottom / self.measurements.line_height).ceil() as u32, 0);
+        let max_scroll_top = buffer.max_point().row as f64 * self.line_height;
+        let scroll_top = self.scroll_top.min(max_scroll_top);
+        let scroll_bottom = scroll_top + self.height;
+        let start = Point::new((scroll_top / self.line_height).floor() as u32, 0);
+        let end = Point::new((scroll_bottom / self.line_height).ceil() as u32, 0);
 
         let mut lines = Vec::new();
         let mut cur_line = Vec::new();
@@ -442,10 +473,16 @@ impl View for BufferView {
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value) {
-        // match serde_json::from_value(action) {
-            // Ok(BufferViewAction::ToggleFileFinder) => self.toggle_file_finder(),
-            // _ => eprintln!("Unrecognized action"),
-        // }
+        match serde_json::from_value(action) {
+            Ok(BufferViewAction::SetScrollTop{value}) => {
+                self.set_scroll_top(value);
+            },
+            Ok(BufferViewAction::SetDimensions{width, height}) => {
+                self.set_width(width as f64);
+                self.set_height(height as f64);
+            },
+            action @ _ => eprintln!("Unrecognized action {:?}", action),
+        }
     }
 }
 
@@ -502,18 +539,10 @@ mod tests {
     extern crate tokio_core;
 
     use super::*;
-    use self::tokio_core::reactor::Core;
-    use futures::future;
-
-    const DEFAULT_MEASUREMENTS: Measurements = Measurements{
-        height: 100.0,
-        line_height: 10.0,
-        scroll_top: 0.0,
-    };
 
     #[test]
     fn test_cursor_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))),DEFAULT_MEASUREMENTS);
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
         editor.buffer.borrow_mut().splice(0..0, "abc");
         editor.buffer.borrow_mut().splice(3..3, "\n");
         editor.buffer.borrow_mut().splice(4..4, "\ndef");
@@ -586,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_selection_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))), DEFAULT_MEASUREMENTS);
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
         editor.buffer.borrow_mut().splice(0..0, "abc");
         editor.buffer.borrow_mut().splice(3..3, "\n");
         editor.buffer.borrow_mut().splice(4..4, "\ndef");
@@ -657,7 +686,7 @@ mod tests {
 
     #[test]
     fn test_add_selection() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))), DEFAULT_MEASUREMENTS);
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
         editor.buffer.borrow_mut().splice(0..0, "abcd\nefgh\nijkl\nmnop");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
@@ -708,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_above() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))), DEFAULT_MEASUREMENTS);
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
         editor.buffer.borrow_mut().splice(0..0, "\
             abcdefghijk\n\
             lmnop\n\
@@ -774,7 +803,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_below() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))), DEFAULT_MEASUREMENTS);
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
         editor.buffer.borrow_mut().splice(0..0, "\
             abcdefgh\n\
             ijklm\n\
@@ -836,11 +865,11 @@ mod tests {
         let line_height = 6.0;
 
         {
-            let mut editor = BufferView::new(buffer.clone(), Measurements {
-                line_height,
-                scroll_top: 2.5 * line_height,
-                height: 3.0 * line_height,
-            });
+            let mut editor = BufferView::new(buffer.clone());
+            editor
+                .set_height(3.0 * line_height)
+                .set_line_height(line_height)
+                .set_scroll_top(2.5 * line_height);
             // Selections starting or ending outside viewport
             editor.add_selection(Point::new(1, 2), Point::new(3, 1));
             editor.add_selection(Point::new(5, 2), Point::new(6, 0));
@@ -860,11 +889,11 @@ mod tests {
 
         // Selection starting at the end of buffer
         {
-            let mut editor = BufferView::new(buffer.clone(), Measurements {
-                line_height,
-                scroll_top: 1.0 * line_height,
-                height: 8.0 * line_height,
-            });
+            let mut editor = BufferView::new(buffer.clone());
+            editor
+                .set_height(8.0 * line_height)
+                .set_line_height(line_height)
+                .set_scroll_top(1.0 * line_height);
             editor.add_selection(Point::new(8, 2), Point::new(8, 2));
 
             let frame = editor.render();
@@ -875,11 +904,11 @@ mod tests {
 
         // Selection ending exactly at first visible row
         {
-            let mut editor = BufferView::new(buffer.clone(), Measurements {
-                line_height,
-                scroll_top: 1.0 * line_height,
-                height: 3.0 * line_height,
-            });
+            let mut editor = BufferView::new(buffer.clone());
+            editor
+                .set_height(3.0 * line_height)
+                .set_line_height(line_height)
+                .set_scroll_top(1.0 * line_height);
             editor.add_selection(Point::new(0, 2), Point::new(1, 0));
 
             let frame = editor.render();
@@ -892,11 +921,12 @@ mod tests {
     #[test]
     fn test_render_past_last_line() {
         let line_height = 4.0;
-        let mut editor = BufferView::new( Rc::new(RefCell::new(Buffer::new(1))), Measurements {
-            line_height,
-            scroll_top: 2.0 * line_height,
-            height: 3.0 * line_height,
-        });
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
+
+        editor
+            .set_height(3.0 * line_height)
+            .set_line_height(line_height)
+            .set_scroll_top(2.0 * line_height);
         editor.buffer.borrow_mut().splice(0..0, "abc\ndef\nghi");
         editor.add_selection(Point::new(2, 3), Point::new(2, 3));
 
@@ -905,11 +935,7 @@ mod tests {
         assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi"]);
         assert_eq!(frame["selections"], json!([selection((2, 3), (2, 3))]));
 
-        editor.set_measurements(Measurements {
-            line_height,
-            scroll_top: 3.0 * line_height,
-            height: 3.0 * line_height,
-        });
+        editor.set_scroll_top(3.0 * line_height);
         let frame = editor.render();
         assert_eq!(frame["first_visible_row"], 2);
         assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi"]);

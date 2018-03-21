@@ -7,7 +7,7 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use serde_json;
-use xray_core::workspace::WorkspaceHandle;
+use xray_core::workspace::{WorkspaceHandle, WorkspaceView};
 use xray_core::window::{Window, ViewId};
 use tokio_core::reactor;
 
@@ -56,8 +56,8 @@ impl App {
                     IncomingMessage::StartCli => {
                         Self::start_cli(inner, incoming);
                     },
-                    IncomingMessage::StartWindow { window_id } => {
-                        Self::start_window(inner, outgoing, incoming, window_id);
+                    IncomingMessage::StartWindow { window_id, height } => {
+                        Self::start_window(inner, outgoing, incoming, window_id, height);
                     }
                     _ => eprintln!("Unexpected message {:?}", first_message),
                 }
@@ -95,14 +95,24 @@ impl App {
         inner.borrow_mut().reactor.spawn(Self::handle_app_messages(inner.clone(), incoming));
     }
 
-    fn start_window<O, I>(inner: Rc<RefCell<Inner>>, outgoing: O, incoming: I, window_id: WindowId)
+    fn start_window<O, I>(
+        inner: Rc<RefCell<Inner>>,
+        outgoing: O,
+        incoming: I,
+        window_id: WindowId,
+        height: f64
+    )
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>
     {
         let inner_clone = inner.clone();
         let mut inner = inner.borrow_mut();
-        let window_updates = inner.windows.get_mut(&window_id).unwrap().updates();
+        let window_updates = {
+            let window = inner.windows.get_mut(&window_id).unwrap();
+            window.set_height(height);
+            window.updates()
+        };
         let receive_incoming = incoming.for_each(move |message| {
             inner_clone.borrow_mut().handle_window_message(window_id, message);
             Ok(())
@@ -158,8 +168,10 @@ impl Inner {
         let window_id = self.next_window_id;
         self.next_window_id += 1;
 
+        let mut window = Window::new(0.0);
         let workspace = WorkspaceHandle::new(paths);
-        let window = Window::new(workspace);
+        let workspace_view_handle = window.handle().add_view(WorkspaceView::new(workspace));
+        window.set_root_view(workspace_view_handle);
         self.windows.insert(window_id, window);
 
         if let Some(ref mut app_channel) = self.app_channel {

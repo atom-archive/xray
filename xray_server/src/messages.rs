@@ -8,7 +8,10 @@ use xray_core::window::{self, ViewId};
 pub enum IncomingMessage {
     StartApp,
     StartCli,
-    StartWindow { window_id: WindowId },
+    StartWindow {
+        window_id: WindowId,
+        height: f64,
+    },
     OpenWorkspace { paths: Vec<PathBuf> },
     Action {
         view_id: ViewId,
