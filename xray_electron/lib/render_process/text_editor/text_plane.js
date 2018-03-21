@@ -48,7 +48,7 @@ class TextPlane extends React.Component {
       canvasWidth: this.props.width * window.devicePixelRatio,
       canvasHeight: this.props.height * window.devicePixelRatio,
       scrollTop: this.props.scrollTop,
-      firstVisibleRow: this.props.frameState.firstVisibleRow,
+      firstVisibleRow: this.props.frameState.first_visible_row,
       lines: this.props.frameState.lines,
       selections: this.props.frameState.selections,
       showCursors: this.props.showCursors,

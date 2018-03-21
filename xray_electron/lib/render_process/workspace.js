@@ -24,12 +24,18 @@ module.exports = class Workspace extends React.Component {
       modal = $(Modal, null, $(View, { id: this.props.modal }));
     }
 
+    let centerItem
+    if (this.props.center_pane) {
+      centerItem = $(View, { id: this.props.center_pane });
+    }
+
     return $(
       Root,
       {
         tabIndex: -1,
         onKeyDown: this.didKeyDown
       },
+      centerItem,
       modal
     );
   }

@@ -7,6 +7,7 @@ const React = require("react");
 const ReactDOM = require("react-dom");
 const ViewRegistry = require("./view_registry");
 const Workspace = require("./workspace");
+const TextEditorView = require("./text_editor/text_editor");
 const XrayClient = require("../shared/xray_client");
 const $ = React.createElement;
 
@@ -48,6 +49,7 @@ function buildViewRegistry(client) {
   });
   viewRegistry.addComponent("Workspace", Workspace);
   viewRegistry.addComponent("FileFinder", FileFinder);
+  viewRegistry.addComponent("BufferView", TextEditorView);
   return viewRegistry;
 }
 

@@ -2,7 +2,6 @@ const React = require("react");
 const ReactDOM = require("react-dom");
 const PropTypes = require("prop-types");
 const { styled } = require("styletron-react");
-const xray = require("xray");
 const TextPlane = require("./text_plane");
 const $ = React.createElement;
 
@@ -11,20 +10,15 @@ class TextEditorContainer extends React.Component {
     super(props);
     this.onWheel = this.onWheel.bind(this);
 
-    const buffer = new xray.TextBuffer(1);
-    const editor = new xray.TextEditor(buffer, this.editorChanged.bind(this));
-
     if (props.initialText) {
       buffer.splice(0, 0, props.initialText);
     }
 
     this.state = {
       resizeObserver: new ResizeObserver((entries) => this.componentDidResize(entries[0].contentRect)),
-      editor: editor,
       scrollTop: 0,
       height: 0,
       width: 0,
-      editorVersion: 0,
       showCursors: true
     };
   }
@@ -47,29 +41,17 @@ class TextEditorContainer extends React.Component {
   componentWillUnmount() {
     const element = ReactDOM.findDOMNode(this);
     element.removeEventListener('wheel', this.onWheel, {passive: true});
-    this.state.editor.destroy();
     this.state.resizeObserver.disconnect();
     window.clearInterval(this.state.cursorBlinkIntervalHandle);
   }
 
   componentDidResize({width, height}) {
-    this.setState({width, height});
+    this.setMeasurements({width, height})
   }
 
-  editorChanged() {
-    this.setState({
-      editorVersion: this.state.editorVersion + 1
-    });
-  }
-
-  computeFrameState() {
-    const { scrollTop, height } = this.state;
-    const { fontSize, lineHeight } = this.context.theme.editor;
-    return this.state.editor.render({
-      scrollTop,
-      height,
-      lineHeight: fontSize * lineHeight
-    });
+  setMeasurements(measurements) {
+    this.setState(measurements)
+    this.props.dispatch({type: 'SetMeasurements', measurements})
   }
 
   render() {
@@ -80,12 +62,12 @@ class TextEditorContainer extends React.Component {
       width,
       height,
       showCursors,
-      frameState: this.computeFrameState()
+      frameState: this.props
     })
   }
 
   onWheel (event) {
-    this.setState({
+    this.setMeasurements({
       scrollTop: Math.max(0, this.state.scrollTop + event.deltaY)
     });
   }
