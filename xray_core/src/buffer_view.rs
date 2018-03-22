@@ -39,6 +39,11 @@ struct SelectionProps {
 enum BufferViewAction {
     UpdateScrollTop{delta: f64},
     SetDimensions{width: u64, height: u64},
+    ReplaceSelectedText{text: String},
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
 }
 
 impl BufferView {
@@ -89,6 +94,20 @@ impl BufferView {
         self.scroll_top = scroll_top;
         self.updated();
         self
+    }
+
+    pub fn replace_selected_text(&mut self, text: &str) {
+        {
+            let mut buffer = self.buffer.borrow_mut();
+            for selection in self.selections.iter().rev() {
+                let start = buffer.offset_for_anchor(&selection.start).unwrap();
+                let end = buffer.offset_for_anchor(&selection.end).unwrap();
+                buffer.splice(start..end, text);
+            }
+        }
+
+        self.merge_selections();
+        self.updated();
     }
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
@@ -489,6 +508,11 @@ impl View for BufferView {
                 self.set_width(width as f64);
                 self.set_height(height as f64);
             },
+            Ok(BufferViewAction::ReplaceSelectedText{text}) => self.replace_selected_text(text.as_str()),
+            Ok(BufferViewAction::MoveUp) => self.move_up(),
+            Ok(BufferViewAction::MoveDown) => self.move_down(),
+            Ok(BufferViewAction::MoveLeft) => self.move_left(),
+            Ok(BufferViewAction::MoveRight) => self.move_right(),
             action @ _ => eprintln!("Unrecognized action {:?}", action),
         }
     }
@@ -863,6 +887,24 @@ mod tests {
                 selection((4, 1), (4, 1)),
                 selection((4, 4), (4, 8))
             ]
+        );
+    }
+
+    #[test]
+    fn test_replace_selected_text() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
+
+        editor.buffer.borrow_mut().splice(0..0, "abcdefgh\nhijklmno");
+
+        // Three selections on the same line
+        editor.select_right();
+        editor.select_right();
+        editor.add_selection(Point::new(0, 3), Point::new(0, 5));
+        editor.add_selection(Point::new(0, 7), Point::new(1, 1));
+        editor.replace_selected_text("-");
+        assert_eq!(
+            String::from_utf16_lossy(editor.buffer.borrow().to_u16_chars().as_slice()),
+            "-c-fg-ijklmno"
         );
     }
 

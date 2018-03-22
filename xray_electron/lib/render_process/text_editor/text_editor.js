@@ -3,7 +3,11 @@ const ReactDOM = require("react-dom");
 const PropTypes = require("prop-types");
 const { styled } = require("styletron-react");
 const TextPlane = require("./text_plane");
+const debounce = require('../debounce');
 const $ = React.createElement;
+
+const CURSOR_BLINK_RESUME_DELAY = 300;
+const CURSOR_BLINK_PERIOD = 800;
 
 const Root = styled("div", {
   width: "100%",
@@ -14,7 +18,12 @@ const Root = styled("div", {
 class TextEditor extends React.Component {
   constructor(props) {
     super(props);
-    this.onWheel = this.onWheel.bind(this);
+    this.handleMouseWheel = this.handleMouseWheel.bind(this);
+    this.handleKeyDown = this.handleKeyDown.bind(this);
+    this.debouncedStartCursorBlinking = debounce(
+      this.startCursorBlinking.bind(this),
+      CURSOR_BLINK_RESUME_DELAY
+    );
 
     if (props.initialText) {
       buffer.splice(0, 0, props.initialText);
@@ -39,18 +48,16 @@ class TextEditor extends React.Component {
       height: element.offsetHeight
     });
 
-    element.addEventListener('wheel', this.onWheel, {passive: true});
+    element.addEventListener('wheel', this.handleMouseWheel, {passive: true});
 
-    this.state.cursorBlinkIntervalHandle = window.setInterval(() => {
-      this.setState({ showCursors: !this.state.showCursors });
-    }, 500);
+    this.startCursorBlinking();
   }
 
   componentWillUnmount() {
+    this.stopCursorBlinking();
     const element = ReactDOM.findDOMNode(this);
-    element.removeEventListener('wheel', this.onWheel, {passive: true});
+    element.removeEventListener('wheel', this.handleMouseWheel, {passive: true});
     this.state.resizeObserver.disconnect();
-    window.clearInterval(this.state.cursorBlinkIntervalHandle);
   }
 
   componentDidResize(measurements) {
@@ -64,7 +71,10 @@ class TextEditor extends React.Component {
   render() {
     return $(
       Root,
-      {},
+      {
+        tabIndex: -1,
+        onKeyDown: this.handleKeyDown
+      },
       $(TextPlane, {
         showCursors: this.state.showCursors,
         lineHeight: this.props.line_height,
@@ -78,8 +88,63 @@ class TextEditor extends React.Component {
     );
   }
 
-  onWheel (event) {
+  handleMouseWheel(event) {
     this.props.dispatch({type: 'UpdateScrollTop', delta: event.deltaY});
+  }
+
+  handleKeyDown(event) {
+    if (event.key.length === 1) {
+      this.props.dispatch({type: 'ReplaceSelectedText', text: event.key});
+      return;
+    }
+
+    switch (event.key) {
+      case 'ArrowUp':
+        this.pauseCursorBlinking();
+        this.props.dispatch({type: 'MoveUp'});
+        break;
+      case 'ArrowDown':
+        this.pauseCursorBlinking();
+        this.props.dispatch({type: 'MoveDown'});
+        break;
+      case 'ArrowLeft':
+        this.pauseCursorBlinking();
+        this.props.dispatch({type: 'MoveLeft'});
+        break;
+      case 'ArrowRight':
+        this.pauseCursorBlinking();
+        this.props.dispatch({type: 'MoveRight'});
+        break;
+    }
+  }
+
+  pauseCursorBlinking () {
+    this.stopCursorBlinking()
+    this.debouncedStartCursorBlinking()
+  }
+
+  stopCursorBlinking () {
+    if (this.state.cursorsBlinking) {
+      window.clearInterval(this.cursorBlinkIntervalHandle)
+      this.cursorBlinkIntervalHandle = null
+      this.setState({
+        showCursors: true,
+        cursorsBlinking: false
+      });
+    }
+  }
+
+  startCursorBlinking () {
+    if (!this.state.cursorsBlinking) {
+      this.cursorBlinkIntervalHandle = window.setInterval(() => {
+        this.setState({ showCursors: !this.state.showCursors });
+      }, CURSOR_BLINK_PERIOD / 2);
+
+      this.setState({
+        cursorsBlinking: true,
+        showCursors: false
+      });
+    }
   }
 }
 
