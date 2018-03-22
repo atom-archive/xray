@@ -64,15 +64,3 @@ impl fs::Tree for Tree {
         Box::new(self.updates.observe())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_populate() {
-        let tree = Tree::new("/Users/nathan/src/xray");
-        tree.updates.observe().take(100).for_each(|_| Ok(())).wait();
-        println!("{:?}", tree.root);
-    }
-}
