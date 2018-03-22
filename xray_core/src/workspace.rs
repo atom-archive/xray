@@ -1,18 +1,18 @@
 use serde_json;
-use std::cell::{RefCell, Ref, RefMut};
+use std::cell::{Ref, RefCell, RefMut};
 use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
-use window::{View, ViewUpdateStream, WindowHandle, ViewHandle};
+use window::{View, ViewHandle, ViewUpdateStream, WindowHandle};
 use buffer::Buffer;
 use buffer_view::BufferView;
 use notify_cell::NotifyCell;
 
 pub struct Workspace {
-    paths: Vec<PathBuf>
+    paths: Vec<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -23,7 +23,7 @@ pub struct WorkspaceView {
     window_handle: Option<WindowHandle>,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
-    updates: NotifyCell<()>
+    updates: NotifyCell<()>,
 }
 
 #[derive(Deserialize)]
@@ -34,13 +34,13 @@ enum WorkspaceViewAction {
 
 struct FileFinderView {
     query: String,
-    updates: NotifyCell<()>
+    updates: NotifyCell<()>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum FileFinderAction {
-    UpdateQuery { query: String }
+    UpdateQuery { query: String },
 }
 
 impl Workspace {
@@ -70,7 +70,7 @@ impl WorkspaceView {
             modal_panel: None,
             center_pane: None,
             window_handle: None,
-            updates: NotifyCell::new(())
+            updates: NotifyCell::new(()),
         }
     }
 
@@ -85,11 +85,12 @@ impl WorkspaceView {
     }
 
     fn build_example_buffer_view(&self) -> BufferView {
-        let src_path : PathBuf = env::var("XRAY_SRC_PATH")
+        let src_path: PathBuf = env::var("XRAY_SRC_PATH")
             .expect("Missing XRAY_SRC_PATH environment variable")
             .into();
 
-        let react_js_path = src_path.join("xray_electron/node_modules/react/cjs/react.development.js");
+        let react_js_path =
+            src_path.join("xray_electron/node_modules/react/cjs/react.development.js");
         let file = File::open(react_js_path).unwrap();
         let mut buf_reader = BufReader::new(file);
         let mut contents = String::new();
@@ -134,7 +135,9 @@ impl View for WorkspaceView {
 }
 
 impl View for FileFinderView {
-    fn component_name(&self) -> &'static str { "FileFinder" }
+    fn component_name(&self) -> &'static str {
+        "FileFinder"
+    }
 
     fn render(&self) -> serde_json::Value {
         json!({
@@ -158,7 +161,7 @@ impl FileFinderView {
     fn new() -> Self {
         Self {
             query: String::new(),
-            updates: NotifyCell::new(())
+            updates: NotifyCell::new(()),
         }
     }
 

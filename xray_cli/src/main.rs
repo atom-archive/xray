@@ -42,13 +42,14 @@ fn main() {
         "paths": args.arg_path
     });
 
-    let socket_path = args.flag_socket_path.as_ref().map_or(DEFAULT_SOCKET_PATH, |path| path.as_str());
+    let socket_path = args.flag_socket_path
+        .as_ref()
+        .map_or(DEFAULT_SOCKET_PATH, |path| path.as_str());
 
     if let Ok(mut socket) = UnixStream::connect(socket_path) {
         write_to_socket(&mut socket, json!({ "type": "StartCli" }))
             .expect("Failed to write to socket");
-        write_to_socket(&mut socket, message)
-            .expect("Failed to write to socket");
+        write_to_socket(&mut socket, message).expect("Failed to write to socket");
         return;
     }
 

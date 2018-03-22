@@ -5,7 +5,7 @@ use std::mem;
 use std::ops::Range;
 use serde_json;
 use notify_cell::NotifyCell;
-use buffer::{Buffer, Point, Anchor};
+use buffer::{Anchor, Buffer, Point};
 use movement;
 use window::{View, ViewUpdateStream, WindowHandle};
 
@@ -24,22 +24,22 @@ struct Selection {
     start: Anchor,
     end: Anchor,
     reversed: bool,
-    goal_column: Option<u32>
+    goal_column: Option<u32>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
 struct SelectionProps {
     pub start: Point,
     pub end: Point,
-    pub reversed: bool
+    pub reversed: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum BufferViewAction {
-    UpdateScrollTop{delta: f64},
-    SetDimensions{width: u64, height: u64},
-    Edit{text: String},
+    UpdateScrollTop { delta: f64 },
+    SetDimensions { width: u64, height: u64 },
+    Edit { text: String },
     MoveUp,
     MoveDown,
     MoveLeft,
@@ -52,12 +52,14 @@ impl BufferView {
 
         {
             let buffer = buffer.borrow();
-            selections = vec![Selection {
-                start: buffer.anchor_before_offset(0).unwrap(),
-                end: buffer.anchor_before_offset(0).unwrap(),
-                reversed: false,
-                goal_column: None
-            }];
+            selections = vec![
+                Selection {
+                    start: buffer.anchor_before_offset(0).unwrap(),
+                    end: buffer.anchor_before_offset(0).unwrap(),
+                    reversed: false,
+                    goal_column: None,
+                },
+            ];
         }
 
         Self {
@@ -112,19 +114,24 @@ impl BufferView {
             }
 
             let mut delta = 0_isize;
-            self.selections = offset_ranges.into_iter().map(|(start, end)| {
-                let start = start as isize;
-                let end = end as isize;
-                let anchor = buffer.anchor_before_offset((start + delta) as usize + text.len()).unwrap();
-                let deleted_count = end - start;
-                delta += text.len() as isize - deleted_count;
-                Selection {
-                    start: anchor.clone(),
-                    end: anchor,
-                    reversed: false,
-                    goal_column: None
-                }
-            }).collect();
+            self.selections = offset_ranges
+                .into_iter()
+                .map(|(start, end)| {
+                    let start = start as isize;
+                    let end = end as isize;
+                    let anchor = buffer
+                        .anchor_before_offset((start + delta) as usize + text.len())
+                        .unwrap();
+                    let deleted_count = end - start;
+                    delta += text.len() as isize - deleted_count;
+                    Selection {
+                        start: anchor.clone(),
+                        end: anchor,
+                        reversed: false,
+                        goal_column: None,
+                    }
+                })
+                .collect();
         }
 
         self.updated();
@@ -139,16 +146,21 @@ impl BufferView {
             // TODO: Clip points or return a result.
             let start_anchor = buffer.anchor_before_point(start).unwrap();
             let end_anchor = buffer.anchor_before_point(end).unwrap();
-            let index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start_anchor).unwrap()) {
+            let index = match self.selections
+                .binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start_anchor).unwrap())
+            {
                 Ok(index) => index,
-                Err(index) => index
+                Err(index) => index,
             };
-            self.selections.insert(index, Selection {
-                start: start_anchor,
-                end: end_anchor,
-                reversed: false,
-                goal_column: None
-            });
+            self.selections.insert(
+                index,
+                Selection {
+                    start: start_anchor,
+                    end: end_anchor,
+                    reversed: false,
+                    goal_column: None,
+                },
+            );
         }
 
         self.merge_selections();
@@ -188,10 +200,14 @@ impl BufferView {
 
                     if add_selection {
                         new_selections.push(Selection {
-                            start: buffer.anchor_before_point(Point::new(row, start_column)).unwrap(),
-                            end: buffer.anchor_before_point(Point::new(row, end_column)).unwrap(),
+                            start: buffer
+                                .anchor_before_point(Point::new(row, start_column))
+                                .unwrap(),
+                            end: buffer
+                                .anchor_before_point(Point::new(row, end_column))
+                                .unwrap(),
                             reversed: selection.reversed,
-                            goal_column: Some(goal_column)
+                            goal_column: Some(goal_column),
                         });
                         break;
                     }
@@ -199,9 +215,11 @@ impl BufferView {
             }
 
             for selection in new_selections {
-                let index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &selection.start).unwrap()) {
+                let index = match self.selections.binary_search_by(|probe| {
+                    buffer.cmp_anchors(&probe.start, &selection.start).unwrap()
+                }) {
                     Ok(index) => index,
-                    Err(index) => index
+                    Err(index) => index,
                 };
                 self.selections.insert(index, selection);
             }
@@ -245,10 +263,14 @@ impl BufferView {
 
                     if add_selection {
                         new_selections.push(Selection {
-                            start: buffer.anchor_before_point(Point::new(row, start_column)).unwrap(),
-                            end: buffer.anchor_before_point(Point::new(row, end_column)).unwrap(),
+                            start: buffer
+                                .anchor_before_point(Point::new(row, start_column))
+                                .unwrap(),
+                            end: buffer
+                                .anchor_before_point(Point::new(row, end_column))
+                                .unwrap(),
                             reversed: selection.reversed,
-                            goal_column: Some(goal_column)
+                            goal_column: Some(goal_column),
                         });
                         break;
                     }
@@ -256,9 +278,11 @@ impl BufferView {
             }
 
             for selection in new_selections {
-                let index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &selection.start).unwrap()) {
+                let index = match self.selections.binary_search_by(|probe| {
+                    buffer.cmp_anchors(&probe.start, &selection.start).unwrap()
+                }) {
                     Ok(index) => index,
-                    Err(index) => index
+                    Err(index) => index,
                 };
                 self.selections.insert(index, selection);
             }
@@ -278,7 +302,9 @@ impl BufferView {
                 if start != end {
                     selection.end = selection.start.clone();
                 } else {
-                    let cursor = buffer.anchor_before_point(movement::left(&buffer, start)).unwrap();
+                    let cursor = buffer
+                        .anchor_before_point(movement::left(&buffer, start))
+                        .unwrap();
                     selection.start = cursor.clone();
                     selection.end = cursor;
                 }
@@ -295,7 +321,9 @@ impl BufferView {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
                 let head = buffer.point_for_anchor(selection.head()).unwrap();
-                let cursor = buffer.anchor_before_point(movement::left(&buffer, head)).unwrap();
+                let cursor = buffer
+                    .anchor_before_point(movement::left(&buffer, head))
+                    .unwrap();
                 selection.set_head(&buffer, cursor);
                 selection.goal_column = None;
             }
@@ -314,7 +342,9 @@ impl BufferView {
                 if start != end {
                     selection.start = selection.end.clone();
                 } else {
-                    let cursor = buffer.anchor_before_point(movement::right(&buffer, end)).unwrap();
+                    let cursor = buffer
+                        .anchor_before_point(movement::right(&buffer, end))
+                        .unwrap();
                     selection.start = cursor.clone();
                     selection.end = cursor;
                 }
@@ -331,7 +361,9 @@ impl BufferView {
             let buffer = self.buffer.borrow();
             for selection in &mut self.selections {
                 let head = buffer.point_for_anchor(selection.head()).unwrap();
-                let cursor = buffer.anchor_before_point(movement::right(&buffer, head)).unwrap();
+                let cursor = buffer
+                    .anchor_before_point(movement::right(&buffer, head))
+                    .unwrap();
                 selection.set_head(&buffer, cursor);
                 selection.goal_column = None;
             }
@@ -416,9 +448,15 @@ impl BufferView {
         let buffer = self.buffer.borrow();
         let mut i = 1;
         while i < self.selections.len() {
-            if buffer.cmp_anchors(&self.selections[i - 1].end, &self.selections[i].start).unwrap() >= Ordering::Equal {
+            if buffer
+                .cmp_anchors(&self.selections[i - 1].end, &self.selections[i].start)
+                .unwrap() >= Ordering::Equal
+            {
                 let removed = self.selections.remove(i);
-                if buffer.cmp_anchors(&removed.end, &self.selections[i - 1].end).unwrap() > Ordering::Equal {
+                if buffer
+                    .cmp_anchors(&removed.end, &self.selections[i - 1].end)
+                    .unwrap() > Ordering::Equal
+                {
                     self.selections[i - 1].end = removed.end;
                 }
             } else {
@@ -431,10 +469,16 @@ impl BufferView {
         let buffer = self.buffer.borrow();
 
         let start = buffer.anchor_before_point(range.start).unwrap();
-        let start_index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start).unwrap()) {
+        let start_index = match self.selections
+            .binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start).unwrap())
+        {
             Ok(index) => index,
             Err(index) => {
-                if index > 0 && buffer.cmp_anchors(&self.selections[index - 1].end, &start).unwrap() == Ordering::Greater {
+                if index > 0
+                    && buffer
+                        .cmp_anchors(&self.selections[index - 1].end, &start)
+                        .unwrap() == Ordering::Greater
+                {
                     index - 1
                 } else {
                     index
@@ -446,9 +490,11 @@ impl BufferView {
             &self.selections[start_index..]
         } else {
             let end = buffer.anchor_after_point(range.end).unwrap();
-            let end_index = match self.selections.binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &end).unwrap()) {
+            let end_index = match self.selections
+                .binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &end).unwrap())
+            {
                 Ok(index) => index,
-                Err(index) => index
+                Err(index) => index,
             };
 
             &self.selections[start_index..end_index]
@@ -517,18 +563,18 @@ impl View for BufferView {
 
     fn dispatch_action(&mut self, action: serde_json::Value) {
         match serde_json::from_value(action) {
-            Ok(BufferViewAction::UpdateScrollTop{delta}) => {
+            Ok(BufferViewAction::UpdateScrollTop { delta }) => {
                 let mut scroll_top = self.scroll_top + delta;
                 if scroll_top < 0.0 {
                     scroll_top = 0.0;
                 }
                 self.set_scroll_top(scroll_top);
-            },
-            Ok(BufferViewAction::SetDimensions{width, height}) => {
+            }
+            Ok(BufferViewAction::SetDimensions { width, height }) => {
                 self.set_width(width as f64);
                 self.set_height(height as f64);
-            },
-            Ok(BufferViewAction::Edit{text}) => self.edit(text.as_str()),
+            }
+            Ok(BufferViewAction::Edit { text }) => self.edit(text.as_str()),
             Ok(BufferViewAction::MoveUp) => self.move_up(),
             Ok(BufferViewAction::MoveDown) => self.move_down(),
             Ok(BufferViewAction::MoveLeft) => self.move_left(),
@@ -581,7 +627,7 @@ impl Selection {
         SelectionProps {
             start: buffer.point_for_anchor(&self.start).unwrap(),
             end: buffer.point_for_anchor(&self.end).unwrap(),
-            reversed: self.reversed
+            reversed: self.reversed,
         }
     }
 }
@@ -604,19 +650,27 @@ mod tests {
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
 
         // Wraps across lines moving right
-        for _ in 0..3 { editor.move_right(); }
+        for _ in 0..3 {
+            editor.move_right();
+        }
         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
 
         // Stops at end
-        for _ in 0..4 { editor.move_right(); }
+        for _ in 0..4 {
+            editor.move_right();
+        }
         assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
 
         // Wraps across lines moving left
-        for _ in 0..4 { editor.move_left(); }
+        for _ in 0..4 {
+            editor.move_left();
+        }
         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
 
         // Stops at start
-        for _ in 0..4 { editor.move_left(); }
+        for _ in 0..4 {
+            editor.move_left();
+        }
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
         // Moves down and up at column 0
@@ -678,7 +732,9 @@ mod tests {
         assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 1))]);
 
         // Selecting right wraps across newlines
-        for _ in 0..3 { editor.select_right(); }
+        for _ in 0..3 {
+            editor.select_right();
+        }
         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
 
         // Moving right with a non-empty selection clears the selection
@@ -689,9 +745,15 @@ mod tests {
 
         // Selecting left wraps across newlines
         editor.select_left();
-        assert_eq!(render_selections(&editor), vec![rev_selection((1, 0), (2, 0))]);
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((1, 0), (2, 0))]
+        );
         editor.select_left();
-        assert_eq!(render_selections(&editor), vec![rev_selection((0, 3), (2, 0))]);
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 3), (2, 0))]
+        );
 
         // Moving left with a non-empty selection clears the selection
         editor.move_left();
@@ -699,7 +761,10 @@ mod tests {
 
         // Reverse is updated correctly when selecting left and right
         editor.select_left();
-        assert_eq!(render_selections(&editor), vec![rev_selection((0, 2), (0, 3))]);
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 2), (0, 3))]
+        );
         editor.select_right();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
         editor.select_right();
@@ -707,18 +772,27 @@ mod tests {
         editor.select_left();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
         editor.select_left();
-        assert_eq!(render_selections(&editor), vec![rev_selection((0, 2), (0, 3))]);
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 2), (0, 3))]
+        );
 
         // Selecting vertically moves the head and updates the reversed property
         editor.select_left();
-        assert_eq!(render_selections(&editor), vec![rev_selection((0, 1), (0, 3))]);
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 1), (0, 3))]
+        );
         editor.select_down();
         assert_eq!(render_selections(&editor), vec![selection((0, 3), (1, 0))]);
         editor.select_down();
         assert_eq!(render_selections(&editor), vec![selection((0, 3), (2, 1))]);
         editor.select_up();
         editor.select_up();
-        assert_eq!(render_selections(&editor), vec![rev_selection((0, 1), (0, 3))]);
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 1), (0, 3))]
+        );
 
         // Favors selection end when moving down
         editor.move_down();
@@ -739,7 +813,10 @@ mod tests {
     #[test]
     fn test_add_selection() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
-        editor.buffer.borrow_mut().splice(0..0, "abcd\nefgh\nijkl\nmnop");
+        editor
+            .buffer
+            .borrow_mut()
+            .splice(0..0, "abcd\nefgh\nijkl\nmnop");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
         // Adding non-overlapping selections
@@ -754,7 +831,7 @@ mod tests {
                 selection((0, 0), (0, 1)),
                 selection((0, 2), (0, 2)),
                 selection((0, 3), (1, 2)),
-                selection((2, 2), (2, 3))
+                selection((2, 2), (2, 3)),
             ]
         );
 
@@ -769,7 +846,7 @@ mod tests {
                 selection((0, 0), (0, 1)),
                 selection((0, 2), (0, 2)),
                 selection((0, 3), (1, 3)),
-                selection((2, 2), (2, 3))
+                selection((2, 2), (2, 3)),
             ]
         );
 
@@ -782,7 +859,7 @@ mod tests {
             vec![
                 selection((0, 0), (0, 2)),
                 selection((0, 3), (1, 4)),
-                selection((2, 1), (2, 3))
+                selection((2, 1), (2, 3)),
             ]
         );
     }
@@ -790,13 +867,16 @@ mod tests {
     #[test]
     fn test_add_selection_above() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
-        editor.buffer.borrow_mut().splice(0..0, "\
-            abcdefghijk\n\
-            lmnop\n\
-            \n\
-            \n\
-            qrstuvwxyz\n\
-        ");
+        editor.buffer.borrow_mut().splice(
+            0..0,
+            "\
+             abcdefghijk\n\
+             lmnop\n\
+             \n\
+             \n\
+             qrstuvwxyz\n\
+             ",
+        );
 
         // Multi-line selections
         editor.move_down();
@@ -830,7 +910,7 @@ mod tests {
                 selection((2, 0), (2, 0)),
                 selection((4, 1), (4, 3)),
                 selection((4, 6), (4, 6)),
-                selection((4, 7), (4, 9))
+                selection((4, 7), (4, 9)),
             ]
         );
 
@@ -848,7 +928,7 @@ mod tests {
                 selection((2, 0), (2, 0)),
                 selection((4, 1), (4, 3)),
                 selection((4, 6), (4, 6)),
-                selection((4, 7), (4, 9))
+                selection((4, 7), (4, 9)),
             ]
         );
     }
@@ -856,14 +936,17 @@ mod tests {
     #[test]
     fn test_add_selection_below() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
-        editor.buffer.borrow_mut().splice(0..0, "\
-            abcdefgh\n\
-            ijklm\n\
-            \n\
-            \n\
-            nopqrstuvwx\n\
-            yz\
-        ");
+        editor.buffer.borrow_mut().splice(
+            0..0,
+            "\
+             abcdefgh\n\
+             ijklm\n\
+             \n\
+             \n\
+             nopqrstuvwx\n\
+             yz\
+             ",
+        );
 
         // Multi-line selections
         editor.select_down();
@@ -889,7 +972,7 @@ mod tests {
                 selection((1, 0), (1, 0)),
                 selection((1, 1), (1, 1)),
                 selection((1, 4), (1, 5)),
-                selection((4, 5), (4, 6))
+                selection((4, 5), (4, 6)),
             ]
         );
 
@@ -905,7 +988,7 @@ mod tests {
                 selection((1, 4), (1, 5)),
                 selection((2, 0), (2, 0)),
                 selection((4, 1), (4, 1)),
-                selection((4, 4), (4, 8))
+                selection((4, 4), (4, 8)),
             ]
         );
     }
@@ -914,7 +997,10 @@ mod tests {
     fn test_edit() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
 
-        editor.buffer.borrow_mut().splice(0..0, "abcdefgh\nhijklmno");
+        editor
+            .buffer
+            .borrow_mut()
+            .splice(0..0, "abcdefgh\nhijklmno");
 
         // Three selections on the same line
         editor.select_right();
@@ -923,17 +1009,22 @@ mod tests {
         editor.add_selection(Point::new(0, 7), Point::new(1, 1));
         editor.edit("-");
         assert_eq!(editor.buffer.borrow().to_string(), "-c-fg-ijklmno");
-        assert_eq!(render_selections(&editor), vec![
-            selection((0, 1), (0, 1)),
-            selection((0, 3), (0, 3)),
-            selection((0, 6), (0, 6))
-        ]);
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 1), (0, 1)),
+                selection((0, 3), (0, 3)),
+                selection((0, 6), (0, 6)),
+            ]
+        );
     }
 
     #[test]
     fn test_render() {
         let buffer = Rc::new(RefCell::new(Buffer::new(1)));
-        buffer.borrow_mut().splice(0..0, "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
+        buffer
+            .borrow_mut()
+            .splice(0..0, "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
         let line_height = 6.0;
 
         {
@@ -952,10 +1043,17 @@ mod tests {
 
             let frame = editor.render();
             assert_eq!(frame["first_visible_row"], 2);
-            assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi", "jkl", "mno", "pqr"]);
+            assert_eq!(
+                stringify_lines(&frame["lines"]),
+                vec!["ghi", "jkl", "mno", "pqr"]
+            );
             assert_eq!(
                 frame["selections"],
-                json!([selection((1, 2), (3, 1)), selection((3, 2), (4, 1)), selection((5, 2), (6, 0))])
+                json!([
+                    selection((1, 2), (3, 1)),
+                    selection((3, 2), (4, 1)),
+                    selection((5, 2), (6, 0))
+                ])
             );
         }
 
@@ -970,7 +1068,10 @@ mod tests {
 
             let frame = editor.render();
             assert_eq!(frame["first_visible_row"], 1);
-            assert_eq!(stringify_lines(&frame["lines"]), vec!["def", "ghi", "jkl", "mno", "pqr", "stu", "vwx", "yz"]);
+            assert_eq!(
+                stringify_lines(&frame["lines"]),
+                vec!["def", "ghi", "jkl", "mno", "pqr", "stu", "vwx", "yz"]
+            );
             assert_eq!(frame["selections"], json!([selection((8, 2), (8, 2))]));
         }
 
@@ -1015,18 +1116,27 @@ mod tests {
     }
 
     fn stringify_lines(lines: &serde_json::Value) -> Vec<String> {
-        lines.as_array().unwrap().iter().map(|line| line.as_str().unwrap().into()).collect()
+        lines
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap().into())
+            .collect()
     }
 
     fn render_selections(editor: &BufferView) -> Vec<SelectionProps> {
-        editor.selections.iter().map(|s| s.render(&editor.buffer.borrow())).collect()
+        editor
+            .selections
+            .iter()
+            .map(|s| s.render(&editor.buffer.borrow()))
+            .collect()
     }
 
     fn empty_selection(row: u32, column: u32) -> SelectionProps {
         SelectionProps {
             start: Point::new(row, column),
             end: Point::new(row, column),
-            reversed: false
+            reversed: false,
         }
     }
 
@@ -1034,7 +1144,7 @@ mod tests {
         SelectionProps {
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
-            reversed: false
+            reversed: false,
         }
     }
 
@@ -1042,7 +1152,7 @@ mod tests {
         SelectionProps {
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
-            reversed: true
+            reversed: true,
         }
     }
 }

@@ -3,7 +3,7 @@ use std::boxed::Box;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
-use futures::{Stream, Poll, Async};
+use futures::{Async, Poll, Stream};
 use futures::task::{self, Task};
 
 pub type ViewId = usize;
@@ -21,7 +21,7 @@ pub struct Window(Rc<RefCell<Inner>>, Option<ViewHandle>);
 pub struct WindowUpdateStream {
     counter: usize,
     polled_once: bool,
-    inner: Weak<RefCell<Inner>>
+    inner: Weak<RefCell<Inner>>,
 }
 
 pub struct Inner {
@@ -38,33 +38,36 @@ pub struct WindowHandle(Weak<RefCell<Inner>>);
 
 pub struct ViewHandle {
     pub view_id: ViewId,
-    inner: Weak<RefCell<Inner>>
+    inner: Weak<RefCell<Inner>>,
 }
 
 #[derive(Serialize, Debug)]
 pub struct WindowUpdate {
     updated: Vec<ViewUpdate>,
-    removed: Vec<ViewId>
+    removed: Vec<ViewId>,
 }
 
 #[derive(Serialize, Debug)]
 pub struct ViewUpdate {
     component_name: &'static str,
     view_id: ViewId,
-    props: serde_json::Value
+    props: serde_json::Value,
 }
 
 impl Window {
     pub fn new(height: f64) -> Self {
-        Window(Rc::new(RefCell::new(Inner {
-            next_view_id: 0,
-            views: HashMap::new(),
-            inserted: HashSet::new(),
-            removed: HashSet::new(),
-            height: height,
-            update_stream_counter: 0,
-            update_stream_task: None,
-        })), None)
+        Window(
+            Rc::new(RefCell::new(Inner {
+                next_view_id: 0,
+                views: HashMap::new(),
+                inserted: HashSet::new(),
+                removed: HashSet::new(),
+                height: height,
+                update_stream_counter: 0,
+                update_stream_task: None,
+            })),
+            None,
+        )
     }
 
     pub fn dispatch_action(&self, view_id: ViewId, action: serde_json::Value) {
@@ -78,7 +81,7 @@ impl Window {
         WindowUpdateStream {
             counter: inner.update_stream_counter,
             polled_once: false,
-            inner: Rc::downgrade(&self.0)
+            inner: Rc::downgrade(&self.0),
         }
     }
 
@@ -103,7 +106,7 @@ impl Stream for WindowUpdateStream {
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         let inner_ref = match self.inner.upgrade() {
             None => return Ok(Async::Ready(None)),
-            Some(inner) => inner
+            Some(inner) => inner,
         };
 
         let mut window_update;
@@ -127,7 +130,7 @@ impl Stream for WindowUpdateStream {
                         window_update.updated.push(ViewUpdate {
                             view_id: *id,
                             component_name: view.component_name(),
-                            props: view.render()
+                            props: view.render(),
                         });
                     }
                 }
@@ -140,7 +143,7 @@ impl Stream for WindowUpdateStream {
                             window_update.updated.push(ViewUpdate {
                                 view_id: *id,
                                 component_name: view.component_name(),
-                                props: view.render()
+                                props: view.render(),
                             });
                         }
                     }
@@ -157,7 +160,7 @@ impl Stream for WindowUpdateStream {
                     window_update.updated.push(ViewUpdate {
                         view_id: *id,
                         component_name: view.component_name(),
-                        props: view.render()
+                        props: view.render(),
                     });
                 }
 
@@ -204,10 +207,16 @@ impl WindowHandle {
 
         let inner = self.0.upgrade().unwrap();
         let mut inner = inner.borrow_mut();
-        inner.views.insert(view_id, (Rc::new(RefCell::new(view)), RefCell::new(updates)));
+        inner.views.insert(
+            view_id,
+            (Rc::new(RefCell::new(view)), RefCell::new(updates)),
+        );
         inner.inserted.insert(view_id);
         inner.update_stream_task.take().map(|task| task.notify());
-        ViewHandle { view_id, inner: self.0.clone() }
+        ViewHandle {
+            view_id,
+            inner: self.0.clone(),
+        }
     }
 }
 
