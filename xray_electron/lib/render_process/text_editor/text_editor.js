@@ -25,10 +25,6 @@ class TextEditor extends React.Component {
       CURSOR_BLINK_RESUME_DELAY
     );
 
-    if (props.initialText) {
-      buffer.splice(0, 0, props.initialText);
-    }
-
     this.state = {
       resizeObserver: new ResizeObserver(([{contentRect}]) =>
         this.componentDidResize({width: contentRect.width, height: contentRect.height})
