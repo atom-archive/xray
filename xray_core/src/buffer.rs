@@ -178,6 +178,11 @@ impl Buffer {
         result
     }
 
+    #[cfg(test)]
+    pub fn to_string(&self) -> String {
+        String::from_utf16_lossy(self.iter().collect::<Vec<u16>>().as_slice())
+    }
+
     pub fn iter(&self) -> Iter {
         Iter::new(self)
     }
@@ -963,12 +968,6 @@ mod tests {
 
     use super::*;
     use std::cmp::Ordering;
-
-    impl Buffer {
-        fn to_string(&self) -> String {
-            String::from_utf16_lossy(self.iter().collect::<Vec<u16>>().as_slice())
-        }
-    }
 
     #[test]
     fn splice() {

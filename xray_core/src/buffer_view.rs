@@ -99,14 +99,34 @@ impl BufferView {
     pub fn replace_selected_text(&mut self, text: &str) {
         {
             let mut buffer = self.buffer.borrow_mut();
-            for selection in self.selections.iter().rev() {
+            let mut offset_ranges = Vec::new();
+
+            for selection in &self.selections {
                 let start = buffer.offset_for_anchor(&selection.start).unwrap();
                 let end = buffer.offset_for_anchor(&selection.end).unwrap();
+                offset_ranges.push((start, end));
+            }
+
+            for &(start, end) in offset_ranges.iter().rev() {
                 buffer.splice(start..end, text);
             }
+
+            let mut delta = 0_isize;
+            self.selections = offset_ranges.into_iter().map(|(start, end)| {
+                let start = start as isize;
+                let end = end as isize;
+                let anchor = buffer.anchor_before_offset((start + delta) as usize + text.len()).unwrap();
+                let deleted_count = end - start;
+                delta += text.len() as isize - deleted_count;
+                Selection {
+                    start: anchor.clone(),
+                    end: anchor,
+                    reversed: false,
+                    goal_column: None
+                }
+            }).collect();
         }
 
-        self.merge_selections();
         self.updated();
     }
 
@@ -902,10 +922,12 @@ mod tests {
         editor.add_selection(Point::new(0, 3), Point::new(0, 5));
         editor.add_selection(Point::new(0, 7), Point::new(1, 1));
         editor.replace_selected_text("-");
-        assert_eq!(
-            String::from_utf16_lossy(editor.buffer.borrow().to_u16_chars().as_slice()),
-            "-c-fg-ijklmno"
-        );
+        assert_eq!(editor.buffer.borrow().to_string(), "-c-fg-ijklmno");
+        assert_eq!(render_selections(&editor), vec![
+            selection((0, 1), (0, 1)),
+            selection((0, 3), (0, 3)),
+            selection((0, 6), (0, 6))
+        ]);
     }
 
     #[test]
