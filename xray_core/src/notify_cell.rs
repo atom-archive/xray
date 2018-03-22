@@ -18,7 +18,7 @@ pub struct NotifyCellObserver<T: Clone> {
 struct Inner<T: Clone> {
     value: Option<T>,
     last_written_at: Version,
-    subscribers: Vec<Task>
+    subscribers: Vec<Task>,
 }
 
 impl<T: Clone> NotifyCell<T> {
@@ -27,7 +27,7 @@ impl<T: Clone> NotifyCell<T> {
             inner: Arc::new(Mutex::new(Inner {
                 value: Some(value),
                 last_written_at: 0,
-                subscribers: Vec::new()
+                subscribers: Vec::new(),
             })),
         }
     }
@@ -63,7 +63,7 @@ impl<T: Clone> Stream for NotifyCellObserver<T> {
         let mut inner = self.inner.lock().unwrap();
 
         if let Some(value) = inner.value.as_ref().cloned() {
-            if self.last_polled_at < inner.last_written_at  {
+            if self.last_polled_at < inner.last_written_at {
                 self.last_polled_at = inner.last_written_at;
                 Ok(Async::Ready(Some(value.clone())))
             } else {
@@ -88,8 +88,8 @@ impl<T: Clone> Drop for NotifyCell<T> {
 
 #[cfg(test)]
 mod tests {
-    extern crate rand;
     extern crate futures_cpupool;
+    extern crate rand;
 
     use super::*;
     use std::collections::BTreeSet;

@@ -2,10 +2,10 @@ use std::cell::RefCell;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::iter;
-use std::ops::{Add, AddAssign, Sub, Range};
+use std::ops::{Add, AddAssign, Range, Sub};
 use std::result;
 use std::sync::Arc;
-use super::tree::{self, Tree, SeekBias};
+use super::tree::{self, SeekBias, Tree};
 use notify_cell::NotifyCell;
 
 pub type ReplicaId = usize;
@@ -16,7 +16,7 @@ type Result<T> = result::Result<T, Error>;
 #[derive(Eq, PartialEq, Debug)]
 pub enum Error {
     OffsetOutOfRange,
-    InvalidAnchor
+    InvalidAnchor,
 }
 
 #[derive(Debug)]
@@ -28,16 +28,16 @@ pub struct Buffer {
     insertions: HashMap<ChangeId, Tree<FragmentMapping>>,
     anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
     offset_cache: RefCell<HashMap<Point, usize>>,
-    pub version: NotifyCell<Version>
+    pub version: NotifyCell<Version>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Version(LocalTimestamp);
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
 pub struct Point {
     pub row: u32,
-    pub column: u32
+    pub column: u32,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
@@ -50,19 +50,19 @@ enum AnchorInner {
     Middle {
         insertion_id: ChangeId,
         offset: usize,
-        bias: AnchorBias
-    }
+        bias: AnchorBias,
+    },
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 enum AnchorBias {
     Left,
-    Right
+    Right,
 }
 
 pub struct Iter<'a> {
     fragment_cursor: tree::Cursor<'a, Fragment>,
-    fragment_offset: usize
+    fragment_offset: usize,
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -72,19 +72,19 @@ struct Insertion {
     offset_in_parent: usize,
     replica_id: ReplicaId,
     lamport_timestamp: LamportTimestamp,
-    text: Text
+    text: Text,
 }
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct Text {
     code_units: Vec<u16>,
-    newline_offsets: Vec<usize>
+    newline_offsets: Vec<usize>,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize)]
 struct ChangeId {
     replica_id: ReplicaId,
-    local_timestamp: LocalTimestamp
+    local_timestamp: LocalTimestamp,
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
@@ -103,7 +103,7 @@ struct Fragment {
 pub struct FragmentSummary {
     extent: usize,
     extent_2d: Point,
-    max_fragment_id: FragmentId
+    max_fragment_id: FragmentId,
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
@@ -115,12 +115,12 @@ struct NewlineCount(usize);
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct FragmentMapping {
     extent: usize,
-    fragment_id: FragmentId
+    fragment_id: FragmentId,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct FragmentMappingSummary {
-    extent: usize
+    extent: usize,
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
@@ -132,14 +132,23 @@ impl Buffer {
         let mut fragments = Tree::<Fragment>::new();
 
         // Push start sentinel.
-        fragments.push(Fragment::new(FragmentId::min_value(), Insertion {
-            id: ChangeId { replica_id: 0, local_timestamp: 0 },
-            parent_id: ChangeId { replica_id: 0, local_timestamp: 0},
-            offset_in_parent: 0,
-            replica_id: 0,
-            lamport_timestamp: 0,
-            text: Text::new(vec![])
-        }));
+        fragments.push(Fragment::new(
+            FragmentId::min_value(),
+            Insertion {
+                id: ChangeId {
+                    replica_id: 0,
+                    local_timestamp: 0,
+                },
+                parent_id: ChangeId {
+                    replica_id: 0,
+                    local_timestamp: 0,
+                },
+                offset_in_parent: 0,
+                replica_id: 0,
+                lamport_timestamp: 0,
+                text: Text::new(vec![]),
+            },
+        ));
 
         Buffer {
             replica_id,
@@ -149,7 +158,7 @@ impl Buffer {
             insertions: HashMap::new(),
             anchor_cache: RefCell::new(HashMap::new()),
             offset_cache: RefCell::new(HashMap::new()),
-            version: NotifyCell::new(Version(0))
+            version: NotifyCell::new(Version(0)),
         }
     }
 
@@ -178,6 +187,11 @@ impl Buffer {
         result
     }
 
+    #[cfg(test)]
+    pub fn to_string(&self) -> String {
+        String::from_utf16_lossy(self.iter().collect::<Vec<u16>>().as_slice())
+    }
+
     pub fn iter(&self) -> Iter {
         Iter::new(self)
     }
@@ -188,13 +202,17 @@ impl Buffer {
 
     pub fn splice<T: Into<Text>>(&mut self, old_range: Range<usize>, new_text: T) {
         let new_text = new_text.into();
-        let new_text = if new_text.len() > 0 { Some(new_text) } else { None };
+        let new_text = if new_text.len() > 0 {
+            Some(new_text)
+        } else {
+            None
+        };
         if new_text.is_some() || old_range.end > old_range.start {
             self.local_clock += 1;
             self.lamport_clock += 1;
             let change_id = ChangeId {
                 replica_id: self.replica_id,
-                local_timestamp: self.local_clock
+                local_timestamp: self.local_clock,
             };
             self.splice_fragments(change_id, old_range, new_text);
             self.anchor_cache.borrow_mut().clear();
@@ -203,10 +221,16 @@ impl Buffer {
         }
     }
 
-    fn splice_fragments(&mut self, change_id: ChangeId, old_range: Range<usize>, mut new_text: Option<Text>) {
+    fn splice_fragments(
+        &mut self,
+        change_id: ChangeId,
+        old_range: Range<usize>,
+        mut new_text: Option<Text>,
+    ) {
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
-        let mut updated_fragments = cursor.build_prefix(&CharacterCount(old_range.start), SeekBias::Right);
+        let mut updated_fragments =
+            cursor.build_prefix(&CharacterCount(old_range.start), SeekBias::Right);
         let mut inserted_fragments = Vec::new();
 
         if cursor.prev_item().is_none() {
@@ -216,13 +240,18 @@ impl Buffer {
 
         let prev_fragment = cursor.prev_item().unwrap();
         if let Some(cur_fragment) = cursor.item() {
-            let (before_range, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, cursor.start::<CharacterCount>().0, &old_range);
+            let (before_range, within_range, after_range) = self.split_fragment(
+                prev_fragment,
+                cur_fragment,
+                cursor.start::<CharacterCount>().0,
+                &old_range,
+            );
             let insertion = new_text.take().map(|new_text| {
                 self.build_insertion(
                     change_id.clone(),
                     before_range.as_ref().unwrap_or(prev_fragment),
                     within_range.as_ref().or(after_range.as_ref()),
-                    new_text
+                    new_text,
                 )
             });
 
@@ -236,21 +265,29 @@ impl Buffer {
             cursor.next();
         } else {
             new_text.take().map(|new_text| {
-                inserted_fragments.push(self.build_insertion(change_id, prev_fragment, None, new_text));
+                inserted_fragments.push(self.build_insertion(
+                    change_id,
+                    prev_fragment,
+                    None,
+                    new_text,
+                ));
             });
         }
 
         loop {
             let fragment_start = cursor.start::<CharacterCount>().0;
 
-            if fragment_start >= old_range.end { break; }
+            if fragment_start >= old_range.end {
+                break;
+            }
 
             let prev_fragment = cursor.prev_item().unwrap();
             let cur_fragment = cursor.item().unwrap();
             let fragment_end = fragment_start + cur_fragment.len();
 
             if old_range.end < fragment_end {
-                let (_, within_range, after_range) = self.split_fragment(prev_fragment, cur_fragment, fragment_start, &old_range);
+                let (_, within_range, after_range) =
+                    self.split_fragment(prev_fragment, cur_fragment, fragment_start, &old_range);
                 let mut within_range = within_range.unwrap();
                 within_range.deletions.insert(change_id.clone());
                 inserted_fragments.push(within_range);
@@ -271,7 +308,13 @@ impl Buffer {
         self.fragments = updated_fragments;
     }
 
-    fn split_fragment(&mut self, prev_fragment: &Fragment, fragment: &Fragment, fragment_start: usize, range: &Range<usize>) -> (Option<Fragment>, Option<Fragment>, Option<Fragment>) {
+    fn split_fragment(
+        &mut self,
+        prev_fragment: &Fragment,
+        fragment: &Fragment,
+        fragment_start: usize,
+        range: &Range<usize>,
+    ) -> (Option<Fragment>, Option<Fragment>, Option<Fragment>) {
         let fragment_end = fragment_start + fragment.len();
         let mut prefix = fragment.clone();
         let mut before_range = None;
@@ -288,7 +331,8 @@ impl Buffer {
 
         if range.start < range.end {
             let mut suffix = prefix.clone();
-            suffix.start_offset = prefix.start_offset + cmp::max(range.start, fragment_start) - fragment_start;
+            suffix.start_offset =
+                prefix.start_offset + cmp::max(range.start, fragment_start) - fragment_start;
             prefix.end_offset = suffix.start_offset;
             prefix.id = FragmentId::between(&prev_fragment.id, &suffix.id);
             within_range = Some(suffix);
@@ -303,25 +347,26 @@ impl Buffer {
             {
                 let split_tree = self.insertions.get(&fragment.insertion.id).unwrap();
                 let mut cursor = split_tree.cursor();
-                updated_split_tree = cursor.build_prefix(&InsertionOffset(fragment.start_offset), SeekBias::Right);
+                updated_split_tree =
+                    cursor.build_prefix(&InsertionOffset(fragment.start_offset), SeekBias::Right);
 
                 if let Some(ref fragment) = before_range {
                     updated_split_tree.push(FragmentMapping {
                         extent: range.start - fragment_start,
-                        fragment_id: fragment.id.clone()
+                        fragment_id: fragment.id.clone(),
                     })
                 }
 
                 if let Some(ref fragment) = within_range {
                     updated_split_tree.push(FragmentMapping {
                         extent: range.end - range.start,
-                        fragment_id: fragment.id.clone()
+                        fragment_id: fragment.id.clone(),
                     })
                 }
                 if let Some(ref fragment) = after_range {
                     updated_split_tree.push(FragmentMapping {
                         extent: fragment_end - range.end,
-                        fragment_id: fragment.id.clone()
+                        fragment_id: fragment.id.clone(),
                     })
                 }
 
@@ -329,33 +374,45 @@ impl Buffer {
                 updated_split_tree.push_tree(cursor.build_suffix());
             }
 
-            self.insertions.insert(fragment.insertion.id, updated_split_tree);
+            self.insertions
+                .insert(fragment.insertion.id, updated_split_tree);
         }
 
         (before_range, within_range, after_range)
     }
 
-    fn build_insertion(&mut self, change_id: ChangeId, prev_fragment: &Fragment, next_fragment: Option<&Fragment>, text: Text) -> Fragment {
+    fn build_insertion(
+        &mut self,
+        change_id: ChangeId,
+        prev_fragment: &Fragment,
+        next_fragment: Option<&Fragment>,
+        text: Text,
+    ) -> Fragment {
         let new_fragment_id = FragmentId::between(
             &prev_fragment.id,
-            next_fragment.map(|f| &f.id).unwrap_or(&FragmentId::max_value())
+            next_fragment
+                .map(|f| &f.id)
+                .unwrap_or(&FragmentId::max_value()),
         );
 
         let mut split_tree = Tree::new();
         split_tree.push(FragmentMapping {
             extent: text.len(),
-            fragment_id: new_fragment_id.clone()
+            fragment_id: new_fragment_id.clone(),
         });
         self.insertions.insert(change_id, split_tree);
 
-        Fragment::new(new_fragment_id, Insertion {
-            id: change_id,
-            parent_id: prev_fragment.insertion.id,
-            offset_in_parent: prev_fragment.end_offset,
-            replica_id: self.replica_id,
-            lamport_timestamp: self.lamport_clock,
-            text
-        })
+        Fragment::new(
+            new_fragment_id,
+            Insertion {
+                id: change_id,
+                parent_id: prev_fragment.insertion.id,
+                offset_in_parent: prev_fragment.end_offset,
+                replica_id: self.replica_id,
+                lamport_timestamp: self.lamport_clock,
+                text,
+            },
+        )
     }
 
     pub fn anchor_before_offset(&self, offset: usize) -> Result<Anchor> {
@@ -399,7 +456,7 @@ impl Buffer {
         let anchor = Anchor(AnchorInner::Middle {
             insertion_id: fragment.insertion.id,
             offset: offset_in_insertion,
-            bias
+            bias,
         });
         self.cache_position(Some(anchor.clone()), offset, point);
         Ok(anchor)
@@ -445,7 +502,7 @@ impl Buffer {
         let anchor = Anchor(AnchorInner::Middle {
             insertion_id: fragment.insertion.id,
             offset: offset_in_insertion,
-            bias
+            bias,
         });
         let offset = cursor.start::<CharacterCount>().0 + offset_in_fragment;
         self.cache_position(Some(anchor.clone()), offset, point);
@@ -462,12 +519,18 @@ impl Buffer {
 
     fn position_for_anchor(&self, anchor: &Anchor) -> Result<(usize, Point)> {
         match &anchor.0 {
-            &AnchorInner::Start => Ok((0, Point {row: 0, column: 0})),
+            &AnchorInner::Start => Ok((0, Point { row: 0, column: 0 })),
             &AnchorInner::End => Ok((self.len(), self.fragments.len::<Point>())),
-            &AnchorInner::Middle { ref insertion_id, offset, ref bias } => {
+            &AnchorInner::Middle {
+                ref insertion_id,
+                offset,
+                ref bias,
+            } => {
                 let cached_position = {
                     let anchor_cache = self.anchor_cache.try_borrow().ok();
-                    anchor_cache.as_ref().and_then(|cache| cache.get(anchor).cloned())
+                    anchor_cache
+                        .as_ref()
+                        .and_then(|cache| cache.get(anchor).cloned())
                 };
 
                 if let Some(cached_position) = cached_position {
@@ -478,24 +541,34 @@ impl Buffer {
                         &AnchorBias::Right => SeekBias::Right,
                     };
 
-                    let splits = self.insertions.get(&insertion_id).ok_or(Error::InvalidAnchor)?;
+                    let splits = self.insertions
+                        .get(&insertion_id)
+                        .ok_or(Error::InvalidAnchor)?;
                     let mut splits_cursor = splits.cursor();
                     splits_cursor.seek(&InsertionOffset(offset), seek_bias);
-                    splits_cursor.item().ok_or(Error::InvalidAnchor).and_then(|split| {
-                        let mut fragments_cursor = self.fragments.cursor();
-                        fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
-                        fragments_cursor.item().ok_or(Error::InvalidAnchor).and_then(|fragment| {
-                            let overshoot = if fragment.is_visible() {
-                                offset - fragment.start_offset
-                            } else {
-                                0
-                            };
-                            let offset = fragments_cursor.start::<CharacterCount>().0 + overshoot;
-                            let point = fragments_cursor.start::<Point>() + &fragment.point_for_offset(overshoot)?;
-                            self.cache_position(Some(anchor.clone()), offset, point);
-                            Ok((offset, point))
+                    splits_cursor
+                        .item()
+                        .ok_or(Error::InvalidAnchor)
+                        .and_then(|split| {
+                            let mut fragments_cursor = self.fragments.cursor();
+                            fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
+                            fragments_cursor
+                                .item()
+                                .ok_or(Error::InvalidAnchor)
+                                .and_then(|fragment| {
+                                    let overshoot = if fragment.is_visible() {
+                                        offset - fragment.start_offset
+                                    } else {
+                                        0
+                                    };
+                                    let offset =
+                                        fragments_cursor.start::<CharacterCount>().0 + overshoot;
+                                    let point = fragments_cursor.start::<Point>()
+                                        + &fragment.point_for_offset(overshoot)?;
+                                    self.cache_position(Some(anchor.clone()), offset, point);
+                                    Ok((offset, point))
+                                })
                         })
-                    })
                 }
             }
         }
@@ -504,7 +577,9 @@ impl Buffer {
     fn offset_for_point(&self, point: Point) -> Result<usize> {
         let cached_offset = {
             let offset_cache = self.offset_cache.try_borrow().ok();
-            offset_cache.as_ref().and_then(|cache| cache.get(&point).cloned())
+            offset_cache
+                .as_ref()
+                .and_then(|cache| cache.get(&point).cloned())
         };
 
         if let Some(cached_offset) = cached_offset {
@@ -512,12 +587,17 @@ impl Buffer {
         } else {
             let mut fragments_cursor = self.fragments.cursor();
             fragments_cursor.seek(&point, SeekBias::Left);
-            fragments_cursor.item().ok_or(Error::OffsetOutOfRange).map(|fragment| {
-                let overshoot = fragment.offset_for_point(point - &fragments_cursor.start::<Point>()).unwrap();
-                let offset = &fragments_cursor.start::<CharacterCount>().0 + &overshoot;
-                self.cache_position(None, offset, point);
-                offset
-            })
+            fragments_cursor
+                .item()
+                .ok_or(Error::OffsetOutOfRange)
+                .map(|fragment| {
+                    let overshoot = fragment
+                        .offset_for_point(point - &fragments_cursor.start::<Point>())
+                        .unwrap();
+                    let offset = &fragments_cursor.start::<CharacterCount>().0 + &overshoot;
+                    self.cache_position(None, offset, point);
+                    offset
+                })
         }
     }
 
@@ -614,26 +694,33 @@ impl<'a> Iter<'a> {
         fragment_cursor.seek(&CharacterCount(0), SeekBias::Right);
         Self {
             fragment_cursor,
-            fragment_offset: 0
+            fragment_offset: 0,
         }
     }
 
     fn starting_at_row(buffer: &'a Buffer, target_row: u32) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
-        fragment_cursor.seek(&Point {row: target_row, column: 0}, SeekBias::Right);
+        fragment_cursor.seek(
+            &Point {
+                row: target_row,
+                column: 0,
+            },
+            SeekBias::Right,
+        );
 
         let mut fragment_offset = 0;
         if let Some(fragment) = fragment_cursor.item() {
             let fragment_start_row = fragment_cursor.start::<Point>().row;
             if target_row != fragment_start_row {
                 let target_row_within_fragment = target_row - fragment_start_row - 1;
-                fragment_offset = fragment.insertion.text.newline_offsets[target_row_within_fragment as usize] + 1;
+                fragment_offset = fragment.insertion.text.newline_offsets
+                    [target_row_within_fragment as usize] + 1;
             }
         }
 
         Self {
             fragment_cursor,
-            fragment_offset
+            fragment_offset,
         }
     }
 }
@@ -645,7 +732,7 @@ impl<'a> Iterator for Iter<'a> {
         if let Some(fragment) = self.fragment_cursor.item() {
             if let Some(c) = fragment.get_code_unit(self.fragment_offset) {
                 self.fragment_offset += 1;
-                return Some(c)
+                return Some(c);
             }
         }
 
@@ -654,7 +741,7 @@ impl<'a> Iterator for Iter<'a> {
             if let Some(fragment) = self.fragment_cursor.item() {
                 if let Some(c) = fragment.get_code_unit(0) {
                     self.fragment_offset = 1;
-                    return Some(c)
+                    return Some(c);
                 }
             } else {
                 break;
@@ -667,15 +754,22 @@ impl<'a> Iterator for Iter<'a> {
 
 impl Text {
     fn new(code_units: Vec<u16>) -> Self {
-        let newline_offsets = code_units.iter().enumerate().filter_map(|(offset, c)| {
-            if *c == (b'\n' as u16) {
-                Some(offset)
-            } else {
-                None
-            }
-        }).collect();
+        let newline_offsets = code_units
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, c)| {
+                if *c == (b'\n' as u16) {
+                    Some(offset)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        Self { code_units, newline_offsets }
+        Self {
+            code_units,
+            newline_offsets,
+        }
     }
 
     fn len(&self) -> usize {
@@ -695,7 +789,7 @@ impl Text {
 
             Ok(Point {
                 row: row as u32,
-                column: (offset - row_start_offset) as u32
+                column: (offset - row_start_offset) as u32,
             })
         }
     }
@@ -761,7 +855,7 @@ impl FragmentId {
             let interval = r - l;
             if interval > 1 {
                 new_entries.push(l + interval / 2);
-                break
+                break;
             } else {
                 new_entries.push(l);
             }
@@ -803,7 +897,7 @@ impl Fragment {
             insertion: Arc::new(ins),
             start_offset: 0,
             end_offset,
-            deletions: HashSet::new()
+            deletions: HashSet::new(),
         }
     }
 
@@ -830,7 +924,10 @@ impl Fragment {
     fn point_for_offset(&self, offset: usize) -> Result<Point> {
         let text = &self.insertion.text;
         let offset_in_insertion = self.start_offset + offset;
-        Ok(text.point_for_offset(offset_in_insertion)? - &text.point_for_offset(self.start_offset)?)
+        Ok(
+            text.point_for_offset(offset_in_insertion)?
+                - &text.point_for_offset(self.start_offset)?,
+        )
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize> {
@@ -845,18 +942,24 @@ impl tree::Item for Fragment {
 
     fn summarize(&self) -> Self::Summary {
         if self.is_visible() {
-            let fragment_2d_start = self.insertion.text.point_for_offset(self.start_offset).unwrap();
-            let fragment_2d_end = self.insertion.text.point_for_offset(self.end_offset).unwrap();
+            let fragment_2d_start = self.insertion
+                .text
+                .point_for_offset(self.start_offset)
+                .unwrap();
+            let fragment_2d_end = self.insertion
+                .text
+                .point_for_offset(self.end_offset)
+                .unwrap();
             FragmentSummary {
                 extent: self.len(),
                 extent_2d: fragment_2d_end - &fragment_2d_start,
-                max_fragment_id: self.id.clone()
+                max_fragment_id: self.id.clone(),
             }
         } else {
             FragmentSummary {
                 extent: 0,
-                extent_2d: Point {row: 0, column: 0},
-                max_fragment_id: self.id.clone()
+                extent_2d: Point { row: 0, column: 0 },
+                max_fragment_id: self.id.clone(),
             }
         }
     }
@@ -876,8 +979,8 @@ impl Default for FragmentSummary {
     fn default() -> Self {
         FragmentSummary {
             extent: 0,
-            extent_2d: Point {row: 0, column: 0},
-            max_fragment_id: FragmentId::min_value()
+            extent_2d: Point { row: 0, column: 0 },
+            max_fragment_id: FragmentId::min_value(),
         }
     }
 }
@@ -909,7 +1012,7 @@ impl tree::Item for FragmentMapping {
 
     fn summarize(&self) -> Self::Summary {
         FragmentMappingSummary {
-            extent: self.extent
+            extent: self.extent,
         }
     }
 }
@@ -922,9 +1025,7 @@ impl<'a> AddAssign<&'a FragmentMappingSummary> for FragmentMappingSummary {
 
 impl Default for FragmentMappingSummary {
     fn default() -> Self {
-        FragmentMappingSummary {
-            extent: 0
-        }
+        FragmentMappingSummary { extent: 0 }
     }
 }
 
@@ -953,7 +1054,7 @@ impl AddAssign for InsertionOffset {
 fn find_insertion_index<T: Ord>(v: &Vec<T>, x: &T) -> usize {
     match v.binary_search(x) {
         Ok(index) => index,
-        Err(index) => index
+        Err(index) => index,
     }
 }
 
@@ -963,12 +1064,6 @@ mod tests {
 
     use super::*;
     use std::cmp::Ordering;
-
-    impl Buffer {
-        fn to_string(&self) -> String {
-            String::from_utf16_lossy(self.iter().collect::<Vec<u16>>().as_slice())
-        }
-    }
 
     #[test]
     fn splice() {
@@ -1001,10 +1096,16 @@ mod tests {
             for _i in 0..30 {
                 let end = rng.gen_range::<usize>(0, buffer.len() + 1);
                 let start = rng.gen_range::<usize>(0, end + 1);
-                let new_text = RandomCharIter(rng).take(rng.gen_range(0, 10)).collect::<String>();
+                let new_text = RandomCharIter(rng)
+                    .take(rng.gen_range(0, 10))
+                    .collect::<String>();
 
                 buffer.splice(start..end, new_text.as_str());
-                reference_string = [&reference_string[0..start], new_text.as_str(), &reference_string[end..]].concat();
+                reference_string = [
+                    &reference_string[0..start],
+                    new_text.as_str(),
+                    &reference_string[end..],
+                ].concat();
                 assert_eq!(buffer.to_string(), reference_string);
             }
         }
@@ -1045,19 +1146,34 @@ mod tests {
         buffer.splice(18..21, "\nPQ");
 
         let iter = buffer.iter_starting_at_row(0);
-        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "abcd\nefgh\nijkl\nmno\nPQrs");
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "abcd\nefgh\nijkl\nmno\nPQrs"
+        );
 
         let iter = buffer.iter_starting_at_row(1);
-        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "efgh\nijkl\nmno\nPQrs");
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "efgh\nijkl\nmno\nPQrs"
+        );
 
         let iter = buffer.iter_starting_at_row(2);
-        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "ijkl\nmno\nPQrs");
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "ijkl\nmno\nPQrs"
+        );
 
         let iter = buffer.iter_starting_at_row(3);
-        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "mno\nPQrs");
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "mno\nPQrs"
+        );
 
         let iter = buffer.iter_starting_at_row(4);
-        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "PQrs");
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "PQrs"
+        );
 
         let iter = buffer.iter_starting_at_row(5);
         assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "");
@@ -1090,24 +1206,33 @@ mod tests {
     }
 
     #[test]
-    fn test_offset_for_point () {
+    fn test_offset_for_point() {
         let text = Text::from("abc\ndefgh");
         assert_eq!(text.offset_for_point(Point { row: 0, column: 0 }), Ok(0));
         assert_eq!(text.offset_for_point(Point { row: 0, column: 1 }), Ok(1));
         assert_eq!(text.offset_for_point(Point { row: 0, column: 2 }), Ok(2));
         assert_eq!(text.offset_for_point(Point { row: 0, column: 3 }), Ok(3));
-        assert_eq!(text.offset_for_point(Point { row: 0, column: 4 }), Err(Error::OffsetOutOfRange));
+        assert_eq!(
+            text.offset_for_point(Point { row: 0, column: 4 }),
+            Err(Error::OffsetOutOfRange)
+        );
         assert_eq!(text.offset_for_point(Point { row: 1, column: 0 }), Ok(4));
         assert_eq!(text.offset_for_point(Point { row: 1, column: 1 }), Ok(5));
         assert_eq!(text.offset_for_point(Point { row: 1, column: 5 }), Ok(9));
-        assert_eq!(text.offset_for_point(Point { row: 1, column: 6 }), Err(Error::OffsetOutOfRange));
+        assert_eq!(
+            text.offset_for_point(Point { row: 1, column: 6 }),
+            Err(Error::OffsetOutOfRange)
+        );
 
         let text = Text::from("abc");
         assert_eq!(text.offset_for_point(Point { row: 0, column: 0 }), Ok(0));
         assert_eq!(text.offset_for_point(Point { row: 0, column: 1 }), Ok(1));
         assert_eq!(text.offset_for_point(Point { row: 0, column: 2 }), Ok(2));
         assert_eq!(text.offset_for_point(Point { row: 0, column: 3 }), Ok(3));
-        assert_eq!(text.offset_for_point(Point { row: 0, column: 4 }), Err(Error::OffsetOutOfRange));
+        assert_eq!(
+            text.offset_for_point(Point { row: 0, column: 4 }),
+            Err(Error::OffsetOutOfRange)
+        );
     }
 
     #[test]
@@ -1142,57 +1267,135 @@ mod tests {
         assert_eq!(buffer.to_string(), "adef\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
-        assert_eq!(buffer.point_for_anchor(&left_anchor).unwrap(), Point { row: 1, column: 1 });
-        assert_eq!(buffer.point_for_anchor(&right_anchor).unwrap(), Point { row: 1, column: 1 });
+        assert_eq!(
+            buffer.point_for_anchor(&left_anchor).unwrap(),
+            Point { row: 1, column: 1 }
+        );
+        assert_eq!(
+            buffer.point_for_anchor(&right_anchor).unwrap(),
+            Point { row: 1, column: 1 }
+        );
 
         buffer.splice(2..3, "");
         assert_eq!(buffer.to_string(), "adf\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
-        assert_eq!(buffer.point_for_anchor(&left_anchor).unwrap(), Point { row: 1, column: 1 });
-        assert_eq!(buffer.point_for_anchor(&right_anchor).unwrap(), Point { row: 1, column: 1 });
+        assert_eq!(
+            buffer.point_for_anchor(&left_anchor).unwrap(),
+            Point { row: 1, column: 1 }
+        );
+        assert_eq!(
+            buffer.point_for_anchor(&right_anchor).unwrap(),
+            Point { row: 1, column: 1 }
+        );
 
         buffer.splice(5..5, "ghi\n");
         assert_eq!(buffer.to_string(), "adf\nbghi\nc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 9);
-        assert_eq!(buffer.point_for_anchor(&left_anchor).unwrap(), Point { row: 1, column: 1 });
-        assert_eq!(buffer.point_for_anchor(&right_anchor).unwrap(), Point { row: 2, column: 0 });
+        assert_eq!(
+            buffer.point_for_anchor(&left_anchor).unwrap(),
+            Point { row: 1, column: 1 }
+        );
+        assert_eq!(
+            buffer.point_for_anchor(&right_anchor).unwrap(),
+            Point { row: 2, column: 0 }
+        );
 
         buffer.splice(7..9, "");
         assert_eq!(buffer.to_string(), "adf\nbghc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
-        assert_eq!(buffer.point_for_anchor(&left_anchor).unwrap(), Point { row: 1, column: 1 });
-        assert_eq!(buffer.point_for_anchor(&right_anchor).unwrap(), Point { row: 1, column: 3 });
+        assert_eq!(
+            buffer.point_for_anchor(&left_anchor).unwrap(),
+            Point { row: 1, column: 1 }
+        );
+        assert_eq!(
+            buffer.point_for_anchor(&right_anchor).unwrap(),
+            Point { row: 1, column: 3 }
+        );
 
         // Ensure anchoring to a point is equivalent to anchoring to an offset.
-        assert_eq!(buffer.anchor_before_point(Point { row: 0, column: 0 }), buffer.anchor_before_offset(0));
-        assert_eq!(buffer.anchor_before_point(Point { row: 0, column: 1 }), buffer.anchor_before_offset(1));
-        assert_eq!(buffer.anchor_before_point(Point { row: 0, column: 2 }), buffer.anchor_before_offset(2));
-        assert_eq!(buffer.anchor_before_point(Point { row: 0, column: 3 }), buffer.anchor_before_offset(3));
-        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 0 }), buffer.anchor_before_offset(4));
-        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 1 }), buffer.anchor_before_offset(5));
-        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 2 }), buffer.anchor_before_offset(6));
-        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 3 }), buffer.anchor_before_offset(7));
-        assert_eq!(buffer.anchor_before_point(Point { row: 1, column: 4 }), buffer.anchor_before_offset(8));
+        assert_eq!(
+            buffer.anchor_before_point(Point { row: 0, column: 0 }),
+            buffer.anchor_before_offset(0)
+        );
+        assert_eq!(
+            buffer.anchor_before_point(Point { row: 0, column: 1 }),
+            buffer.anchor_before_offset(1)
+        );
+        assert_eq!(
+            buffer.anchor_before_point(Point { row: 0, column: 2 }),
+            buffer.anchor_before_offset(2)
+        );
+        assert_eq!(
+            buffer.anchor_before_point(Point { row: 0, column: 3 }),
+            buffer.anchor_before_offset(3)
+        );
+        assert_eq!(
+            buffer.anchor_before_point(Point { row: 1, column: 0 }),
+            buffer.anchor_before_offset(4)
+        );
+        assert_eq!(
+            buffer.anchor_before_point(Point { row: 1, column: 1 }),
+            buffer.anchor_before_offset(5)
+        );
+        assert_eq!(
+            buffer.anchor_before_point(Point { row: 1, column: 2 }),
+            buffer.anchor_before_offset(6)
+        );
+        assert_eq!(
+            buffer.anchor_before_point(Point { row: 1, column: 3 }),
+            buffer.anchor_before_offset(7)
+        );
+        assert_eq!(
+            buffer.anchor_before_point(Point { row: 1, column: 4 }),
+            buffer.anchor_before_offset(8)
+        );
 
         // Comparison between anchors.
         let anchor_at_offset_0 = buffer.anchor_before_offset(0).unwrap();
         let anchor_at_offset_1 = buffer.anchor_before_offset(1).unwrap();
         let anchor_at_offset_2 = buffer.anchor_before_offset(2).unwrap();
 
-        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_0, &anchor_at_offset_0), Ok(Ordering::Equal));
-        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_1, &anchor_at_offset_1), Ok(Ordering::Equal));
-        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_2, &anchor_at_offset_2), Ok(Ordering::Equal));
+        assert_eq!(
+            buffer.cmp_anchors(&anchor_at_offset_0, &anchor_at_offset_0),
+            Ok(Ordering::Equal)
+        );
+        assert_eq!(
+            buffer.cmp_anchors(&anchor_at_offset_1, &anchor_at_offset_1),
+            Ok(Ordering::Equal)
+        );
+        assert_eq!(
+            buffer.cmp_anchors(&anchor_at_offset_2, &anchor_at_offset_2),
+            Ok(Ordering::Equal)
+        );
 
-        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_0, &anchor_at_offset_1), Ok(Ordering::Less));
-        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_1, &anchor_at_offset_2), Ok(Ordering::Less));
-        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_0, &anchor_at_offset_2), Ok(Ordering::Less));
+        assert_eq!(
+            buffer.cmp_anchors(&anchor_at_offset_0, &anchor_at_offset_1),
+            Ok(Ordering::Less)
+        );
+        assert_eq!(
+            buffer.cmp_anchors(&anchor_at_offset_1, &anchor_at_offset_2),
+            Ok(Ordering::Less)
+        );
+        assert_eq!(
+            buffer.cmp_anchors(&anchor_at_offset_0, &anchor_at_offset_2),
+            Ok(Ordering::Less)
+        );
 
-        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_1, &anchor_at_offset_0), Ok(Ordering::Greater));
-        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_2, &anchor_at_offset_1), Ok(Ordering::Greater));
-        assert_eq!(buffer.cmp_anchors(&anchor_at_offset_2, &anchor_at_offset_0), Ok(Ordering::Greater));
+        assert_eq!(
+            buffer.cmp_anchors(&anchor_at_offset_1, &anchor_at_offset_0),
+            Ok(Ordering::Greater)
+        );
+        assert_eq!(
+            buffer.cmp_anchors(&anchor_at_offset_2, &anchor_at_offset_1),
+            Ok(Ordering::Greater)
+        );
+        assert_eq!(
+            buffer.cmp_anchors(&anchor_at_offset_2, &anchor_at_offset_0),
+            Ok(Ordering::Greater)
+        );
     }
 
     #[test]

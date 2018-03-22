@@ -2,7 +2,5 @@
 **/target/
 **/*.rs.bk
 **/.DS_Store
-napi/src/sys/bindings.rs
-xray_core/Cargo.lock
 Icon*
 .tags*
