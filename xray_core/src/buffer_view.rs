@@ -39,7 +39,7 @@ struct SelectionProps {
 enum BufferViewAction {
     UpdateScrollTop{delta: f64},
     SetDimensions{width: u64, height: u64},
-    ReplaceSelectedText{text: String},
+    Edit{text: String},
     MoveUp,
     MoveDown,
     MoveLeft,
@@ -96,7 +96,7 @@ impl BufferView {
         self
     }
 
-    pub fn replace_selected_text(&mut self, text: &str) {
+    pub fn edit(&mut self, text: &str) {
         {
             let mut buffer = self.buffer.borrow_mut();
             let mut offset_ranges = Vec::new();
@@ -528,7 +528,7 @@ impl View for BufferView {
                 self.set_width(width as f64);
                 self.set_height(height as f64);
             },
-            Ok(BufferViewAction::ReplaceSelectedText{text}) => self.replace_selected_text(text.as_str()),
+            Ok(BufferViewAction::Edit{text}) => self.edit(text.as_str()),
             Ok(BufferViewAction::MoveUp) => self.move_up(),
             Ok(BufferViewAction::MoveDown) => self.move_down(),
             Ok(BufferViewAction::MoveLeft) => self.move_left(),
@@ -911,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn test_replace_selected_text() {
+    fn test_edit() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
 
         editor.buffer.borrow_mut().splice(0..0, "abcdefgh\nhijklmno");
@@ -921,7 +921,7 @@ mod tests {
         editor.select_right();
         editor.add_selection(Point::new(0, 3), Point::new(0, 5));
         editor.add_selection(Point::new(0, 7), Point::new(1, 1));
-        editor.replace_selected_text("-");
+        editor.edit("-");
         assert_eq!(editor.buffer.borrow().to_string(), "-c-fg-ijklmno");
         assert_eq!(render_selections(&editor), vec![
             selection((0, 1), (0, 1)),

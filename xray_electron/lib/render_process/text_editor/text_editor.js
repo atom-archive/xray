@@ -94,7 +94,7 @@ class TextEditor extends React.Component {
 
   handleKeyDown(event) {
     if (event.key.length === 1) {
-      this.props.dispatch({type: 'ReplaceSelectedText', text: event.key});
+      this.props.dispatch({type: 'Edit', text: event.key});
       return;
     }
 
