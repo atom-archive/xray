@@ -42,8 +42,8 @@ One cool feature of the stream-oriented approach for detecting individual view u
 
 ## Declarative interface on the client
 
-**This is still a work in progress.**
+To consume view state on the client, we implement a `ViewRegistry` that allows you to get the component and props for any view id, and also watch those props for updates.
 
-We want to make it easy to consume updates from the server on the client, so we plan to thread the view registry through the component tree using React's [context](https://reactjs.org/docs/context.html) feature.
+The `ViewRegistry`'s imperative API is wrapped in a component-oriented interface. At the root of the component hierarchy is the `App` component, which injects the view registry into the component tree's [context](https://reactjs.org/docs/context.html). Beneath the `App` component, the `View` component can be used to render a view with a specific id.
 
-The view registry will be accessed by a special `View` component, which is passed the relevant view id as a property. The `View` component will automatically retrieve the appropriate component class and props for the view with the given id from the view registry, then render the view. It will subscribe to state updates and re-render the child component as needed. It will also pass a `dispatch` property to the child component, enabling actions to be dispatched to the view's back-end representation.
+The `View` component takes the view's `id` as a property, then retrieves the view's component and props from the registry and renders the component as a child. It also sets up an observer on the view's props, re-rendering its child component with the new properties when they change. Finally, the `View` component passes a `dispatch` method as a property to the child component, giving it the ability to send arbitrary actions as plain JS objects back to the view's server-side representation.
