@@ -1,10 +1,4 @@
-language: node_js
+language: rust
+rust:
+ - stable
 sudo: required
-node_js:
-  - "8.9.3"
-
-install:
-  - curl https://sh.rustup.rs -sSf | sh -s -- -y
-  - source $HOME/.cargo/env
-  - cd xray_electron
-  - npm install
