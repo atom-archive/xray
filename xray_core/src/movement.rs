@@ -26,10 +26,7 @@ pub fn up(buffer: &Buffer, mut point: Point, goal_column: Option<u32>) -> (Point
     let goal_column = goal_column.or(Some(point.column));
     if point.row > 0 {
         point.row -= 1;
-        point.column = cmp::min(
-            goal_column.unwrap(),
-            buffer.len_for_row(point.row).unwrap()
-        );
+        point.column = cmp::min(goal_column.unwrap(), buffer.len_for_row(point.row).unwrap());
     } else {
         point = Point::new(0, 0);
     }
@@ -42,10 +39,7 @@ pub fn down(buffer: &Buffer, mut point: Point, goal_column: Option<u32>) -> (Poi
     let max_point = buffer.max_point();
     if point.row < max_point.row {
         point.row += 1;
-        point.column = cmp::min(
-            goal_column.unwrap(),
-            buffer.len_for_row(point.row).unwrap()
-        )
+        point.column = cmp::min(goal_column.unwrap(), buffer.len_for_row(point.row).unwrap())
     } else {
         point = max_point;
     }
