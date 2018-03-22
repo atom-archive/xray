@@ -1,5 +1,5 @@
 use serde_json;
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::RefCell;
 use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -11,15 +11,8 @@ use buffer::Buffer;
 use buffer_view::BufferView;
 use notify_cell::NotifyCell;
 
-pub struct Workspace {
-    paths: Vec<PathBuf>,
-}
-
-#[derive(Clone)]
-pub struct WorkspaceHandle(Rc<RefCell<Workspace>>);
-
 pub struct WorkspaceView {
-    workspace: WorkspaceHandle,
+    // workspace: WorkspaceHandle,
     window_handle: Option<WindowHandle>,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
@@ -43,30 +36,9 @@ enum FileFinderAction {
     UpdateQuery { query: String },
 }
 
-impl Workspace {
-    fn new(paths: Vec<PathBuf>) -> Self {
-        Self { paths }
-    }
-}
-
-impl WorkspaceHandle {
-    pub fn new(paths: Vec<PathBuf>) -> Self {
-        WorkspaceHandle(Rc::new(RefCell::new(Workspace::new(paths))))
-    }
-
-    pub fn borrow(&self) -> Ref<Workspace> {
-        self.0.borrow()
-    }
-
-    pub fn borrow_mut(&self) -> RefMut<Workspace> {
-        self.0.borrow_mut()
-    }
-}
-
 impl WorkspaceView {
-    pub fn new(workspace: WorkspaceHandle) -> Self {
+    pub fn new() -> Self {
         WorkspaceView {
-            workspace,
             modal_panel: None,
             center_pane: None,
             window_handle: None,
