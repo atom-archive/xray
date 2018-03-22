@@ -4,6 +4,7 @@ Xray is an experimental Electron-based text editor informed by what we've learne
 
 ## Updates
 
+* [March 19, 2018](./docs/updates/2018_03_19.md)
 * [March 12, 2018](./docs/updates/2018_03_12.md)
 * [March 5, 2018](./docs/updates/2018_03_05.md)
 
@@ -150,28 +151,36 @@ Interested in helping out? Welcome! Check out the [CONTRIBUTING](./CONTRIBUTING.
 
 ## Q1 2018 Roadmap
 
-The primary goal of the next three months is to validate the key ideas presented in this document and to get a sense for how long the envisioned system might take to develop. That's a pretty abstract goal, however.
+By May 1, we'd like it to be possible for multiple Xray clients to connect to a headless remote workspace. Clients should be able to open files from the remote project via the file finder and collaboratively edit shared buffers. We also would like to enable collaborators to follow each other around and have a text-based conversation in the workspace. We're going to focus on the bare minimum of editor features needed to reach this goal. If we're collaboratively editing text that isn't syntax highlighted, that's ok for now.
 
-More concretely, our goal is to ship a high-performance standalone editor component suitable for use in any web application, something we could eventually use on GitHub.com. This standalone editor will give us a chance to test a limited set of critical features in production scenarios without building out an entire desktop-based editor. We plan to develop this new editor in the context of a prototype Electron application, but we'll offer the standalone component as a separate build artifact from the main app.
+* [x] High-performance text rendering
+* [x] Cursors, selections, and editing
+* [x] Client/server architecture
+* [ ] File finder
+* [ ] Load and save buffers
+* [ ] Key bindings system
+* [ ] Flesh out basic editor experience
+  * [ ] Gutter with line numbers
+  * [ ] Autoscroll
+  * [ ] Low-hanging movement and editing operations
+* [ ] Remote headless workspace
+  * [ ] File finder
+  * [ ] Loading a buffer
+  * [ ] Editing can be shared between multiple participants
+  * [ ] Saving
+  * [ ] Discussions
+  * [ ] Following
 
-* [ ] Standalone editor component (dev release)
-  * [x] CRDT based text storage
-  * [ ] WebGL-based black and white text rendering
-    * [x] Rendering of glyphs with a 1:1 correspondence with characters
-    * [x] Subpixel horizontal character positioning
-    * [ ] Multi-character graphemes
-  * [ ] Cursors and selections
-    * [ ] Rendering
-    * [ ] Basic movement
-    * [ ] Auto-scroll
-    * [ ] Advanced movement
-  * [ ] Editing
-    * [ ] Insert characters
-    * [ ] Copy and paste
-  * [ ] Web-compatible build artifact
-  * [ ] Syntax highlighting
-  * [ ] History
-  * [ ] Synthetic scrollbars
-* Stretch
-  * [ ] Auto-indent
-  * [ ] File system interaction on the desktop
+## Q2 2018
+
+Once we get the basic collaboration experience down, we'll be looking to expand on it by adding the basic features that developers expect from a text editor. This list is incomplete and will likely evolve as this time approaches.
+
+* [ ] Find and replace in a buffer
+* [ ] Local project-wide search
+* [ ] Remote project-wide search
+* [ ] Undo history
+* [ ] Syntax highlighting
+* [ ] Project browser
+* [ ] Peer-to-peer workspace sharing
+* [ ] Code folding
+* [ ] Soft wrapping

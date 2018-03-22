@@ -2,29 +2,36 @@ const React = require("react");
 const ReactDOM = require("react-dom");
 const PropTypes = require("prop-types");
 const { styled } = require("styletron-react");
-const xray = require("xray");
 const TextPlane = require("./text_plane");
+const debounce = require('../debounce');
 const $ = React.createElement;
 
-class TextEditorContainer extends React.Component {
+const CURSOR_BLINK_RESUME_DELAY = 300;
+const CURSOR_BLINK_PERIOD = 800;
+
+const Root = styled("div", {
+  width: "100%",
+  height: "100%",
+  overflow: "hidden"
+});
+
+class TextEditor extends React.Component {
   constructor(props) {
     super(props);
-    this.onWheel = this.onWheel.bind(this);
-
-    const buffer = new xray.TextBuffer(1);
-    const editor = new xray.TextEditor(buffer, this.editorChanged.bind(this));
-
-    if (props.initialText) {
-      buffer.splice(0, 0, props.initialText);
-    }
+    this.handleMouseWheel = this.handleMouseWheel.bind(this);
+    this.handleKeyDown = this.handleKeyDown.bind(this);
+    this.debouncedStartCursorBlinking = debounce(
+      this.startCursorBlinking.bind(this),
+      CURSOR_BLINK_RESUME_DELAY
+    );
 
     this.state = {
-      resizeObserver: new ResizeObserver((entries) => this.componentDidResize(entries[0].contentRect)),
-      editor: editor,
+      resizeObserver: new ResizeObserver(([{contentRect}]) =>
+        this.componentDidResize({width: contentRect.width, height: contentRect.height})
+      ),
       scrollTop: 0,
       height: 0,
       width: 0,
-      editorVersion: 0,
       showCursors: true
     };
   }
@@ -37,82 +44,108 @@ class TextEditorContainer extends React.Component {
       height: element.offsetHeight
     });
 
-    element.addEventListener('wheel', this.onWheel, {passive: true});
+    element.addEventListener('wheel', this.handleMouseWheel, {passive: true});
 
-    this.state.cursorBlinkIntervalHandle = window.setInterval(() => {
-      this.setState({ showCursors: !this.state.showCursors });
-    }, 500);
+    this.startCursorBlinking();
   }
 
   componentWillUnmount() {
+    this.stopCursorBlinking();
     const element = ReactDOM.findDOMNode(this);
-    element.removeEventListener('wheel', this.onWheel, {passive: true});
-    this.state.editor.destroy();
+    element.removeEventListener('wheel', this.handleMouseWheel, {passive: true});
     this.state.resizeObserver.disconnect();
-    window.clearInterval(this.state.cursorBlinkIntervalHandle);
   }
 
-  componentDidResize({width, height}) {
-    this.setState({width, height});
-  }
-
-  editorChanged() {
-    this.setState({
-      editorVersion: this.state.editorVersion + 1
-    });
-  }
-
-  computeFrameState() {
-    const { scrollTop, height } = this.state;
-    const { fontSize, lineHeight } = this.context.theme.editor;
-    return this.state.editor.render({
-      scrollTop,
-      height,
-      lineHeight: fontSize * lineHeight
-    });
+  componentDidResize(measurements) {
+    this.props.dispatch({
+      type: 'SetDimensions',
+      width: measurements.width,
+      height: measurements.height
+    })
   }
 
   render() {
-    const { scrollTop, width, height, showCursors } = this.state;
-
-    return $(TextEditor, {
-      scrollTop,
-      width,
-      height,
-      showCursors,
-      frameState: this.computeFrameState()
-    })
+    return $(
+      Root,
+      {
+        tabIndex: -1,
+        onKeyDown: this.handleKeyDown
+      },
+      $(TextPlane, {
+        showCursors: this.state.showCursors,
+        lineHeight: this.props.line_height,
+        scrollTop: this.props.scroll_top,
+        height: this.props.height,
+        width: this.props.width,
+        selections: this.props.selections,
+        firstVisibleRow: this.props.first_visible_row,
+        lines: this.props.lines
+      })
+    );
   }
 
-  onWheel (event) {
-    this.setState({
-      scrollTop: Math.max(0, this.state.scrollTop + event.deltaY)
-    });
+  handleMouseWheel(event) {
+    this.props.dispatch({type: 'UpdateScrollTop', delta: event.deltaY});
+  }
+
+  handleKeyDown(event) {
+    if (event.key.length === 1) {
+      this.props.dispatch({type: 'Edit', text: event.key});
+      return;
+    }
+
+    switch (event.key) {
+      case 'ArrowUp':
+        this.pauseCursorBlinking();
+        this.props.dispatch({type: 'MoveUp'});
+        break;
+      case 'ArrowDown':
+        this.pauseCursorBlinking();
+        this.props.dispatch({type: 'MoveDown'});
+        break;
+      case 'ArrowLeft':
+        this.pauseCursorBlinking();
+        this.props.dispatch({type: 'MoveLeft'});
+        break;
+      case 'ArrowRight':
+        this.pauseCursorBlinking();
+        this.props.dispatch({type: 'MoveRight'});
+        break;
+    }
+  }
+
+  pauseCursorBlinking () {
+    this.stopCursorBlinking()
+    this.debouncedStartCursorBlinking()
+  }
+
+  stopCursorBlinking () {
+    if (this.state.cursorsBlinking) {
+      window.clearInterval(this.cursorBlinkIntervalHandle)
+      this.cursorBlinkIntervalHandle = null
+      this.setState({
+        showCursors: true,
+        cursorsBlinking: false
+      });
+    }
+  }
+
+  startCursorBlinking () {
+    if (!this.state.cursorsBlinking) {
+      this.cursorBlinkIntervalHandle = window.setInterval(() => {
+        this.setState({ showCursors: !this.state.showCursors });
+      }, CURSOR_BLINK_PERIOD / 2);
+
+      this.setState({
+        cursorsBlinking: true,
+        showCursors: false
+      });
+    }
   }
 }
 
-TextEditorContainer.contextTypes = {
+TextEditor.contextTypes = {
   theme: PropTypes.object
 };
 
-const Root = styled("div", {
-  width: "100%",
-  height: "100%",
-  overflow: "hidden"
-});
-
-function TextEditor(props) {
-  return $(
-    Root,
-    {onWheel: props.onWheel},
-    $(TextPlane, {
-      scrollTop: props.scrollTop,
-      width: props.width,
-      height: props.height,
-      showCursors: props.showCursors,
-      frameState: props.frameState
-    })
-  );
-}
-
-module.exports = TextEditorContainer;
+module.exports = TextEditor;
