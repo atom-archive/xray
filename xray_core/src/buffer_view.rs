@@ -37,7 +37,7 @@ struct SelectionProps {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum BufferViewAction {
-    SetScrollTop{value: f64},
+    UpdateScrollTop{delta: f64},
     SetDimensions{width: u64, height: u64},
 }
 
@@ -462,6 +462,10 @@ impl View for BufferView {
         json!({
             "first_visible_row": start.row,
             "lines": lines,
+            "scroll_top": self.scroll_top,
+            "height": self.height,
+            "width": self.width,
+            "line_height": self.line_height,
             "selections": visible_selections.iter()
                 .map(|selection| selection.render(&buffer))
                 .collect::<Vec<_>>()
@@ -474,8 +478,12 @@ impl View for BufferView {
 
     fn dispatch_action(&mut self, action: serde_json::Value) {
         match serde_json::from_value(action) {
-            Ok(BufferViewAction::SetScrollTop{value}) => {
-                self.set_scroll_top(value);
+            Ok(BufferViewAction::UpdateScrollTop{delta}) => {
+                let mut scroll_top = self.scroll_top + delta;
+                if scroll_top < 0.0 {
+                    scroll_top = 0.0;
+                }
+                self.set_scroll_top(scroll_top);
             },
             Ok(BufferViewAction::SetDimensions{width, height}) => {
                 self.set_width(width as f64);

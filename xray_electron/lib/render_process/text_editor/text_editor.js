@@ -48,7 +48,6 @@ class TextEditorContainer extends React.Component {
   }
 
   componentDidResize(measurements) {
-    this.setState(measurements)
     this.props.dispatch({
       type: 'SetDimensions',
       width: measurements.width,
@@ -57,21 +56,20 @@ class TextEditorContainer extends React.Component {
   }
 
   render() {
-    const { scrollTop, width, height, showCursors } = this.state;
-
     return $(TextEditor, {
-      scrollTop,
-      width,
-      height,
-      showCursors,
-      frameState: this.props
-    })
+      showCursors: this.state.showCursors,
+      lineHeight: this.props.line_height,
+      scrollTop: this.props.scroll_top,
+      height: this.props.height,
+      width: this.props.width,
+      selections: this.props.selections,
+      firstVisibleRow: this.props.first_visible_row,
+      lines: this.props.lines
+    });
   }
 
   onWheel (event) {
-    const scrollTop = Math.max(0, this.state.scrollTop + event.deltaY)
-    this.setState({scrollTop})
-    this.props.dispatch({type: 'SetScrollTop', value: scrollTop})
+    this.props.dispatch({type: 'UpdateScrollTop', delta: event.deltaY});
   }
 }
 
@@ -89,13 +87,7 @@ function TextEditor(props) {
   return $(
     Root,
     {onWheel: props.onWheel},
-    $(TextPlane, {
-      scrollTop: props.scrollTop,
-      width: props.width,
-      height: props.height,
-      showCursors: props.showCursors,
-      frameState: props.frameState
-    })
+    $(TextPlane, props)
   );
 }
 

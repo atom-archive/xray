@@ -25,12 +25,11 @@ class TextPlane extends React.Component {
     const {
       fontFamily,
       fontSize,
-      lineHeight,
       backgroundColor,
       baseTextColor
     } = this.context.theme.editor;
 
-    const computedLineHeight = Math.ceil(lineHeight * fontSize);
+    const computedLineHeight = this.props.lineHeight;
 
     if (!this.gl) {
       this.gl = this.refs.canvas.getContext("webgl2");
@@ -48,9 +47,9 @@ class TextPlane extends React.Component {
       canvasWidth: this.props.width * window.devicePixelRatio,
       canvasHeight: this.props.height * window.devicePixelRatio,
       scrollTop: this.props.scrollTop,
-      firstVisibleRow: this.props.frameState.first_visible_row,
-      lines: this.props.frameState.lines,
-      selections: this.props.frameState.selections,
+      firstVisibleRow: this.props.firstVisibleRow,
+      lines: this.props.lines,
+      selections: this.props.selections,
       showCursors: this.props.showCursors,
       computedLineHeight,
     });
