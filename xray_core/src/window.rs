@@ -14,7 +14,7 @@ pub trait View {
     fn will_mount(&mut self, _handle: WindowHandle) {}
     fn render(&self) -> serde_json::Value;
     fn updates(&self) -> ViewUpdateStream;
-    fn dispatch_action(&mut self, serde_json::Value);
+    fn dispatch_action(&mut self, serde_json::Value) {}
 }
 
 pub struct Window(Rc<RefCell<Inner>>, Option<ViewHandle>);
@@ -222,12 +222,67 @@ impl WindowHandle {
 
 impl Drop for ViewHandle {
     fn drop(&mut self) {
+        // Store the removed view here to prevent it from being dropped until after the borrow of
+        // inner is dropped, since the removed view may itself hold other view handles which will
+        // call drop reentrantly.
+        let mut _removed_view = None;
+
         let inner = self.inner.upgrade();
         if let Some(inner) = inner {
             let mut inner = inner.borrow_mut();
-            inner.views.remove(&self.view_id);
+            _removed_view = inner.views.remove(&self.view_id);
             inner.removed.insert(self.view_id);
             inner.update_stream_task.take().map(|task| task.notify());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_view_handle_drop() {
+        // Dropping the window should not cause a panic
+        let mut window = Window::new(100.0);
+        window.handle().add_view(TestView::new(true));
+    }
+
+    struct TestView {
+        add_child: bool,
+        handle: Option<ViewHandle>,
+        updates: NotifyCell<()>,
+    }
+
+    use notify_cell::NotifyCell;
+
+    impl TestView {
+        fn new(add_child: bool) -> Self {
+            TestView {
+                add_child,
+                handle: None,
+                updates: NotifyCell::new(()),
+            }
+        }
+    }
+
+    impl View for TestView {
+        fn component_name(&self) -> &'static str {
+            "TestView"
+        }
+
+        fn updates(&self) -> ViewUpdateStream {
+            Box::new(self.updates.observe())
+        }
+
+        fn render(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        fn will_mount(&mut self, window_handle: WindowHandle) {
+            if self.add_child {
+                self.handle = Some(window_handle.add_view(TestView::new(false)));
+            }
         }
     }
 }
