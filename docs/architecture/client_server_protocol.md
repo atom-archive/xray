@@ -1,6 +1,6 @@
 # Xray's client/server protocol
 
-Xray is organized around a client/server architecture, with all the application logic centralized in a central server. User-facing components connect to this server as clients to present the user experience.
+Xray is organized around a client/server architecture, with all the application logic located in a central server. User-facing components connect to this server as clients to present the user experience.
 
 ## Major application components
 
@@ -16,13 +16,13 @@ All application logic is controlled by a single server that listens on a domain 
 
 ![Window protocol diagram](../images/window_protocol.png)
 
-The protocol between the window and the server in inspired by the [Flux application architecture](https://facebook.github.io/flux/), though it's probably different in some ways due to the particular needs of Xray.
+The protocol between the window and the server is inspired by the [Flux application architecture](https://facebook.github.io/flux/), though it's probably different in some ways due to the particular needs of Xray.
 
 The state of the UI for any given window is managed entirely by the server. It creates a `Window` object for each connected window, and this `Window` object is responsible for managing a tree of views to be rendered by the connected client. Each view is associated with a unique identifier, a component name, and a plain-old JS object representing the view's state. Views can refer to *other* views via their id.
 
-When views are added and removed from the `Window` object on the server side, updates are automatically relayed to the client. The server calls `render()` on any newly added views to obtain a JSON object representing the view's state. The window also observes an `updates()` stream associated with each view, and sends a new update for a view's state if the view becomes dirty. To keep things simple, each time a view is updated, its entire state tree is sent again across the wire. For this reason, it's important to limit the size of each view's state object to avoid transmission and parsing overhead. Since the required data for a given view is naturally limited by the viewport, this should be acceptable.
+When views are added and removed from the `Window` object on the server side, updates are automatically relayed to the client. The server calls `render()` on any newly added views to obtain a JSON object representing the view's state. The window also observes an `updates()` stream associated with each view, and sends a new update for a view's state if the view becomes dirty. To keep things simple, each time a view is updated, its entire state tree is sent again across the wire. For this reason, it's important to limit the size of each view's state object to avoid transmission and parsing overhead. Since the required data for a given view is naturally limited by the viewport, this should be acceptable. We may switch to protocol buffers if JSON parsing overhead becomes a bottleneck.
 
-The root view is always a `WorkspaceView` with an id of `0`. Its props refer to other views that are displayed in the workspace via their id. For example, the workspace may contain a `DocumentView` (editor) with id 1, and also be presenting a `FileFinderView` with id 2 as a modal panel. When views are added to the `Window`, they are provided with a `WindowHandle` that allows them to add additional sub-views to the window. When a view adds a sub-view, it receives a `ViewHandle`. When this handle is dropped, the sub-view is automatically removed from the `Window` and deleted on the client.
+The root view of a typical window is a `WorkspaceView` with an id of `0`. Its props refer to other views that are displayed in the workspace via their id. For example, the workspace may contain a `BufferView` (editor) with id 1, and also be presenting a `FileFinderView` with id 2 as a modal panel. When views are added to the `Window`, they are provided with a `WindowHandle` via the optional `did_mount` method that allows them to add additional sub-views to the window. When a view adds a sub-view, it receives a `ViewHandle`. When this handle is dropped, the sub-view is automatically removed from the `Window` and deleted on the client.
 
 In the render process, we maintain a `ViewRegistry` which mirrors the state of the `Window` in the server process. The `ViewRegistry` contains an imperative interface for fetching the component and props associated with a particular view id, although most code will interface with the registry declaratively via special React components.
 
@@ -38,7 +38,7 @@ The `Window` object represents the messages that need to be sent to the client a
 
 If polling every visible view on each poll of the window update stream turns out to have too much overhead, we can always employ a similar strategy to the `FuturesUnordered` object and track notifications in a more fine-grained way. However, since we're anticipating rendering far fewer than 100 discrete views at any one time, we don't think polling everything should be an issue.
 
-One cool feature of the stream-oriented approach for detecting individual view updates is that a given view's update stream could be composed from other streams in fairly complex ways. For example, the updates stream of a `DocumentView` (editor) could derive from a `NotifyCell` on the view itself, plus an updates stream on the view's `Document`, which it could share with other `DocumentView`s.
+One cool feature of the stream-oriented approach for detecting individual view updates is that a given view's update stream could be composed from other streams in fairly complex ways. For example, the updates stream of a `BufferView` (editor) could derive from a `NotifyCell` on the view itself, plus an updates stream on the view's `Buffer`, which it could share with other `BufferView`s.
 
 ## Declarative interface on the client
 
