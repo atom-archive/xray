@@ -121,7 +121,7 @@ impl View for WorkspaceView {
         Box::new(self.updates.observe())
     }
 
-    fn did_mount(&mut self, window_handle: WindowHandle) {
+    fn will_mount(&mut self, window_handle: WindowHandle) {
         self.center_pane = Some(window_handle.add_view(self.build_example_buffer_view()));
         self.window_handle = Some(window_handle);
     }

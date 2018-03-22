@@ -11,7 +11,7 @@ pub type ViewUpdateStream = Box<Stream<Item = (), Error = ()>>;
 
 pub trait View {
     fn component_name(&self) -> &'static str;
-    fn did_mount(&mut self, _handle: WindowHandle) {}
+    fn will_mount(&mut self, _handle: WindowHandle) {}
     fn render(&self) -> serde_json::Value;
     fn updates(&self) -> ViewUpdateStream;
     fn dispatch_action(&mut self, serde_json::Value);
@@ -202,7 +202,7 @@ impl WindowHandle {
             inner.next_view_id - 1
         };
 
-        view.did_mount(WindowHandle(self.0.clone()));
+        view.will_mount(WindowHandle(self.0.clone()));
         let updates = view.updates();
 
         let inner = self.0.upgrade().unwrap();

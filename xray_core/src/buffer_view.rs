@@ -511,7 +511,7 @@ impl View for BufferView {
         "BufferView"
     }
 
-    fn did_mount(&mut self, window_handle: WindowHandle) {
+    fn will_mount(&mut self, window_handle: WindowHandle) {
         self.height = window_handle.height();
     }
 
