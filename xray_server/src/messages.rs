@@ -24,7 +24,6 @@ pub enum IncomingMessage {
 #[derive(Serialize, Debug)]
 #[serde(tag = "type")]
 pub enum OutgoingMessage {
-    Acknowledge,
     OpenWindow { window_id: WindowId },
     UpdateWindow(window::WindowUpdate),
 }

@@ -184,7 +184,7 @@ impl Inner {
         };
     }
 
-    fn open_workspace(&mut self, paths: Vec<PathBuf>) {
+    fn open_workspace(&mut self, _paths: Vec<PathBuf>) {
         let window_id = self.next_window_id;
         self.next_window_id += 1;
 
@@ -194,7 +194,9 @@ impl Inner {
         self.windows.insert(window_id, window);
 
         if let Some(ref mut app_channel) = self.app_channel {
-            app_channel.unbounded_send(OutgoingMessage::OpenWindow { window_id });
+            app_channel
+                .unbounded_send(OutgoingMessage::OpenWindow { window_id })
+                .expect("Tried to open a workspace with no connected app");
         }
     }
 
