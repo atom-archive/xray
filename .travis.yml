@@ -2,3 +2,8 @@ language: rust
 rust:
  - stable
 sudo: required
+
+before_install:
+ - sudo apt-get -qq update
+ - sudo apt-get install -y nodejs
+ - node -v
