@@ -8,3 +8,11 @@ before_install:
  - curl -o- https://raw.githubusercontent.com/creationix/nvm/v0.33.8/install.sh | bash
  - command -v nvm
  - nvm install v8.9.3
+
+script:
+ - cargo build
+ - cargo test
+ - cd xray_electron
+ - npm install
+ - npm test
+ - cd ../
