@@ -8,29 +8,27 @@ class View extends React.Component {
     super(props);
     this.state = {
       version: 0,
-      viewId: props.id,
-      disposePropsWatch: context.viewRegistry.watchProps(props.id, () => {
-        this.setState({ version: this.state.version++ });
-      })
+      viewId: props.id
     };
+    this.disposePropsWatch = context.viewRegistry.watchProps(props.id, () => {
+      this.setState({ version: this.state.version++ });
+    });
   }
 
   componentWillReceiveProps(props, context) {
     const { viewRegistry } = context;
 
     if (this.state.viewId !== props.id) {
-      this.state.disposePropsWatch();
-      this.setState({
-        viewId: props.id,
-        disposePropsWatch: viewRegistry.watchProps(props.id, () => {
-          this.setState({ version: this.state.version + 1 });
-        })
-      });
+      this.disposePropsWatch();
+      this.setState({viewId: props.id});
+      this.disposePropsWatch = viewRegistry.watchProps(props.id, () => {
+        this.setState({ version: this.state.version + 1 });
+      })
     }
   }
 
   componentWillUnmount() {
-    if (this.state.disposePropsWatch) this.state.disposePropsWatch();
+    if (this.disposePropsWatch) this.disposePropsWatch();
   }
 
   render() {
