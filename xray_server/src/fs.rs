@@ -3,25 +3,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use walkdir::WalkDir;
-use xray_core::fs::{self, Dir, File};
+use xray_core::fs;
 use xray_core::notify_cell::NotifyCell;
 
 pub struct Tree {
     path: PathBuf,
-    root: Dir,
+    root: fs::Entry,
     updates: Arc<NotifyCell<()>>
 }
 
 impl Tree {
     pub fn new<T: Into<PathBuf>>(path: T) -> Self {
         let path = path.into();
-        let root = Dir::new(false);
+        let root = fs::Entry::dir(false);
         let updates = Arc::new(NotifyCell::new(()));
         Self::populate(path.clone(), root.clone(), updates.clone());
         Self { path, root, updates }
     }
 
-    fn populate(path: PathBuf, root: Dir, updates: Arc<NotifyCell<()>>) {
+    fn populate(path: PathBuf, root: fs::Entry, updates: Arc<NotifyCell<()>>) {
         thread::spawn(move || {
             let mut stack = vec![root];
 
@@ -38,12 +38,12 @@ impl Tree {
                 let file_name = entry.file_name();
 
                 if file_type.is_dir() {
-                    let dir = Dir::new(file_type.is_symlink());
-                    stack.last_mut().unwrap().add_dir(file_name, dir.clone());
+                    let dir = fs::Entry::dir(file_type.is_symlink());
+                    stack.last_mut().unwrap().insert(file_name, dir.clone());
                     stack.push(dir);
                 } else if file_type.is_file() {
-                    let file = File::new(file_type.is_symlink());
-                    stack.last_mut().unwrap().add_file(file_name, file);
+                    let file = fs::Entry::file(file_type.is_symlink());
+                    stack.last_mut().unwrap().insert(file_name, file);
                 }
                 updates.set(());
             }
@@ -56,7 +56,7 @@ impl fs::Tree for Tree {
         &self.path
     }
 
-    fn root(&self) -> &Dir {
+    fn root(&self) -> &fs::Entry {
         &self.root
     }
 
