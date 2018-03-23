@@ -1,7 +1,6 @@
 language: rust
 rust:
  - stable
-sudo: required
 
 before_install:
  - sudo apt-get -qq update
@@ -10,9 +9,4 @@ before_install:
  - nvm install v8.9.3
 
 script:
- - cargo build
- - cargo test
- - cd xray_electron
- - npm install
- - npm test
- - cd ../
+ - bash scripts/test.bash
