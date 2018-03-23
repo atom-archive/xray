@@ -26,9 +26,6 @@ class TextEditor extends React.Component {
     );
 
     this.state = {
-      resizeObserver: new ResizeObserver(([{contentRect}]) =>
-        this.componentDidResize({width: contentRect.width, height: contentRect.height})
-      ),
       scrollTop: 0,
       height: 0,
       width: 0,
@@ -38,7 +35,10 @@ class TextEditor extends React.Component {
 
   componentDidMount() {
     const element = ReactDOM.findDOMNode(this);
-    this.state.resizeObserver.observe(element);
+    this.resizeObserver = new ResizeObserver(([{contentRect}]) => {
+      this.componentDidResize({width: contentRect.width, height: contentRect.height})
+    });
+    this.resizeObserver.observe(element);
     this.componentDidResize({
       width: element.offsetWidth,
       height: element.offsetHeight
@@ -53,7 +53,7 @@ class TextEditor extends React.Component {
     this.stopCursorBlinking();
     const element = ReactDOM.findDOMNode(this);
     element.removeEventListener('wheel', this.handleMouseWheel, {passive: true});
-    this.state.resizeObserver.disconnect();
+    this.resizeObserver.disconnect();
   }
 
   componentDidResize(measurements) {
