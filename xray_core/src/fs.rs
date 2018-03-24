@@ -138,12 +138,7 @@ impl Stream for Search {
 
                 if entries_index < entries.len() {
                     let child = &entries[entries_index];
-                    Self::update_match_variants(
-                        &mut self.match_variants,
-                        &self.query,
-                        &self.parent_path,
-                        &child.0
-                    );
+                    self.update_match_variants(&child.0);
                     match child.1 {
                         Entry::Dir(ref inner) => {
                             self.parent_path.push(&child.0);
@@ -244,18 +239,18 @@ impl Search {
         }
     }
 
-    fn update_match_variants(match_variants: &mut Vec<MatchVariant>, query: &Vec<char>, parent_path: &PathBuf, name: &OsStr) {
+    fn update_match_variants(&mut self, name: &OsStr) {
+        let parent_path_len = self.parent_path.as_os_str().as_bytes().len();
         let mut new_variants = Vec::<MatchVariant>::new();
 
         let previous_character: char = '\0';
-        for (name_index, character) in name.as_bytes().iter().map(|c| *c as char).enumerate() {
-            let name_index = (name_index + parent_path.as_os_str().as_bytes().len() + 1) as u16;
-            let character = character.to_ascii_lowercase();
+        for (name_index, character) in name.as_bytes().iter().map(|c| c.to_ascii_lowercase() as char).enumerate() {
+            let name_index = (name_index + parent_path_len) as u16;
 
             let mut i = 0;
-            while i != match_variants.len() {
-                let mut variant = &mut match_variants[i];
-                if variant.query_index as usize == query.len() {
+            while i != self.match_variants.len() {
+                let mut variant = &mut self.match_variants[i];
+                if variant.query_index as usize == self.query.len() {
                     i += 1;
                     continue;
                 }
@@ -263,7 +258,7 @@ impl Search {
                 // If the current word character matches the next character of the query
                 // for this match variant, create a new match variant that consumes the
                 // matching character.
-                let query_character = query[variant.query_index as usize];
+                let query_character = self.query[variant.query_index as usize];
                 if character == query_character {
                     let mut new_variant = variant.clone();
                     new_variant.query_index += 1;
@@ -305,7 +300,7 @@ impl Search {
             for new_variant in new_variants.drain(..) {
                 if new_variant.query_index != previous_query_index {
                     previous_query_index = new_variant.query_index;
-                    match_variants.push(new_variant);
+                    self.match_variants.push(new_variant);
                 }
             }
         }
