@@ -227,8 +227,7 @@ impl Search {
                 });
 
                 match search_result {
-                    Ok(_) => {},
-                    Err(index) => {
+                    Ok(index) | Err(index) => {
                         if index < self.max_results {
                             let mut path = self.parent_path.clone();
                             path.push(filename);
