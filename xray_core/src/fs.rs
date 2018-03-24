@@ -171,7 +171,6 @@ impl Stream for Search {
             }
         }
 
-        self.done = true;
         return Ok(Async::Ready(Some(self.results.clone())));
     }
 }
