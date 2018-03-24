@@ -210,17 +210,7 @@ impl Search {
     fn update_results(&mut self, filename: OsString) {
         for variant in self.match_variants.iter().rev() {
             if variant.query_index == self.query.len() as u16 {
-                let search_result = self.results.binary_search_by(|result| {
-                    if result.score > variant.score {
-                        Ordering::Less
-                    } else if result.score < variant.score {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Equal
-                    }
-                });
-
-                match search_result {
+                match self.results.binary_search_by(|probe| variant.score.cmp(&probe.score)) {
                     Ok(index) | Err(index) => {
                         if index < self.max_results {
                             let mut path = self.parent_path.clone();
