@@ -1,5 +1,6 @@
 use futures::{Future, Sink, Stream};
 use futures::sync::mpsc;
+use futures_cpupool::CpuPool;
 use messages::{IncomingMessage, OutgoingMessage};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -188,7 +189,8 @@ impl Inner {
         let window_id = self.next_window_id;
         self.next_window_id += 1;
 
-        let mut window = Window::new(0.0);
+        let background_executor = Box::new(CpuPool::new_num_cpus());
+        let mut window = Window::new(Some(background_executor), 0.0);
         let workspace_view_handle = window.handle().add_view(WorkspaceView::new());
         window.set_root_view(workspace_view_handle);
         self.windows.insert(window_id, window);

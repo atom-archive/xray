@@ -3,8 +3,12 @@ use std::boxed::Box;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
-use futures::{Async, Poll, Stream};
+use futures::{Async, Future, Poll, Stream};
 use futures::task::{self, Task};
+use futures::future;
+
+type BoxedSendableFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
+type BoxedExecutor = Box<future::Executor<BoxedSendableFuture>>;
 
 pub type ViewId = usize;
 pub type ViewUpdateStream = Box<Stream<Item = (), Error = ()>>;
@@ -32,6 +36,7 @@ pub struct Inner {
     height: f64,
     update_stream_counter: usize,
     update_stream_task: Option<Task>,
+    executor: Option<BoxedExecutor>
 }
 
 pub struct WindowHandle(Weak<RefCell<Inner>>);
@@ -55,7 +60,7 @@ pub struct ViewUpdate {
 }
 
 impl Window {
-    pub fn new(height: f64) -> Self {
+    pub fn new(executor: Option<BoxedExecutor>, height: f64) -> Self {
         Window(
             Rc::new(RefCell::new(Inner {
                 next_view_id: 0,
@@ -65,6 +70,7 @@ impl Window {
                 height: height,
                 update_stream_counter: 0,
                 update_stream_task: None,
+                executor
             })),
             None,
         )
@@ -188,6 +194,12 @@ impl Inner {
 }
 
 impl WindowHandle {
+    pub fn spawn<F: Future<Item = (), Error = ()> + Send + 'static>(&self, future: F) {
+        let inner = self.0.upgrade().unwrap();
+        let inner = inner.borrow();
+        inner.executor.as_ref().map(|executor| executor.execute(Box::new(future)));
+    }
+
     pub fn height(&self) -> f64 {
         let inner = self.0.upgrade().unwrap();
         let inner = inner.borrow();
@@ -244,7 +256,7 @@ mod tests {
     #[test]
     fn test_view_handle_drop() {
         // Dropping the window should not cause a panic
-        let mut window = Window::new(100.0);
+        let mut window = Window::new(None, 100.0);
         window.handle().add_view(TestView::new(true));
     }
 

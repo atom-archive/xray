@@ -5,6 +5,7 @@ mod messages;
 
 extern crate bytes;
 extern crate futures;
+extern crate futures_cpupool;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
