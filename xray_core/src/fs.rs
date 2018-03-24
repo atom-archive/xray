@@ -130,16 +130,14 @@ impl Stream for Search {
         for _ in 0..self.entry_count_per_poll {
             let prev_variants_len = self.match_variants.len();
 
-            enum Action {
-                Push(StackEntry),
-                Pop,
-                UpdateResults(OsString),
-            };
+            if self.stack.len() > 0 {
+                let (entries, entries_index) = {
+                    let last = self.stack.last().unwrap();
+                    (last.entries.clone(), last.entries_index)
+                };
 
-            let action: Action;
-            if let Some(ref mut cur_dir) = self.stack.last_mut() {
-                if cur_dir.entries_index < cur_dir.entries.len() {
-                    let child = &cur_dir.entries[cur_dir.entries_index];
+                if entries_index < entries.len() {
+                    let child = &entries[entries_index];
                     Self::update_match_variants(
                         &mut self.match_variants,
                         &self.query,
@@ -149,40 +147,27 @@ impl Stream for Search {
                     match child.1 {
                         Entry::Dir(ref inner) => {
                             self.parent_path.push(&child.0);
-                            action = Action::Push(StackEntry {
+                            self.stack.push(StackEntry {
                                 entries: inner.read().entries.clone(),
                                 entries_index: 0,
                                 prev_variants_len: self.match_variants.len(),
                             });
                         },
                         Entry::File(_) => {
-                            cur_dir.entries_index += 1;
-                            action = Action::UpdateResults(child.0.clone());
+                            self.update_results(child.0.clone());
+                            self.stack.last_mut().map(|last| last.entries_index += 1);
+                            self.match_variants.truncate(prev_variants_len);
                         }
                     }
                 } else {
-                    action = Action::Pop;
-                }
-            } else {
-                return Ok(Async::Ready(Some(self.results.clone())));
-            }
-
-            match action {
-                Action::Push(new_stack_entry) => {
-                    self.stack.push(new_stack_entry);
-                },
-                Action::Pop => {
                     let last = self.stack.pop().unwrap();
                     self.match_variants.truncate(last.prev_variants_len);
-                    if let Some(mut last) = self.stack.last_mut() {
-                        last.entries_index += 1;
-                    }
                     self.parent_path.pop();
-                },
-                Action::UpdateResults(filename) => {
-                    self.update_results(filename);
-                    self.match_variants.truncate(prev_variants_len);
-                },
+                    self.stack.last_mut().map(|last| last.entries_index += 1);
+                }
+            } else {
+                self.done = true;
+                break;
             }
         }
 
