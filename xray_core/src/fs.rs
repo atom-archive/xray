@@ -109,6 +109,13 @@ impl Entry {
             &Entry::File(_) => Err(()),
         }
     }
+
+    pub fn search(&self, query: &str, max_results: usize) -> Result<(Search, SearchHandle)> {
+        match self {
+            &Entry::Dir(ref inner) => Ok(Search::new(inner, query, max_results)),
+            _ => Err(())
+        }
+    }
 }
 
 impl Stream for Search {
@@ -191,33 +198,29 @@ const LEADING_MISMATCH_PENALTY: i64 = 3;
 const MISMATCH_PENALTY: i64 = 1;
 
 impl Search {
-    pub fn new(entry: &Entry, query: &str, max_results: usize) -> (Self, SearchHandle) {
-        match entry {
-            &Entry::Dir(ref inner) => {
-                let handle = SearchHandle(Arc::new(()));
-                let search = Search {
-                    query: query.chars().map(|c| c.to_ascii_lowercase()).collect(),
-                    max_results,
-                    results: Vec::new(),
-                    parent_path: PathBuf::new(),
-                    stack: vec![StackEntry {
-                        entries: inner.read().entries.clone(),
-                        entries_index: 0,
-                        prev_variants_len: 0,
-                    }],
-                    match_variants: vec![MatchVariant {
-                        score: 0,
-                        query_index: 0,
-                        match_indices: Vec::new(),
-                    }],
-                    done: false,
-                    entry_count_per_poll: usize::MAX,
-                    handle_ref: Arc::downgrade(&handle.0),
-                };
-                (search, handle)
-            },
-            _ => panic!("search_tree called on a file")
-        }
+    fn new(dir: &Arc<RwLock<DirInner>>, query: &str, max_results: usize) -> (Self, SearchHandle) {
+        let handle = SearchHandle(Arc::new(()));
+        let search = Search {
+            query: query.chars().map(|c| c.to_ascii_lowercase()).collect(),
+            max_results,
+            results: Vec::new(),
+            parent_path: PathBuf::new(),
+            stack: vec![StackEntry {
+                entries: dir.read().entries.clone(),
+                entries_index: 0,
+                prev_variants_len: 0,
+            }],
+            match_variants: vec![MatchVariant {
+                score: 0,
+                query_index: 0,
+                match_indices: Vec::new(),
+            }],
+            done: false,
+            entry_count_per_poll: usize::MAX,
+            handle_ref: Arc::downgrade(&handle.0),
+        };
+
+        (search, handle)
     }
 
     pub fn set_entry_count_per_poll(&mut self, entry_count_per_poll: usize) -> &mut Self {
@@ -380,7 +383,7 @@ mod tests {
         root.insert("catsup", child1);
         root.insert("dog", child2);
 
-        let (mut search, handle) = Search::new(&root, "eg", 10);
+        let (mut search, handle) = root.search("eg", 10).unwrap();
         search.set_entry_count_per_poll(50);
 
         let results = search.poll();
