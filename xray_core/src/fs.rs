@@ -42,7 +42,6 @@ pub struct Search {
     results: Vec<SearchResult>,
     parent_path: PathBuf,
     stack: Vec<StackEntry>,
-    match_variants: Vec<MatchVariant>,
     entry_count_per_poll: usize,
     done: bool,
     handle_ref: Weak<()>,
@@ -60,10 +59,10 @@ pub struct SearchResult {
 struct StackEntry {
     entries: Arc<Entries>,
     entries_index: usize,
-    prev_variants_len: usize,
+    match_variants: Vec<MatchVariant>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MatchVariant {
     query_index: u16,
     score: i64,
@@ -128,8 +127,6 @@ impl Stream for Search {
         }
 
         for _ in 0..self.entry_count_per_poll {
-            let prev_variants_len = self.match_variants.len();
-
             if self.stack.len() > 0 {
                 let (entries, entries_index) = {
                     let last = self.stack.last().unwrap();
@@ -138,25 +135,27 @@ impl Stream for Search {
 
                 if entries_index < entries.len() {
                     let child = &entries[entries_index];
-                    self.update_match_variants(&child.0);
+                    let match_variants = self.update_match_variants(
+                        &self.stack.last().unwrap().match_variants,
+                        &child.0
+                    );
+
                     match child.1 {
                         Entry::Dir(ref inner) => {
                             self.parent_path.push(&child.0);
                             self.stack.push(StackEntry {
                                 entries: inner.read().entries.clone(),
                                 entries_index: 0,
-                                prev_variants_len: self.match_variants.len(),
+                                match_variants,
                             });
                         },
                         Entry::File(_) => {
-                            self.update_results(child.0.clone());
+                            self.update_results(match_variants, child.0.clone());
                             self.stack.last_mut().map(|last| last.entries_index += 1);
-                            self.match_variants.truncate(prev_variants_len);
                         }
                     }
                 } else {
-                    let last = self.stack.pop().unwrap();
-                    self.match_variants.truncate(last.prev_variants_len);
+                    self.stack.pop().unwrap();
                     self.parent_path.pop();
                     self.stack.last_mut().map(|last| last.entries_index += 1);
                 }
@@ -187,12 +186,11 @@ impl Search {
             stack: vec![StackEntry {
                 entries: dir.read().entries.clone(),
                 entries_index: 0,
-                prev_variants_len: 0,
-            }],
-            match_variants: vec![MatchVariant {
-                score: 0,
-                query_index: 0,
-                match_indices: Vec::new(),
+                match_variants: vec![MatchVariant {
+                    score: 0,
+                    query_index: 0,
+                    match_indices: Vec::new(),
+                }],
             }],
             done: false,
             entry_count_per_poll: usize::MAX,
@@ -207,17 +205,17 @@ impl Search {
         self
     }
 
-    fn update_results(&mut self, filename: OsString) {
-        for variant in self.match_variants.iter().rev() {
+    fn update_results(&mut self, mut match_variants: Vec<MatchVariant>, filename: OsString) {
+        for variant in match_variants.drain(..).rev() {
             if variant.query_index == self.query.len() as u16 {
                 match self.results.binary_search_by(|probe| variant.score.cmp(&probe.score)) {
                     Ok(index) | Err(index) => {
                         if index < self.max_results {
                             let mut path = self.parent_path.clone();
-                            path.push(filename);
+                            path.push(&filename);
                             self.results.insert(index, SearchResult {
                                 score: variant.score,
-                                match_indices: variant.match_indices.clone(),
+                                match_indices: variant.match_indices,
                                 path,
                             });
                             self.results.truncate(self.max_results);
@@ -229,77 +227,96 @@ impl Search {
         }
     }
 
-    fn update_match_variants(&mut self, name: &OsStr) {
-        let parent_path_len = self.parent_path.as_os_str().as_bytes().len();
+    fn update_match_variants(&self, variants: &Vec<MatchVariant>, name: &OsStr) -> Vec<MatchVariant> {
+        let mut parent_path_len = self.parent_path.as_os_str().as_bytes().len();
+        if parent_path_len > 0 {
+            parent_path_len += 1;
+        }
+
+        let mut variants = variants.clone();
         let mut new_variants = Vec::<MatchVariant>::new();
 
-        let previous_character: char = '\0';
+        let mut previous_character: char = '\0';
         for (name_index, character) in name.as_bytes().iter().map(|c| c.to_ascii_lowercase() as char).enumerate() {
             let name_index = (name_index + parent_path_len) as u16;
 
             let mut i = 0;
-            while i != self.match_variants.len() {
-                let mut variant = &mut self.match_variants[i];
-                if variant.query_index as usize == self.query.len() {
-                    i += 1;
-                    continue;
-                }
-
-                // If the current word character matches the next character of the query
-                // for this match variant, create a new match variant that consumes the
-                // matching character.
-                let query_character = self.query[variant.query_index as usize];
-                if character == query_character {
-                    let mut new_variant = variant.clone();
-                    new_variant.query_index += 1;
-
-                    // Apply a bonus if the current character is the start of a word.
-                    if !previous_character.is_alphanumeric() {
-                        new_variant.score += SUBWORD_START_BONUS;
-                    }
-
-                    // Apply a bonus if the last character of the path also matched.
-                    if new_variant.match_indices.last().map_or(false, |index| *index == name_index - 1) {
-                        new_variant.score += CONSECUTIVE_BONUS;
-                    }
-
-                    new_variant.match_indices.push(name_index as u16);
-                    new_variants.push(new_variant);
-                }
-
-                // For the current match variant, treat the current character as a mismatch
-                // regardless of whether it matched above. This reserves the chance for the
-                // next character to be consumed by a match with higher overall value.
-                if name_index < LEADING_MISMATCH_LENGTH {
-                  variant.score -= LEADING_MISMATCH_PENALTY;
-                } else {
-                  variant.score -= MISMATCH_PENALTY;
-                }
-
-                i += 1;
-            }
-
-            // Add all of the newly-computed match variants to the list. Avoid adding multiple
-            // match variants with the same query index.
             let mut previous_query_index = u16::MAX;
-            new_variants.sort_unstable_by(|a, b| match a.query_index.cmp(&b.query_index) {
-                Ordering::Equal => b.score.cmp(&a.score),
-                comparison @ _ => comparison
-            });
+            while i < variants.len() {
+                let mut should_remove;
+
+                {
+                    let mut variant = unsafe { variants.get_unchecked_mut(i) };
+                    i += 1;
+
+                    // If the current word character matches the next character of the query
+                    // for this match variant, create a new match variant that consumes the
+                    // matching character.
+                    if variant.query_index < self.query.len() as u16 {
+                        let query_character = self.query[variant.query_index as usize];
+                        if character == query_character {
+                            let mut new_variant = variant.clone();
+                            new_variant.query_index += 1;
+
+                            // Apply a bonus if the current character is the start of a word.
+                            if !previous_character.is_alphanumeric() {
+                                new_variant.score += SUBWORD_START_BONUS;
+                            }
+
+                            // Apply a bonus if the last character of the path also matched.
+                            if new_variant.match_indices.last().map_or(false, |index| *index == name_index - 1) {
+                                new_variant.score += CONSECUTIVE_BONUS;
+                            }
+
+                            new_variant.match_indices.push(name_index as u16);
+                            new_variants.push(new_variant);
+                        }
+                    }
+
+                    // For the current match variant, treat the current character as a mismatch
+                    // regardless of whether it matched above. This reserves the chance for the
+                    // next character to be consumed by a match with higher overall value.
+                    if name_index < LEADING_MISMATCH_LENGTH {
+                      variant.score -= LEADING_MISMATCH_PENALTY;
+                    } else {
+                      variant.score -= MISMATCH_PENALTY;
+                    }
+
+                    should_remove = variant.query_index == previous_query_index;
+                }
+
+                if should_remove {
+                    variants.remove(i);
+                    i -= 1;
+                }
+            }
 
             for new_variant in new_variants.drain(..) {
-                if new_variant.query_index != previous_query_index {
-                    previous_query_index = new_variant.query_index;
-                    self.match_variants.push(new_variant);
+                match variants.binary_search_by(|variant| {
+                    match variant.query_index.cmp(&new_variant.query_index) {
+                        Ordering::Equal => new_variant.score.cmp(&variant.score),
+                        comparison @ _ => comparison
+                    }
+                }) {
+                    Ok(index) | Err(index) => {
+                        if index == 0 || variants[index - 1].query_index != new_variant.query_index {
+                            variants.insert(index, new_variant);
+                        }
+                    }
                 }
             }
+
+            previous_character = character;
         }
+
+        variants
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json;
 
     impl Entry {
         fn entry_names(&self) -> Vec<String> {
@@ -326,32 +343,48 @@ mod tests {
     }
 
     #[test]
-    fn test_search() {
-        let root = Entry::dir(false);
-        let child1 = Entry::dir(false);
-        let child2 = Entry::dir(false);
-        let child1_child1 = Entry::file(false);
-        let child1_child2 = Entry::file(false);
-        let child2_child1 = Entry::file(false);
-        let child2_child2 = Entry::file(false);
-
-        child1.insert("egg", child1_child1);
-        child1.insert("fox", child1_child2);
-        child2.insert("gum", child2_child1);
-        child2.insert("hut", child2_child2);
-        root.insert("catsup", child1);
-        root.insert("dog", child2);
-
-        let (mut search, handle) = root.search("eg", 10).unwrap();
-        search.set_entry_count_per_poll(50);
-
-        let results = search.poll();
-
-        match results {
-            Ok(Async::Ready(Some(results))) => {
-                assert_eq!(results[0].path, Path::new("catsup/egg"));
+    fn test_search_subword_start_bonus() {
+        let root = build_directory(&json!({
+            "cadence": null,
+            "ace": {
+                "identifier": null
             },
-            _ => panic!("Unexpected results {:?}", results)
+            "cats": {
+                "dogs": {
+                    "eagles": null
+                },
+                "indent": null
+            },
+            "accident": {
+                "ogre": null
+            }
+        }));
+
+        let (mut search, _handle) = root.search("cde", 10).unwrap();
+        assert_eq!(get_results(search.poll())[0].path, Path::new("cats/dogs/eagles"));
+
+        let (mut search, _handle) = root.search("og", 10).unwrap();
+        assert_eq!(get_results(search.poll())[0].path, Path::new("accident/ogre"));
+    }
+
+    fn get_results(result: Result<Async<Option<Vec<SearchResult>>>>) -> Vec<SearchResult> {
+        match result {
+            Ok(Async::Ready(Some(results))) => results,
+            results @ _ => panic!("Unexpected results {:?}", results)
         }
+    }
+
+    fn build_directory(json: &serde_json::Value) -> Entry {
+        let object = json.as_object().unwrap();
+        let result = Entry::dir(false);
+        for (key, value) in object {
+            let child_entry = if value.is_object() {
+                build_directory(value)
+            } else {
+                Entry::file(false)
+            };
+            assert_eq!(result.insert(key, child_entry), Ok(()));
+        }
+        result
     }
 }
