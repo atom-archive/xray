@@ -298,18 +298,9 @@ impl Search {
             // Add all of the newly-computed match variants to the list. Avoid adding multiple
             // match variants with the same query index.
             let mut previous_query_index = u16::MAX;
-            new_variants.sort_unstable_by(|a, b| {
-                if a.query_index < b.query_index {
-                    Ordering::Less
-                } else if a.query_index > b.query_index {
-                    Ordering::Greater
-                } else if a.score > b.score {
-                    Ordering::Less
-                } else if a.score < b.score {
-                    Ordering::Greater
-                } else {
-                    Ordering::Equal
-                }
+            new_variants.sort_unstable_by(|a, b| match a.query_index.cmp(&b.query_index) {
+                Ordering::Equal => b.score.cmp(&a.score),
+                comparison @ _ => comparison
             });
 
             for new_variant in new_variants.drain(..) {
