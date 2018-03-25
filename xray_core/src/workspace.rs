@@ -3,16 +3,19 @@ use std::cell::RefCell;
 use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
 use window::{View, ViewHandle, ViewUpdateStream, WindowHandle};
 use buffer::Buffer;
 use buffer_view::BufferView;
+use futures::{future, Stream};
 use notify_cell::NotifyCell;
+use fs;
 
 pub struct WorkspaceView {
-    // workspace: WorkspaceHandle,
+    roots: Rc<Vec<Box<fs::Tree>>>,
     window_handle: Option<WindowHandle>,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
@@ -26,8 +29,11 @@ enum WorkspaceViewAction {
 }
 
 struct FileFinderView {
+    roots: Rc<Vec<Box<fs::Tree>>>,
     query: String,
-    updates: NotifyCell<()>,
+    search_handle: Option<fs::SearchHandle>,
+    window_handle: Option<WindowHandle>,
+    updates: Arc<NotifyCell<Vec<fs::SearchResult>>>,
 }
 
 #[derive(Deserialize)]
@@ -37,8 +43,9 @@ enum FileFinderAction {
 }
 
 impl WorkspaceView {
-    pub fn new() -> Self {
+    pub fn new(roots: Vec<Box<fs::Tree>>) -> Self {
         WorkspaceView {
+            roots: Rc::new(roots),
             modal_panel: None,
             center_pane: None,
             window_handle: None,
@@ -51,7 +58,7 @@ impl WorkspaceView {
         if self.modal_panel.is_some() {
             self.modal_panel = None;
         } else {
-            self.modal_panel = Some(window_handle.add_view(FileFinderView::new()));
+            self.modal_panel = Some(window_handle.add_view(FileFinderView::new(self.roots.clone())));
         }
         self.updates.set(());
     }
@@ -113,12 +120,17 @@ impl View for FileFinderView {
 
     fn render(&self) -> serde_json::Value {
         json!({
-            "query": self.query.as_str()
+            "query": self.query.as_str(),
+            "results": self.updates.get(),
         })
     }
 
+    fn will_mount(&mut self, window_handle: WindowHandle) {
+        self.window_handle = Some(window_handle);
+    }
+
     fn updates(&self) -> ViewUpdateStream {
-        Box::new(self.updates.observe())
+        Box::new(self.updates.observe().map(|_| ()))
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value) {
@@ -130,17 +142,29 @@ impl View for FileFinderView {
 }
 
 impl FileFinderView {
-    fn new() -> Self {
+    fn new(roots: Rc<Vec<Box<fs::Tree>>>) -> Self {
         Self {
+            roots: roots,
             query: String::new(),
-            updates: NotifyCell::new(()),
+            updates: Arc::new(NotifyCell::new(Vec::new())),
+            search_handle: None,
+            window_handle: None,
         }
     }
 
     fn update_query(&mut self, query: String) {
         if self.query != query {
             self.query = query;
-            self.updates.set(());
+            self.updates.set(Vec::new());
+            if let Ok((mut search, search_handle)) = self.roots[0].root().search(&self.query, 10) {
+                self.search_handle = Some(search_handle);
+                search.set_entry_count_per_poll(1000);
+                let mut updates = self.updates.clone();
+                self.window_handle.as_ref().unwrap().spawn(search.for_each(move |results| {
+                    updates.set(results);
+                    Ok(())
+                }));
+            }
         }
     }
 }

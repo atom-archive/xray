@@ -8,9 +8,11 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use serde_json;
+use xray_core;
 use xray_core::workspace::WorkspaceView;
 use xray_core::window::{ViewId, Window};
 use tokio_core::reactor;
+use fs;
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
 pub type WindowId = usize;
@@ -185,13 +187,18 @@ impl Inner {
         };
     }
 
-    fn open_workspace(&mut self, _paths: Vec<PathBuf>) {
+    fn open_workspace(&mut self, paths: Vec<PathBuf>) {
         let window_id = self.next_window_id;
         self.next_window_id += 1;
 
         let background_executor = Box::new(CpuPool::new_num_cpus());
         let mut window = Window::new(Some(background_executor), 0.0);
-        let workspace_view_handle = window.handle().add_view(WorkspaceView::new());
+
+        let roots = paths.iter()
+            .map(|path| Box::new(fs::Tree::new(path)) as Box<xray_core::fs::Tree>)
+            .collect();
+
+        let workspace_view_handle = window.handle().add_view(WorkspaceView::new(roots));
         window.set_root_view(workspace_view_handle);
         self.windows.insert(window_id, window);
 

@@ -49,7 +49,7 @@ pub struct Search {
 
 pub struct SearchHandle(Arc<()>);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SearchResult {
     path: PathBuf,
     score: i64,
