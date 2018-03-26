@@ -1,4 +1,4 @@
-use futures::{Poll, Stream};
+use futures::{Async, Poll, Stream};
 use serde_json;
 use std::cell::RefCell;
 use std::env;
@@ -11,7 +11,7 @@ use std::io::prelude::*;
 use window::{View, ViewHandle, WindowHandle};
 use buffer::Buffer;
 use buffer_view::BufferView;
-use notify_cell::NotifyCell;
+use notify_cell::{NotifyCell, NotifyCellObserver};
 use fs;
 use fuzzy_search::SearchResult;
 
@@ -32,9 +32,9 @@ enum WorkspaceViewAction {
 struct FileFinderView {
     roots: Rc<Vec<Box<fs::Tree>>>,
     query: String,
-    search_handle: Option<fs::SearchHandle>,
+    search_updates: Option<NotifyCellObserver<Vec<SearchResult>>>,
     window_handle: Option<WindowHandle>,
-    updates: Arc<NotifyCell<Vec<SearchResult>>>,
+    updates: NotifyCell<()>,
 }
 
 #[derive(Deserialize)]
@@ -127,7 +127,7 @@ impl View for FileFinderView {
     fn render(&self) -> serde_json::Value {
         json!({
             "query": self.query.as_str(),
-            "results": self.updates.get(),
+            "results": self.search_updates.as_ref().and_then(|results| results.get()).unwrap_or_default(),
         })
     }
 
@@ -148,7 +148,12 @@ impl Stream for FileFinderView {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        self.updates.poll()
+        let search_poll = self.search_updates.as_mut().map(|s| s.poll()).unwrap_or(Ok(Async::NotReady))?;
+        let updates_poll = self.updates.poll()?;
+        match (search_poll, updates_poll) {
+            (Async::NotReady, Async::NotReady) => Ok(Async::NotReady),
+            _ => Ok(Async::Ready(Some(())))
+        }
     }
 }
 
@@ -157,8 +162,8 @@ impl FileFinderView {
         Self {
             roots: roots,
             query: String::new(),
-            updates: Arc::new(NotifyCell::new(Vec::new())),
-            search_handle: None,
+            search_updates: None,
+            updates: NotifyCell::new(()),
             window_handle: None,
         }
     }
@@ -166,16 +171,12 @@ impl FileFinderView {
     fn update_query(&mut self, query: String) {
         if self.query != query {
             self.query = query;
-            self.updates.set(Vec::new());
-            if let Ok((mut search, search_handle)) = self.roots[0].root().search(&self.query, 10) {
-                self.search_handle = Some(search_handle);
+            if let Ok((mut search, search_updates)) = self.roots[0].root().search(&self.query, 10) {
+                self.search_updates = Some(search_updates);
                 search.set_entry_count_per_poll(1000);
-                let mut updates = self.updates.clone();
-                self.window_handle.as_ref().unwrap().spawn(search.for_each(move |results| {
-                    updates.set(results);
-                    Ok(())
-                }));
+                self.window_handle.as_ref().unwrap().spawn(search.for_each(|_| Ok(())));
             }
+            self.updates.set(());
         }
     }
 }

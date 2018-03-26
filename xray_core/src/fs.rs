@@ -1,8 +1,9 @@
+use notify_cell::{NotifyCell, NotifyCellObserver, WeakNotifyCell};
 use parking_lot::RwLock;
 use std::ffi::{OsString, OsStr};
 use std::path::Path;
 use std::result;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::iter::Iterator;
 use futures::{Async, Poll, Stream};
 use std::os::unix::ffi::OsStrExt;
@@ -42,7 +43,7 @@ pub struct Search {
     stack: Vec<StackEntry>,
     entry_count_per_poll: usize,
     done: bool,
-    handle_ref: Weak<()>,
+    updates: WeakNotifyCell<Vec<SearchResult>>,
 }
 
 pub struct SearchHandle(Arc<()>);
@@ -93,7 +94,7 @@ impl Entry {
         }
     }
 
-    pub fn search(&self, query: &str, max_results: usize) -> Result<(Search, SearchHandle)> {
+    pub fn search(&self, query: &str, max_results: usize) -> Result<(Search, NotifyCellObserver<Vec<SearchResult>>)> {
         match self {
             &Entry::Dir(ref inner) => Ok(Search::new(inner, query, max_results)),
             _ => Err(())
@@ -102,11 +103,11 @@ impl Entry {
 }
 
 impl Stream for Search {
-    type Item = Vec<SearchResult>;
+    type Item = ();
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        if self.done || self.handle_ref.upgrade().is_none() {
+        if self.done {
             return Ok(Async::Ready(None));
         }
 
@@ -149,13 +150,18 @@ impl Stream for Search {
             }
         }
 
-        return Ok(Async::Ready(Some(self.results.clone())));
+        if self.updates.try_set(self.results.clone()).is_ok() {
+            Ok(Async::Ready(Some(())))
+        } else {
+            self.done = true;
+            Ok(Async::Ready(None))
+        }
     }
 }
 
 impl Search {
-    fn new(dir: &Arc<RwLock<DirInner>>, query: &str, max_results: usize) -> (Self, SearchHandle) {
-        let handle = SearchHandle(Arc::new(()));
+    fn new(dir: &Arc<RwLock<DirInner>>, query: &str, max_results: usize) -> (Self, NotifyCellObserver<Vec<SearchResult>>) {
+        let (updates, updates_observer) = NotifyCell::weak(Vec::new());
         let mut search = FuzzySearch::new(query);
         search
             .set_subword_start_bonus(10)
@@ -164,6 +170,7 @@ impl Search {
         let search = Search {
             search,
             max_results,
+            updates,
             results: Vec::new(),
             stack: vec![StackEntry {
                 entries: dir.read().entries.clone(),
@@ -172,10 +179,9 @@ impl Search {
             }],
             done: false,
             entry_count_per_poll: usize::MAX,
-            handle_ref: Arc::downgrade(&handle.0),
         };
 
-        (search, handle)
+        (search, updates_observer)
     }
 
     pub fn set_entry_count_per_poll(&mut self, entry_count_per_poll: usize) -> &mut Self {
@@ -261,18 +267,13 @@ mod tests {
             }
         }));
 
-        let (mut search, _handle) = root.search("cde", 10).unwrap();
-        assert_eq!(get_results(search.poll())[0].string, "cats/dogs/eagles");
+        let (mut search, results) = root.search("cde", 10).unwrap();
+        assert_eq!(search.poll(), Ok(Async::Ready(Some(()))));
+        assert_eq!(results.get().unwrap()[0].string, "cats/dogs/eagles");
 
-        let (mut search, _handle) = root.search("og", 10).unwrap();
-        assert_eq!(get_results(search.poll())[0].string, "accident/ogre");
-    }
-
-    fn get_results(result: Result<Async<Option<Vec<SearchResult>>>>) -> Vec<SearchResult> {
-        match result {
-            Ok(Async::Ready(Some(results))) => results,
-            results @ _ => panic!("Unexpected results {:?}", results)
-        }
+        let (mut search, results) = root.search("og", 10).unwrap();
+        assert_eq!(search.poll(), Ok(Async::Ready(Some(()))));
+        assert_eq!(results.get().unwrap()[0].string, "accident/ogre");
     }
 
     fn build_directory(json: &serde_json::Value) -> Entry {
