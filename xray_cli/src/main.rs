@@ -53,6 +53,12 @@ fn main() {
         return;
     }
 
+    let electron_node_env = if cfg!(debug_assertions) {
+        "development"
+    } else {
+        "production"
+    };
+
     if let Ok(src_path) = env::var("XRAY_SRC_PATH") {
         let src_path = Path::new(&src_path);
         let electron_app_path = src_path.join("xray_electron");
@@ -61,6 +67,7 @@ fn main() {
             .arg(electron_app_path)
             .env("XRAY_SOCKET_PATH", socket_path)
             .env("XRAY_INITIAL_MESSAGE", message.to_string())
+            .env("NODE_ENV", electron_node_env)
             .spawn()
             .expect("Failed to open Xray app");
     } else {
