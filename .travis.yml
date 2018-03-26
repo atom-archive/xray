@@ -1,12 +1,12 @@
 language: rust
+
 rust:
- - stable
+- stable
 
 before_install:
- - sudo apt-get -qq update
- - curl -o- https://raw.githubusercontent.com/creationix/nvm/v0.33.8/install.sh | bash
- - command -v nvm
- - nvm install v8.9.3
+- curl -o- https://raw.githubusercontent.com/creationix/nvm/v0.33.8/install.sh | bash
+- nvm install v8.9.3
 
 script:
- - bash scripts/test.bash
+- script/build
+- script/test

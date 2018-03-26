@@ -1,0 +1,5 @@
+#!/bin/bash
+
+cargo test &&
+cd xray_electron &&
+npm test
