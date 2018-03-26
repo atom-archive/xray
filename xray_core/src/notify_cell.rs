@@ -11,10 +11,14 @@ pub enum TrySetError {
 }
 
 #[derive(Debug)]
-pub struct NotifyCell<T: Clone>(Arc<RwLock<Inner<T>>>);
+pub struct NotifyCell<T: Clone> {
+    observer: Option<NotifyCellObserver<T>>,
+    inner: Arc<RwLock<Inner<T>>>
+}
 
 pub struct WeakNotifyCell<T: Clone>(Weak<RwLock<Inner<T>>>);
 
+#[derive(Debug)]
 pub struct NotifyCellObserver<T: Clone> {
     last_polled_at: Version,
     inner: Arc<RwLock<Inner<T>>>,
@@ -29,11 +33,14 @@ struct Inner<T: Clone> {
 
 impl<T: Clone> NotifyCell<T> {
     pub fn new(value: T) -> Self {
-        NotifyCell(Arc::new(RwLock::new(Inner {
-            value: Some(value),
-            last_written_at: 0,
-            subscribers: Vec::new(),
-        })))
+        NotifyCell {
+            observer: None,
+            inner: Arc::new(RwLock::new(Inner {
+                value: Some(value),
+                last_written_at: 0,
+                subscribers: Vec::new(),
+            }))
+        }
     }
 
     pub fn weak(value: T) -> (WeakNotifyCell<T>, NotifyCellObserver<T>) {
@@ -50,7 +57,7 @@ impl<T: Clone> NotifyCell<T> {
     }
 
     pub fn set(&self, value: T) {
-        let mut inner = self.0.write();
+        let mut inner = self.inner.write();
         inner.value = Some(value);
         inner.last_written_at += 1;
         for subscriber in inner.subscribers.drain(..) {
@@ -59,15 +66,15 @@ impl<T: Clone> NotifyCell<T> {
     }
 
     pub fn get(&self) -> Option<T> {
-        let inner = self.0.read();
+        let inner = self.inner.read();
         inner.value.as_ref().cloned()
     }
 
     pub fn observe(&self) -> NotifyCellObserver<T> {
-        let inner = self.0.read();
+        let inner = self.inner.read();
         NotifyCellObserver {
             last_polled_at: inner.last_written_at,
-            inner: self.0.clone(),
+            inner: self.inner.clone(),
         }
     }
 }
@@ -112,9 +119,32 @@ impl<T: Clone> Stream for NotifyCellObserver<T> {
     }
 }
 
+impl<T: Clone> Stream for NotifyCell<T> {
+    type Item = T;
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        if self.observer.is_none() {
+            self.observer = Some(self.observe());
+
+            let inner = self.inner.read();
+            if inner.last_written_at == 0 || inner.value.is_none() {
+                // Release read lock before polling to avoid deadlocks.
+                drop(inner);
+                self.observer.as_mut().unwrap().poll()
+            } else {
+                Ok(Async::Ready(Some(inner.value.as_ref().unwrap().clone())))
+            }
+        } else {
+            self.observer.as_mut().unwrap().poll()
+        }
+
+    }
+}
+
 impl<T: Clone> Drop for NotifyCell<T> {
     fn drop(&mut self) {
-        let mut inner = self.0.write();
+        let mut inner = self.inner.write();
         inner.value.take();
         for subscriber in inner.subscribers.drain(..) {
             subscriber.notify();
@@ -166,6 +196,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_notify_cell_poll() {
+        CpuPool::new_num_cpus().spawn_fn(|| -> Result<(), ()> {
+            let mut cell = NotifyCell::new(1);
+            assert_eq!(cell.poll(), Ok(Async::NotReady));
+
+            cell.set(2);
+            assert_eq!(cell.poll(), Ok(Async::Ready(Some(2))));
+            assert_eq!(cell.poll(), Ok(Async::NotReady));
+
+            let mut cell = NotifyCell::new(1);
+            cell.set(2);
+            assert_eq!(cell.poll(), Ok(Async::Ready(Some(2))));
+            assert_eq!(cell.poll(), Ok(Async::NotReady));
+
+            cell.set(3);
+            assert_eq!(cell.poll(), Ok(Async::Ready(Some(3))));
+            assert_eq!(cell.poll(), Ok(Async::NotReady));
+
+            Ok(())
+        }).wait().unwrap();
     }
 
     #[test]
