@@ -1,3 +1,4 @@
+use futures::{Poll, Stream};
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
@@ -7,7 +8,7 @@ use serde_json;
 use notify_cell::NotifyCell;
 use buffer::{Anchor, Buffer, Point};
 use movement;
-use window::{View, ViewUpdateStream, WindowHandle};
+use window::{View, WindowHandle};
 
 pub struct BufferView {
     buffer: Rc<RefCell<Buffer>>,
@@ -557,10 +558,6 @@ impl View for BufferView {
         })
     }
 
-    fn updates(&self) -> ViewUpdateStream {
-        Box::new(self.updates.observe())
-    }
-
     fn dispatch_action(&mut self, action: serde_json::Value) {
         match serde_json::from_value(action) {
             Ok(BufferViewAction::UpdateScrollTop { delta }) => {
@@ -581,6 +578,15 @@ impl View for BufferView {
             Ok(BufferViewAction::MoveRight) => self.move_right(),
             action @ _ => eprintln!("Unrecognized action {:?}", action),
         }
+    }
+}
+
+impl Stream for BufferView {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        self.updates.poll()
     }
 }
 

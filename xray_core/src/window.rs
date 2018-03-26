@@ -11,13 +11,11 @@ type BoxedSendableFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
 type BoxedExecutor = Box<future::Executor<BoxedSendableFuture>>;
 
 pub type ViewId = usize;
-pub type ViewUpdateStream = Box<Stream<Item = (), Error = ()>>;
 
-pub trait View {
+pub trait View: Stream {
     fn component_name(&self) -> &'static str;
     fn will_mount(&mut self, _handle: WindowHandle) {}
     fn render(&self) -> serde_json::Value;
-    fn updates(&self) -> ViewUpdateStream;
     fn dispatch_action(&mut self, serde_json::Value) {}
 }
 
@@ -30,7 +28,7 @@ pub struct WindowUpdateStream {
 
 pub struct Inner {
     next_view_id: ViewId,
-    views: HashMap<ViewId, (Rc<RefCell<View>>, RefCell<ViewUpdateStream>)>,
+    views: HashMap<ViewId, Rc<RefCell<View<Item = (), Error = ()>>>>,
     inserted: HashSet<ViewId>,
     removed: HashSet<ViewId>,
     height: f64,
@@ -141,8 +139,8 @@ impl Stream for WindowUpdateStream {
                     }
                 }
 
-                for (id, &(ref view, ref updates)) in inner.views.iter() {
-                    let result = updates.borrow_mut().poll();
+                for (id, ref view) in inner.views.iter() {
+                    let result = view.borrow_mut().poll();
                     if !inner.inserted.contains(&id) {
                         if let Ok(Async::Ready(Some(()))) = result {
                             let view = view.borrow();
@@ -160,9 +158,9 @@ impl Stream for WindowUpdateStream {
                     removed: Vec::new(),
                 };
 
-                for (id, &(ref view, ref updates)) in inner.views.iter() {
-                    let _ = updates.borrow_mut().poll();
-                    let view = view.borrow();
+                for (id, ref view) in inner.views.iter() {
+                    let mut view = view.borrow_mut();
+                    let _ = view.poll();
                     window_update.updated.push(ViewUpdate {
                         view_id: *id,
                         component_name: view.component_name(),
@@ -188,8 +186,8 @@ impl Stream for WindowUpdateStream {
 }
 
 impl Inner {
-    fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<View>>> {
-        self.views.get(&id).map(|&(ref view, _)| view.clone())
+    fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<View<Item = (), Error = ()>>>> {
+        self.views.get(&id).map(|view| view.clone())
     }
 }
 
@@ -206,7 +204,7 @@ impl WindowHandle {
         inner.height
     }
 
-    pub fn add_view<T: 'static + View>(&self, mut view: T) -> ViewHandle {
+    pub fn add_view<T: 'static + View<Item = (), Error = ()>>(&self, mut view: T) -> ViewHandle {
         let view_id = {
             let inner = self.0.upgrade().unwrap();
             let mut inner = inner.borrow_mut();
@@ -215,14 +213,10 @@ impl WindowHandle {
         };
 
         view.will_mount(WindowHandle(self.0.clone()));
-        let updates = view.updates();
 
         let inner = self.0.upgrade().unwrap();
         let mut inner = inner.borrow_mut();
-        inner.views.insert(
-            view_id,
-            (Rc::new(RefCell::new(view)), RefCell::new(updates)),
-        );
+        inner.views.insert(view_id, Rc::new(RefCell::new(view)));
         inner.inserted.insert(view_id);
         inner.update_stream_task.take().map(|task| task.notify());
         ViewHandle {
@@ -283,10 +277,6 @@ mod tests {
             "TestView"
         }
 
-        fn updates(&self) -> ViewUpdateStream {
-            Box::new(self.updates.observe())
-        }
-
         fn render(&self) -> serde_json::Value {
             json!({})
         }
@@ -295,6 +285,15 @@ mod tests {
             if self.add_child {
                 self.handle = Some(window_handle.add_view(TestView::new(false)));
             }
+        }
+    }
+
+    impl Stream for TestView {
+        type Item = ();
+        type Error = ();
+
+        fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+            self.updates.poll()
         }
     }
 }

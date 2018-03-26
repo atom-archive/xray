@@ -1,3 +1,4 @@
+use futures::{Poll, Stream};
 use serde_json;
 use std::cell::RefCell;
 use std::env;
@@ -7,10 +8,9 @@ use std::sync::Arc;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
-use window::{View, ViewHandle, ViewUpdateStream, WindowHandle};
+use window::{View, ViewHandle, WindowHandle};
 use buffer::Buffer;
 use buffer_view::BufferView;
-use futures::Stream;
 use notify_cell::NotifyCell;
 use fs;
 use fuzzy_search::SearchResult;
@@ -97,10 +97,6 @@ impl View for WorkspaceView {
         })
     }
 
-    fn updates(&self) -> ViewUpdateStream {
-        Box::new(self.updates.observe())
-    }
-
     fn will_mount(&mut self, window_handle: WindowHandle) {
         self.center_pane = Some(window_handle.add_view(self.build_example_buffer_view()));
         self.window_handle = Some(window_handle);
@@ -111,6 +107,15 @@ impl View for WorkspaceView {
             Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(),
             _ => eprintln!("Unrecognized action"),
         }
+    }
+}
+
+impl Stream for WorkspaceView {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        self.updates.poll()
     }
 }
 
@@ -130,15 +135,20 @@ impl View for FileFinderView {
         self.window_handle = Some(window_handle);
     }
 
-    fn updates(&self) -> ViewUpdateStream {
-        Box::new(self.updates.observe().map(|_| ()))
-    }
-
     fn dispatch_action(&mut self, action: serde_json::Value) {
         match serde_json::from_value(action) {
             Ok(FileFinderAction::UpdateQuery { query }) => self.update_query(query),
             _ => eprintln!("Unrecognized action"),
         }
+    }
+}
+
+impl Stream for FileFinderView {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        self.updates.poll()
     }
 }
 
