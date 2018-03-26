@@ -160,6 +160,8 @@ impl Stream for Search {
 }
 
 impl Search {
+    const DEFAULT_ENTRY_COUNT_PER_POLL: usize = 5000;
+
     fn new(dir: &Arc<RwLock<DirInner>>, query: &str, max_results: usize) -> (Self, NotifyCellObserver<Vec<SearchResult>>) {
         let (updates, updates_observer) = NotifyCell::weak(Vec::new());
         let mut search = FuzzySearch::new(query);
@@ -178,15 +180,10 @@ impl Search {
                 search_checkpoint,
             }],
             done: false,
-            entry_count_per_poll: usize::MAX,
+            entry_count_per_poll: Self::DEFAULT_ENTRY_COUNT_PER_POLL,
         };
 
         (search, updates_observer)
-    }
-
-    pub fn set_entry_count_per_poll(&mut self, entry_count_per_poll: usize) -> &mut Self {
-        self.entry_count_per_poll = entry_count_per_poll;
-        self
     }
 
     fn process_entry(&mut self, name: &OsStr, is_file: bool) {

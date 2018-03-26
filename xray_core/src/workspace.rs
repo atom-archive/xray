@@ -171,9 +171,8 @@ impl FileFinderView {
     fn update_query(&mut self, query: String) {
         if self.query != query {
             self.query = query;
-            if let Ok((mut search, search_updates)) = self.roots[0].root().search(&self.query, 10) {
+            if let Ok((search, search_updates)) = self.roots[0].root().search(&self.query, 10) {
                 self.search_updates = Some(search_updates);
-                search.set_entry_count_per_poll(1000);
                 self.window_handle.as_ref().unwrap().spawn(search.for_each(|_| Ok(())));
             }
             self.updates.set(());
