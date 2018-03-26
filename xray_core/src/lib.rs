@@ -7,6 +7,7 @@ extern crate serde;
 extern crate serde_derive;
 #[macro_use]
 extern crate serde_json;
+extern crate smallvec;
 
 pub mod buffer;
 pub mod buffer_view;
@@ -14,6 +15,7 @@ pub mod fs;
 pub mod notify_cell;
 pub mod window;
 pub mod workspace;
+pub mod fuzzy_search;
 
 mod movement;
 mod tree;

@@ -44,7 +44,7 @@ module.exports = class FileFinder extends React.Component {
   }
 
   renderSearchResult(result) {
-    const path = result.path;
+    const path = result.string;
     const matchIndices = result.match_indices;
 
     let pathIndex = 0;

@@ -1,14 +1,13 @@
 use parking_lot::RwLock;
 use std::ffi::{OsString, OsStr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::result;
 use std::sync::{Arc, Weak};
 use std::iter::Iterator;
 use futures::{Async, Poll, Stream};
 use std::os::unix::ffi::OsStrExt;
-use std::u16;
 use std::usize;
-use std::cmp::Ordering;
+use fuzzy_search::{Search as FuzzySearch, SearchResult, Checkpoint};
 
 pub type Result<T> = result::Result<T, ()>;
 type Entries = Vec<(OsString, Entry)>;
@@ -37,10 +36,9 @@ pub struct FileInner {
 }
 
 pub struct Search {
-    query: Vec<char>,
+    search: FuzzySearch,
     max_results: usize,
     results: Vec<SearchResult>,
-    parent_path: PathBuf,
     stack: Vec<StackEntry>,
     entry_count_per_poll: usize,
     done: bool,
@@ -49,24 +47,10 @@ pub struct Search {
 
 pub struct SearchHandle(Arc<()>);
 
-#[derive(Clone, Debug, Serialize)]
-pub struct SearchResult {
-    path: PathBuf,
-    score: i64,
-    match_indices: Vec<u16>,
-}
-
 struct StackEntry {
     entries: Arc<Entries>,
     entries_index: usize,
-    match_variants: Vec<MatchVariant>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct MatchVariant {
-    query_index: u16,
-    score: i64,
-    match_indices: Vec<u16>,
+    search_checkpoint: Checkpoint,
 }
 
 impl Entry {
@@ -135,29 +119,29 @@ impl Stream for Search {
 
                 if entries_index < entries.len() {
                     let child = &entries[entries_index];
-                    let match_variants = self.update_match_variants(
-                        &self.stack.last().unwrap().match_variants,
-                        &child.0
-                    );
 
                     match child.1 {
                         Entry::Dir(ref inner) => {
-                            self.parent_path.push(&child.0);
+                            self.process_entry(&child.0, false);
                             self.stack.push(StackEntry {
                                 entries: inner.read().entries.clone(),
                                 entries_index: 0,
-                                match_variants,
+                                search_checkpoint: self.search.get_checkpoint(),
                             });
                         },
                         Entry::File(_) => {
-                            self.update_results(match_variants, child.0.clone());
-                            self.stack.last_mut().map(|last| last.entries_index += 1);
+                            self.process_entry(&child.0, true);
+                            let mut last = self.stack.last_mut().unwrap();
+                            last.entries_index += 1;
+                            self.search.restore_checkpoint(last.search_checkpoint.clone());
                         }
                     }
                 } else {
                     self.stack.pop().unwrap();
-                    self.parent_path.pop();
-                    self.stack.last_mut().map(|last| last.entries_index += 1);
+                    if let Some(last) = self.stack.last_mut() {
+                        self.search.restore_checkpoint(last.search_checkpoint.clone());
+                        last.entries_index += 1;
+                    }
                 }
             } else {
                 self.done = true;
@@ -169,28 +153,22 @@ impl Stream for Search {
     }
 }
 
-const SUBWORD_START_BONUS: i64 = 10;
-const CONSECUTIVE_BONUS: i64 = 5;
-const LEADING_MISMATCH_LENGTH: u16 = 3;
-const LEADING_MISMATCH_PENALTY: i64 = 3;
-const MISMATCH_PENALTY: i64 = 1;
-
 impl Search {
     fn new(dir: &Arc<RwLock<DirInner>>, query: &str, max_results: usize) -> (Self, SearchHandle) {
         let handle = SearchHandle(Arc::new(()));
+        let mut search = FuzzySearch::new(query);
+        search
+            .set_subword_start_bonus(10)
+            .set_consecutive_bonus(5);
+        let search_checkpoint = search.get_checkpoint();
         let search = Search {
-            query: query.chars().map(|c| c.to_ascii_lowercase()).collect(),
+            search,
             max_results,
             results: Vec::new(),
-            parent_path: PathBuf::new(),
             stack: vec![StackEntry {
                 entries: dir.read().entries.clone(),
                 entries_index: 0,
-                match_variants: vec![MatchVariant {
-                    score: 0,
-                    query_index: 0,
-                    match_indices: Vec::new(),
-                }],
+                search_checkpoint,
             }],
             done: false,
             entry_count_per_poll: usize::MAX,
@@ -205,111 +183,35 @@ impl Search {
         self
     }
 
-    fn update_results(&mut self, mut match_variants: Vec<MatchVariant>, filename: OsString) {
-        for variant in match_variants.drain(..).rev() {
-            if variant.query_index == self.query.len() as u16 {
-                match self.results.binary_search_by(|probe| variant.score.cmp(&probe.score)) {
+    fn process_entry(&mut self, name: &OsStr, is_file: bool) {
+        let separator = if self.stack.len() > 1 {
+            Some('/')
+        } else {
+            None
+        };
+
+        let characters = separator.iter().cloned().chain(
+            name.as_bytes().iter().map(|c| c.to_ascii_lowercase() as char)
+        );
+
+        let match_bonus = if is_file {
+            10
+        } else {
+            1
+        };
+
+        self.search.process(characters, match_bonus);
+
+        if is_file {
+            if let Some(result) = self.search.finish() {
+                match self.results.binary_search_by(|r| result.score.cmp(&r.score)) {
                     Ok(index) | Err(index) => {
-                        if index < self.max_results {
-                            let mut path = self.parent_path.clone();
-                            path.push(&filename);
-                            self.results.insert(index, SearchResult {
-                                score: variant.score,
-                                match_indices: variant.match_indices,
-                                path,
-                            });
-                            self.results.truncate(self.max_results);
-                            return;
-                        }
+                        self.results.insert(index, result);
+                        self.results.truncate(self.max_results);
                     }
                 }
             }
         }
-    }
-
-    fn update_match_variants(&self, variants: &Vec<MatchVariant>, name: &OsStr) -> Vec<MatchVariant> {
-        let mut parent_path_len = self.parent_path.as_os_str().as_bytes().len();
-        if parent_path_len > 0 {
-            parent_path_len += 1;
-        }
-
-        let mut variants = variants.clone();
-        let mut new_variants = Vec::<MatchVariant>::new();
-
-        let mut previous_character: char = '\0';
-        for (name_index, character) in name.as_bytes().iter().map(|c| c.to_ascii_lowercase() as char).enumerate() {
-            let name_index = (name_index + parent_path_len) as u16;
-
-            let mut i = 0;
-            let mut previous_query_index = u16::MAX;
-            while i < variants.len() {
-                let mut should_remove;
-
-                {
-                    let mut variant = unsafe { variants.get_unchecked_mut(i) };
-                    i += 1;
-
-                    // If the current word character matches the next character of the query
-                    // for this match variant, create a new match variant that consumes the
-                    // matching character.
-                    if variant.query_index < self.query.len() as u16 {
-                        let query_character = self.query[variant.query_index as usize];
-                        if character == query_character {
-                            let mut new_variant = variant.clone();
-                            new_variant.query_index += 1;
-
-                            // Apply a bonus if the current character is the start of a word.
-                            if !previous_character.is_alphanumeric() {
-                                new_variant.score += SUBWORD_START_BONUS;
-                            }
-
-                            // Apply a bonus if the last character of the path also matched.
-                            if new_variant.match_indices.last().map_or(false, |index| *index == name_index - 1) {
-                                new_variant.score += CONSECUTIVE_BONUS;
-                            }
-
-                            new_variant.match_indices.push(name_index as u16);
-                            new_variants.push(new_variant);
-                        }
-                    }
-
-                    // For the current match variant, treat the current character as a mismatch
-                    // regardless of whether it matched above. This reserves the chance for the
-                    // next character to be consumed by a match with higher overall value.
-                    if name_index < LEADING_MISMATCH_LENGTH {
-                      variant.score -= LEADING_MISMATCH_PENALTY;
-                    } else {
-                      variant.score -= MISMATCH_PENALTY;
-                    }
-
-                    should_remove = variant.query_index == previous_query_index;
-                }
-
-                if should_remove {
-                    variants.remove(i);
-                    i -= 1;
-                }
-            }
-
-            for new_variant in new_variants.drain(..) {
-                match variants.binary_search_by(|variant| {
-                    match variant.query_index.cmp(&new_variant.query_index) {
-                        Ordering::Equal => new_variant.score.cmp(&variant.score),
-                        comparison @ _ => comparison
-                    }
-                }) {
-                    Ok(index) | Err(index) => {
-                        if index == 0 || variants[index - 1].query_index != new_variant.query_index {
-                            variants.insert(index, new_variant);
-                        }
-                    }
-                }
-            }
-
-            previous_character = character;
-        }
-
-        variants
     }
 }
 
@@ -345,7 +247,6 @@ mod tests {
     #[test]
     fn test_search_subword_start_bonus() {
         let root = build_directory(&json!({
-            "cadence": null,
             "ace": {
                 "identifier": null
             },
@@ -361,10 +262,10 @@ mod tests {
         }));
 
         let (mut search, _handle) = root.search("cde", 10).unwrap();
-        assert_eq!(get_results(search.poll())[0].path, Path::new("cats/dogs/eagles"));
+        assert_eq!(get_results(search.poll())[0].string, "cats/dogs/eagles");
 
         let (mut search, _handle) = root.search("og", 10).unwrap();
-        assert_eq!(get_results(search.poll())[0].path, Path::new("accident/ogre"));
+        assert_eq!(get_results(search.poll())[0].string, "accident/ogre");
     }
 
     fn get_results(result: Result<Async<Option<Vec<SearchResult>>>>) -> Vec<SearchResult> {

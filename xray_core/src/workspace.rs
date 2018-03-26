@@ -10,9 +10,10 @@ use std::io::prelude::*;
 use window::{View, ViewHandle, ViewUpdateStream, WindowHandle};
 use buffer::Buffer;
 use buffer_view::BufferView;
-use futures::{future, Stream};
+use futures::Stream;
 use notify_cell::NotifyCell;
 use fs;
+use fuzzy_search::SearchResult;
 
 pub struct WorkspaceView {
     roots: Rc<Vec<Box<fs::Tree>>>,
@@ -33,7 +34,7 @@ struct FileFinderView {
     query: String,
     search_handle: Option<fs::SearchHandle>,
     window_handle: Option<WindowHandle>,
-    updates: Arc<NotifyCell<Vec<fs::SearchResult>>>,
+    updates: Arc<NotifyCell<Vec<SearchResult>>>,
 }
 
 #[derive(Deserialize)]
