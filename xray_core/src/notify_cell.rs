@@ -1,12 +1,19 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use futures::{Async, Poll, Stream};
 use futures::task::{self, Task};
 use parking_lot::RwLock;
 
 type Version = usize;
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum TrySetError {
+    ObserverDisconnected
+}
+
 #[derive(Debug)]
 pub struct NotifyCell<T: Clone>(Arc<RwLock<Inner<T>>>);
+
+pub struct WeakNotifyCell<T: Clone>(Weak<RwLock<Inner<T>>>);
 
 pub struct NotifyCellObserver<T: Clone> {
     last_polled_at: Version,
@@ -29,6 +36,19 @@ impl<T: Clone> NotifyCell<T> {
         })))
     }
 
+    pub fn weak(value: T) -> (WeakNotifyCell<T>, NotifyCellObserver<T>) {
+        let observer = NotifyCellObserver {
+            last_polled_at: 0,
+            inner: Arc::new(RwLock::new(Inner {
+                value: Some(value),
+                last_written_at: 0,
+                subscribers: Vec::new(),
+            }))
+        };
+        let weak_cell = WeakNotifyCell(Arc::downgrade(&observer.inner));
+        (weak_cell, observer)
+    }
+
     pub fn set(&self, value: T) {
         let mut inner = self.0.write();
         inner.value = Some(value);
@@ -49,6 +69,25 @@ impl<T: Clone> NotifyCell<T> {
             last_polled_at: inner.last_written_at,
             inner: self.0.clone(),
         }
+    }
+}
+
+impl<T: Clone> WeakNotifyCell<T> {
+    pub fn try_set(&self, value: T) -> Result<(), TrySetError> {
+        let inner = self.0.upgrade().ok_or(TrySetError::ObserverDisconnected)?;
+        let mut inner = inner.write();
+        inner.value = Some(value);
+        inner.last_written_at += 1;
+        for subscriber in inner.subscribers.drain(..) {
+            subscriber.notify();
+        }
+        Ok(())
+    }
+}
+
+impl<T: Clone> NotifyCellObserver<T> {
+    pub fn get(&self) -> Option<T> {
+        self.inner.read().value.clone()
     }
 }
 
@@ -127,5 +166,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_weak_notify_cell() {
+        let (cell, observer) = NotifyCell::weak(1);
+        assert_eq!(observer.get(), Some(1));
+
+        assert_eq!(cell.try_set(2), Ok(()));
+        assert_eq!(observer.get(), Some(2));
+
+        assert_eq!(cell.try_set(3), Ok(()));
+        assert_eq!(observer.get(), Some(3));
+
+        drop(observer);
+        assert_eq!(cell.try_set(4), Err(TrySetError::ObserverDisconnected));
     }
 }
