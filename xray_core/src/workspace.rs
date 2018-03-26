@@ -32,6 +32,7 @@ enum WorkspaceViewAction {
 struct FileFinderView {
     roots: Rc<Vec<Box<fs::Tree>>>,
     query: String,
+    search_results: Vec<SearchResult>,
     search_updates: Option<NotifyCellObserver<Vec<SearchResult>>>,
     window_handle: Option<WindowHandle>,
     updates: NotifyCell<()>,
@@ -127,7 +128,7 @@ impl View for FileFinderView {
     fn render(&self) -> serde_json::Value {
         json!({
             "query": self.query.as_str(),
-            "results": self.search_updates.as_ref().and_then(|results| results.get()).unwrap_or_default(),
+            "results": self.search_results,
         })
     }
 
@@ -152,6 +153,10 @@ impl Stream for FileFinderView {
         let updates_poll = self.updates.poll()?;
         match (search_poll, updates_poll) {
             (Async::NotReady, Async::NotReady) => Ok(Async::NotReady),
+            (Async::Ready(Some(search_results)), _) => {
+                self.search_results = search_results;
+                Ok(Async::Ready(Some(())))
+            },
             _ => Ok(Async::Ready(Some(())))
         }
     }
@@ -162,6 +167,7 @@ impl FileFinderView {
         Self {
             roots: roots,
             query: String::new(),
+            search_results: Vec::new(),
             search_updates: None,
             updates: NotifyCell::new(()),
             window_handle: None,
