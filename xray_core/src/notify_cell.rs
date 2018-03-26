@@ -1,17 +1,16 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use futures::{Async, Poll, Stream};
 use futures::task::{self, Task};
+use parking_lot::RwLock;
 
 type Version = usize;
 
 #[derive(Debug)]
-pub struct NotifyCell<T: Clone> {
-    inner: Arc<Mutex<Inner<T>>>,
-}
+pub struct NotifyCell<T: Clone>(Arc<RwLock<Inner<T>>>);
 
 pub struct NotifyCellObserver<T: Clone> {
     last_polled_at: Version,
-    inner: Arc<Mutex<Inner<T>>>,
+    inner: Arc<RwLock<Inner<T>>>,
 }
 
 #[derive(Debug)]
@@ -23,17 +22,15 @@ struct Inner<T: Clone> {
 
 impl<T: Clone> NotifyCell<T> {
     pub fn new(value: T) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Inner {
-                value: Some(value),
-                last_written_at: 0,
-                subscribers: Vec::new(),
-            })),
-        }
+        NotifyCell(Arc::new(RwLock::new(Inner {
+            value: Some(value),
+            last_written_at: 0,
+            subscribers: Vec::new(),
+        })))
     }
 
     pub fn set(&self, value: T) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.0.write();
         inner.value = Some(value);
         inner.last_written_at += 1;
         for subscriber in inner.subscribers.drain(..) {
@@ -42,15 +39,15 @@ impl<T: Clone> NotifyCell<T> {
     }
 
     pub fn get(&self) -> Option<T> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.0.read();
         inner.value.as_ref().cloned()
     }
 
     pub fn observe(&self) -> NotifyCellObserver<T> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.0.read();
         NotifyCellObserver {
             last_polled_at: inner.last_written_at,
-            inner: self.inner.clone(),
+            inner: self.0.clone(),
         }
     }
 }
@@ -60,14 +57,14 @@ impl<T: Clone> Stream for NotifyCellObserver<T> {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = self.inner.upgradable_read();
 
         if let Some(value) = inner.value.as_ref().cloned() {
             if self.last_polled_at < inner.last_written_at {
                 self.last_polled_at = inner.last_written_at;
                 Ok(Async::Ready(Some(value.clone())))
             } else {
-                inner.subscribers.push(task::current());
+                inner.upgrade().subscribers.push(task::current());
                 Ok(Async::NotReady)
             }
         } else {
@@ -78,7 +75,7 @@ impl<T: Clone> Stream for NotifyCellObserver<T> {
 
 impl<T: Clone> Drop for NotifyCell<T> {
     fn drop(&mut self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.0.write();
         inner.value.take();
         for subscriber in inner.subscribers.drain(..) {
             subscriber.notify();
