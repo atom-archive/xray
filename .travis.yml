@@ -10,3 +10,8 @@ before_install:
 script:
 - script/build
 - script/test
+
+cache:
+  cargo: true
+  directories:
+  - xray_electron/node_modules
