@@ -160,7 +160,7 @@ impl Stream for Search {
 }
 
 impl Search {
-    const DEFAULT_ENTRY_COUNT_PER_POLL: usize = 5000;
+    const DEFAULT_ENTRY_COUNT_PER_POLL: usize = 100000;
 
     fn new(dir: &Arc<RwLock<DirInner>>, query: &str, max_results: usize) -> (Self, NotifyCellObserver<Vec<SearchResult>>) {
         let (updates, updates_observer) = NotifyCell::weak(Vec::new());

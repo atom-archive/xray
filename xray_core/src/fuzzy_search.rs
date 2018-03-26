@@ -72,54 +72,35 @@ impl Search {
 
     pub fn process<T: IntoIterator<Item = char>>(&mut self, characters: T, match_bonus: usize) -> &mut Self {
         for character in characters {
-            let mut i = 0;
-            let previous_len = self.variants.len();
-            while i < previous_len {
-                let mut matching_variant: Option<MatchVariant> = None;
+            let mut new_variants = Vec::new();
 
-                {
-                    let variant = &self.variants[i];
-                    i += 1;
+            for variant in &self.variants {
+                if let Some(query_character) = self.query.get(variant.query_index as usize) {
+                    if character == *query_character {
+                        let mut new_variant = variant.clone();
+                        let match_index = self.characters.len() as u16;
+                        new_variant.query_index += 1;
+                        new_variant.score += match_bonus;
 
-                    if let Some(query_character) = self.query.get(variant.query_index as usize) {
-                        if character == *query_character {
-                            let mut new_variant = variant.clone();
-                            let match_index = self.characters.len() as u16;
-                            new_variant.query_index += 1;
-                            new_variant.score += match_bonus;
-
-                            // Apply a bonus if the current character is the start of a word.
-                            if self.characters.last().map_or(true, |c| !c.is_alphanumeric()) {
-                                new_variant.score += self.subword_start_bonus;
-                            }
-
-                            // Apply a bonus if the last character of the path also matched.
-                            if new_variant.match_indices.last().map_or(false, |index| *index == match_index - 1) {
-                                new_variant.score += self.consecutive_bonus;
-                            }
-
-                            new_variant.match_indices.push(match_index);
-                            matching_variant = Some(new_variant);
+                        // Apply a bonus if the current character is the start of a word.
+                        if self.characters.last().map_or(true, |c| !c.is_alphanumeric()) {
+                            new_variant.score += self.subword_start_bonus;
                         }
-                    }
-                }
 
-                if let Some(matching_variant) = matching_variant.take() {
-                    self.variants.push(matching_variant)
+                        // Apply a bonus if the last character of the path also matched.
+                        if new_variant.match_indices.last().map_or(false, |index| *index == match_index - 1) {
+                            new_variant.score += self.consecutive_bonus;
+                        }
+
+                        new_variant.match_indices.push(match_index);
+                        new_variants.push(new_variant);
+                    }
                 }
             }
 
-            i = previous_len;
-            while i < self.variants.len() {
-                let (query_index, score) = {
-                    let mut variant = &self.variants[i];
-                    (variant.query_index, variant.score)
-                };
-
-                if self.variants.iter().take(previous_len).find(|v| v.query_index == query_index && v.score > score).is_some() {
-                    self.variants.remove(i);
-                } else {
-                    i += 1;
+            for new_variant in new_variants {
+                if self.variants.iter().all(|v| v.query_index != new_variant.query_index || v.score < new_variant.score) {
+                    self.variants.push(new_variant);
                 }
             }
 
