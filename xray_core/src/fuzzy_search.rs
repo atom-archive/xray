@@ -99,7 +99,9 @@ impl Search {
             }
 
             for new_variant in new_variants {
-                if self.variants.iter().all(|v| v.query_index != new_variant.query_index || v.score < new_variant.score) {
+                if self.variants.iter().all(|v|
+                    v.query_index != new_variant.query_index || v.score <= new_variant.score
+                ) {
                     self.variants.push(new_variant);
                 }
             }
