@@ -3,7 +3,7 @@ use serde_json;
 use std::cell::RefCell;
 use std::env;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
@@ -20,6 +20,7 @@ pub struct WorkspaceView {
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
+    weak_ref: Option<Weak<RefCell<WorkspaceView>>>,
 }
 
 #[derive(Deserialize)]
@@ -36,16 +37,16 @@ impl WorkspaceView {
             center_pane: None,
             window_handle: None,
             updates: NotifyCell::new(()),
+            weak_ref: None,
         }
     }
 
     fn toggle_file_finder(&mut self) {
-        let delegate = self.window_handle.as_ref().unwrap().get_weak(self);
-
         let ref mut window_handle = self.window_handle.as_mut().unwrap();
         if self.modal_panel.is_some() {
             self.modal_panel = None;
         } else {
+            let delegate = self.weak_ref.as_ref().cloned().unwrap();
             self.modal_panel = Some(window_handle.add_view(FileFinderView::new(delegate)));
         }
         self.updates.set(());
@@ -88,6 +89,12 @@ impl View for WorkspaceView {
 
         self.center_pane = Some(window_handle.add_view(self.open_path(react_js_path)));
         self.window_handle = Some(window_handle);
+    }
+
+    fn capture_ref(view: &Rc<RefCell<WorkspaceView>>) {
+        let weak_view = Rc::downgrade(view);
+        let mut view = view.borrow_mut();
+        view.weak_ref = Some(weak_view);
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value) {

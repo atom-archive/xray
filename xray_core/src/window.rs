@@ -6,7 +6,6 @@ use std::rc::{Rc, Weak};
 use futures::{Async, Future, Poll, Stream};
 use futures::task::{self, Task};
 use futures::future;
-use std::mem::transmute;
 
 type BoxedSendableFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
 type BoxedExecutor = Box<future::Executor<BoxedSendableFuture>>;
@@ -18,6 +17,7 @@ pub trait View: Stream<Item = (), Error = ()> {
     fn will_mount(&mut self, _handle: WindowHandle) {}
     fn render(&self) -> serde_json::Value;
     fn dispatch_action(&mut self, serde_json::Value) {}
+    fn capture_ref(_ref: &Rc<RefCell<Self>>) where Self: Sized {}
 }
 
 pub struct Window(Rc<RefCell<Inner>>, Option<ViewHandle>);
@@ -38,7 +38,7 @@ pub struct Inner {
     executor: Option<BoxedExecutor>
 }
 
-pub struct WindowHandle(Weak<RefCell<Inner>>, ViewId);
+pub struct WindowHandle(Weak<RefCell<Inner>>);
 
 pub struct ViewHandle {
     pub view_id: ViewId,
@@ -100,7 +100,7 @@ impl Window {
     }
 
     pub fn handle(&mut self) -> WindowHandle {
-        WindowHandle(Rc::downgrade(&self.0), 0)
+        WindowHandle(Rc::downgrade(&self.0))
     }
 }
 
@@ -213,24 +213,19 @@ impl WindowHandle {
             inner.next_view_id - 1
         };
 
-        view.will_mount(WindowHandle(self.0.clone(), view_id));
+        view.will_mount(WindowHandle(self.0.clone()));
+        let view_rc = Rc::new(RefCell::new(view));
+        T::capture_ref(&view_rc);
 
         let inner = self.0.upgrade().unwrap();
         let mut inner = inner.borrow_mut();
-        inner.views.insert(view_id, Rc::new(RefCell::new(view)));
+        inner.views.insert(view_id, view_rc);
         inner.inserted.insert(view_id);
         inner.update_stream_task.take().map(|task| task.notify());
         ViewHandle {
             view_id,
             inner: self.0.clone(),
         }
-    }
-
-    pub fn get_weak<T: 'static + View>(&self, _view: &T) -> Weak<RefCell<T>> {
-        let inner = self.0.upgrade().unwrap();
-        let inner = inner.borrow();
-        let view_rc = Rc::downgrade(&inner.views[&self.1]);
-        unsafe { transmute::<_, (Weak<RefCell<T>>, *const T)>(view_rc) }.0
     }
 }
 
