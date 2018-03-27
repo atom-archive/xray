@@ -3,7 +3,7 @@ use serde_json;
 use std::cell::RefCell;
 use std::env;
 use std::path::PathBuf;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
@@ -14,9 +14,7 @@ use notify_cell::NotifyCell;
 use fs;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
 
-pub struct WorkspaceView(Rc<RefCell<WorkspaceViewState>>);
-
-struct WorkspaceViewState {
+pub struct WorkspaceView {
     roots: Rc<Vec<Box<fs::Tree>>>,
     window_handle: Option<WindowHandle>,
     modal_panel: Option<ViewHandle>,
@@ -32,55 +30,18 @@ enum WorkspaceViewAction {
 
 impl WorkspaceView {
     pub fn new(roots: Vec<Box<fs::Tree>>) -> Self {
-        WorkspaceView(Rc::new(RefCell::new(WorkspaceViewState {
+        WorkspaceView {
             roots: Rc::new(roots),
             modal_panel: None,
             center_pane: None,
             window_handle: None,
             updates: NotifyCell::new(()),
-        })))
-    }
-}
-
-impl View for WorkspaceView {
-    fn component_name(&self) -> &'static str {
-        "Workspace"
-    }
-
-    fn render(&self) -> serde_json::Value {
-        let state = self.0.borrow();
-        json!({
-            "modal": state.modal_panel.as_ref().map(|view_handle| view_handle.view_id),
-            "center_pane": state.center_pane.as_ref().map(|view_handle| view_handle.view_id)
-        })
-    }
-
-    fn will_mount(&mut self, window_handle: WindowHandle) {
-        let mut state = self.0.borrow_mut();
-
-        let src_path: PathBuf = env::var("XRAY_SRC_PATH")
-            .expect("Missing XRAY_SRC_PATH environment variable")
-            .into();
-
-        let react_js_path =
-            src_path.join("xray_electron/node_modules/react/cjs/react.development.js");
-
-        state.center_pane = Some(window_handle.add_view(state.open_path(react_js_path)));
-        state.window_handle = Some(window_handle);
-    }
-
-    fn dispatch_action(&mut self, action: serde_json::Value) {
-        let delegate = Rc::downgrade(&self.0);
-        let mut state = self.0.borrow_mut();
-        match serde_json::from_value(action) {
-            Ok(WorkspaceViewAction::ToggleFileFinder) => state.toggle_file_finder(delegate),
-            _ => eprintln!("Unrecognized action"),
         }
     }
-}
 
-impl WorkspaceViewState {
-    fn toggle_file_finder(&mut self, delegate: Weak<RefCell<WorkspaceViewState>>) {
+    fn toggle_file_finder(&mut self) {
+        let delegate = self.window_handle.as_ref().unwrap().get_weak(self);
+
         let ref mut window_handle = self.window_handle.as_mut().unwrap();
         if self.modal_panel.is_some() {
             self.modal_panel = None;
@@ -105,7 +66,39 @@ impl WorkspaceViewState {
     }
 }
 
-impl FileFinderViewDelegate for WorkspaceViewState {
+impl View for WorkspaceView {
+    fn component_name(&self) -> &'static str {
+        "Workspace"
+    }
+
+    fn render(&self) -> serde_json::Value {
+        json!({
+            "modal": self.modal_panel.as_ref().map(|view_handle| view_handle.view_id),
+            "center_pane": self.center_pane.as_ref().map(|view_handle| view_handle.view_id)
+        })
+    }
+
+    fn will_mount(&mut self, window_handle: WindowHandle) {
+        let src_path: PathBuf = env::var("XRAY_SRC_PATH")
+            .expect("Missing XRAY_SRC_PATH environment variable")
+            .into();
+
+        let react_js_path =
+            src_path.join("xray_electron/node_modules/react/cjs/react.development.js");
+
+        self.center_pane = Some(window_handle.add_view(self.open_path(react_js_path)));
+        self.window_handle = Some(window_handle);
+    }
+
+    fn dispatch_action(&mut self, action: serde_json::Value) {
+        match serde_json::from_value(action) {
+            Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(),
+            _ => eprintln!("Unrecognized action"),
+        }
+    }
+}
+
+impl FileFinderViewDelegate for WorkspaceView {
     fn trees(&self) -> &Vec<Box<fs::Tree>> {
         &self.roots
     }
@@ -127,7 +120,6 @@ impl Stream for WorkspaceView {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let mut state = self.0.borrow_mut();
-        state.updates.poll()
+        self.updates.poll()
     }
 }

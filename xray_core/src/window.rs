@@ -6,6 +6,7 @@ use std::rc::{Rc, Weak};
 use futures::{Async, Future, Poll, Stream};
 use futures::task::{self, Task};
 use futures::future;
+use std::mem::transmute;
 
 type BoxedSendableFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
 type BoxedExecutor = Box<future::Executor<BoxedSendableFuture>>;
@@ -223,6 +224,13 @@ impl WindowHandle {
             view_id,
             inner: self.0.clone(),
         }
+    }
+
+    pub fn get_weak<T: 'static + View>(&self, _view: &T) -> Weak<RefCell<T>> {
+        let inner = self.0.upgrade().unwrap();
+        let inner = inner.borrow();
+        let view_rc = Rc::downgrade(&inner.views[&self.1]);
+        unsafe { transmute::<_, (Weak<RefCell<T>>, *const T)>(view_rc) }.0
     }
 }
 
