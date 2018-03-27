@@ -2,9 +2,7 @@ use futures::{Async, Poll, Stream};
 use std::path::PathBuf;
 use fuzzy_search::SearchResult;
 use fs;
-use std::rc::Weak;
-use std::cell::RefCell;
-use window::{View, WindowHandle};
+use window::{View, ViewRef, WindowHandle};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use serde_json;
 
@@ -15,7 +13,7 @@ pub trait FileFinderViewDelegate {
 }
 
 pub struct FileFinderView<T: FileFinderViewDelegate> {
-    delegate: Weak<RefCell<T>>,
+    delegate: ViewRef<T>,
     query: String,
     include_ignored: bool,
     selected_index: usize,
@@ -85,7 +83,7 @@ impl<T: FileFinderViewDelegate> Stream for FileFinderView<T> {
 }
 
 impl<T: FileFinderViewDelegate> FileFinderView<T> {
-    pub fn new(delegate: Weak<RefCell<T>>) -> Self {
+    pub fn new(delegate: ViewRef<T>) -> Self {
         Self {
             delegate,
             query: String::new(),
@@ -130,22 +128,24 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
 
     fn confirm(&mut self) {
         if let Some(search_result) = self.search_results.get(self.selected_index) {
-            let delegate = self.delegate.upgrade().unwrap();
-            let mut delegate = delegate.borrow_mut();
-            delegate.did_confirm(PathBuf::from(search_result.string.clone()));
+            self.delegate.map(|delegate|
+                delegate.did_confirm(PathBuf::from(search_result.string.clone()))
+            );
         }
     }
 
     fn close(&mut self) {
-        let delegate = self.delegate.upgrade().unwrap();
-        let mut delegate = delegate.borrow_mut();
-        delegate.did_close();
+        self.delegate.map(|delegate| delegate.did_close());
     }
 
     fn restart_search(&mut self) {
-        let delegate = self.delegate.upgrade().unwrap();
-        let delegate = delegate.borrow();
-        if let Ok((search, search_updates)) = delegate.trees()[0].root().search(&self.query, 10, self.include_ignored) {
+        let search = self.delegate.map(|delegate|
+            delegate.trees()[0]
+                .root()
+                .search(&self.query, 10, self.include_ignored)
+        );
+
+        if let Some(Ok((search, search_updates))) = search {
             self.search_updates = Some(search_updates);
             self.window_handle.as_ref().unwrap().spawn(search.for_each(|_| Ok(())));
         }

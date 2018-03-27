@@ -3,11 +3,11 @@ use serde_json;
 use std::cell::RefCell;
 use std::env;
 use std::path::PathBuf;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
-use window::{View, ViewHandle, WindowHandle};
+use window::{View, ViewHandle, ViewRef, WindowHandle};
 use buffer::Buffer;
 use buffer_view::BufferView;
 use notify_cell::NotifyCell;
@@ -20,7 +20,7 @@ pub struct WorkspaceView {
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
-    weak_ref: Option<Weak<RefCell<WorkspaceView>>>,
+    weak_ref: Option<ViewRef<WorkspaceView>>,
 }
 
 #[derive(Deserialize)]
@@ -91,10 +91,8 @@ impl View for WorkspaceView {
         self.window_handle = Some(window_handle);
     }
 
-    fn capture_ref(view: &Rc<RefCell<WorkspaceView>>) {
-        let weak_view = Rc::downgrade(view);
-        let mut view = view.borrow_mut();
-        view.weak_ref = Some(weak_view);
+    fn set_view_ref(&mut self, view_ref: ViewRef<WorkspaceView>) {
+        self.weak_ref = Some(view_ref);
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value) {

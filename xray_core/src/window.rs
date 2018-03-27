@@ -17,7 +17,24 @@ pub trait View: Stream<Item = (), Error = ()> {
     fn will_mount(&mut self, _handle: WindowHandle) {}
     fn render(&self) -> serde_json::Value;
     fn dispatch_action(&mut self, serde_json::Value) {}
-    fn capture_ref(_ref: &Rc<RefCell<Self>>) where Self: Sized {}
+    fn set_view_ref(&mut self, _ref: ViewRef<Self>) where Self: Sized {}
+}
+
+pub struct ViewRef<T>(Weak<RefCell<T>>);
+
+impl<T> ViewRef<T> {
+    pub fn map<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut T) -> R
+    {
+        self.0.upgrade().map(|view| f(&mut *view.borrow_mut()))
+    }
+}
+
+impl<T> Clone for ViewRef<T> {
+    fn clone(&self) -> Self {
+        ViewRef(self.0.clone())
+    }
 }
 
 pub struct Window(Rc<RefCell<Inner>>, Option<ViewHandle>);
@@ -215,7 +232,8 @@ impl WindowHandle {
 
         view.will_mount(WindowHandle(self.0.clone()));
         let view_rc = Rc::new(RefCell::new(view));
-        T::capture_ref(&view_rc);
+        let weak_view = Rc::downgrade(&view_rc);
+        view_rc.borrow_mut().set_view_ref(ViewRef(weak_view));
 
         let inner = self.0.upgrade().unwrap();
         let mut inner = inner.borrow_mut();
