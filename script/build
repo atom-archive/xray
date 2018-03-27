@@ -1,0 +1,5 @@
+#!/bin/bash
+
+cargo build &&
+cd xray_electron &&
+npm install

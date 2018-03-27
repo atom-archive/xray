@@ -6,11 +6,12 @@ const $ = React.createElement;
 class TextPlane extends React.Component {
   constructor(props) {
     super(props);
+    this.handleCanvas = this.handleCanvas.bind(this);
   }
 
   render() {
     return $("canvas", {
-      ref: "canvas",
+      ref: this.handleCanvas,
       className: this.props.className,
       width: this.props.width * window.devicePixelRatio,
       height: this.props.height * window.devicePixelRatio,
@@ -21,7 +22,13 @@ class TextPlane extends React.Component {
     });
   }
 
+  handleCanvas(canvas) {
+    this.canvas = canvas;
+  }
+
   async componentDidUpdate() {
+    if (this.canvas == null) return;
+
     const {
       fontFamily,
       fontSize,
@@ -32,7 +39,7 @@ class TextPlane extends React.Component {
     const computedLineHeight = this.props.lineHeight;
 
     if (!this.gl) {
-      this.gl = this.refs.canvas.getContext("webgl2");
+      this.gl = this.canvas.getContext("webgl2");
       this.renderer = new Renderer(this.gl, {
         fontFamily,
         fontSize,

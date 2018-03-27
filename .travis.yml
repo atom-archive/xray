@@ -1,0 +1,26 @@
+language: rust
+
+rust:
+- stable
+
+before_install:
+- curl -o- https://raw.githubusercontent.com/creationix/nvm/v0.33.8/install.sh | bash
+- nvm install v8.9.3
+
+script:
+- script/build
+- script/test
+
+cache:
+  cargo: true
+  directories:
+  - xray_electron/node_modules
+
+branches:
+  only:
+    - master
+
+notifications:
+  email:
+    on_success: never
+    on_failure: change
