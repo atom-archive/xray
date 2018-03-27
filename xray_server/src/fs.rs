@@ -1,4 +1,4 @@
-use futures::{Future, Stream};
+use futures::Stream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -39,11 +39,11 @@ impl Tree {
 
                 if file_type.is_dir() {
                     let dir = fs::Entry::dir(file_type.is_symlink());
-                    stack.last_mut().unwrap().insert(file_name, dir.clone());
+                    stack.last_mut().unwrap().insert(file_name, dir.clone()).unwrap();
                     stack.push(dir);
                 } else if file_type.is_file() {
                     let file = fs::Entry::file(file_type.is_symlink());
-                    stack.last_mut().unwrap().insert(file_name, file);
+                    stack.last_mut().unwrap().insert(file_name, file).unwrap();
                 }
                 updates.set(());
             }
