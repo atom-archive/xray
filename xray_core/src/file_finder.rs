@@ -17,6 +17,7 @@ pub trait FileFinderViewDelegate {
 pub struct FileFinderView<T: FileFinderViewDelegate> {
     delegate: Weak<RefCell<T>>,
     query: String,
+    include_ignored: bool,
     selected_index: usize,
     search_results: Vec<SearchResult>,
     search_updates: Option<NotifyCellObserver<Vec<SearchResult>>>,
@@ -28,6 +29,7 @@ pub struct FileFinderView<T: FileFinderViewDelegate> {
 #[serde(tag = "type")]
 enum FileFinderAction {
     UpdateQuery { query: String },
+    UpdateIncludeIgnored { include_ignored: bool },
     SelectPrevious,
     SelectNext,
     Confirm,
@@ -54,6 +56,7 @@ impl<T: FileFinderViewDelegate> View for FileFinderView<T> {
     fn dispatch_action(&mut self, action: serde_json::Value) {
         match serde_json::from_value(action) {
             Ok(FileFinderAction::UpdateQuery { query }) => self.update_query(query),
+            Ok(FileFinderAction::UpdateIncludeIgnored { include_ignored }) => self.update_include_ignored(include_ignored),
             Ok(FileFinderAction::SelectPrevious) => self.select_previous(),
             Ok(FileFinderAction::SelectNext) => self.select_next(),
             Ok(FileFinderAction::Confirm) => self.confirm(),
@@ -86,6 +89,7 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
         Self {
             delegate,
             query: String::new(),
+            include_ignored: false,
             selected_index: 0,
             search_results: Vec::new(),
             search_updates: None,
@@ -97,12 +101,15 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
     fn update_query(&mut self, query: String) {
         if self.query != query {
             self.query = query;
-            let delegate = self.delegate.upgrade().unwrap();
-            let delegate = delegate.borrow();
-            if let Ok((search, search_updates)) = delegate.trees()[0].root().search(&self.query, 10) {
-                self.search_updates = Some(search_updates);
-                self.window_handle.as_ref().unwrap().spawn(search.for_each(|_| Ok(())));
-            }
+            self.restart_search();
+            self.updates.set(());
+        }
+    }
+
+    fn update_include_ignored(&mut self, include_ignored: bool) {
+        if self.include_ignored != include_ignored {
+            self.include_ignored = include_ignored;
+            self.restart_search();
             self.updates.set(());
         }
     }
@@ -133,5 +140,14 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
         let delegate = self.delegate.upgrade().unwrap();
         let mut delegate = delegate.borrow_mut();
         delegate.did_close();
+    }
+
+    fn restart_search(&mut self) {
+        let delegate = self.delegate.upgrade().unwrap();
+        let delegate = delegate.borrow();
+        if let Ok((search, search_updates)) = delegate.trees()[0].root().search(&self.query, 10, self.include_ignored) {
+            self.search_updates = Some(search_updates);
+            self.window_handle.as_ref().unwrap().spawn(search.for_each(|_| Ok(())));
+        }
     }
 }

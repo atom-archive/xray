@@ -6,6 +6,7 @@ mod messages;
 extern crate bytes;
 extern crate futures;
 extern crate futures_cpupool;
+extern crate ignore;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
@@ -14,7 +15,6 @@ extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_process;
 extern crate tokio_uds;
-extern crate walkdir;
 extern crate xray_core;
 
 use std::env;

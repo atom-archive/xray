@@ -7,6 +7,7 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 bytes = "0.4"
 futures = "0.1"
 futures-cpupool = "0.1"
+ignore = { git = "https://github.com/atom/ripgrep", branch = "include_ignored" }
 rand = "0.4"
 serde = "1.0"
 serde_derive = "1.0"
@@ -15,5 +16,4 @@ tokio-io = "0.1"
 tokio-core = "0.1"
 tokio-process = "0.1"
 tokio-uds = "0.1"
-walkdir = "2"
 xray_core = {path = "../xray_core"}

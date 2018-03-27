@@ -34,6 +34,7 @@ module.exports = class FileFinder extends React.Component {
   constructor() {
     super();
     this.didChangeQuery = this.didChangeQuery.bind(this);
+    this.didChangeIncludeIgnored = this.didChangeIncludeIgnored.bind(this);
     this.didKeyDown = this.didKeyDown.bind(this);
   }
 
@@ -45,6 +46,14 @@ module.exports = class FileFinder extends React.Component {
         onChange: this.didChangeQuery,
         onKeyDown: this.didKeyDown,
       }),
+      $("label", {},
+        $("input", {
+          type: 'checkbox',
+          onChange: this.didChangeIncludeIgnored,
+          checked: this.props.includeIgnored,
+        }),
+        "Include Ignored Files"
+      ),
       $(SearchResultList, {}, ...this.props.results.map((result, i) =>
         this.renderSearchResult(result, i === this.props.selected_index)
       ))
@@ -85,6 +94,13 @@ module.exports = class FileFinder extends React.Component {
     this.props.dispatch({
       type: "UpdateQuery",
       query: event.target.value
+    });
+  }
+
+  didChangeIncludeIgnored(event) {
+    this.props.dispatch({
+      type: "UpdateIncludeIgnored",
+      include_ignored: event.target.checked
     });
   }
 

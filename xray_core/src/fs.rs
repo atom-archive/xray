@@ -28,17 +28,20 @@ pub enum Entry {
 #[derive(Clone, Debug)]
 pub struct DirInner {
     entries: Arc<Entries>,
-    is_symlink: bool,
+    symlink: bool,
+    ignored: bool
 }
 
 #[derive(Clone, Debug)]
 pub struct FileInner {
-    is_symlink: bool,
+    symlink: bool,
+    ignored: bool
 }
 
 pub struct Search {
     search: FuzzySearch,
     max_results: usize,
+    include_ignored: bool,
     results: Vec<SearchResult>,
     stack: Vec<StackEntry>,
     entry_count_per_poll: usize,
@@ -55,14 +58,15 @@ struct StackEntry {
 }
 
 impl Entry {
-    pub fn file(is_symlink: bool) -> Self {
-        Entry::File(Arc::new(FileInner { is_symlink }))
+    pub fn file(symlink: bool, ignored: bool) -> Self {
+        Entry::File(Arc::new(FileInner { symlink, ignored }))
     }
 
-    pub fn dir(is_symlink: bool) -> Self {
+    pub fn dir(symlink: bool, ignored: bool) -> Self {
         Entry::Dir(Arc::new(RwLock::new(DirInner {
             entries: Arc::new(Vec::new()),
-            is_symlink,
+            symlink,
+            ignored
         })))
     }
 
@@ -94,9 +98,9 @@ impl Entry {
         }
     }
 
-    pub fn search(&self, query: &str, max_results: usize) -> Result<(Search, NotifyCellObserver<Vec<SearchResult>>)> {
+    pub fn search(&self, query: &str, max_results: usize, include_ignored: bool) -> Result<(Search, NotifyCellObserver<Vec<SearchResult>>)> {
         match self {
-            &Entry::Dir(ref inner) => Ok(Search::new(inner, query, max_results)),
+            &Entry::Dir(ref inner) => Ok(Search::new(inner, query, max_results, include_ignored)),
             _ => Err(())
         }
     }
@@ -123,18 +127,27 @@ impl Stream for Search {
 
                     match child.1 {
                         Entry::Dir(ref inner) => {
-                            self.process_entry(&child.0, false);
-                            self.stack.push(StackEntry {
-                                entries: inner.read().entries.clone(),
-                                entries_index: 0,
-                                search_checkpoint: self.search.get_checkpoint(),
-                            });
+                            let inner = inner.read();
+                            if inner.ignored && !self.include_ignored {
+                                self.stack.last_mut().map(|last| last.entries_index += 1);
+                            } else {
+                                self.process_entry(&child.0, false);
+                                self.stack.push(StackEntry {
+                                    entries: inner.entries.clone(),
+                                    entries_index: 0,
+                                    search_checkpoint: self.search.get_checkpoint(),
+                                });
+                            }
                         },
-                        Entry::File(_) => {
-                            self.process_entry(&child.0, true);
-                            let mut last = self.stack.last_mut().unwrap();
-                            last.entries_index += 1;
-                            self.search.restore_checkpoint(last.search_checkpoint.clone());
+                        Entry::File(ref inner) => {
+                            if inner.ignored && !self.include_ignored {
+                                self.stack.last_mut().map(|last| last.entries_index += 1);
+                            } else {
+                                self.process_entry(&child.0, true);
+                                let mut last = self.stack.last_mut().unwrap();
+                                last.entries_index += 1;
+                                self.search.restore_checkpoint(last.search_checkpoint.clone());
+                            }
                         }
                     }
                 } else {
@@ -162,7 +175,7 @@ impl Stream for Search {
 impl Search {
     const DEFAULT_ENTRY_COUNT_PER_POLL: usize = 100000;
 
-    fn new(dir: &Arc<RwLock<DirInner>>, query: &str, max_results: usize) -> (Self, NotifyCellObserver<Vec<SearchResult>>) {
+    fn new(dir: &Arc<RwLock<DirInner>>, query: &str, max_results: usize, include_ignored: bool) -> (Self, NotifyCellObserver<Vec<SearchResult>>) {
         let (updates, updates_observer) = NotifyCell::weak(Vec::new());
         let mut search = FuzzySearch::new(query);
         search
@@ -172,6 +185,7 @@ impl Search {
         let search = Search {
             search,
             max_results,
+            include_ignored,
             updates,
             results: Vec::new(),
             stack: vec![StackEntry {
@@ -239,11 +253,11 @@ mod tests {
 
     #[test]
     fn test_insert() {
-        let root = Entry::dir(false);
-        assert_eq!(root.insert("a", Entry::file(false)), Ok(()));
-        assert_eq!(root.insert("c", Entry::file(false)), Ok(()));
-        assert_eq!(root.insert("b", Entry::file(false)), Ok(()));
-        assert_eq!(root.insert("a", Entry::file(false)), Err(()));
+        let root = Entry::dir(false, false);
+        assert_eq!(root.insert("a", Entry::file(false, false)), Ok(()));
+        assert_eq!(root.insert("c", Entry::file(false, false)), Ok(()));
+        assert_eq!(root.insert("b", Entry::file(false, false)), Ok(()));
+        assert_eq!(root.insert("a", Entry::file(false, false)), Err(()));
         assert_eq!(root.entry_names(), vec!["a", "b", "c"]);
     }
 
@@ -264,23 +278,23 @@ mod tests {
             }
         }));
 
-        let (mut search, results) = root.search("cde", 10).unwrap();
+        let (mut search, results) = root.search("cde", 10, true).unwrap();
         assert_eq!(search.poll(), Ok(Async::Ready(Some(()))));
         assert_eq!(results.get().unwrap()[0].string, "cats/dogs/eagles");
 
-        let (mut search, results) = root.search("og", 10).unwrap();
+        let (mut search, results) = root.search("og", 10, true).unwrap();
         assert_eq!(search.poll(), Ok(Async::Ready(Some(()))));
         assert_eq!(results.get().unwrap()[0].string, "accident/ogre");
     }
 
     fn build_directory(json: &serde_json::Value) -> Entry {
         let object = json.as_object().unwrap();
-        let result = Entry::dir(false);
+        let result = Entry::dir(false, false);
         for (key, value) in object {
             let child_entry = if value.is_object() {
                 build_directory(value)
             } else {
-                Entry::file(false)
+                Entry::file(false, false)
             };
             assert_eq!(result.insert(key, child_entry), Ok(()));
         }
