@@ -26,10 +26,15 @@ const SearchResultListItem = styled("li", {
   marginTop: '10px'
 });
 
+const SelectedSearchResultListItem = styled(SearchResultListItem, {
+  backgroundColor: 'blue'
+});
+
 module.exports = class FileFinder extends React.Component {
   constructor() {
     super();
     this.didChangeQuery = this.didChangeQuery.bind(this);
+    this.didKeyDown = this.didKeyDown.bind(this);
   }
 
   render() {
@@ -37,13 +42,16 @@ module.exports = class FileFinder extends React.Component {
       $(QueryInput, {
         $ref: (inputNode) => this.queryInput = inputNode,
         value: this.props.query,
-        onChange: this.didChangeQuery
+        onChange: this.didChangeQuery,
+        onKeyDown: this.didKeyDown,
       }),
-      $(SearchResultList, {}, ...this.props.results.map(this.renderSearchResult))
+      $(SearchResultList, {}, ...this.props.results.map((result, i) =>
+        this.renderSearchResult(result, i === this.props.selected_index)
+      ))
     );
   }
 
-  renderSearchResult(result) {
+  renderSearchResult(result, isSelected) {
     const path = result.string;
     const matchIndices = result.match_indices;
 
@@ -65,7 +73,8 @@ module.exports = class FileFinder extends React.Component {
       }
     }
 
-    return $(SearchResultListItem, null, ...children);
+    const item = isSelected ? SelectedSearchResultListItem : SearchResultListItem;
+    return $(item, null, ...children);
   }
 
   componentDidMount() {
@@ -77,5 +86,22 @@ module.exports = class FileFinder extends React.Component {
       type: "UpdateQuery",
       query: event.target.value
     });
+  }
+
+  didKeyDown(event) {
+    switch (event.key) {
+      case 'ArrowUp':
+        this.props.dispatch({type: 'SelectPrevious'});
+        break;
+      case 'ArrowDown':
+        this.props.dispatch({type: 'SelectNext'});
+        break;
+      case 'Enter':
+        this.props.dispatch({type: 'Confirm'});
+        break;
+      case 'Escape':
+        this.props.dispatch({type: 'Close'});
+        break;
+    }
   }
 };

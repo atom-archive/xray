@@ -89,7 +89,7 @@ class TextEditor extends React.Component {
   }
 
   handleKeyDown(event) {
-    if (event.key.length === 1) {
+    if (event.key.length === 1 && !event.metaKey) {
       this.props.dispatch({type: 'Edit', text: event.key});
       return;
     }

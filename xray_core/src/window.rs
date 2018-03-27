@@ -12,7 +12,7 @@ type BoxedExecutor = Box<future::Executor<BoxedSendableFuture>>;
 
 pub type ViewId = usize;
 
-pub trait View: Stream {
+pub trait View: Stream<Item = (), Error = ()> {
     fn component_name(&self) -> &'static str;
     fn will_mount(&mut self, _handle: WindowHandle) {}
     fn render(&self) -> serde_json::Value;
@@ -37,7 +37,7 @@ pub struct Inner {
     executor: Option<BoxedExecutor>
 }
 
-pub struct WindowHandle(Weak<RefCell<Inner>>);
+pub struct WindowHandle(Weak<RefCell<Inner>>, ViewId);
 
 pub struct ViewHandle {
     pub view_id: ViewId,
@@ -99,7 +99,7 @@ impl Window {
     }
 
     pub fn handle(&mut self) -> WindowHandle {
-        WindowHandle(Rc::downgrade(&self.0))
+        WindowHandle(Rc::downgrade(&self.0), 0)
     }
 }
 
@@ -204,7 +204,7 @@ impl WindowHandle {
         inner.height
     }
 
-    pub fn add_view<T: 'static + View<Item = (), Error = ()>>(&self, mut view: T) -> ViewHandle {
+    pub fn add_view<T: 'static + View>(&self, mut view: T) -> ViewHandle {
         let view_id = {
             let inner = self.0.upgrade().unwrap();
             let mut inner = inner.borrow_mut();
@@ -212,7 +212,7 @@ impl WindowHandle {
             inner.next_view_id - 1
         };
 
-        view.will_mount(WindowHandle(self.0.clone()));
+        view.will_mount(WindowHandle(self.0.clone(), view_id));
 
         let inner = self.0.upgrade().unwrap();
         let mut inner = inner.borrow_mut();
