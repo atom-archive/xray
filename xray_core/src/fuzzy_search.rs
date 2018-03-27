@@ -71,9 +71,9 @@ impl Search {
     }
 
     pub fn process<T: IntoIterator<Item = char>>(&mut self, characters: T, match_bonus: usize) -> &mut Self {
-        for character in characters {
-            let mut new_variants = Vec::new();
+        let mut new_variants = Vec::new();
 
+        for character in characters {
             for variant in &self.variants {
                 if let Some(query_character) = self.query.get(variant.query_index as usize) {
                     if character == *query_character {
@@ -98,7 +98,7 @@ impl Search {
                 }
             }
 
-            for new_variant in new_variants {
+            for new_variant in new_variants.drain(..) {
                 if self.variants.iter().all(|v|
                     v.query_index != new_variant.query_index || v.score <= new_variant.score
                 ) {
