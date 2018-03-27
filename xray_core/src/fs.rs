@@ -1,14 +1,14 @@
 use notify_cell::{NotifyCell, NotifyCellObserver, WeakNotifyCell};
 use parking_lot::RwLock;
 use std::ffi::{OsString, OsStr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::Arc;
 use std::iter::Iterator;
 use futures::{Async, Poll, Stream};
 use std::os::unix::ffi::OsStrExt;
 use std::usize;
-use fuzzy_search::{Search as FuzzySearch, SearchResult, Checkpoint};
+use fuzzy_search::{Search as FuzzySearch, Checkpoint};
 
 pub type Result<T> = result::Result<T, ()>;
 type Entries = Vec<(OsString, Entry)>;
@@ -50,6 +50,13 @@ pub struct Search {
 }
 
 pub struct SearchHandle(Arc<()>);
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SearchResult {
+    pub score: usize,
+    pub match_indices: Vec<u16>,
+    pub path: PathBuf,
+}
 
 struct StackEntry {
     entries: Arc<Entries>,
@@ -221,10 +228,21 @@ impl Search {
 
         if is_file {
             if let Some(result) = self.search.finish() {
-                match self.results.binary_search_by(|r| result.score.cmp(&r.score)) {
-                    Ok(index) | Err(index) => {
-                        self.results.insert(index, result);
-                        self.results.truncate(self.max_results);
+                if self.results.len() < self.max_results || result.score > self.results.last().unwrap().score {
+                    let mut path = PathBuf::new();
+                    for &StackEntry{ ref entries, entries_index, .. } in &self.stack {
+                        path.push(&entries[entries_index].0)
+                    }
+
+                    match self.results.binary_search_by(|r| result.score.cmp(&r.score)) {
+                        Ok(index) | Err(index) => {
+                            self.results.insert(index, SearchResult {
+                                score: result.score,
+                                match_indices: result.match_indices.to_vec(),
+                                path,
+                            });
+                            self.results.truncate(self.max_results);
+                        }
                     }
                 }
             }
@@ -280,11 +298,16 @@ mod tests {
 
         let (mut search, results) = root.search("cde", 10, true).unwrap();
         assert_eq!(search.poll(), Ok(Async::Ready(Some(()))));
-        assert_eq!(results.get().unwrap()[0].string, "cats/dogs/eagles");
+
+        for result in &results.get().unwrap() {
+            eprintln!("{:?}", result);
+        }
+
+        assert_eq!(results.get().unwrap()[0].path, PathBuf::from("cats/dogs/eagles"));
 
         let (mut search, results) = root.search("og", 10, true).unwrap();
         assert_eq!(search.poll(), Ok(Async::Ready(Some(()))));
-        assert_eq!(results.get().unwrap()[0].string, "accident/ogre");
+        assert_eq!(results.get().unwrap()[0].path, PathBuf::from("accident/ogre"));
     }
 
     fn build_directory(json: &serde_json::Value) -> Entry {

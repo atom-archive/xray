@@ -6,7 +6,7 @@ type MatchIndices = SmallVec<[u16; 12]>;
 pub struct Search {
     query: Vec<char>,
     variants: Vec<MatchVariant>,
-    characters: Vec<char>,
+    char_count: u16,
     subword_start_bonus: usize,
     consecutive_bonus: usize,
 }
@@ -14,14 +14,13 @@ pub struct Search {
 #[derive(Clone)]
 pub struct Checkpoint {
     variants_len: usize,
-    characters_len: usize,
+    char_count: u16,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchResult {
     pub score: usize,
-    pub match_indices: Vec<u16>,
-    pub string: String,
+    pub match_indices: MatchIndices,
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +34,7 @@ impl Search {
     pub fn new(query: &str) -> Self {
         Search {
             query: query.chars().map(|c| c.to_ascii_lowercase()).collect(),
-            characters: Vec::new(),
+            char_count: 0,
             variants: vec![
                 MatchVariant {
                     score: 0,
@@ -61,29 +60,30 @@ impl Search {
     pub fn get_checkpoint(&self) -> Checkpoint {
         Checkpoint{
             variants_len: self.variants.len(),
-            characters_len: self.characters.len(),
+            char_count: self.char_count,
         }
     }
 
     pub fn restore_checkpoint(&mut self, checkpoint: Checkpoint) {
         self.variants.truncate(checkpoint.variants_len);
-        self.characters.truncate(checkpoint.characters_len);
+        self.char_count = checkpoint.char_count;
     }
 
     pub fn process<T: IntoIterator<Item = char>>(&mut self, characters: T, match_bonus: usize) -> &mut Self {
         let mut new_variants = Vec::new();
 
+        let mut last_character = '\0';
         for character in characters {
             for variant in &self.variants {
                 if let Some(query_character) = self.query.get(variant.query_index as usize) {
                     if character == *query_character {
                         let mut new_variant = variant.clone();
-                        let match_index = self.characters.len() as u16;
+                        let match_index = self.char_count;
                         new_variant.query_index += 1;
                         new_variant.score += match_bonus;
 
                         // Apply a bonus if the current character is the start of a word.
-                        if self.characters.last().map_or(true, |c| !c.is_alphanumeric()) {
+                        if !last_character.is_alphanumeric() {
                             new_variant.score += self.subword_start_bonus;
                         }
 
@@ -106,7 +106,8 @@ impl Search {
                 }
             }
 
-            self.characters.push(character);
+            last_character = character;
+            self.char_count += 1;
         }
 
         self
@@ -118,9 +119,8 @@ impl Search {
             .filter(|v| v.query_index == query_len)
             .max_by_key(|v| v.score)
             .map(|v| SearchResult {
-                match_indices: v.match_indices.to_vec(),
+                match_indices: v.match_indices.clone(),
                 score: v.score,
-                string: self.characters.iter().collect(),
             })
     }
 }
@@ -134,8 +134,7 @@ mod tests {
         let mut search = Search::new("ace");
         let result = search.process("abcde".chars(), 1).finish();
         assert_eq!(result, Some(SearchResult {
-            string: String::from("abcde"),
-            match_indices: vec![0, 2, 4],
+            match_indices: MatchIndices::from_vec(vec![0, 2, 4]),
             score: 3,
         }));
     }
@@ -152,8 +151,7 @@ mod tests {
         let checkpoint = search.get_checkpoint();
         search.process("/defg".chars(), 1);
         assert_eq!(search.finish(), Some(SearchResult {
-            string: String::from("abc/defg"),
-            match_indices: vec![1, 7],
+            match_indices: MatchIndices::from_vec(vec![1, 7]),
             score: 2,
         }));
 
@@ -161,8 +159,7 @@ mod tests {
         search.restore_checkpoint(checkpoint);
         search.process("/debg".chars(), 1);
         assert_eq!(search.finish(), Some(SearchResult {
-            string: String::from("abc/debg"),
-            match_indices: vec![6, 7],
+            match_indices: MatchIndices::from_vec(vec![6, 7]),
             score: 12,
         }));
     }

@@ -1,6 +1,5 @@
 use futures::{Async, Poll, Stream};
 use std::path::PathBuf;
-use fuzzy_search::SearchResult;
 use fs;
 use window::{View, ViewRef, WindowHandle};
 use notify_cell::{NotifyCell, NotifyCellObserver};
@@ -17,8 +16,8 @@ pub struct FileFinderView<T: FileFinderViewDelegate> {
     query: String,
     include_ignored: bool,
     selected_index: usize,
-    search_results: Vec<SearchResult>,
-    search_updates: Option<NotifyCellObserver<Vec<SearchResult>>>,
+    search_results: Vec<fs::SearchResult>,
+    search_updates: Option<NotifyCellObserver<Vec<fs::SearchResult>>>,
     window_handle: Option<WindowHandle>,
     updates: NotifyCell<()>,
 }
@@ -129,7 +128,7 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
     fn confirm(&mut self) {
         if let Some(search_result) = self.search_results.get(self.selected_index) {
             self.delegate.map(|delegate|
-                delegate.did_confirm(PathBuf::from(search_result.string.clone()))
+                delegate.did_confirm(search_result.path.clone())
             );
         }
     }
