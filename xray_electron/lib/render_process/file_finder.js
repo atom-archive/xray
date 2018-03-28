@@ -1,4 +1,5 @@
 const React = require("react");
+const ReactDOM = require("react-dom");
 const { styled } = require("styletron-react");
 const $ = React.createElement;
 
@@ -26,9 +27,26 @@ const SearchResultListItem = styled("li", {
   marginTop: '10px'
 });
 
-const SelectedSearchResultListItem = styled(SearchResultListItem, {
-  backgroundColor: 'blue'
-});
+class SelectedSearchResultListItem extends React.Component {
+  render() {
+    return $(styled(SearchResultListItem, {
+      backgroundColor: 'blue'
+    }), {}, ...this.props.children);
+  }
+
+  componentDidMount() {
+    this.scrollIntoViewIfNeeded();
+  }
+
+  componentDidUpdate() {
+    this.scrollIntoViewIfNeeded()
+  }
+
+  scrollIntoViewIfNeeded() {
+    const domNode = ReactDOM.findDOMNode(this);
+    if (domNode) domNode.scrollIntoViewIfNeeded()
+  }
+}
 
 module.exports = class FileFinder extends React.Component {
   constructor() {
