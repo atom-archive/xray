@@ -17,6 +17,7 @@ pub mod window;
 pub mod workspace;
 pub mod fuzzy_search;
 mod file_finder;
+mod fuzzy;
 
 mod movement;
 mod tree;
