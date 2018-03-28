@@ -4,7 +4,7 @@ environment:
 install:
   - ps: Install-Product node $env:nodejs_version
   - appveyor DownloadFile https://win.rustup.rs/ -FileName rustup-init.exe
-  - rustup-init -yv --default-toolchain %channel% --default-host %target%
+  - rustup-init -yv --default-toolchain stable
   - set PATH=%PATH%;%USERPROFILE%\.cargo\bin
   - rustc -vV
   - cargo -vV
