@@ -1,10 +1,10 @@
+use futures::Stream;
 use parking_lot::RwLock;
-use std::ffi::{OsString, OsStr};
+use std::ffi::{OsStr, OsString};
+use std::iter::Iterator;
 use std::path::Path;
 use std::result;
 use std::sync::Arc;
-use std::iter::Iterator;
-use futures::Stream;
 
 pub type EntryId = u32;
 pub type Result<T> = result::Result<T, ()>;
@@ -28,7 +28,7 @@ pub struct DirInner {
     name_chars: Vec<char>,
     children: RwLock<Arc<Vec<Entry>>>,
     symlink: bool,
-    ignored: bool
+    ignored: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -37,7 +37,7 @@ pub struct FileInner {
     name: OsString,
     name_chars: Vec<char>,
     symlink: bool,
-    ignored: bool
+    ignored: bool,
 }
 
 impl Entry {
@@ -47,7 +47,7 @@ impl Entry {
             name_chars: name.to_string_lossy().chars().collect(),
             name,
             symlink,
-            ignored
+            ignored,
         }))
     }
 
@@ -58,35 +58,35 @@ impl Entry {
             name,
             children: RwLock::new(Arc::new(Vec::new())),
             symlink,
-            ignored
+            ignored,
         }))
     }
 
     pub fn is_dir(&self) -> bool {
         match self {
             &Entry::Dir(_) => true,
-            &Entry::File(_) => false
+            &Entry::File(_) => false,
         }
     }
 
     pub fn id(&self) -> EntryId {
         match self {
             &Entry::Dir(ref inner) => inner.id,
-            &Entry::File(ref inner) => inner.id
+            &Entry::File(ref inner) => inner.id,
         }
     }
 
     pub fn name(&self) -> &OsStr {
         match self {
             &Entry::Dir(ref inner) => &inner.name,
-            &Entry::File(ref inner) => &inner.name
+            &Entry::File(ref inner) => &inner.name,
         }
     }
 
     pub fn name_chars(&self) -> &[char] {
         match self {
             &Entry::Dir(ref inner) => &inner.name_chars,
-            &Entry::File(ref inner) => &inner.name_chars
+            &Entry::File(ref inner) => &inner.name_chars,
         }
     }
 
@@ -100,7 +100,7 @@ impl Entry {
     pub fn children(&self) -> Option<Arc<Vec<Entry>>> {
         match self {
             &Entry::Dir(ref inner) => Some(inner.children.read().clone()),
-            &Entry::File(..) => None
+            &Entry::File(..) => None,
         }
     }
 
@@ -121,7 +121,7 @@ impl Entry {
                         let new_name = new_entry.name();
                         match children.binary_search_by(|child| child.name().cmp(new_name)) {
                             Ok(_) => return Err(()), // An entry already exists with this name
-                            Err(index) => index
+                            Err(index) => index,
                         }
                     };
                     children.insert(index, new_entry);

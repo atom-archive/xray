@@ -1,6 +1,6 @@
+use std::f64;
 use std::fmt;
 use std::ops::{Index, IndexMut};
-use std::f64;
 
 pub type Score = f64;
 
@@ -15,16 +15,16 @@ const SCORE_MATCH_CAPITAL: Score = 0.7;
 const SCORE_MATCH_DOT: Score = 0.6;
 
 pub struct Matcher<'a> {
-    needle: &'a[char],
-    stack: Vec<usize>
+    needle: &'a [char],
+    stack: Vec<usize>,
 }
 
 pub struct Scorer<'a> {
-    needle: &'a[char],
+    needle: &'a [char],
     d: Matrix<Score>,
     m: Matrix<Score>,
     bonus_cache: Vec<Score>,
-    stack: Vec<usize>
+    stack: Vec<usize>,
 }
 
 struct Matrix<T> {
@@ -34,10 +34,10 @@ struct Matrix<T> {
 }
 
 impl<'a> Matcher<'a> {
-    pub fn new(needle: &'a[char]) -> Self {
+    pub fn new(needle: &'a [char]) -> Self {
         Self {
             needle,
-            stack: Vec::new()
+            stack: Vec::new(),
         }
     }
 
@@ -51,7 +51,7 @@ impl<'a> Matcher<'a> {
                     needle_index += 1;
                     if needle_index == self.needle.len() {
                         self.stack.push(needle_index);
-                        return true
+                        return true;
                     }
                 }
             }
@@ -66,13 +66,13 @@ impl<'a> Matcher<'a> {
 }
 
 impl<'a> Scorer<'a> {
-    pub fn new(needle: &'a[char]) -> Self {
+    pub fn new(needle: &'a [char]) -> Self {
         Self {
             d: Matrix::new(needle.len(), 0),
             m: Matrix::new(needle.len(), 0),
             needle,
             bonus_cache: Vec::new(),
-            stack: Vec::new()
+            stack: Vec::new(),
         }
     }
 
@@ -102,7 +102,8 @@ impl<'a> Scorer<'a> {
                 if needle_ch.eq_ignore_ascii_case(&haystack_ch) {
                     let score;
                     if i == 0 {
-                        score = (j as Score * SCORE_GAP_LEADING) + self.bonus_cache[j - haystack_start];
+                        score =
+                            (j as Score * SCORE_GAP_LEADING) + self.bonus_cache[j - haystack_start];
                     } else if j > 0 {
                         let score_1 = self.m[(i - 1, j - 1)] + self.bonus_cache[j - haystack_start];
                         let score_2 = self.d[(i - 1, j - 1)] + SCORE_MATCH_CONSECUTIVE;
@@ -128,11 +129,12 @@ impl<'a> Scorer<'a> {
             let mut match_required = false;
             let mut j = haystack_len - 1;
             for i in (0..needle_len).rev() {
-                while j != 0  {
-                    if self.d[(i, j)] != SCORE_MIN && (match_required || self.d[(i, j)] == self.m[(i, j)]) {
-                        match_required =
-                            i > 0 && j > 0 &&
-                            self.m[(i, j)] == self.d[(i - 1, j - 1)] + SCORE_MATCH_CONSECUTIVE;
+                while j != 0 {
+                    if self.d[(i, j)] != SCORE_MIN
+                        && (match_required || self.d[(i, j)] == self.m[(i, j)])
+                    {
+                        match_required = i > 0 && j > 0
+                            && self.m[(i, j)] == self.d[(i - 1, j - 1)] + SCORE_MATCH_CONSECUTIVE;
                         positions[i] = j;
                         j -= 1;
                         break;
@@ -167,13 +169,14 @@ impl<T: Clone + Default> Matrix<T> {
         Self {
             rows,
             cols,
-            buffer: Vec::with_capacity(rows * cols)
+            buffer: Vec::with_capacity(rows * cols),
         }
     }
 
     fn add_columns(&mut self, additional: usize) {
         let prev_len = self.buffer.len();
-        self.buffer.resize(prev_len + (self.rows * additional), T::default());
+        self.buffer
+            .resize(prev_len + (self.rows * additional), T::default());
         self.cols += additional;
     }
 
@@ -238,7 +241,6 @@ lazy_static! {
 
         table
     };
-
     static ref BONUS_STATES: [Score; 3 * 256] = {
         let mut table = [0_f64; 3 * 256];
 

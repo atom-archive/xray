@@ -1,11 +1,11 @@
+use fs;
+use futures::{Async, Future, Poll};
+use fuzzy;
+use notify_cell::{NotifyCell, NotifyCellObserver, WeakNotifyCell};
 use std::cmp;
+use std::collections::{BinaryHeap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::collections::{HashMap, BinaryHeap};
-use notify_cell::{NotifyCell, WeakNotifyCell, NotifyCellObserver};
-use futures::{Poll, Async, Future};
-use fuzzy;
-use fs;
 
 pub struct Project {
     pub trees: Vec<Box<fs::Tree>>,
@@ -36,7 +36,7 @@ pub struct PathSearchResult {
 struct StackEntry {
     children: Arc<Vec<fs::Entry>>,
     child_index: usize,
-    found_match: bool
+    found_match: bool,
 }
 
 enum MatchMarker {
@@ -49,7 +49,12 @@ impl Project {
         Project { trees }
     }
 
-    pub fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
+    pub fn search_paths(
+        &self,
+        needle: &str,
+        max_results: usize,
+        include_ignored: bool,
+    ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
         let (updates, updates_observer) = NotifyCell::weak(PathSearchStatus::Pending);
         let search = PathSearch {
             roots: Arc::new(self.trees.iter().map(|tree| tree.root().clone()).collect()),
@@ -97,7 +102,7 @@ impl PathSearch {
                     stack.push(StackEntry {
                         children: children,
                         child_index,
-                        found_match
+                        found_match,
                     });
                     children = next_children;
                     child_index = 0;
@@ -123,7 +128,10 @@ impl PathSearch {
         results
     }
 
-    fn rank_matches(&mut self, matches: HashMap<fs::EntryId, MatchMarker>) -> Vec<PathSearchResult> {
+    fn rank_matches(
+        &mut self,
+        matches: HashMap<fs::EntryId, MatchMarker>,
+    ) -> Vec<PathSearchResult> {
         let mut results: BinaryHeap<PathSearchResult> = BinaryHeap::new();
         let mut positions = Vec::with_capacity(self.needle.len());
         let mut scorer = fuzzy::Scorer::new(&self.needle);
@@ -143,9 +151,9 @@ impl PathSearch {
                             Some(&MatchMarker::IsMatch) => {
                                 found_match = true;
                                 true
-                            },
+                            }
                             Some(&MatchMarker::ContainsMatch) => true,
-                            None => false
+                            None => false,
                         }
                     };
                     if descend {
@@ -154,7 +162,7 @@ impl PathSearch {
                         stack.push(StackEntry {
                             child_index,
                             children,
-                            found_match
+                            found_match,
                         });
                         children = next_children;
                         child_index = 0;
@@ -163,10 +171,18 @@ impl PathSearch {
                     }
                 } else {
                     if found_match || matches.contains_key(&children[child_index].id()) {
-                        let score = scorer.push(children[child_index].name_chars(), Some(&mut positions));
-                        if results.len() < self.max_results || score > results.peek().map(|r| r.score).unwrap_or(fuzzy::SCORE_MIN) {
+                        let score =
+                            scorer.push(children[child_index].name_chars(), Some(&mut positions));
+                        if results.len() < self.max_results
+                            || score > results.peek().map(|r| r.score).unwrap_or(fuzzy::SCORE_MIN)
+                        {
                             let mut path = PathBuf::new();
-                            for &StackEntry { ref children, ref child_index, .. } in stack.iter() {
+                            for &StackEntry {
+                                ref children,
+                                ref child_index,
+                                ..
+                            } in stack.iter()
+                            {
                                 path.push(children[*child_index].name());
                             }
 
@@ -174,7 +190,7 @@ impl PathSearch {
                             results.push(PathSearchResult {
                                 score,
                                 path,
-                                positions: positions.clone()
+                                positions: positions.clone(),
                             })
                         }
                     }
