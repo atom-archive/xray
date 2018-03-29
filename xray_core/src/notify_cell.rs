@@ -29,6 +29,7 @@ struct Inner<T: Clone> {
     value: T,
     last_written_at: Version,
     subscribers: Vec<Task>,
+    dropped: bool
 }
 
 impl<T: Clone> NotifyCell<T> {
@@ -39,6 +40,7 @@ impl<T: Clone> NotifyCell<T> {
                 value,
                 last_written_at: 0,
                 subscribers: Vec::new(),
+                dropped: false
             }))
         }
     }
@@ -50,6 +52,7 @@ impl<T: Clone> NotifyCell<T> {
                 value,
                 last_written_at: 0,
                 subscribers: Vec::new(),
+                dropped: false
             }))
         };
         let weak_cell = WeakNotifyCell(Arc::downgrade(&observer.inner));
@@ -104,7 +107,9 @@ impl<T: Clone> Stream for NotifyCellObserver<T> {
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         let inner = self.inner.upgradable_read();
 
-        if self.last_polled_at < inner.last_written_at {
+        if inner.dropped {
+            Ok(Async::Ready(None))
+        } else if self.last_polled_at < inner.last_written_at {
             self.last_polled_at = inner.last_written_at;
             Ok(Async::Ready(Some(inner.value.clone())))
         } else {
@@ -133,13 +138,13 @@ impl<T: Clone> Stream for NotifyCell<T> {
         } else {
             self.observer.as_mut().unwrap().poll()
         }
-
     }
 }
 
 impl<T: Clone> Drop for NotifyCell<T> {
     fn drop(&mut self) {
         let mut inner = self.inner.write();
+        inner.dropped = true;
         for subscriber in inner.subscribers.drain(..) {
             subscriber.notify();
         }
@@ -218,13 +223,13 @@ mod tests {
     #[test]
     fn test_weak_notify_cell() {
         let (cell, observer) = NotifyCell::weak(1);
-        assert_eq!(observer.get(), Some(1));
+        assert_eq!(observer.get(), 1);
 
         assert_eq!(cell.try_set(2), Ok(()));
-        assert_eq!(observer.get(), Some(2));
+        assert_eq!(observer.get(), 2);
 
         assert_eq!(cell.try_set(3), Ok(()));
-        assert_eq!(observer.get(), Some(3));
+        assert_eq!(observer.get(), 3);
 
         drop(observer);
         assert_eq!(cell.try_set(4), Err(TrySetError::ObserverDisconnected));
