@@ -295,9 +295,9 @@ mod tests {
         assert_eq!(
             summarize_results(&observer.get()),
             Some(vec![
-                ("tree/root-1/subdir-1/file-2", vec![12, 13, 14, 26]),
-                ("tree/root-2/subdir-2/file-4", vec![12, 13, 14, 19]),
                 ("tree/root-2/subdir-2/file-3", vec![12, 13, 14, 19]),
+                ("tree/root-2/subdir-2/file-4", vec![12, 13, 14, 19]),
+                ("tree/root-1/subdir-1/file-2", vec![12, 13, 14, 26]),
             ])
         );
     }
