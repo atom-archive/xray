@@ -82,6 +82,10 @@ impl<T: Clone> NotifyCell<T> {
 }
 
 impl<T: Clone> WeakNotifyCell<T> {
+    pub fn has_observers(&self) -> bool {
+        self.0.upgrade().is_some()
+    }
+
     pub fn try_set(&self, value: T) -> Result<(), TrySetError> {
         let inner = self.0.upgrade().ok_or(TrySetError::ObserverDisconnected)?;
         let mut inner = inner.write();

@@ -78,8 +78,8 @@ impl Future for PathSearch {
         if self.needle.is_empty() {
             let _ = self.updates.try_set(PathSearchStatus::Ready(Vec::new()));
         } else {
-            let matches = self.find_matches();
-            let results = self.rank_matches(matches);
+            let matches = self.find_matches()?;
+            let results = self.rank_matches(matches)?;
             let _ = self.updates.try_set(PathSearchStatus::Ready(results));
         }
         Ok(Async::Ready(()))
@@ -87,16 +87,19 @@ impl Future for PathSearch {
 }
 
 impl PathSearch {
-    fn find_matches(&mut self) -> HashMap<fs::EntryId, MatchMarker> {
+    fn find_matches(&mut self) -> Result<HashMap<fs::EntryId, MatchMarker>, ()> {
         let mut results = HashMap::new();
         let mut matcher = fuzzy::Matcher::new(&self.needle);
 
-        let stack = &mut self.stack;
+        let mut steps_since_last_check = 0;
         let mut children = self.roots.clone();
         let mut child_index = 0;
         let mut found_match = false;
 
         loop {
+            self.check_cancellation(&mut steps_since_last_check, 10000)?;
+            let stack = &mut self.stack;
+
             if child_index < children.len() {
                 if children[child_index].is_ignored() {
                     child_index += 1;
@@ -138,24 +141,27 @@ impl PathSearch {
             }
         }
 
-        results
+        Ok(results)
     }
 
     fn rank_matches(
         &mut self,
         matches: HashMap<fs::EntryId, MatchMarker>,
-    ) -> Vec<PathSearchResult> {
+    ) -> Result<Vec<PathSearchResult>, ()> {
         let mut results: BinaryHeap<PathSearchResult> = BinaryHeap::new();
         let mut positions = Vec::new();
         positions.resize(self.needle.len(), 0);
         let mut scorer = fuzzy::Scorer::new(&self.needle);
 
-        let stack = &mut self.stack;
+        let mut steps_since_last_check = 0;
         let mut children = self.roots.clone();
         let mut child_index = 0;
         let mut found_match = false;
 
         loop {
+            self.check_cancellation(&mut steps_since_last_check, 1000)?;
+            let stack = &mut self.stack;
+
             if child_index < children.len() {
                 if children[child_index].is_ignored() && !self.include_ignored {
                     child_index += 1;
@@ -226,7 +232,21 @@ impl PathSearch {
         for i in 0..(sorted_results_len / 2) {
             sorted_results.swap(i, sorted_results_len - i - 1);
         }
-        sorted_results
+
+        Ok(sorted_results)
+    }
+
+    #[inline(always)]
+    fn check_cancellation(&self, steps_since_last_check: &mut usize, steps_between_checks: usize) -> Result<(), ()> {
+        *steps_since_last_check += 1;
+        if *steps_since_last_check == steps_between_checks {
+            if self.updates.has_observers() {
+                *steps_since_last_check = 0;
+            } else {
+                return Err(());
+            }
+        }
+        Ok(())
     }
 }
 
