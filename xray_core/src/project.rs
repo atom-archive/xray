@@ -97,6 +97,7 @@ impl PathSearch {
                     matcher.pop();
                     results.insert(children[child_index].id(), MatchMarker::IsMatch);
                     found_match = true;
+                    child_index += 1;
                 } else if children[child_index].is_dir() {
                     let next_children = children[child_index].children().unwrap();
                     stack.push(StackEntry {
@@ -189,6 +190,7 @@ impl PathSearch {
                             });
                         }
                     }
+                    child_index += 1;
                 }
             } else if stack.len() > 0 {
                 scorer.pop();
