@@ -88,7 +88,11 @@ impl<'a> Scorer<'a> {
         self.m.add_columns(component_len);
 
         for i in 0..needle_len {
-            let mut prev_score = SCORE_MIN;
+            let mut prev_score = if haystack_start > 0 {
+                self.m[(i, haystack_start - 1)]
+            } else {
+                SCORE_MIN
+            };
             let gap_score = if i == needle_len - 1 {
                 SCORE_GAP_TRAILING
             } else {
@@ -201,11 +205,11 @@ impl<T: Default> IndexMut<(usize, usize)> for Matrix<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Matrix<T> {
+impl fmt::Debug for Matrix<f64> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for row in 0..self.rows {
             for col in 0..self.cols {
-                write!(f, "{:?} ", self[(row, col)])?;
+                write!(f, "{:.2} ", self[(row, col)])?;
             }
             writeln!(f, "")?;
         }
@@ -274,7 +278,7 @@ mod tests {
         let mut search = Scorer::new(&needle);
         search.push(&to_chars("abc/"), None);
         search.push(&to_chars("abc"), Some(&mut positions));
-        assert_eq!(positions, &[4, 5, 6]);
+        assert_eq!(positions, &[0, 1, 2]);
     }
 
     #[test]
@@ -292,6 +296,12 @@ mod tests {
         search.pop();
         search.push(&to_chars("bar"), Some(&mut positions));
         assert_eq!(positions, &[4, 9, 10]);
+
+        search.pop();
+        search.pop();
+        search.push(&to_chars("ban/"), None);
+        search.push(&to_chars("dana"), Some(&mut positions));
+        assert_eq!(positions, &[4, 10, 11]);
     }
 
     fn to_chars(s: &str) -> Vec<char> {

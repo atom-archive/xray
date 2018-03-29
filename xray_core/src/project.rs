@@ -20,7 +20,7 @@ pub struct PathSearch {
     updates: WeakNotifyCell<PathSearchStatus>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PathSearchStatus {
     Pending,
     Ready(Vec<PathSearchResult>),
@@ -39,6 +39,7 @@ struct StackEntry {
     found_match: bool,
 }
 
+#[derive(Debug)]
 enum MatchMarker {
     ContainsMatch,
     IsMatch,
@@ -134,7 +135,8 @@ impl PathSearch {
         matches: HashMap<fs::EntryId, MatchMarker>,
     ) -> Vec<PathSearchResult> {
         let mut results: BinaryHeap<PathSearchResult> = BinaryHeap::new();
-        let mut positions = Vec::with_capacity(self.needle.len());
+        let mut positions = Vec::new();
+        positions.resize(self.needle.len(), 0);
         let mut scorer = fuzzy::Scorer::new(&self.needle);
 
         let stack = &mut self.stack;
@@ -172,7 +174,8 @@ impl PathSearch {
                     }
                 } else {
                     if found_match || matches.contains_key(&children[child_index].id()) {
-                        let score = scorer.push(children[child_index].name_chars(), Some(&mut positions));
+                        let score =
+                            scorer.push(children[child_index].name_chars(), Some(&mut positions));
                         scorer.pop();
                         if results.len() < self.max_results
                             || score > results.peek().map(|r| r.score).unwrap()
@@ -181,8 +184,11 @@ impl PathSearch {
                             for entry in stack.iter() {
                                 path.push(entry.children[entry.child_index].name());
                             }
+                            path.push(children[child_index].name());
 
-                            results.pop();
+                            if results.len() == self.max_results {
+                                results.pop();
+                            }
                             results.push(PathSearchResult {
                                 score,
                                 path,
@@ -228,3 +234,99 @@ impl PartialOrd for PathSearchResult {
 }
 
 impl Eq for PathSearchResult {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::Stream;
+    use serde_json;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    #[test]
+    fn test_search_one_tree() {
+        let tree = TestTree::from_json(
+            "tree",
+            json!({
+                "root-1": {
+                    "file-1": null,
+                    "subdir-1": {
+                        "file-1": null,
+                        "file-2": null,
+                    }
+                },
+                "root-2": {
+                    "subdir-2": {
+                        "file-3": null,
+                        "file-4": null,
+                    }
+                }
+            }),
+        );
+        let project = Project::new(vec![Box::new(tree)]);
+        let (mut search, observer) = project.search_paths("sub2", 10, true);
+
+        assert_eq!(search.poll(), Ok(Async::Ready(())));
+        assert_eq!(
+            to_result_paths(&observer.get()),
+            Some(vec![
+                "tree/root-1/subdir-1/file-2",
+                "tree/root-2/subdir-2/file-4",
+                "tree/root-2/subdir-2/file-3",
+            ])
+        );
+    }
+
+    fn to_result_paths(results: &PathSearchStatus) -> Option<Vec<&str>> {
+        match results {
+            &PathSearchStatus::Pending => None,
+            &PathSearchStatus::Ready(ref results) => {
+                Some(results.iter().map(|r| r.path.to_str().unwrap()).collect())
+            }
+        }
+    }
+
+    struct TestTree {
+        root: fs::Entry,
+        path: PathBuf,
+    }
+
+    impl fs::Tree for TestTree {
+        fn root(&self) -> &fs::Entry {
+            &self.root
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
+            unimplemented!()
+        }
+    }
+
+    impl TestTree {
+        fn from_json<T: Into<PathBuf>>(path: T, json: serde_json::Value) -> Self {
+            fn build_entry(id: &mut u32, name: &str, json: &serde_json::Value) -> fs::Entry {
+                if json.is_object() {
+                    let object = json.as_object().unwrap();
+                    let dir = fs::Entry::dir(*id, OsString::from(name), false, false);
+                    for (key, value) in object {
+                        *id += 1;
+                        let child_entry = build_entry(id, key, value);
+                        assert_eq!(dir.insert(child_entry), Ok(()));
+                    }
+                    dir
+                } else {
+                    fs::Entry::file(*id, OsString::from(name), false, false)
+                }
+            }
+
+            let path = path.into();
+            Self {
+                root: build_entry(&mut 0, path.to_str().unwrap(), &json),
+                path,
+            }
+        }
+    }
+}
