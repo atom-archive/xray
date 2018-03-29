@@ -98,6 +98,11 @@ impl PathSearch {
 
         loop {
             if child_index < children.len() {
+                if children[child_index].is_ignored() {
+                    child_index += 1;
+                    continue;
+                }
+
                 if matcher.push(&children[child_index].name_chars()) {
                     matcher.pop();
                     results.insert(children[child_index].id(), MatchMarker::IsMatch);
