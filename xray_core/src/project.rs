@@ -177,13 +177,8 @@ impl PathSearch {
                             || score > results.peek().map(|r| r.score).unwrap()
                         {
                             let mut path = PathBuf::new();
-                            for &StackEntry {
-                                ref children,
-                                ref child_index,
-                                ..
-                            } in stack.iter()
-                            {
-                                path.push(children[*child_index].name());
+                            for entry in stack.iter() {
+                                path.push(entry.children[entry.child_index].name());
                             }
 
                             results.pop();
@@ -191,7 +186,7 @@ impl PathSearch {
                                 score,
                                 path,
                                 positions: positions.clone(),
-                            })
+                            });
                         }
                     }
                 }
