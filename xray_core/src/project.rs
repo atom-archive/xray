@@ -75,9 +75,13 @@ impl Future for PathSearch {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let matches = self.find_matches();
-        let results = self.rank_matches(matches);
-        let _ = self.updates.try_set(PathSearchStatus::Ready(results));
+        if self.needle.is_empty() {
+            let _ = self.updates.try_set(PathSearchStatus::Ready(Vec::new()));
+        } else {
+            let matches = self.find_matches();
+            let results = self.rank_matches(matches);
+            let _ = self.updates.try_set(PathSearchStatus::Ready(results));
+        }
         Ok(Async::Ready(()))
     }
 }
