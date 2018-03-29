@@ -16,8 +16,6 @@ if (!SOCKET_PATH) {
   process.exit(1);
 }
 
-const INITIAL_MESSAGE = process.env.XRAY_INITIAL_MESSAGE;
-
 class XrayApplication {
   constructor (serverPath, socketPath) {
     this.serverPath = serverPath;
@@ -27,7 +25,7 @@ class XrayApplication {
     this.xrayClient = new XrayClient();
   }
 
-  async start (initialMessage) {
+  async start () {
     const serverProcess = spawn(this.serverPath, [], {stdio: ['ignore', 'pipe', 'inherit']});
     app.on('before-quit', () => serverProcess.kill());
 
@@ -45,9 +43,6 @@ class XrayApplication {
     await this.xrayClient.start(this.socketPath);
     this.xrayClient.addMessageListener(this._handleMessage.bind(this));
     this.xrayClient.sendMessage({type: 'StartApp'});
-    if (initialMessage) {
-      this.xrayClient.sendMessage(JSON.parse(initialMessage));
-    }
   }
 
   async _handleMessage (message) {
@@ -82,4 +77,6 @@ app.on('window-all-closed', function () {
 });
 
 const application = new XrayApplication(SERVER_PATH, SOCKET_PATH);
-application.start(INITIAL_MESSAGE);
+application.start().then(() => {
+  console.log('Listening');
+});

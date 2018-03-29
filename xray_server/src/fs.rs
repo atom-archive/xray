@@ -14,12 +14,13 @@ pub struct Tree {
 }
 
 impl Tree {
-    pub fn new<T: Into<PathBuf>>(path: T) -> Self {
+    pub fn new<T: Into<PathBuf>>(path: T) -> Result<Self, &'static str> {
         let path = path.into();
-        let root = fs::Entry::dir(OsString::from(path.file_name().unwrap()), false, false);
+        let file_name = OsString::from(path.file_name().ok_or("Path must have a filename")?);
+        let root = fs::Entry::dir(file_name, false, false);
         let updates = Arc::new(NotifyCell::new(()));
         Self::populate(path.clone(), root.clone(), updates.clone());
-        Self { path, root, updates }
+        Ok(Self { path, root, updates })
     }
 
     fn populate(path: PathBuf, root: fs::Entry, updates: Arc<NotifyCell<()>>) {

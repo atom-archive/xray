@@ -5,13 +5,15 @@ extern crate serde_derive;
 extern crate serde_json;
 
 use std::env;
-use std::process::Command;
-use std::path::Path;
+use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
 use std::error::Error;
 use docopt::Docopt;
 use std::os::unix::net::UnixStream;
 use serde_json::value::Value;
-use std::io::Write;
+use std::io::{Write, BufReader, BufRead};
+use std::process;
+use std::fs;
 
 const USAGE: &'static str = "
 Xray
@@ -26,52 +28,89 @@ Options:
 
 const DEFAULT_SOCKET_PATH: &'static str = "/tmp/xray.sock";
 
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ServerResponse {
+    Ok,
+    Error { description: String },
+}
+
 #[derive(Debug, Deserialize)]
 struct Args {
     flag_socket_path: Option<String>,
-    arg_path: Vec<String>,
+    arg_path: Vec<PathBuf>,
 }
 
 fn main() {
+    process::exit(match main_inner() {
+        Ok(()) => 0,
+        Err(description) => {
+            eprintln!("{}", description);
+            1
+        },
+    })
+}
+
+fn main_inner() -> Result<(), String> {
     let args: Args = Docopt::new(USAGE)
         .and_then(|d| d.deserialize())
         .unwrap_or_else(|e| e.exit());
-
-    let message = json!({
-        "type": "OpenWorkspace",
-        "paths": args.arg_path
-    });
 
     let socket_path = args.flag_socket_path
         .as_ref()
         .map_or(DEFAULT_SOCKET_PATH, |path| path.as_str());
 
-    if let Ok(mut socket) = UnixStream::connect(socket_path) {
-        write_to_socket(&mut socket, json!({ "type": "StartCli" }))
-            .expect("Failed to write to socket");
-        write_to_socket(&mut socket, message).expect("Failed to write to socket");
-        return;
-    }
+    let mut socket = UnixStream::connect(socket_path);
+    if socket.is_err() {
+        let electron_node_env = if cfg!(debug_assertions) {
+            "development"
+        } else {
+            "production"
+        };
 
-    let electron_node_env = if cfg!(debug_assertions) {
-        "development"
-    } else {
-        "production"
-    };
-
-    if let Ok(src_path) = env::var("XRAY_SRC_PATH") {
-        let src_path = Path::new(&src_path);
-        let electron_app_path = src_path.join("xray_electron");
+        let src_path = env::var("XRAY_SRC_PATH").map_err(|_| "Must specify the XRAY_SRC_PATH environment variable")?;
+        let electron_app_path = Path::new(&src_path).join("xray_electron");
         let electron_bin_path = electron_app_path.join("node_modules/.bin/electron");
-        Command::new(electron_bin_path)
+        let open_command = Command::new(electron_bin_path)
             .arg(electron_app_path)
             .env("XRAY_SOCKET_PATH", socket_path)
-            .env("XRAY_INITIAL_MESSAGE", message.to_string())
             .env("NODE_ENV", electron_node_env)
+            .stdout(Stdio::piped())
             .spawn()
-            .expect("Failed to open Xray app");
-    } else {
-        eprintln!("Must specify the XRAY_SRC_PATH environment variable");
+            .map_err(|error| format!("Failed to open Xray app {}", error))?;
+
+        let mut stdout = open_command.stdout.unwrap();
+        let mut reader = BufReader::new(&mut stdout);
+        let mut line = String::new();
+        while line != "Listening\n" {
+            reader.read_line(&mut line).expect("Error reading app output");
+        }
+        socket = UnixStream::connect(socket_path);
+    }
+
+    let mut socket = socket.expect("Failed to connect to server");
+    write_to_socket(&mut socket, json!({ "type": "StartCli" }))
+        .expect("Failed to write to socket");
+
+    let mut paths = Vec::new();
+    for path in args.arg_path {
+        paths.push(fs::canonicalize(&path)
+            .map_err(|error| format!("Invalid path {:?} - {}", path, error))?);
+    }
+
+    write_to_socket(&mut socket, json!({ "type": "OpenWorkspace", "paths": paths }))
+        .expect("Failed to write to socket");
+
+    let mut reader = BufReader::new(&mut socket);
+    let mut line = String::new();
+    reader.read_line(&mut line)
+        .expect("Error reading server response");
+    let response: ServerResponse = serde_json::from_str(&line)
+        .expect("Error parsing server response");
+
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { description } => Err(description),
     }
 }
 

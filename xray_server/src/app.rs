@@ -61,7 +61,7 @@ impl App {
                             Self::start_app(inner, outgoing, incoming);
                         }
                         IncomingMessage::StartCli => {
-                            Self::start_cli(inner, incoming);
+                            Self::start_cli(inner, outgoing, incoming);
                         }
                         IncomingMessage::StartWindow { window_id, height } => {
                             Self::start_window(inner, outgoing, incoming, window_id, height);
@@ -85,9 +85,9 @@ impl App {
             return;
         }
 
-        inner_borrow.app_channel = Some(tx);
+        inner_borrow.app_channel = Some(tx.clone());
 
-        let receive_incoming = Self::handle_app_messages(inner.clone(), incoming);
+        let receive_incoming = Self::handle_app_messages(inner.clone(), tx, incoming);
         let send_outgoing = outgoing
             .send_all(rx.map_err(|_| unreachable!()))
             .then(|_| Ok(()));
@@ -98,14 +98,15 @@ impl App {
         );
     }
 
-    fn start_cli<I>(inner: Rc<RefCell<Inner>>, incoming: I)
+    fn start_cli<O, I>(inner: Rc<RefCell<Inner>>, outgoing: O, incoming: I)
     where
+        O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
         inner
             .borrow_mut()
             .reactor
-            .spawn(Self::handle_app_messages(inner.clone(), incoming));
+            .spawn(Self::handle_app_messages(inner.clone(), outgoing, incoming));
     }
 
     fn start_window<O, I>(
@@ -146,32 +147,39 @@ impl App {
         );
     }
 
-    fn handle_app_messages<I>(
+    fn handle_app_messages<O, I>(
         inner: Rc<RefCell<Inner>>,
+        outgoing: O,
         incoming: I,
     ) -> Box<Future<Item = (), Error = ()>>
     where
+        O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        Box::new(
-            incoming
-                .for_each(move |message| {
-                    inner.borrow_mut().handle_app_message(message);
-                    Ok(())
-                })
-                .then(|_| Ok(())),
-        )
+        let responses = incoming
+            .map(move |message| {
+                inner.borrow_mut().handle_app_message(message)
+            })
+            .map_err(|_| unreachable!());
+        Box::new(outgoing.send_all(responses).then(|_| Ok(())))
     }
 }
 
 impl Inner {
-    fn handle_app_message(&mut self, message: IncomingMessage) {
+    fn handle_app_message(&mut self, message: IncomingMessage) -> OutgoingMessage {
         match message {
             IncomingMessage::OpenWorkspace { paths } => {
-                self.open_workspace(paths);
+                match self.open_workspace(paths) {
+                    Ok(()) => OutgoingMessage::Ok,
+                    Err(description) => OutgoingMessage::Error {
+                        description: description.to_string()
+                    }
+                }
             }
             _ => {
-                eprintln!("Unexpected message {:?}", message);
+                OutgoingMessage::Error {
+                    description: format!("Unexpected message {:?}", message)
+                }
             }
         }
     }
@@ -187,15 +195,19 @@ impl Inner {
         };
     }
 
-    fn open_workspace(&mut self, paths: Vec<PathBuf>) {
+    fn open_workspace(&mut self, paths: Vec<PathBuf>) -> Result<(), &'static str> {
         let window_id = self.next_window_id;
         self.next_window_id += 1;
 
         let background_executor = Box::new(CpuPool::new_num_cpus());
         let mut window = Window::new(Some(background_executor), 0.0);
 
+        if !paths.iter().all(|path| path.is_absolute()) {
+            return Err("All paths must be absolute");
+        }
+
         let roots = paths.iter()
-            .map(|path| Box::new(fs::Tree::new(path)) as Box<xray_core::fs::Tree>)
+            .map(|path| Box::new(fs::Tree::new(path).unwrap()) as Box<xray_core::fs::Tree>)
             .collect();
 
         let workspace_view_handle = window.handle().add_view(WorkspaceView::new(roots));
@@ -207,6 +219,8 @@ impl Inner {
                 .unbounded_send(OutgoingMessage::OpenWindow { window_id })
                 .expect("Tried to open a workspace with no connected app");
         }
+
+        Ok(())
     }
 
     fn dispatch_action(&mut self, window_id: WindowId, view_id: ViewId, action: serde_json::Value) {
