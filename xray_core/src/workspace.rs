@@ -1,3 +1,5 @@
+use project::{Project, PathSearch, PathSearchStatus};
+use notify_cell::NotifyCellObserver;
 use futures::{Poll, Stream};
 use serde_json;
 use std::cell::RefCell;
@@ -15,7 +17,7 @@ use fs;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
 
 pub struct WorkspaceView {
-    roots: Rc<Vec<Box<fs::Tree>>>,
+    project: Project,
     window_handle: Option<WindowHandle>,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
@@ -32,7 +34,7 @@ enum WorkspaceViewAction {
 impl WorkspaceView {
     pub fn new(roots: Vec<Box<fs::Tree>>) -> Self {
         WorkspaceView {
-            roots: Rc::new(roots),
+            project: Project::new(roots),
             modal_panel: None,
             center_pane: None,
             window_handle: None,
@@ -104,8 +106,8 @@ impl View for WorkspaceView {
 }
 
 impl FileFinderViewDelegate for WorkspaceView {
-    fn trees(&self) -> &Vec<Box<fs::Tree>> {
-        &self.roots
+    fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
+        self.project.search_paths(needle, max_results, include_ignored)
     }
 
     fn did_close(&mut self) {
@@ -114,7 +116,12 @@ impl FileFinderViewDelegate for WorkspaceView {
     }
 
     fn did_confirm(&mut self, path: PathBuf) {
-        self.center_pane = Some(self.window_handle.as_ref().unwrap().add_view(self.open_path(path)));
+        self.center_pane = Some(
+            self.window_handle
+                .as_ref()
+                .unwrap()
+                .add_view(self.open_path(path)),
+        );
         self.modal_panel = None;
         self.updates.set(());
     }

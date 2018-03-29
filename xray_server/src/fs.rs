@@ -1,4 +1,5 @@
 use futures::Stream;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -15,7 +16,7 @@ pub struct Tree {
 impl Tree {
     pub fn new<T: Into<PathBuf>>(path: T) -> Self {
         let path = path.into();
-        let root = fs::Entry::dir(false, false);
+        let root = fs::Entry::dir(0, OsString::from(path.file_name().unwrap()), false, false);
         let updates = Arc::new(NotifyCell::new(()));
         Self::populate(path.clone(), root.clone(), updates.clone());
         Self { path, root, updates }
@@ -24,6 +25,7 @@ impl Tree {
     fn populate(path: PathBuf, root: fs::Entry, updates: Arc<NotifyCell<()>>) {
         thread::spawn(move || {
             let mut stack = vec![root];
+            let next_entry_id = 1;
 
             let entries = WalkBuilder::new(path.clone())
                 .follow_links(true)
@@ -39,12 +41,12 @@ impl Tree {
                 let file_name = entry.file_name();
 
                 if file_type.is_dir() {
-                    let dir = fs::Entry::dir(file_type.is_symlink(), entry.ignored());
-                    stack.last_mut().unwrap().insert(file_name, dir.clone()).unwrap();
+                    let dir = fs::Entry::dir(next_entry_id, OsString::from(file_name), file_type.is_symlink(), entry.ignored());
+                    stack.last_mut().unwrap().insert(dir.clone()).unwrap();
                     stack.push(dir);
                 } else if file_type.is_file() {
-                    let file = fs::Entry::file(file_type.is_symlink(), entry.ignored());
-                    stack.last_mut().unwrap().insert(file_name, file).unwrap();
+                    let file = fs::Entry::file(next_entry_id, OsString::from(file_name), file_type.is_symlink(), entry.ignored());
+                    stack.last_mut().unwrap().insert(file).unwrap();
                 }
                 updates.set(());
             }

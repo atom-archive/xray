@@ -1,12 +1,12 @@
 use futures::{Async, Poll, Stream};
 use std::path::PathBuf;
-use fs;
+use project::{PathSearch, PathSearchStatus, PathSearchResult};
 use window::{View, ViewRef, WindowHandle};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use serde_json;
 
 pub trait FileFinderViewDelegate {
-    fn trees(&self) -> &Vec<Box<fs::Tree>>;
+    fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
     fn did_close(&mut self);
     fn did_confirm(&mut self, path: PathBuf);
 }
@@ -16,8 +16,8 @@ pub struct FileFinderView<T: FileFinderViewDelegate> {
     query: String,
     include_ignored: bool,
     selected_index: usize,
-    search_results: Vec<fs::SearchResult>,
-    search_updates: Option<NotifyCellObserver<Vec<fs::SearchResult>>>,
+    search_results: Vec<PathSearchResult>,
+    search_updates: Option<NotifyCellObserver<PathSearchStatus>>,
     window_handle: Option<WindowHandle>,
     updates: NotifyCell<()>,
 }
@@ -72,8 +72,14 @@ impl<T: FileFinderViewDelegate> Stream for FileFinderView<T> {
         let updates_poll = self.updates.poll()?;
         match (search_poll, updates_poll) {
             (Async::NotReady, Async::NotReady) => Ok(Async::NotReady),
-            (Async::Ready(Some(search_results)), _) => {
-                self.search_results = search_results;
+            (Async::Ready(Some(search_status)), _) => {
+                match search_status {
+                    PathSearchStatus::Pending => {},
+                    PathSearchStatus::Ready(results) => {
+                        self.search_results = results;
+                    },
+                }
+
                 Ok(Async::Ready(Some(())))
             },
             _ => Ok(Async::Ready(Some(())))
@@ -98,7 +104,7 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
     fn update_query(&mut self, query: String) {
         if self.query != query {
             self.query = query;
-            self.restart_search();
+            self.search();
             self.updates.set(());
         }
     }
@@ -106,7 +112,7 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
     fn update_include_ignored(&mut self, include_ignored: bool) {
         if self.include_ignored != include_ignored {
             self.include_ignored = include_ignored;
-            self.restart_search();
+            self.search();
             self.updates.set(());
         }
     }
@@ -137,16 +143,15 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
         self.delegate.map(|delegate| delegate.did_close());
     }
 
-    fn restart_search(&mut self) {
+    fn search(&mut self) {
         let search = self.delegate.map(|delegate|
-            delegate.trees()[0]
-                .root()
-                .search(&self.query, 10, self.include_ignored)
+            delegate.search_paths(&self.query, 10, self.include_ignored)
         );
 
-        if let Some(Ok((search, search_updates))) = search {
+        if let Some((search, search_updates)) = search {
             self.search_updates = Some(search_updates);
-            self.window_handle.as_ref().unwrap().spawn(search.for_each(|_| Ok(())));
+            self.window_handle.as_ref().unwrap().spawn(search);
+            self.updates.set(());
         }
     }
 }

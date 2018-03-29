@@ -15,9 +15,9 @@ pub mod fs;
 pub mod notify_cell;
 pub mod window;
 pub mod workspace;
-pub mod fuzzy_search;
+
 mod file_finder;
 mod fuzzy;
-
+mod project;
 mod movement;
 mod tree;
