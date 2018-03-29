@@ -52,9 +52,11 @@ impl Entry {
     }
 
     pub fn dir(id: EntryId, name: OsString, symlink: bool, ignored: bool) -> Self {
+        let mut name_chars: Vec<char> = name.to_string_lossy().chars().collect();
+        name_chars.push('/');
         Entry::Dir(Arc::new(DirInner {
             id,
-            name_chars: name.to_string_lossy().chars().collect(),
+            name_chars,
             name,
             children: RwLock::new(Arc::new(Vec::new())),
             symlink,

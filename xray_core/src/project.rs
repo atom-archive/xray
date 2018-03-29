@@ -268,20 +268,20 @@ mod tests {
 
         assert_eq!(search.poll(), Ok(Async::Ready(())));
         assert_eq!(
-            to_result_paths(&observer.get()),
+            summarize_results(&observer.get()),
             Some(vec![
-                "tree/root-1/subdir-1/file-2",
-                "tree/root-2/subdir-2/file-4",
-                "tree/root-2/subdir-2/file-3",
+                ("tree/root-1/subdir-1/file-2", vec![12, 13, 14, 26]),
+                ("tree/root-2/subdir-2/file-4", vec![12, 13, 14, 19]),
+                ("tree/root-2/subdir-2/file-3", vec![12, 13, 14, 19]),
             ])
         );
     }
 
-    fn to_result_paths(results: &PathSearchStatus) -> Option<Vec<&str>> {
+    fn summarize_results(results: &PathSearchStatus) -> Option<Vec<(&str, Vec<usize>)>> {
         match results {
             &PathSearchStatus::Pending => None,
             &PathSearchStatus::Ready(ref results) => {
-                Some(results.iter().map(|r| r.path.to_str().unwrap()).collect())
+                Some(results.iter().map(|r| (r.path.to_str().unwrap(), r.positions.clone())).collect())
             }
         }
     }
