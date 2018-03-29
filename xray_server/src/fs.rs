@@ -25,7 +25,7 @@ impl Tree {
     fn populate(path: PathBuf, root: fs::Entry, updates: Arc<NotifyCell<()>>) {
         thread::spawn(move || {
             let mut stack = vec![root];
-            let next_entry_id = 1;
+            let mut next_entry_id = 1;
 
             let entries = WalkBuilder::new(path.clone())
                 .follow_links(true)
@@ -48,6 +48,7 @@ impl Tree {
                     let file = fs::Entry::file(next_entry_id, OsString::from(file_name), file_type.is_symlink(), entry.ignored());
                     stack.last_mut().unwrap().insert(file).unwrap();
                 }
+                next_entry_id += 1;
                 updates.set(());
             }
         });
