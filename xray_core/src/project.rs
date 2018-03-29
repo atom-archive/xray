@@ -227,13 +227,7 @@ impl PathSearch {
             }
         }
 
-        let mut sorted_results = results.into_sorted_vec();
-        let sorted_results_len = sorted_results.len();
-        for i in 0..(sorted_results_len / 2) {
-            sorted_results.swap(i, sorted_results_len - i - 1);
-        }
-
-        Ok(sorted_results)
+        Ok(results.into_sorted_vec())
     }
 
     #[inline(always)]
