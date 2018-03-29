@@ -270,25 +270,31 @@ mod tests {
     #[test]
     fn test_basic() {
         let mut positions = [0; 3].to_vec();
-        let mut search = Scorer::new("abc".to_owned());
-        search.push(b"abc/", None);
-        search.push(b"abc", Some(&mut positions));
+        let needle = to_chars("abc");
+        let mut search = Scorer::new(&needle);
+        search.push(&to_chars("abc/"), None);
+        search.push(&to_chars("abc"), Some(&mut positions));
         assert_eq!(positions, &[4, 5, 6]);
     }
 
     #[test]
     fn test_push_pop() {
         let mut positions = [0; 3].to_vec();
-        let mut search = Scorer::new("bna".to_owned());
-        search.push(b"abc/", None);
-        search.push(b"bandana/", None);
-        search.push(b"banana/", None);
-        search.push(b"foo", Some(&mut positions));
+        let needle = to_chars("bna");
+        let mut search = Scorer::new(&needle);
+        search.push(&to_chars("abc/"), None);
+        search.push(&to_chars("bandana/"), None);
+        search.push(&to_chars("banana/"), None);
+        search.push(&to_chars("foo"), Some(&mut positions));
         assert_eq!(positions, &[12, 14, 15]);
 
         search.pop();
         search.pop();
-        search.push(b"bar", Some(&mut positions));
+        search.push(&to_chars("bar"), Some(&mut positions));
         assert_eq!(positions, &[4, 9, 10]);
+    }
+
+    fn to_chars(s: &str) -> Vec<char> {
+        s.chars().collect()
     }
 }

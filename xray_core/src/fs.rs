@@ -142,10 +142,10 @@ mod tests {
         fn entry_names(&self) -> Vec<String> {
             match self {
                 &Entry::Dir(ref inner) => inner
-                    .read()
                     .children
+                    .read()
                     .iter()
-                    .map(|&(ref name, _)| name.clone().into_string().unwrap())
+                    .map(|ref entry| entry.name().to_string_lossy().into_owned())
                     .collect(),
                 _ => panic!(),
             }
@@ -154,25 +154,23 @@ mod tests {
 
     #[test]
     fn test_insert() {
-        let root = Entry::dir(0, false, false);
-        assert_eq!(root.insert("a", Entry::file(1, false, false)), Ok(()));
-        assert_eq!(root.insert("c", Entry::file(2, false, false)), Ok(()));
-        assert_eq!(root.insert("b", Entry::file(3, false, false)), Ok(()));
-        assert_eq!(root.insert("a", Entry::file(4, false, false)), Err(()));
+        let root = Entry::dir(0, OsString::from("root"), false, false);
+        assert_eq!(
+            root.insert(Entry::file(1, OsString::from("a"), false, false)),
+            Ok(())
+        );
+        assert_eq!(
+            root.insert(Entry::file(2, OsString::from("c"), false, false)),
+            Ok(())
+        );
+        assert_eq!(
+            root.insert(Entry::file(3, OsString::from("b"), false, false)),
+            Ok(())
+        );
+        assert_eq!(
+            root.insert(Entry::file(4, OsString::from("a"), false, false)),
+            Err(())
+        );
         assert_eq!(root.entry_names(), vec!["a", "b", "c"]);
-    }
-
-    fn build_directory(json: &serde_json::Value) -> Entry {
-        let object = json.as_object().unwrap();
-        let result = Entry::dir(false, false);
-        for (key, value) in object {
-            let child_entry = if value.is_object() {
-                build_directory(value)
-            } else {
-                Entry::file(false, false)
-            };
-            assert_eq!(result.insert(key, child_entry), Ok(()));
-        }
-        result
     }
 }
