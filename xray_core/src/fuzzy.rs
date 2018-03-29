@@ -42,18 +42,22 @@ impl<'a> Matcher<'a> {
     }
 
     pub fn push(&mut self, component: &[char]) -> bool {
-        let mut needle_index = self.stack.last().cloned().unwrap_or(0);
-        for ch in component {
-            if self.needle[needle_index].eq_ignore_ascii_case(ch) {
-                needle_index += 1;
-                if needle_index == self.needle.len() {
-                    self.stack.push(needle_index);
-                    return true
+        if self.needle.is_empty() {
+            true
+        } else {
+            let mut needle_index = self.stack.last().cloned().unwrap_or(0);
+            for ch in component {
+                if self.needle[needle_index].eq_ignore_ascii_case(ch) {
+                    needle_index += 1;
+                    if needle_index == self.needle.len() {
+                        self.stack.push(needle_index);
+                        return true
+                    }
                 }
             }
+            self.stack.push(needle_index);
+            false
         }
-        self.stack.push(needle_index);
-        false
     }
 
     pub fn pop(&mut self) {
