@@ -272,35 +272,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_basic() {
-        let mut positions = [0; 3].to_vec();
+    fn test_matcher() {
         let needle = to_chars("abc");
-        let mut search = Scorer::new(&needle);
-        search.push(&to_chars("abc/"), None);
-        search.push(&to_chars("abc"), Some(&mut positions));
-        assert_eq!(positions, &[0, 1, 2]);
+        let mut matcher = Matcher::new(&needle);
+        assert_eq!(matcher.push(&to_chars("abra/")), false);
+        assert_eq!(matcher.push(&to_chars("cadabra")), true);
+        matcher.pop();
+        assert_eq!(matcher.push(&to_chars("ham/")), false);
+        assert_eq!(matcher.push(&to_chars("lincoln")), true);
     }
 
     #[test]
-    fn test_push_pop() {
+    fn test_scorer() {
         let mut positions = [0; 3].to_vec();
         let needle = to_chars("bna");
-        let mut search = Scorer::new(&needle);
-        search.push(&to_chars("abc/"), None);
-        search.push(&to_chars("bandana/"), None);
-        search.push(&to_chars("banana/"), None);
-        search.push(&to_chars("foo"), Some(&mut positions));
+        let mut scorer = Scorer::new(&needle);
+        scorer.push(&to_chars("abc/"), None);
+        scorer.push(&to_chars("bandana/"), None);
+        scorer.push(&to_chars("banana/"), None);
+        scorer.push(&to_chars("foo"), Some(&mut positions));
         assert_eq!(positions, &[12, 14, 15]);
 
-        search.pop();
-        search.pop();
-        search.push(&to_chars("bar"), Some(&mut positions));
+        scorer.pop();
+        scorer.pop();
+        scorer.push(&to_chars("bar"), Some(&mut positions));
         assert_eq!(positions, &[4, 9, 10]);
 
-        search.pop();
-        search.pop();
-        search.push(&to_chars("ban/"), None);
-        search.push(&to_chars("dana"), Some(&mut positions));
+        scorer.pop();
+        scorer.pop();
+        scorer.push(&to_chars("ban/"), None);
+        scorer.push(&to_chars("dana"), Some(&mut positions));
         assert_eq!(positions, &[4, 10, 11]);
     }
 
