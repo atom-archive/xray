@@ -174,7 +174,7 @@ impl PathSearch {
                         let score =
                             scorer.push(children[child_index].name_chars(), Some(&mut positions));
                         if results.len() < self.max_results
-                            || score > results.peek().map(|r| r.score).unwrap_or(fuzzy::SCORE_MIN)
+                            || score > results.peek().map(|r| r.score).unwrap()
                         {
                             let mut path = PathBuf::new();
                             for &StackEntry {
