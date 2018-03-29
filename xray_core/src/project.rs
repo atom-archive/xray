@@ -114,9 +114,11 @@ impl PathSearch {
                     child_index = 0;
                     found_match = false;
                 } else {
+                    matcher.pop();
                     child_index += 1;
                 }
             } else if stack.len() > 0 {
+                matcher.pop();
                 let entry = stack.pop().unwrap();
                 children = entry.children;
                 child_index = entry.child_index;
