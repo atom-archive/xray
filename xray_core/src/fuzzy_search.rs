@@ -71,19 +71,26 @@ impl Search {
 
     pub fn process<T: IntoIterator<Item = char>>(&mut self, characters: T, match_bonus: usize) -> &mut Self {
         let mut new_variants = Vec::new();
+        let previous_variants_len = self.variants.len();
 
-        let mut last_character = '\0';
+        let mut last_character_is_alphanumeric = false;
         for character in characters {
-            for variant in &self.variants {
+            for (variant_index, variant) in self.variants.iter_mut().enumerate() {
                 if let Some(query_character) = self.query.get(variant.query_index as usize) {
                     if character == *query_character {
-                        let mut new_variant = variant.clone();
+                        let mut new_variant = if variant_index >= previous_variants_len {
+                            variant
+                        } else {
+                            new_variants.push(variant.clone());
+                            new_variants.last_mut().unwrap()
+                        };
+
                         let match_index = self.char_count;
                         new_variant.query_index += 1;
                         new_variant.score += match_bonus;
 
                         // Apply a bonus if the current character is the start of a word.
-                        if !last_character.is_alphanumeric() {
+                        if last_character_is_alphanumeric {
                             new_variant.score += self.subword_start_bonus;
                         }
 
@@ -93,7 +100,6 @@ impl Search {
                         }
 
                         new_variant.match_indices.push(match_index);
-                        new_variants.push(new_variant);
                     }
                 }
             }
@@ -106,7 +112,7 @@ impl Search {
                 }
             }
 
-            last_character = character;
+            last_character_is_alphanumeric = character.is_alphanumeric();
             self.char_count += 1;
         }
 
