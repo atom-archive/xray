@@ -6,7 +6,7 @@ use std::path::Path;
 use std::result;
 use std::sync::Arc;
 
-pub type EntryId = u32;
+pub type EntryId = usize;
 pub type Result<T> = result::Result<T, ()>;
 
 pub trait Tree {
@@ -23,7 +23,6 @@ pub enum Entry {
 
 #[derive(Debug)]
 pub struct DirInner {
-    id: EntryId,
     name: OsString,
     name_chars: Vec<char>,
     children: RwLock<Arc<Vec<Entry>>>,
@@ -33,7 +32,6 @@ pub struct DirInner {
 
 #[derive(Clone, Debug)]
 pub struct FileInner {
-    id: EntryId,
     name: OsString,
     name_chars: Vec<char>,
     symlink: bool,
@@ -41,9 +39,8 @@ pub struct FileInner {
 }
 
 impl Entry {
-    pub fn file(id: EntryId, name: OsString, symlink: bool, ignored: bool) -> Self {
+    pub fn file(name: OsString, symlink: bool, ignored: bool) -> Self {
         Entry::File(Arc::new(FileInner {
-            id,
             name_chars: name.to_string_lossy().chars().collect(),
             name,
             symlink,
@@ -51,11 +48,10 @@ impl Entry {
         }))
     }
 
-    pub fn dir(id: EntryId, name: OsString, symlink: bool, ignored: bool) -> Self {
+    pub fn dir(name: OsString, symlink: bool, ignored: bool) -> Self {
         let mut name_chars: Vec<char> = name.to_string_lossy().chars().collect();
         name_chars.push('/');
         Entry::Dir(Arc::new(DirInner {
-            id,
             name_chars,
             name,
             children: RwLock::new(Arc::new(Vec::new())),
@@ -73,8 +69,8 @@ impl Entry {
 
     pub fn id(&self) -> EntryId {
         match self {
-            &Entry::Dir(ref inner) => inner.id,
-            &Entry::File(ref inner) => inner.id,
+            &Entry::Dir(ref inner) => inner.as_ref() as *const DirInner as EntryId,
+            &Entry::File(ref inner) => inner.as_ref() as *const FileInner as EntryId,
         }
     }
 
@@ -138,7 +134,6 @@ impl Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json;
 
     impl Entry {
         fn entry_names(&self) -> Vec<String> {
@@ -156,21 +151,21 @@ mod tests {
 
     #[test]
     fn test_insert() {
-        let root = Entry::dir(0, OsString::from("root"), false, false);
+        let root = Entry::dir(OsString::from("root"), false, false);
         assert_eq!(
-            root.insert(Entry::file(1, OsString::from("a"), false, false)),
+            root.insert(Entry::file(OsString::from("a"), false, false)),
             Ok(())
         );
         assert_eq!(
-            root.insert(Entry::file(2, OsString::from("c"), false, false)),
+            root.insert(Entry::file(OsString::from("c"), false, false)),
             Ok(())
         );
         assert_eq!(
-            root.insert(Entry::file(3, OsString::from("b"), false, false)),
+            root.insert(Entry::file(OsString::from("b"), false, false)),
             Ok(())
         );
         assert_eq!(
-            root.insert(Entry::file(4, OsString::from("a"), false, false)),
+            root.insert(Entry::file(OsString::from("a"), false, false)),
             Err(())
         );
         assert_eq!(root.entry_names(), vec!["a", "b", "c"]);

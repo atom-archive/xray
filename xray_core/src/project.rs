@@ -318,24 +318,23 @@ mod tests {
 
     impl TestTree {
         fn from_json<T: Into<PathBuf>>(path: T, json: serde_json::Value) -> Self {
-            fn build_entry(id: &mut u32, name: &str, json: &serde_json::Value) -> fs::Entry {
+            fn build_entry(name: &str, json: &serde_json::Value) -> fs::Entry {
                 if json.is_object() {
                     let object = json.as_object().unwrap();
-                    let dir = fs::Entry::dir(*id, OsString::from(name), false, false);
+                    let dir = fs::Entry::dir(OsString::from(name), false, false);
                     for (key, value) in object {
-                        *id += 1;
-                        let child_entry = build_entry(id, key, value);
+                        let child_entry = build_entry(key, value);
                         assert_eq!(dir.insert(child_entry), Ok(()));
                     }
                     dir
                 } else {
-                    fs::Entry::file(*id, OsString::from(name), false, false)
+                    fs::Entry::file(OsString::from(name), false, false)
                 }
             }
 
             let path = path.into();
             Self {
-                root: build_entry(&mut 0, path.to_str().unwrap(), &json),
+                root: build_entry(path.to_str().unwrap(), &json),
                 path,
             }
         }
