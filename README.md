@@ -162,10 +162,6 @@ By May 1, we'd like it to be possible for multiple Xray clients to connect to a 
 * [ ] File finder
 * [ ] Load and save buffers
 * [ ] Key bindings system
-* [ ] Flesh out basic editor experience
-  * [ ] Gutter with line numbers
-  * [ ] Autoscroll
-  * [ ] Low-hanging movement and editing operations
 * [ ] Remote headless workspace
   * [ ] File finder
   * [ ] Loading a buffer
@@ -173,6 +169,11 @@ By May 1, we'd like it to be possible for multiple Xray clients to connect to a 
   * [ ] Saving
   * [ ] Discussions
   * [ ] Following
+* [ ] Flesh out basic editor experience
+  * [ ] Gutter with line numbers
+  * [ ] Autoscroll
+  * [ ] Easy movement and editing operations
+  * [ ] Mouse interaction
 
 ## Q2 2018
 
