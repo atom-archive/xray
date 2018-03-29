@@ -171,8 +171,8 @@ impl PathSearch {
                     }
                 } else {
                     if found_match || matches.contains_key(&children[child_index].id()) {
-                        let score =
-                            scorer.push(children[child_index].name_chars(), Some(&mut positions));
+                        let score = scorer.push(children[child_index].name_chars(), Some(&mut positions));
+                        scorer.pop();
                         if results.len() < self.max_results
                             || score > results.peek().map(|r| r.score).unwrap()
                         {
