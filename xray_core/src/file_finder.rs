@@ -1,7 +1,7 @@
 use futures::{Async, Poll, Stream};
 use std::path::PathBuf;
 use project::{PathSearch, PathSearchStatus, PathSearchResult};
-use window::{View, ViewRef, WindowHandle};
+use window::{View, WeakViewHandle, WindowHandle};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use serde_json;
 
@@ -12,7 +12,7 @@ pub trait FileFinderViewDelegate {
 }
 
 pub struct FileFinderView<T: FileFinderViewDelegate> {
-    delegate: ViewRef<T>,
+    delegate: WeakViewHandle<T>,
     query: String,
     include_ignored: bool,
     selected_index: usize,
@@ -88,7 +88,7 @@ impl<T: FileFinderViewDelegate> Stream for FileFinderView<T> {
 }
 
 impl<T: FileFinderViewDelegate> FileFinderView<T> {
-    pub fn new(delegate: ViewRef<T>) -> Self {
+    pub fn new(delegate: WeakViewHandle<T>) -> Self {
         Self {
             delegate,
             query: String::new(),

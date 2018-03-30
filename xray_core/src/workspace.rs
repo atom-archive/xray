@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
-use window::{View, ViewHandle, ViewRef, WindowHandle};
+use window::{View, ViewHandle, WeakViewHandle, WindowHandle};
 use buffer::Buffer;
 use buffer_view::BufferView;
 use notify_cell::NotifyCell;
@@ -22,7 +22,7 @@ pub struct WorkspaceView {
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
-    weak_ref: Option<ViewRef<WorkspaceView>>,
+    weak_ref: Option<WeakViewHandle<WorkspaceView>>,
 }
 
 #[derive(Deserialize)]
@@ -93,7 +93,7 @@ impl View for WorkspaceView {
         self.window_handle = Some(window_handle);
     }
 
-    fn set_view_ref(&mut self, view_ref: ViewRef<WorkspaceView>) {
+    fn set_view_ref(&mut self, view_ref: WeakViewHandle<WorkspaceView>) {
         self.weak_ref = Some(view_ref);
     }
 

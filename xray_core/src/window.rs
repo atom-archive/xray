@@ -17,24 +17,7 @@ pub trait View: Stream<Item = (), Error = ()> {
     fn will_mount(&mut self, _handle: WindowHandle) {}
     fn render(&self) -> serde_json::Value;
     fn dispatch_action(&mut self, serde_json::Value) {}
-    fn set_view_ref(&mut self, _ref: ViewRef<Self>) where Self: Sized {}
-}
-
-pub struct ViewRef<T>(Weak<RefCell<T>>);
-
-impl<T> ViewRef<T> {
-    pub fn map<F, R>(&self, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut T) -> R
-    {
-        self.0.upgrade().map(|view| f(&mut *view.borrow_mut()))
-    }
-}
-
-impl<T> Clone for ViewRef<T> {
-    fn clone(&self) -> Self {
-        ViewRef(self.0.clone())
-    }
+    fn set_view_ref(&mut self, _ref: WeakViewHandle<Self>) where Self: Sized {}
 }
 
 pub struct Window(Rc<RefCell<Inner>>, Option<ViewHandle>);
@@ -61,6 +44,8 @@ pub struct ViewHandle {
     pub view_id: ViewId,
     inner: Weak<RefCell<Inner>>,
 }
+
+pub struct WeakViewHandle<T>(Weak<RefCell<T>>);
 
 #[derive(Serialize, Debug)]
 pub struct WindowUpdate {
@@ -233,7 +218,7 @@ impl WindowHandle {
         view.will_mount(WindowHandle(self.0.clone()));
         let view_rc = Rc::new(RefCell::new(view));
         let weak_view = Rc::downgrade(&view_rc);
-        view_rc.borrow_mut().set_view_ref(ViewRef(weak_view));
+        view_rc.borrow_mut().set_view_ref(WeakViewHandle(weak_view));
 
         let inner = self.0.upgrade().unwrap();
         let mut inner = inner.borrow_mut();
@@ -261,6 +246,21 @@ impl Drop for ViewHandle {
             inner.removed.insert(self.view_id);
             inner.update_stream_task.take().map(|task| task.notify());
         }
+    }
+}
+
+impl<T> WeakViewHandle<T> {
+    pub fn map<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut T) -> R
+    {
+        self.0.upgrade().map(|view| f(&mut *view.borrow_mut()))
+    }
+}
+
+impl<T> Clone for WeakViewHandle<T> {
+    fn clone(&self) -> Self {
+        WeakViewHandle(self.0.clone())
     }
 }
 
