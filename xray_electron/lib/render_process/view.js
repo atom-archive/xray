@@ -37,7 +37,7 @@ class View extends React.Component {
     const component = viewRegistry.getComponent(id);
     const props = viewRegistry.getProps(id);
     const dispatch = action => viewRegistry.dispatchAction(id, action);
-    return $(component, Object.assign({ dispatch }, props));
+    return $(component, Object.assign({ dispatch, key: id }, props));
   }
 }
 
