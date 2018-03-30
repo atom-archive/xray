@@ -134,7 +134,7 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
     fn confirm(&mut self) {
         if let Some(search_result) = self.search_results.get(self.selected_index) {
             self.delegate.map(|delegate|
-                delegate.did_confirm(search_result.path.clone())
+                delegate.did_confirm(search_result.absolute_path.clone())
             );
         }
     }

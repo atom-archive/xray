@@ -131,15 +131,15 @@ impl<'a> Scorer<'a> {
 
         positions.map(|positions| {
             let mut match_required = false;
-            let mut j = haystack_len - 1;
+            let mut j = (haystack_len - 1) as isize;
             for i in (0..needle_len).rev() {
-                while j != 0 {
+                while j >= 0 {
                     if self.d[(i, j)] != SCORE_MIN
                         && (match_required || self.d[(i, j)] == self.m[(i, j)])
                     {
                         match_required = i > 0 && j > 0
                             && self.m[(i, j)] == self.d[(i - 1, j - 1)] + SCORE_MATCH_CONSECUTIVE;
-                        positions[i] = j;
+                        positions[i] = j as usize;
                         j -= 1;
                         break;
                     }
@@ -196,6 +196,15 @@ impl<T> Index<(usize, usize)> for Matrix<T> {
 
     fn index(&self, (row, col): (usize, usize)) -> &Self::Output {
         &self.buffer[(col * self.rows) + row]
+    }
+}
+
+impl<T> Index<(usize, isize)> for Matrix<T> {
+    type Output = T;
+
+    fn index(&self, (row, col): (usize, isize)) -> &Self::Output {
+        debug_assert!(col >= 0);
+        &self.buffer[(col as usize * self.rows) + row]
     }
 }
 

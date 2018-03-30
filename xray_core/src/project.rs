@@ -12,6 +12,7 @@ pub struct Project {
 }
 
 pub struct PathSearch {
+    root_paths: Vec<PathBuf>,
     roots: Arc<Vec<fs::Entry>>,
     needle: Vec<char>,
     max_results: usize,
@@ -30,7 +31,8 @@ pub enum PathSearchStatus {
 pub struct PathSearchResult {
     pub score: fuzzy::Score,
     pub positions: Vec<usize>,
-    pub path: PathBuf,
+    pub absolute_path: PathBuf,
+    pub relative_path: PathBuf
 }
 
 struct StackEntry {
@@ -58,6 +60,7 @@ impl Project {
     ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
         let (updates, updates_observer) = NotifyCell::weak(PathSearchStatus::Pending);
         let search = PathSearch {
+            root_paths: self.trees.iter().map(|tree| PathBuf::from(tree.path())).collect(),
             roots: Arc::new(self.trees.iter().map(|tree| tree.root().clone()).collect()),
             needle: needle.chars().collect(),
             max_results,
@@ -92,7 +95,11 @@ impl PathSearch {
         let mut matcher = fuzzy::Matcher::new(&self.needle);
 
         let mut steps_since_last_check = 0;
-        let mut children = self.roots.clone();
+        let mut children = if self.roots.len() == 1 {
+            self.roots[0].children().unwrap()
+        } else {
+            self.roots.clone()
+        };
         let mut child_index = 0;
         let mut found_match = false;
 
@@ -154,7 +161,11 @@ impl PathSearch {
         let mut scorer = fuzzy::Scorer::new(&self.needle);
 
         let mut steps_since_last_check = 0;
-        let mut children = self.roots.clone();
+        let mut children = if self.roots.len() == 1 {
+            self.roots[0].children().unwrap()
+        } else {
+            self.roots.clone()
+        };
         let mut child_index = 0;
         let mut found_match = false;
 
@@ -197,19 +208,32 @@ impl PathSearch {
                         if results.len() < self.max_results
                             || score > results.peek().map(|r| r.score).unwrap()
                         {
-                            let mut path = PathBuf::new();
-                            for entry in stack.iter() {
-                                path.push(entry.children[entry.child_index].name());
+                            let mut absolute_path = if self.roots.len() == 1 {
+                                self.root_paths[0].to_path_buf()
+                            } else {
+                                let mut root_path = self.root_paths[stack[0].child_index].to_path_buf();
+                                root_path.pop();
+                                root_path
+                            };
+
+                            let mut relative_path = PathBuf::new();
+                            for entry in stack {
+                                let name = entry.children[entry.child_index].name();
+                                absolute_path.push(name);
+                                relative_path.push(name);
                             }
-                            path.push(children[child_index].name());
+                            let file_name = children[child_index].name();
+                            absolute_path.push(file_name);
+                            relative_path.push(file_name);
 
                             if results.len() == self.max_results {
                                 results.pop();
                             }
                             results.push(PathSearchResult {
                                 score,
-                                path,
-                                positions: positions.clone(),
+                                absolute_path,
+                                relative_path,
+                                positions: positions.clone()
                             });
                         }
                     }
@@ -271,7 +295,7 @@ mod tests {
     #[test]
     fn test_search_one_tree() {
         let tree = TestTree::from_json(
-            "tree",
+            "/Users/someone/tree",
             json!({
                 "root-1": {
                     "file-1": null,
@@ -295,18 +319,66 @@ mod tests {
         assert_eq!(
             summarize_results(&observer.get()),
             Some(vec![
-                ("tree/root-2/subdir-2/file-3", vec![12, 13, 14, 19]),
-                ("tree/root-2/subdir-2/file-4", vec![12, 13, 14, 19]),
-                ("tree/root-1/subdir-1/file-2", vec![12, 13, 14, 26]),
+                ("/Users/someone/tree/root-2/subdir-2/file-3", "root-2/subdir-2/file-3", vec![7, 8, 9, 14]),
+                ("/Users/someone/tree/root-2/subdir-2/file-4", "root-2/subdir-2/file-4", vec![7, 8, 9, 14]),
+                ("/Users/someone/tree/root-1/subdir-1/file-2", "root-1/subdir-1/file-2", vec![7, 8, 9, 21]),
             ])
         );
     }
 
-    fn summarize_results(results: &PathSearchStatus) -> Option<Vec<(&str, Vec<usize>)>> {
+    #[test]
+    fn test_search_many_trees() {
+        let tree_1 = TestTree::from_json(
+            "/Users/someone/foo",
+            json!({
+                "subdir-a": {
+                    "file-1": null,
+                    "subdir-1": {
+                        "file-1": null,
+                        "bar": null,
+                    }
+                }
+            }),
+        );
+        let tree_2 = TestTree::from_json(
+            "/Users/someone/bar",
+            json!({
+                "subdir-b": {
+                    "subdir-2": {
+                        "file-3": null,
+                        "foo": null,
+                    }
+                }
+            })
+        );
+        let project = Project::new(vec![Box::new(tree_1), Box::new(tree_2)]);
+
+        let (mut search, observer) = project.search_paths("bar", 10, true);
+        assert_eq!(search.poll(), Ok(Async::Ready(())));
+        assert_eq!(
+            summarize_results(&observer.get()),
+            Some(vec![
+                ("/Users/someone/bar/subdir-b/subdir-2/foo", "bar/subdir-b/subdir-2/foo", vec![0, 1, 2]),
+                ("/Users/someone/foo/subdir-a/subdir-1/bar", "foo/subdir-a/subdir-1/bar", vec![22, 23, 24]),
+                ("/Users/someone/bar/subdir-b/subdir-2/file-3", "bar/subdir-b/subdir-2/file-3", vec![0, 1, 2]),
+                ("/Users/someone/foo/subdir-a/subdir-1/file-1", "foo/subdir-a/subdir-1/file-1", vec![6, 11, 18]),
+            ])
+        );
+    }
+
+    fn summarize_results(results: &PathSearchStatus) -> Option<Vec<(&str, &str, Vec<usize>)>> {
         match results {
             &PathSearchStatus::Pending => None,
             &PathSearchStatus::Ready(ref results) => {
-                Some(results.iter().map(|r| (r.path.to_str().unwrap(), r.positions.clone())).collect())
+                let summary = results
+                    .iter()
+                    .map(|result| {
+                        let absolute_path = result.absolute_path.to_str().unwrap();
+                        let relative_path = result.relative_path.to_str().unwrap();
+                        (absolute_path, relative_path, result.positions.clone())
+                    })
+                    .collect();
+                Some(summary)
             }
         }
     }
@@ -348,7 +420,7 @@ mod tests {
 
             let path = path.into();
             Self {
-                root: build_entry(path.to_str().unwrap(), &json),
+                root: build_entry(path.file_name().unwrap().to_str().unwrap(), &json),
                 path,
             }
         }
