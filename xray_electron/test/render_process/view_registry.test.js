@@ -1,4 +1,4 @@
-const assert = require('assert');
+const assert = require("assert");
 const ViewRegistry = require("../../lib/render_process/view_registry");
 
 suite("ViewRegistry", () => {
@@ -105,5 +105,24 @@ suite("ViewRegistry", () => {
       { view_id: 1, action: { a: 1, b: 2 } },
       { view_id: 2, action: { c: 3 } }
     ]);
+  });
+
+  test("focus", () => {
+    const registry = new ViewRegistry({ onAction: a => actions.push(a) });
+
+    const focusRequests = [];
+    registry.update({ updated: [], removed: [], focus: 2 });
+    registry.update({ updated: [], removed: [], focus: 1 });
+    registry.update({ updated: [], removed: [], focus: 1 });
+    const disposeWatch1 = registry.watchFocus(1, () => focusRequests.push(1));
+    registry.watchFocus(2, () => focusRequests.push(2));
+    registry.update({ updated: [], removed: [], focus: 1 });
+    registry.update({ updated: [], removed: [], focus: 2 });
+
+    assert.deepEqual(focusRequests, [1, 1, 2]);
+    assert.throws(() => registry.watchFocus(1));
+
+    disposeWatch1()
+    assert.doesNotThrow(() => registry.watchFocus(1))
   });
 });
