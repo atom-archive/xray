@@ -101,7 +101,7 @@ module.exports = class FileFinder extends React.Component {
     return $(item, null, ...children);
   }
 
-  componentDidMount() {
+  focus() {
     this.queryInput.focus();
   }
 

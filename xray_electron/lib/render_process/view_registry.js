@@ -26,7 +26,7 @@ module.exports = class ViewRegistry {
     this.componentsByName.delete(name);
   }
 
-  update({ updated, removed, focus }) {
+  update({ updated, removed, focused }) {
     for (let i = 0; i < updated.length; i++) {
       const view = updated[i];
       this.viewsById.set(view.view_id, view);
@@ -45,12 +45,12 @@ module.exports = class ViewRegistry {
       this.propListenersByViewId.delete(viewId);
     }
 
-    if (focus != null) {
-      const focusListener = this.focusListenersByViewId.get(focus);
+    if (focused != null) {
+      const focusListener = this.focusListenersByViewId.get(focused);
       if (focusListener) {
         focusListener();
       } else {
-        this.pendingFocus = focus;
+        this.pendingFocus = focused;
       }
     }
   }

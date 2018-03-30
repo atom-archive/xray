@@ -31,6 +31,7 @@ pub struct Inner {
     views: HashMap<ViewId, Rc<RefCell<View<Item = (), Error = ()>>>>,
     inserted: HashSet<ViewId>,
     removed: HashSet<ViewId>,
+    focused: Option<ViewId>,
     height: f64,
     update_stream_counter: usize,
     update_stream_task: Option<Task>,
@@ -48,6 +49,7 @@ pub struct WeakViewHandle<T>(Weak<RefCell<T>>);
 pub struct WindowUpdate {
     updated: Vec<ViewUpdate>,
     removed: Vec<ViewId>,
+    focused: Option<ViewId>
 }
 
 #[derive(Serialize, Debug)]
@@ -65,6 +67,7 @@ impl Window {
                 views: HashMap::new(),
                 inserted: HashSet::new(),
                 removed: HashSet::new(),
+                focused: None,
                 height: height,
                 update_stream_counter: 0,
                 update_stream_task: None,
@@ -115,7 +118,7 @@ impl Window {
         let mut inner = self.0.borrow_mut();
         inner.views.insert(view_id, view_rc);
         inner.inserted.insert(view_id);
-        inner.update_stream_task.take().map(|task| task.notify());
+        inner.notify();
         ViewHandle {
             view_id,
             inner: Rc::downgrade(&self.0),
@@ -139,7 +142,7 @@ impl Stream for WindowUpdateStream {
 
         let mut window_update;
         {
-            let inner = inner_ref.borrow();
+            let mut inner = inner_ref.borrow_mut();
 
             if self.counter < inner.update_stream_counter {
                 return Ok(Async::Ready(None));
@@ -149,6 +152,7 @@ impl Stream for WindowUpdateStream {
                 window_update = WindowUpdate {
                     updated: Vec::new(),
                     removed: inner.removed.iter().cloned().collect(),
+                    focused: inner.focused.take()
                 };
 
                 for id in inner.inserted.iter() {
@@ -180,6 +184,7 @@ impl Stream for WindowUpdateStream {
                 window_update = WindowUpdate {
                     updated: Vec::new(),
                     removed: Vec::new(),
+                    focused: inner.focused.take()
                 };
 
                 for (id, ref view) in inner.views.iter() {
@@ -210,8 +215,22 @@ impl Stream for WindowUpdateStream {
 }
 
 impl Inner {
+    fn notify(&mut self) {
+        self.update_stream_task.take().map(|task| task.notify());
+    }
+
     fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<View<Item = (), Error = ()>>>> {
         self.views.get(&id).map(|view| view.clone())
+    }
+}
+
+impl ViewHandle {
+    pub fn focus(&self) -> Result<(), ()> {
+        let inner = self.inner.upgrade().ok_or(())?;
+        let mut inner = inner.borrow_mut();
+        inner.focused = Some(self.view_id);
+        inner.notify();
+        Ok(())
     }
 }
 
@@ -227,7 +246,7 @@ impl Drop for ViewHandle {
             let mut inner = inner.borrow_mut();
             _removed_view = inner.views.remove(&self.view_id);
             inner.removed.insert(self.view_id);
-            inner.update_stream_task.take().map(|task| task.notify());
+            inner.notify();
         }
     }
 }

@@ -111,13 +111,13 @@ suite("ViewRegistry", () => {
     const registry = new ViewRegistry({ onAction: a => actions.push(a) });
 
     const focusRequests = [];
-    registry.update({ updated: [], removed: [], focus: 2 });
-    registry.update({ updated: [], removed: [], focus: 1 });
-    registry.update({ updated: [], removed: [], focus: 1 });
+    registry.update({ updated: [], removed: [], focused: 2 });
+    registry.update({ updated: [], removed: [], focused: 1 });
+    registry.update({ updated: [], removed: [], focused: 1 });
     const disposeWatch1 = registry.watchFocus(1, () => focusRequests.push(1));
     registry.watchFocus(2, () => focusRequests.push(2));
-    registry.update({ updated: [], removed: [], focus: 1 });
-    registry.update({ updated: [], removed: [], focus: 2 });
+    registry.update({ updated: [], removed: [], focused: 1 });
+    registry.update({ updated: [], removed: [], focused: 2 });
 
     assert.deepEqual(focusRequests, [1, 1, 2]);
     assert.throws(() => registry.watchFocus(1));

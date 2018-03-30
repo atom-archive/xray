@@ -46,7 +46,9 @@ impl WorkspaceView {
             self.modal_panel = None;
         } else {
             let delegate = self.self_handle.as_ref().cloned().unwrap();
-            self.modal_panel = Some(window.add_view(FileFinderView::new(delegate)));
+            let view = window.add_view(FileFinderView::new(delegate));
+            view.focus().unwrap();
+            self.modal_panel = Some(view);
         }
         self.updates.set(());
     }

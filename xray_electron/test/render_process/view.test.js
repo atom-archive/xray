@@ -88,17 +88,17 @@ suite("View", () => {
         { component_name: "component", view_id: 2, props: {} }
       ],
       removed: [],
-      focus: 1
+      focused: 1
     });
 
     mount($(View, { id: 1 }), { context: { viewRegistry } });
     mount($(View, { id: 2 }), { context: { viewRegistry } });
     assert.deepEqual(focusedViewIds, [1]);
 
-    viewRegistry.update({ updated: [], removed: [], focus: 2 });
+    viewRegistry.update({ updated: [], removed: [], focused: 2 });
     assert.deepEqual(focusedViewIds, [1, 2]);
 
-    viewRegistry.update({ updated: [], removed: [], focus: 1 });
+    viewRegistry.update({ updated: [], removed: [], focused: 1 });
     assert.deepEqual(focusedViewIds, [1, 2, 1]);
   });
 });
