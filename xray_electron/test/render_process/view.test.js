@@ -1,6 +1,7 @@
 const assert = require("assert");
+const React = require("react");
 const $ = require("react").createElement;
-const {shallow} = require("./helpers/component_helpers");
+const { mount, shallow } = require("./helpers/component_helpers");
 const View = require("../../lib/render_process/view");
 const ViewRegistry = require("../../lib/render_process/view_registry");
 
@@ -63,5 +64,41 @@ suite("View", () => {
       { view_id: 42, action: { type: "foo" } },
       { view_id: 42, action: { type: "bar" } }
     ]);
+  });
+
+  test("focus", () => {
+    const focusedViewIds = [];
+    const viewRegistry = new ViewRegistry({
+      onAction: a => focusedViewIds.push(a.view_id)
+    });
+
+    class TestComponent extends React.Component {
+      render() {
+        return $("div");
+      }
+
+      focus() {
+        this.props.dispatch({});
+      }
+    }
+    viewRegistry.addComponent("component", TestComponent);
+    viewRegistry.update({
+      updated: [
+        { component_name: "component", view_id: 1, props: {} },
+        { component_name: "component", view_id: 2, props: {} }
+      ],
+      removed: [],
+      focus: 1
+    });
+
+    mount($(View, { id: 1 }), { context: { viewRegistry } });
+    mount($(View, { id: 2 }), { context: { viewRegistry } });
+    assert.deepEqual(focusedViewIds, [1]);
+
+    viewRegistry.update({ updated: [], removed: [], focus: 2 });
+    assert.deepEqual(focusedViewIds, [1, 2]);
+
+    viewRegistry.update({ updated: [], removed: [], focus: 1 });
+    assert.deepEqual(focusedViewIds, [1, 2, 1]);
   });
 });
