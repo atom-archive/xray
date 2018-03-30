@@ -15,8 +15,8 @@ suite("FileFinderView", () => {
     await setProps(fileFinder, {
       query: 'ce',
       results: [
-        {path: 'succeed', score: 3, positions: [3, 4]},
-        {path: 'abcdef', score: 2, positions: [2, 4]},
+        {relative_path: 'succeed', score: 3, positions: [3, 4]},
+        {relative_path: 'abcdef', score: 2, positions: [2, 4]},
       ]
     });
 
