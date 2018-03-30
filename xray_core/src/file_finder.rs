@@ -1,14 +1,14 @@
 use futures::{Async, Poll, Stream};
 use std::path::PathBuf;
 use project::{PathSearch, PathSearchStatus, PathSearchResult};
-use window::{View, WeakViewHandle, WindowHandle};
+use window::{View, WeakViewHandle, Window};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use serde_json;
 
 pub trait FileFinderViewDelegate {
     fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
     fn did_close(&mut self);
-    fn did_confirm(&mut self, path: PathBuf);
+    fn did_confirm(&mut self, path: PathBuf, window: &mut Window);
 }
 
 pub struct FileFinderView<T: FileFinderViewDelegate> {
@@ -18,7 +18,6 @@ pub struct FileFinderView<T: FileFinderViewDelegate> {
     selected_index: usize,
     search_results: Vec<PathSearchResult>,
     search_updates: Option<NotifyCellObserver<PathSearchStatus>>,
-    window_handle: Option<WindowHandle>,
     updates: NotifyCell<()>,
 }
 
@@ -46,17 +45,13 @@ impl<T: FileFinderViewDelegate> View for FileFinderView<T> {
         })
     }
 
-    fn will_mount(&mut self, window_handle: WindowHandle, _: WeakViewHandle<Self>) {
-        self.window_handle = Some(window_handle);
-    }
-
-    fn dispatch_action(&mut self, action: serde_json::Value) {
+    fn dispatch_action(&mut self, action: serde_json::Value, window: &mut Window) {
         match serde_json::from_value(action) {
-            Ok(FileFinderAction::UpdateQuery { query }) => self.update_query(query),
-            Ok(FileFinderAction::UpdateIncludeIgnored { include_ignored }) => self.update_include_ignored(include_ignored),
+            Ok(FileFinderAction::UpdateQuery { query }) => self.update_query(query, window),
+            Ok(FileFinderAction::UpdateIncludeIgnored { include_ignored }) => self.update_include_ignored(include_ignored, window),
             Ok(FileFinderAction::SelectPrevious) => self.select_previous(),
             Ok(FileFinderAction::SelectNext) => self.select_next(),
-            Ok(FileFinderAction::Confirm) => self.confirm(),
+            Ok(FileFinderAction::Confirm) => self.confirm(window),
             Ok(FileFinderAction::Close) => self.close(),
             _ => eprintln!("Unrecognized action"),
         }
@@ -97,22 +92,21 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
             search_results: Vec::new(),
             search_updates: None,
             updates: NotifyCell::new(()),
-            window_handle: None,
         }
     }
 
-    fn update_query(&mut self, query: String) {
+    fn update_query(&mut self, query: String, window: &mut Window) {
         if self.query != query {
             self.query = query;
-            self.search();
+            self.search(window);
             self.updates.set(());
         }
     }
 
-    fn update_include_ignored(&mut self, include_ignored: bool) {
+    fn update_include_ignored(&mut self, include_ignored: bool, window: &mut Window) {
         if self.include_ignored != include_ignored {
             self.include_ignored = include_ignored;
-            self.search();
+            self.search(window);
             self.updates.set(());
         }
     }
@@ -131,10 +125,10 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
         }
     }
 
-    fn confirm(&mut self) {
+    fn confirm(&mut self, window: &mut Window) {
         if let Some(search_result) = self.search_results.get(self.selected_index) {
             self.delegate.map(|delegate|
-                delegate.did_confirm(search_result.absolute_path.clone())
+                delegate.did_confirm(search_result.absolute_path.clone(), window)
             );
         }
     }
@@ -143,14 +137,14 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
         self.delegate.map(|delegate| delegate.did_close());
     }
 
-    fn search(&mut self) {
+    fn search(&mut self, window: &mut Window) {
         let search = self.delegate.map(|delegate|
             delegate.search_paths(&self.query, 10, self.include_ignored)
         );
 
         if let Some((search, search_updates)) = search {
             self.search_updates = Some(search_updates);
-            self.window_handle.as_ref().unwrap().spawn(search);
+            window.spawn(search);
             self.updates.set(());
         }
     }

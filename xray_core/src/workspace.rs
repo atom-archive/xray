@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
-use window::{View, ViewHandle, WeakViewHandle, WindowHandle};
+use window::{View, ViewHandle, WeakViewHandle, Window};
 use buffer::Buffer;
 use buffer_view::BufferView;
 use notify_cell::NotifyCell;
@@ -18,7 +18,6 @@ use file_finder::{FileFinderView, FileFinderViewDelegate};
 
 pub struct WorkspaceView {
     project: Project,
-    window_handle: Option<WindowHandle>,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
@@ -37,19 +36,17 @@ impl WorkspaceView {
             project: Project::new(roots),
             modal_panel: None,
             center_pane: None,
-            window_handle: None,
             updates: NotifyCell::new(()),
             self_handle: None,
         }
     }
 
-    fn toggle_file_finder(&mut self) {
-        let ref mut window_handle = self.window_handle.as_mut().unwrap();
+    fn toggle_file_finder(&mut self, window: &mut Window) {
         if self.modal_panel.is_some() {
             self.modal_panel = None;
         } else {
             let delegate = self.self_handle.as_ref().cloned().unwrap();
-            self.modal_panel = Some(window_handle.add_view(FileFinderView::new(delegate)));
+            self.modal_panel = Some(window.add_view(FileFinderView::new(delegate)));
         }
         self.updates.set(());
     }
@@ -81,7 +78,7 @@ impl View for WorkspaceView {
         })
     }
 
-    fn will_mount(&mut self, window_handle: WindowHandle, view_handle: WeakViewHandle<Self>) {
+    fn will_mount(&mut self, window: &mut Window, view_handle: WeakViewHandle<Self>) {
         let src_path: PathBuf = env::var("XRAY_SRC_PATH")
             .expect("Missing XRAY_SRC_PATH environment variable")
             .into();
@@ -89,14 +86,13 @@ impl View for WorkspaceView {
         let react_js_path =
             src_path.join("xray_electron/node_modules/react/cjs/react.development.js");
 
-        self.center_pane = Some(window_handle.add_view(self.open_path(react_js_path)));
-        self.window_handle = Some(window_handle);
+        self.center_pane = Some(window.add_view(self.open_path(react_js_path)));
         self.self_handle = Some(view_handle);
     }
 
-    fn dispatch_action(&mut self, action: serde_json::Value) {
+    fn dispatch_action(&mut self, action: serde_json::Value, window: &mut Window) {
         match serde_json::from_value(action) {
-            Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(),
+            Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(window),
             _ => eprintln!("Unrecognized action"),
         }
     }
@@ -112,13 +108,8 @@ impl FileFinderViewDelegate for WorkspaceView {
         self.updates.set(());
     }
 
-    fn did_confirm(&mut self, path: PathBuf) {
-        self.center_pane = Some(
-            self.window_handle
-                .as_ref()
-                .unwrap()
-                .add_view(self.open_path(path)),
-        );
+    fn did_confirm(&mut self, path: PathBuf, window: &mut Window) {
+        self.center_pane = Some(window.add_view(self.open_path(path)));
         self.modal_panel = None;
         self.updates.set(());
     }

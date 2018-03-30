@@ -210,7 +210,7 @@ impl Inner {
             .map(|path| Box::new(fs::Tree::new(path).unwrap()) as Box<xray_core::fs::Tree>)
             .collect();
 
-        let workspace_view_handle = window.handle().add_view(WorkspaceView::new(roots));
+        let workspace_view_handle = window.add_view(WorkspaceView::new(roots));
         window.set_root_view(workspace_view_handle);
         self.windows.insert(window_id, window);
 

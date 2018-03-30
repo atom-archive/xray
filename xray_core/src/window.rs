@@ -14,9 +14,9 @@ pub type ViewId = usize;
 
 pub trait View: Stream<Item = (), Error = ()> {
     fn component_name(&self) -> &'static str;
-    fn will_mount(&mut self, _: WindowHandle, _: WeakViewHandle<Self>) where Self: Sized {}
+    fn will_mount(&mut self, &mut Window, WeakViewHandle<Self>) where Self: Sized {}
     fn render(&self) -> serde_json::Value;
-    fn dispatch_action(&mut self, serde_json::Value) {}
+    fn dispatch_action(&mut self, serde_json::Value, &mut Window) {}
 }
 
 pub struct Window(Rc<RefCell<Inner>>, Option<ViewHandle>);
@@ -36,8 +36,6 @@ pub struct Inner {
     update_stream_task: Option<Task>,
     executor: Option<BoxedExecutor>
 }
-
-pub struct WindowHandle(Weak<RefCell<Inner>>);
 
 pub struct ViewHandle {
     pub view_id: ViewId,
@@ -76,9 +74,9 @@ impl Window {
         )
     }
 
-    pub fn dispatch_action(&self, view_id: ViewId, action: serde_json::Value) {
+    pub fn dispatch_action(&mut self, view_id: ViewId, action: serde_json::Value) {
         let view = self.0.borrow().get_view(view_id);
-        view.map(|view| view.borrow_mut().dispatch_action(action));
+        view.map(|view| view.borrow_mut().dispatch_action(action, self));
     }
 
     pub fn updates(&mut self) -> WindowUpdateStream {
@@ -92,16 +90,40 @@ impl Window {
     }
 
     pub fn set_height(&mut self, height: f64) {
-        let mut inner = self.0.borrow_mut();
-        inner.height = height;
+        self.0.borrow_mut().height = height;
     }
 
     pub fn set_root_view(&mut self, root_view: ViewHandle) {
         self.1 = Some(root_view);
     }
 
-    pub fn handle(&mut self) -> WindowHandle {
-        WindowHandle(Rc::downgrade(&self.0))
+    pub fn height(&self) -> f64 {
+        self.0.borrow().height
+    }
+
+    pub fn add_view<T: 'static + View>(&mut self, view: T) -> ViewHandle {
+        let view_id = {
+            let mut inner = self.0.borrow_mut();
+            inner.next_view_id += 1;
+            inner.next_view_id - 1
+        };
+
+        let view_rc = Rc::new(RefCell::new(view));
+        let weak_view = Rc::downgrade(&view_rc);
+        view_rc.borrow_mut().will_mount(self, WeakViewHandle(weak_view));
+
+        let mut inner = self.0.borrow_mut();
+        inner.views.insert(view_id, view_rc);
+        inner.inserted.insert(view_id);
+        inner.update_stream_task.take().map(|task| task.notify());
+        ViewHandle {
+            view_id,
+            inner: Rc::downgrade(&self.0),
+        }
+    }
+
+    pub fn spawn<F: Future<Item = (), Error = ()> + Send + 'static>(&self, future: F) {
+        self.0.borrow().executor.as_ref().map(|executor| executor.execute(Box::new(future)));
     }
 }
 
@@ -190,43 +212,6 @@ impl Stream for WindowUpdateStream {
 impl Inner {
     fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<View<Item = (), Error = ()>>>> {
         self.views.get(&id).map(|view| view.clone())
-    }
-}
-
-impl WindowHandle {
-    pub fn spawn<F: Future<Item = (), Error = ()> + Send + 'static>(&self, future: F) {
-        let inner = self.0.upgrade().unwrap();
-        let inner = inner.borrow();
-        inner.executor.as_ref().map(|executor| executor.execute(Box::new(future)));
-    }
-
-    pub fn height(&self) -> f64 {
-        let inner = self.0.upgrade().unwrap();
-        let inner = inner.borrow();
-        inner.height
-    }
-
-    pub fn add_view<T: 'static + View>(&self, view: T) -> ViewHandle {
-        let view_id = {
-            let inner = self.0.upgrade().unwrap();
-            let mut inner = inner.borrow_mut();
-            inner.next_view_id += 1;
-            inner.next_view_id - 1
-        };
-
-        let view_rc = Rc::new(RefCell::new(view));
-        let weak_view = Rc::downgrade(&view_rc);
-        view_rc.borrow_mut().will_mount(WindowHandle(self.0.clone()), WeakViewHandle(weak_view));
-
-        let inner = self.0.upgrade().unwrap();
-        let mut inner = inner.borrow_mut();
-        inner.views.insert(view_id, view_rc);
-        inner.inserted.insert(view_id);
-        inner.update_stream_task.take().map(|task| task.notify());
-        ViewHandle {
-            view_id,
-            inner: self.0.clone(),
-        }
     }
 }
 
