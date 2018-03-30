@@ -14,10 +14,9 @@ pub type ViewId = usize;
 
 pub trait View: Stream<Item = (), Error = ()> {
     fn component_name(&self) -> &'static str;
-    fn will_mount(&mut self, _handle: WindowHandle) {}
+    fn will_mount(&mut self, _: WindowHandle, _: WeakViewHandle<Self>) where Self: Sized {}
     fn render(&self) -> serde_json::Value;
     fn dispatch_action(&mut self, serde_json::Value) {}
-    fn set_view_ref(&mut self, _ref: WeakViewHandle<Self>) where Self: Sized {}
 }
 
 pub struct Window(Rc<RefCell<Inner>>, Option<ViewHandle>);
@@ -207,7 +206,7 @@ impl WindowHandle {
         inner.height
     }
 
-    pub fn add_view<T: 'static + View>(&self, mut view: T) -> ViewHandle {
+    pub fn add_view<T: 'static + View>(&self, view: T) -> ViewHandle {
         let view_id = {
             let inner = self.0.upgrade().unwrap();
             let mut inner = inner.borrow_mut();
@@ -215,10 +214,9 @@ impl WindowHandle {
             inner.next_view_id - 1
         };
 
-        view.will_mount(WindowHandle(self.0.clone()));
         let view_rc = Rc::new(RefCell::new(view));
         let weak_view = Rc::downgrade(&view_rc);
-        view_rc.borrow_mut().set_view_ref(WeakViewHandle(weak_view));
+        view_rc.borrow_mut().will_mount(WindowHandle(self.0.clone()), WeakViewHandle(weak_view));
 
         let inner = self.0.upgrade().unwrap();
         let mut inner = inner.borrow_mut();

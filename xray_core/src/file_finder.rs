@@ -46,7 +46,7 @@ impl<T: FileFinderViewDelegate> View for FileFinderView<T> {
         })
     }
 
-    fn will_mount(&mut self, window_handle: WindowHandle) {
+    fn will_mount(&mut self, window_handle: WindowHandle, _: WeakViewHandle<Self>) {
         self.window_handle = Some(window_handle);
     }
 

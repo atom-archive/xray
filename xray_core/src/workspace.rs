@@ -22,7 +22,7 @@ pub struct WorkspaceView {
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
-    weak_ref: Option<WeakViewHandle<WorkspaceView>>,
+    self_handle: Option<WeakViewHandle<WorkspaceView>>,
 }
 
 #[derive(Deserialize)]
@@ -39,7 +39,7 @@ impl WorkspaceView {
             center_pane: None,
             window_handle: None,
             updates: NotifyCell::new(()),
-            weak_ref: None,
+            self_handle: None,
         }
     }
 
@@ -48,7 +48,7 @@ impl WorkspaceView {
         if self.modal_panel.is_some() {
             self.modal_panel = None;
         } else {
-            let delegate = self.weak_ref.as_ref().cloned().unwrap();
+            let delegate = self.self_handle.as_ref().cloned().unwrap();
             self.modal_panel = Some(window_handle.add_view(FileFinderView::new(delegate)));
         }
         self.updates.set(());
@@ -81,7 +81,7 @@ impl View for WorkspaceView {
         })
     }
 
-    fn will_mount(&mut self, window_handle: WindowHandle) {
+    fn will_mount(&mut self, window_handle: WindowHandle, view_handle: WeakViewHandle<Self>) {
         let src_path: PathBuf = env::var("XRAY_SRC_PATH")
             .expect("Missing XRAY_SRC_PATH environment variable")
             .into();
@@ -91,10 +91,7 @@ impl View for WorkspaceView {
 
         self.center_pane = Some(window_handle.add_view(self.open_path(react_js_path)));
         self.window_handle = Some(window_handle);
-    }
-
-    fn set_view_ref(&mut self, view_ref: WeakViewHandle<WorkspaceView>) {
-        self.weak_ref = Some(view_ref);
+        self.self_handle = Some(view_handle);
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value) {

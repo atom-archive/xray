@@ -8,7 +8,7 @@ use serde_json;
 use notify_cell::NotifyCell;
 use buffer::{Anchor, Buffer, Point};
 use movement;
-use window::{View, WindowHandle};
+use window::{View, WeakViewHandle, WindowHandle};
 
 pub struct BufferView {
     buffer: Rc<RefCell<Buffer>>,
@@ -512,7 +512,7 @@ impl View for BufferView {
         "BufferView"
     }
 
-    fn will_mount(&mut self, window_handle: WindowHandle) {
+    fn will_mount(&mut self, window_handle: WindowHandle, _: WeakViewHandle<Self>) {
         self.height = Some(window_handle.height());
     }
 
