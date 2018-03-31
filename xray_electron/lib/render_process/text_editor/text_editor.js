@@ -87,7 +87,10 @@ class TextEditor extends React.Component {
       Root,
       {
         tabIndex: -1,
-        onKeyDown: this.handleKeyDown
+        onKeyDown: this.handleKeyDown,
+        $ref: (element) => {
+          this.element = element
+        }
       },
       $(TextPlane, {
         showCursors: this.state.showCursors,
@@ -159,6 +162,10 @@ class TextEditor extends React.Component {
         showCursors: false
       });
     }
+  }
+
+  focus() {
+    this.element.focus();
   }
 }
 

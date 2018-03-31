@@ -111,7 +111,9 @@ impl FileFinderViewDelegate for WorkspaceView {
     }
 
     fn did_confirm(&mut self, path: PathBuf, window: &mut Window) {
-        self.center_pane = Some(window.add_view(self.open_path(path)));
+        let buffer_view = window.add_view(self.open_path(path));
+        buffer_view.focus().unwrap();
+        self.center_pane = Some(buffer_view);
         self.modal_panel = None;
         self.updates.set(());
     }
