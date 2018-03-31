@@ -48,6 +48,7 @@ module.exports = class ViewRegistry {
     if (focused != null) {
       const focusListener = this.focusListenersByViewId.get(focused);
       if (focusListener) {
+        this.pendingFocus = null;
         focusListener();
       } else {
         this.pendingFocus = focused;

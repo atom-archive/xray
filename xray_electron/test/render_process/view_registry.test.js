@@ -123,6 +123,9 @@ suite("ViewRegistry", () => {
     assert.throws(() => registry.watchFocus(1));
 
     disposeWatch1()
-    assert.doesNotThrow(() => registry.watchFocus(1))
+    registry.update({ updated: [], removed: [], focused: 1 });
+    registry.update({ updated: [], removed: [], focused: 2 });
+    assert.doesNotThrow(() => registry.watchFocus(1));
+    assert.deepEqual(focusRequests, [1, 1, 2, 2]);
   });
 });
