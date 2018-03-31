@@ -274,7 +274,7 @@ mod tests {
     fn test_view_handle_drop() {
         // Dropping the window should not cause a panic
         let mut window = Window::new(None, 100.0);
-        window.handle().add_view(TestView::new(true));
+        window.add_view(TestView::new(true));
     }
 
     struct TestView {
@@ -304,9 +304,9 @@ mod tests {
             json!({})
         }
 
-        fn will_mount(&mut self, window_handle: WindowHandle) {
+        fn will_mount(&mut self, window: &mut Window, _view_handle: WeakViewHandle<Self>) {
             if self.add_child {
-                self.handle = Some(window_handle.add_view(TestView::new(false)));
+                self.handle = Some(window.add_view(TestView::new(false)));
             }
         }
     }
