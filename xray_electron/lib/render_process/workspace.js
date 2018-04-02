@@ -1,4 +1,5 @@
 const React = require("react");
+const ReactDOM = require("react-dom");
 const { styled } = require("styletron-react");
 const Modal = require("./modal");
 const View = require("./view");
@@ -38,6 +39,10 @@ module.exports = class Workspace extends React.Component {
       centerItem,
       modal
     );
+  }
+
+  componentDidMount() {
+    ReactDOM.findDOMNode(this).focus()
   }
 
   didKeyDown(event) {
