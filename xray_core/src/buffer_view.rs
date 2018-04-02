@@ -1,3 +1,4 @@
+use futures::{Poll, Stream};
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
@@ -7,15 +8,15 @@ use serde_json;
 use notify_cell::NotifyCell;
 use buffer::{Anchor, Buffer, Point};
 use movement;
-use window::{View, ViewUpdateStream, WindowHandle};
+use window::{View, WeakViewHandle, Window};
 
 pub struct BufferView {
     buffer: Rc<RefCell<Buffer>>,
     updates: NotifyCell<()>,
     dropped: NotifyCell<bool>,
     selections: Vec<Selection>,
-    height: f64,
-    width: f64,
+    height: Option<f64>,
+    width: Option<f64>,
     line_height: f64,
     scroll_top: f64,
 }
@@ -67,21 +68,21 @@ impl BufferView {
             buffer,
             selections,
             dropped: NotifyCell::new(false),
-            height: 0.0,
-            width: 0.0,
+            height: None,
+            width: None,
             line_height: 10.0,
             scroll_top: 0.0,
         }
     }
 
     pub fn set_height(&mut self, height: f64) -> &mut Self {
-        self.height = height;
+        self.height = Some(height);
         self.updated();
         self
     }
 
     pub fn set_width(&mut self, width: f64) -> &mut Self {
-        self.width = width;
+        self.width = Some(width);
         self.updated();
         self
     }
@@ -511,8 +512,8 @@ impl View for BufferView {
         "BufferView"
     }
 
-    fn will_mount(&mut self, window_handle: WindowHandle) {
-        self.height = window_handle.height();
+    fn will_mount(&mut self, window: &mut Window, _: WeakViewHandle<Self>) {
+        self.height = Some(window.height());
     }
 
     fn render(&self) -> serde_json::Value {
@@ -520,7 +521,7 @@ impl View for BufferView {
 
         let max_scroll_top = buffer.max_point().row as f64 * self.line_height;
         let scroll_top = self.scroll_top.min(max_scroll_top);
-        let scroll_bottom = scroll_top + self.height;
+        let scroll_bottom = scroll_top + self.height.unwrap_or(0.0);
         let start = Point::new((scroll_top / self.line_height).floor() as u32, 0);
         let end = Point::new((scroll_bottom / self.line_height).ceil() as u32, 0);
 
@@ -557,11 +558,7 @@ impl View for BufferView {
         })
     }
 
-    fn updates(&self) -> ViewUpdateStream {
-        Box::new(self.updates.observe())
-    }
-
-    fn dispatch_action(&mut self, action: serde_json::Value) {
+    fn dispatch_action(&mut self, action: serde_json::Value, _: &mut Window) {
         match serde_json::from_value(action) {
             Ok(BufferViewAction::UpdateScrollTop { delta }) => {
                 let mut scroll_top = self.scroll_top + delta;
@@ -581,6 +578,15 @@ impl View for BufferView {
             Ok(BufferViewAction::MoveRight) => self.move_right(),
             action @ _ => eprintln!("Unrecognized action {:?}", action),
         }
+    }
+}
+
+impl Stream for BufferView {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        self.updates.poll()
     }
 }
 

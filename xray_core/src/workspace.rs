@@ -1,3 +1,6 @@
+use project::{Project, PathSearch, PathSearchStatus};
+use notify_cell::NotifyCellObserver;
+use futures::{Poll, Stream};
 use serde_json;
 use std::cell::RefCell;
 use std::env;
@@ -6,17 +9,19 @@ use std::rc::Rc;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
-use window::{View, ViewHandle, ViewUpdateStream, WindowHandle};
+use window::{View, ViewHandle, WeakViewHandle, Window};
 use buffer::Buffer;
 use buffer_view::BufferView;
 use notify_cell::NotifyCell;
+use fs;
+use file_finder::{FileFinderView, FileFinderViewDelegate};
 
 pub struct WorkspaceView {
-    // workspace: WorkspaceHandle,
-    window_handle: Option<WindowHandle>,
+    project: Project,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
+    self_handle: Option<WeakViewHandle<WorkspaceView>>,
 }
 
 #[derive(Deserialize)]
@@ -25,45 +30,31 @@ enum WorkspaceViewAction {
     ToggleFileFinder,
 }
 
-struct FileFinderView {
-    query: String,
-    updates: NotifyCell<()>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum FileFinderAction {
-    UpdateQuery { query: String },
-}
-
 impl WorkspaceView {
-    pub fn new() -> Self {
+    pub fn new(roots: Vec<Box<fs::Tree>>) -> Self {
         WorkspaceView {
+            project: Project::new(roots),
             modal_panel: None,
             center_pane: None,
-            window_handle: None,
             updates: NotifyCell::new(()),
+            self_handle: None,
         }
     }
 
-    fn toggle_file_finder(&mut self) {
-        let ref mut window_handle = self.window_handle.as_mut().unwrap();
+    fn toggle_file_finder(&mut self, window: &mut Window) {
         if self.modal_panel.is_some() {
             self.modal_panel = None;
         } else {
-            self.modal_panel = Some(window_handle.add_view(FileFinderView::new()));
+            let delegate = self.self_handle.as_ref().cloned().unwrap();
+            let view = window.add_view(FileFinderView::new(delegate));
+            view.focus().unwrap();
+            self.modal_panel = Some(view);
         }
         self.updates.set(());
     }
 
-    fn build_example_buffer_view(&self) -> BufferView {
-        let src_path: PathBuf = env::var("XRAY_SRC_PATH")
-            .expect("Missing XRAY_SRC_PATH environment variable")
-            .into();
-
-        let react_js_path =
-            src_path.join("xray_electron/node_modules/react/cjs/react.development.js");
-        let file = File::open(react_js_path).unwrap();
+    fn open_path(&self, path: PathBuf) -> BufferView {
+        let file = File::open(path).unwrap();
         let mut buf_reader = BufReader::new(file);
         let mut contents = String::new();
         buf_reader.read_to_string(&mut contents).unwrap();
@@ -89,58 +80,50 @@ impl View for WorkspaceView {
         })
     }
 
-    fn updates(&self) -> ViewUpdateStream {
-        Box::new(self.updates.observe())
+    fn will_mount(&mut self, window: &mut Window, view_handle: WeakViewHandle<Self>) {
+        let src_path: PathBuf = env::var("XRAY_SRC_PATH")
+            .expect("Missing XRAY_SRC_PATH environment variable")
+            .into();
+
+        let react_js_path =
+            src_path.join("xray_electron/node_modules/react/cjs/react.development.js");
+
+        self.center_pane = Some(window.add_view(self.open_path(react_js_path)));
+        self.self_handle = Some(view_handle);
     }
 
-    fn will_mount(&mut self, window_handle: WindowHandle) {
-        self.center_pane = Some(window_handle.add_view(self.build_example_buffer_view()));
-        self.window_handle = Some(window_handle);
-    }
-
-    fn dispatch_action(&mut self, action: serde_json::Value) {
+    fn dispatch_action(&mut self, action: serde_json::Value, window: &mut Window) {
         match serde_json::from_value(action) {
-            Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(),
+            Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(window),
             _ => eprintln!("Unrecognized action"),
         }
     }
 }
 
-impl View for FileFinderView {
-    fn component_name(&self) -> &'static str {
-        "FileFinder"
+impl FileFinderViewDelegate for WorkspaceView {
+    fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
+        self.project.search_paths(needle, max_results, include_ignored)
     }
 
-    fn render(&self) -> serde_json::Value {
-        json!({
-            "query": self.query.as_str()
-        })
+    fn did_close(&mut self) {
+        self.modal_panel = None;
+        self.updates.set(());
     }
 
-    fn updates(&self) -> ViewUpdateStream {
-        Box::new(self.updates.observe())
-    }
-
-    fn dispatch_action(&mut self, action: serde_json::Value) {
-        match serde_json::from_value(action) {
-            Ok(FileFinderAction::UpdateQuery { query }) => self.update_query(query),
-            _ => eprintln!("Unrecognized action"),
-        }
+    fn did_confirm(&mut self, path: PathBuf, window: &mut Window) {
+        let buffer_view = window.add_view(self.open_path(path));
+        buffer_view.focus().unwrap();
+        self.center_pane = Some(buffer_view);
+        self.modal_panel = None;
+        self.updates.set(());
     }
 }
 
-impl FileFinderView {
-    fn new() -> Self {
-        Self {
-            query: String::new(),
-            updates: NotifyCell::new(()),
-        }
-    }
+impl Stream for WorkspaceView {
+    type Item = ();
+    type Error = ();
 
-    fn update_query(&mut self, query: String) {
-        if self.query != query {
-            self.query = query;
-            self.updates.set(());
-        }
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        self.updates.poll()
     }
 }

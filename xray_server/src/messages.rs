@@ -26,4 +26,6 @@ pub enum IncomingMessage {
 pub enum OutgoingMessage {
     OpenWindow { window_id: WindowId },
     UpdateWindow(window::WindowUpdate),
+    Error { description: String },
+    Ok,
 }

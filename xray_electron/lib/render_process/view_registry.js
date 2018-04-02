@@ -6,6 +6,7 @@ module.exports = class ViewRegistry {
     this.componentsByName = new Map();
     this.viewsById = new Map();
     this.propListenersByViewId = new Map();
+    this.focusListenersByViewId = new Map();
   }
 
   addComponent(name, component) {
@@ -14,8 +15,8 @@ module.exports = class ViewRegistry {
   }
 
   getComponent(id) {
-    const view = this.viewsById.get(id)
-    assert(view)
+    const view = this.viewsById.get(id);
+    assert(view);
     const component = this.componentsByName.get(view.component_name);
     assert(component);
     return component;
@@ -25,7 +26,7 @@ module.exports = class ViewRegistry {
     this.componentsByName.delete(name);
   }
 
-  update({ updated, removed }) {
+  update({ updated, removed, focused }) {
     for (let i = 0; i < updated.length; i++) {
       const view = updated[i];
       this.viewsById.set(view.view_id, view);
@@ -42,6 +43,16 @@ module.exports = class ViewRegistry {
       const viewId = removed[i];
       this.viewsById.delete(viewId);
       this.propListenersByViewId.delete(viewId);
+    }
+
+    if (focused != null) {
+      const focusListener = this.focusListenersByViewId.get(focused);
+      if (focusListener) {
+        this.pendingFocus = null;
+        focusListener();
+      } else {
+        this.pendingFocus = focused;
+      }
     }
   }
 
@@ -66,6 +77,18 @@ module.exports = class ViewRegistry {
       const callbackIndex = listeners.indexOf(callback);
       if (callbackIndex !== -1) listeners.splice(callbackIndex, 1);
     };
+  }
+
+  watchFocus(id, callback) {
+    assert(!this.focusListenersByViewId.has(id));
+
+    this.focusListenersByViewId.set(id, callback);
+    if (this.pendingFocus === id) {
+      this.pendingFocus = null;
+      callback();
+    }
+
+    return () => this.focusListenersByViewId.delete(id);
   }
 
   dispatchAction(id, action) {

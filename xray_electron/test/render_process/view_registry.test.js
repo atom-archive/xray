@@ -1,8 +1,8 @@
-const test = require("tape");
+const assert = require("assert");
 const ViewRegistry = require("../../lib/render_process/view_registry");
 
-test("ViewRegistry", t => {
-  t.test("props", t => {
+suite("ViewRegistry", () => {
+  test("props", () => {
     const registry = new ViewRegistry();
 
     // Adding initial views
@@ -14,9 +14,9 @@ test("ViewRegistry", t => {
       removed: []
     });
 
-    t.deepEqual(registry.getProps(1), { a: 1 });
-    t.deepEqual(registry.getProps(2), { b: 2 });
-    t.throws(() => registry.getProps(3));
+    assert.deepEqual(registry.getProps(1), { a: 1 });
+    assert.deepEqual(registry.getProps(2), { b: 2 });
+    assert.throws(() => registry.getProps(3));
 
     const propChanges = [];
     const disposeProps1Watch = registry.watchProps(1, () =>
@@ -25,7 +25,7 @@ test("ViewRegistry", t => {
     const disposeProps2Watch = registry.watchProps(2, () =>
       propChanges.push("component-2")
     );
-    t.throws(() => registry.watchProps(3, () => {}));
+    assert.throws(() => registry.watchProps(3, () => {}));
 
     // Updating existing view, removing existing view, adding a new view
     registry.update({
@@ -36,12 +36,12 @@ test("ViewRegistry", t => {
       removed: [1]
     });
 
-    t.throws(() => registry.getProps(1));
-    t.deepEqual(registry.getProps(2), { b: 3 });
-    t.deepEqual(registry.getProps(3), { c: 4 });
+    assert.throws(() => registry.getProps(1));
+    assert.deepEqual(registry.getProps(2), { b: 3 });
+    assert.deepEqual(registry.getProps(3), { c: 4 });
 
-    t.throws(() => registry.watchProps(1, () => {}));
-    t.deepEqual(propChanges, ["component-2"]);
+    assert.throws(() => registry.watchProps(1, () => {}));
+    assert.deepEqual(propChanges, ["component-2"]);
 
     // Stop watching props for a view
     propChanges.length = 0;
@@ -52,12 +52,10 @@ test("ViewRegistry", t => {
       removed: []
     });
 
-    t.deepEqual(propChanges, []);
-
-    t.end();
+    assert.deepEqual(propChanges, []);
   });
 
-  t.test("components", t => {
+  test("components", () => {
     const registry = new ViewRegistry();
     registry.update({
       updated: [
@@ -72,24 +70,22 @@ test("ViewRegistry", t => {
     const comp2A = () => {};
     registry.addComponent("comp-1", comp1A);
     registry.addComponent("comp-2", comp2A);
-    t.equal(registry.getComponent(1), comp1A);
-    t.equal(registry.getComponent(2), comp2A);
-    t.throws(() => registry.getComponent(3));
+    assert.equal(registry.getComponent(1), comp1A);
+    assert.equal(registry.getComponent(2), comp2A);
+    assert.throws(() => registry.getComponent(3));
 
     registry.removeComponent("comp-1");
-    t.throws(() => registry.getComponent(1));
-    t.equal(registry.getComponent(2), comp2A);
+    assert.throws(() => registry.getComponent(1));
+    assert.equal(registry.getComponent(2), comp2A);
 
     const comp1B = () => {};
     const comp2B = () => {};
     registry.addComponent("comp-1", comp1B);
-    t.throws(() => registry.addComponent("comp-2", comp2B));
-    t.equal(registry.getComponent(1), comp1B);
-
-    t.end();
+    assert.throws(() => registry.addComponent("comp-2", comp2B));
+    assert.equal(registry.getComponent(1), comp1B);
   });
 
-  t.test("dispatching actions", t => {
+  test("dispatching actions", () => {
     const actions = [];
     const registry = new ViewRegistry({ onAction: a => actions.push(a) });
 
@@ -103,13 +99,33 @@ test("ViewRegistry", t => {
 
     registry.dispatchAction(1, { a: 1, b: 2 });
     registry.dispatchAction(2, { c: 3 });
-    t.throws(() => registry.dispatchAction(3, { d: 4 }));
+    assert.throws(() => registry.dispatchAction(3, { d: 4 }));
 
-    t.deepEqual(actions, [
+    assert.deepEqual(actions, [
       { view_id: 1, action: { a: 1, b: 2 } },
       { view_id: 2, action: { c: 3 } }
     ]);
+  });
 
-    t.end();
+  test("focus", () => {
+    const registry = new ViewRegistry({ onAction: a => actions.push(a) });
+
+    const focusRequests = [];
+    registry.update({ updated: [], removed: [], focused: 2 });
+    registry.update({ updated: [], removed: [], focused: 1 });
+    registry.update({ updated: [], removed: [], focused: 1 });
+    const disposeWatch1 = registry.watchFocus(1, () => focusRequests.push(1));
+    registry.watchFocus(2, () => focusRequests.push(2));
+    registry.update({ updated: [], removed: [], focused: 1 });
+    registry.update({ updated: [], removed: [], focused: 2 });
+
+    assert.deepEqual(focusRequests, [1, 1, 2]);
+    assert.throws(() => registry.watchFocus(1));
+
+    disposeWatch1()
+    registry.update({ updated: [], removed: [], focused: 1 });
+    registry.update({ updated: [], removed: [], focused: 2 });
+    assert.doesNotThrow(() => registry.watchFocus(1));
+    assert.deepEqual(focusRequests, [1, 1, 2, 2]);
   });
 });

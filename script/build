@@ -1,5 +1,5 @@
 #!/bin/bash
 
-cargo build &&
+cargo build "$@" &&
 cd xray_electron &&
 npm install

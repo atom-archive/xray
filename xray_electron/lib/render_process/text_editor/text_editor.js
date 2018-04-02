@@ -16,6 +16,24 @@ const Root = styled("div", {
 });
 
 class TextEditor extends React.Component {
+  static getDerivedStateFromProps(nextProps, prevState) {
+    let derivedState = null;
+
+    if (nextProps.width != null && nextProps.width !== prevState.width) {
+      derivedState = {width: nextProps.width};
+    }
+
+    if (nextProps.height != null && nextProps.height !== prevState.height) {
+      if (derivedState) {
+        derivedState.height = nextProps.height;
+      } else {
+        derivedState = {height: nextProps.height};
+      }
+    }
+
+    return derivedState
+  }
+
   constructor(props) {
     super(props);
     this.handleMouseWheel = this.handleMouseWheel.bind(this);
@@ -25,12 +43,7 @@ class TextEditor extends React.Component {
       CURSOR_BLINK_RESUME_DELAY
     );
 
-    this.state = {
-      scrollTop: 0,
-      height: 0,
-      width: 0,
-      showCursors: true
-    };
+    this.state = {showCursors: true};
   }
 
   componentDidMount() {
@@ -39,10 +52,15 @@ class TextEditor extends React.Component {
       this.componentDidResize({width: contentRect.width, height: contentRect.height})
     });
     this.resizeObserver.observe(element);
-    this.componentDidResize({
-      width: element.offsetWidth,
-      height: element.offsetHeight
-    });
+
+    if (this.props.width == null || this.props.height == null) {
+      const dimensions = {
+        width: element.offsetWidth,
+        height: element.offsetHeight
+      };
+      this.componentDidResize(dimensions);
+      this.setState(dimensions)
+    }
 
     element.addEventListener('wheel', this.handleMouseWheel, {passive: true});
 
@@ -69,7 +87,10 @@ class TextEditor extends React.Component {
       Root,
       {
         tabIndex: -1,
-        onKeyDown: this.handleKeyDown
+        onKeyDown: this.handleKeyDown,
+        $ref: (element) => {
+          this.element = element
+        }
       },
       $(TextPlane, {
         showCursors: this.state.showCursors,
@@ -89,7 +110,7 @@ class TextEditor extends React.Component {
   }
 
   handleKeyDown(event) {
-    if (event.key.length === 1) {
+    if (event.key.length === 1 && !event.metaKey) {
       this.props.dispatch({type: 'Edit', text: event.key});
       return;
     }
@@ -141,6 +162,10 @@ class TextEditor extends React.Component {
         showCursors: false
       });
     }
+  }
+
+  focus() {
+    this.element.focus();
   }
 }
 
