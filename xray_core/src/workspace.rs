@@ -3,7 +3,6 @@ use notify_cell::NotifyCellObserver;
 use futures::{Poll, Stream};
 use serde_json;
 use std::cell::RefCell;
-use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::fs::File;
@@ -80,15 +79,7 @@ impl View for WorkspaceView {
         })
     }
 
-    fn will_mount(&mut self, window: &mut Window, view_handle: WeakViewHandle<Self>) {
-        let src_path: PathBuf = env::var("XRAY_SRC_PATH")
-            .expect("Missing XRAY_SRC_PATH environment variable")
-            .into();
-
-        let react_js_path =
-            src_path.join("xray_electron/node_modules/react/cjs/react.development.js");
-
-        self.center_pane = Some(window.add_view(self.open_path(react_js_path)));
+    fn will_mount(&mut self, _window: &mut Window, view_handle: WeakViewHandle<Self>) {
         self.self_handle = Some(view_handle);
     }
 
