@@ -8,8 +8,8 @@ Xray is organized around a client/server architecture, with all the application 
 
 All application logic is controlled by a single server that listens on a domain socket located at `ATOM_SOCKET_PATH`. We connect to the server with three different types of clients:
 
-* **CLI:** When you run the `xray` binary, we will check if a socket for the server already exists. If it does, we will connect to this socket and communicate with the server directly. For example, the application may already be running, but we want to open a new workspace for a given path. To do that, we just connect to the existing socket and send it an `OpenWorkspace` message.
-* **App:** The Electron app in `xray_electron` connects to the server as an app client. If no socket exists when launching via the CLI, we launch the `xray_electron`, then spawn the server as a subprocess of the Electron main process and wait for it to start listening on the socket. We then connect to the server via the socket and identify ourselves as the application via a `{type: StartApp}` message. After that we forward the initial message assigned to `XRAY_INITIAL_MESSAGE` environment variable. One message that the server sends to the app client is the `OpenWindow` message, which tells the app to open a new window.
+* **CLI:** When you run the `xray` binary, we will check if a socket for the server already exists and is listening. If it does, we will connect to this socket and communicate with the server directly. For example, the application may already be running, but we want to open a new workspace for a given path. To do that, we just connect to the existing socket and send it an `OpenWorkspace` message. If the CLI is unable to connect to the socket, it spawns the Electron app and waits for it to report that it is `Listening\n` on `stdout`.
+* **App:** The Electron app in `xray_electron` spawns the server as a child process on startup and identifies itself as the application client via the `{type: "StartApp"}` message. The server then sends the app client application-level command messages like the `OpenWindow` message, which tells the app to open a new window.
 * **Window:** When the server tells the app to open a window, it provides a window id, which gets passed to the Electron window in the URL. Once the window loads, it connects to the server's socket and identifies itself as a window, supplying this id.
 
 ## The window protocol
@@ -29,6 +29,8 @@ In the render process, we maintain a `ViewRegistry` which mirrors the state of t
 The render process communicates changes to the server via *actions*, which are plain-old JS objects that can be dispatched to a particular view id. These actions are dispatched from the `ViewRegistry` on the render process and make their way to the server, where they are routed by the `Window` object. `Window` calls `dispatch_action` on the view corresponding to the action's specified `view_id`, passing the JSON to the view for handling.
 
 Views can handle an action by updating their own state or the state of other model objects. The `Window` detects state changes via the `updates` stream of any current views, then sends these updates to the client.
+
+The server can also tell the window to *focus* a particular view by calling the `focus` method on its top-level React component. This can be accessed via the `ViewHandle::focus` method on the server side. These commands are simply relayed to the client. The server has no explicit model of focus state.
 
 ## Detecting when views need to be re-rendered
 
