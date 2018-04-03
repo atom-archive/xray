@@ -18,10 +18,10 @@ type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
 pub type WindowId = usize;
 
 pub struct App {
-    inner: Rc<RefCell<Inner>>,
+    state: Rc<RefCell<AppState>>,
 }
 
-struct Inner {
+struct AppState {
     app_channel: Option<OutboundSender>,
     next_window_id: WindowId,
     windows: HashMap<WindowId, Window>,
@@ -31,7 +31,7 @@ struct Inner {
 impl App {
     pub fn new(reactor: reactor::Handle) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(Inner {
+            state: Rc::new(RefCell::new(AppState {
                 next_window_id: 1,
                 app_channel: None,
                 windows: HashMap::new(),
@@ -47,20 +47,20 @@ impl App {
             + Sink<SinkItem = OutgoingMessage>,
     {
         let (outgoing, incoming) = socket.split();
-        let inner = self.inner.clone();
-        self.inner.borrow_mut().reactor.spawn(
+        let app_state = self.state.clone();
+        self.state.borrow_mut().reactor.spawn(
             incoming
                 .into_future()
                 .map(|(first_message, incoming)| {
                     first_message.map(|first_message| match first_message {
                         IncomingMessage::StartApp => {
-                            Self::start_app(inner, outgoing, incoming);
+                            Self::start_app(app_state, outgoing, incoming);
                         }
                         IncomingMessage::StartCli => {
-                            Self::start_cli(inner, outgoing, incoming);
+                            Self::start_cli(app_state, outgoing, incoming);
                         }
                         IncomingMessage::StartWindow { window_id, height } => {
-                            Self::start_window(inner, outgoing, incoming, window_id, height);
+                            Self::start_window(app_state, outgoing, incoming, window_id, height);
                         }
                         _ => eprintln!("Unexpected message {:?}", first_message),
                     });
@@ -69,29 +69,29 @@ impl App {
         );
     }
 
-    fn start_app<O, I>(inner: Rc<RefCell<Inner>>, outgoing: O, incoming: I)
+    fn start_app<O, I>(app_state: Rc<RefCell<AppState>>, outgoing: O, incoming: I)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        let inner_clone = inner.clone();
-        let mut inner_borrow = inner.borrow_mut();
-        if inner_borrow.app_channel.is_some() {
+        let app_state_clone = app_state.clone();
+        let mut app_state_borrow = app_state.borrow_mut();
+        if app_state_borrow.app_channel.is_some() {
             let responses = stream::once(Ok(OutgoingMessage::Error {
                 description: "An application client is already registered".into(),
             }));
-            inner_borrow.reactor.spawn(
+            app_state_borrow.reactor.spawn(
                 outgoing
                     .send_all(responses.map_err(|_: ()| unreachable!()))
                     .then(|_| Ok(())),
             );
         } else {
             let (tx, rx) = mpsc::unbounded();
-            inner_borrow.app_channel = Some(tx.clone());
+            app_state_borrow.app_channel = Some(tx.clone());
             let responses = report_input_errors(
-                incoming.map(move |message| inner_clone.borrow_mut().handle_app_message(message)),
+                incoming.map(move |message| app_state_clone.borrow_mut().handle_app_message(message)),
             );
-            inner_borrow.reactor.spawn(
+            app_state_borrow.reactor.spawn(
                 outgoing
                     .send_all(responses.select(rx).map_err(|_| unreachable!()))
                     .then(|_| Ok(())),
@@ -99,18 +99,18 @@ impl App {
         }
     }
 
-    fn start_cli<O, I>(inner: Rc<RefCell<Inner>>, outgoing: O, incoming: I)
+    fn start_cli<O, I>(app_state: Rc<RefCell<AppState>>, outgoing: O, incoming: I)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        let inner_clone = inner.clone();
+        let app_state_clone = app_state.clone();
         let responses = report_input_errors(
-            incoming.map(move |message| inner_clone.borrow_mut().handle_app_message(message)),
+            incoming.map(move |message| app_state_clone.borrow_mut().handle_app_message(message)),
         );
         let responses = stream::once(Ok(OutgoingMessage::Ok)).chain(responses);
 
-        inner.borrow_mut().reactor.spawn(
+        app_state.borrow_mut().reactor.spawn(
             outgoing
                 .send_all(responses.map_err(|_| unreachable!()))
                 .then(|_| Ok(())),
@@ -118,7 +118,7 @@ impl App {
     }
 
     fn start_window<O, I>(
-        inner: Rc<RefCell<Inner>>,
+        app_state: Rc<RefCell<AppState>>,
         outgoing: O,
         incoming: I,
         window_id: WindowId,
@@ -127,16 +127,16 @@ impl App {
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        let inner_clone = inner.clone();
-        let mut inner = inner.borrow_mut();
+        let app_state_clone = app_state.clone();
+        let mut app_state = app_state.borrow_mut();
         let window_updates = {
-            let window = inner.windows.get_mut(&window_id).unwrap();
+            let window = app_state.windows.get_mut(&window_id).unwrap();
             window.set_height(height);
             window.updates()
         };
         let receive_incoming = incoming
             .for_each(move |message| {
-                inner_clone
+                app_state_clone
                     .borrow_mut()
                     .handle_window_message(window_id, message);
                 Ok(())
@@ -148,7 +148,7 @@ impl App {
             .send_all(outgoing_messages.map_err(|_| unreachable!()))
             .then(|_| Ok(()));
 
-        inner.reactor.spawn(
+        app_state.reactor.spawn(
             receive_incoming
                 .select(send_outgoing)
                 .then(|_: Result<((), _), ((), _)>| Ok(())),
@@ -156,7 +156,7 @@ impl App {
     }
 }
 
-impl Inner {
+impl AppState {
     fn handle_app_message(&mut self, message: IncomingMessage) -> OutgoingMessage {
         match message {
             IncomingMessage::OpenWorkspace { paths } => match self.open_workspace(paths) {
