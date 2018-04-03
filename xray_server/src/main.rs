@@ -27,12 +27,14 @@ use messages::{IncomingMessage, OutgoingMessage};
 use app::App;
 
 fn main() {
+    let headless =
+        env::var("XRAY_HEADLESS").expect("Missing XRAY_HEADLESS environment variable") != "0";
     let socket_path =
         env::var("XRAY_SOCKET_PATH").expect("Missing XRAY_SOCKET_PATH environment variable");
 
     let mut core = Core::new().unwrap();
     let handle = core.handle();
-    let mut app = App::new(handle.clone());
+    let mut app = App::new(headless, handle.clone());
 
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(socket_path, &handle).unwrap();
@@ -40,7 +42,7 @@ fn main() {
     let handle_connections = listener.incoming().for_each(move |(socket, _)| {
         let framed_socket =
             socket.framed(JsonLinesCodec::<IncomingMessage, OutgoingMessage>::new());
-        app.add_connection(framed_socket);
+        app.accept_connection(framed_socket);
         Ok(())
     });
 

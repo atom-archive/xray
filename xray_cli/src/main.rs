@@ -30,7 +30,7 @@ type PortNumber = u16;
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum ServerRequest {
-    StartCli,
+    StartCli { headless: bool },
     OpenWorkspace { paths: Vec<PathBuf> },
     Listen { port: PortNumber },
 }
@@ -65,6 +65,8 @@ fn launch() -> Result<(), String> {
         .and_then(|d| d.deserialize())
         .unwrap_or_else(|e| e.exit());
 
+    let headless = args.flag_headless.unwrap_or(false);
+
     const DEFAULT_SOCKET_PATH: &'static str = "/tmp/xray.sock";
     let socket_path = PathBuf::from(args.flag_socket_path
         .as_ref()
@@ -86,7 +88,7 @@ fn launch() -> Result<(), String> {
                 node_env = "development";
             }
 
-            if args.flag_headless.unwrap_or(false) {
+            if headless {
                 start_headless(&server_bin_path, &socket_path)?
             } else {
                 start_electron(&src_path, &server_bin_path, &socket_path, &node_env)?
@@ -94,7 +96,7 @@ fn launch() -> Result<(), String> {
         }
     };
 
-    send_message(&mut socket, ServerRequest::StartCli)?;
+    send_message(&mut socket, ServerRequest::StartCli { headless })?;
 
     let mut paths = Vec::new();
     for path in args.arg_path {
@@ -113,6 +115,7 @@ fn launch() -> Result<(), String> {
 fn start_headless(server_bin_path: &Path, socket_path: &Path) -> Result<UnixStream, String> {
     let command = Command::new(server_bin_path)
         .env("XRAY_SOCKET_PATH", socket_path)
+        .env("XRAY_HEADLESS", "1")
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Failed to open Xray app {}", error))?;
@@ -131,8 +134,9 @@ fn start_electron(src_path: &Path, server_bin_path: &Path, socket_path: &Path, n
     let electron_bin_path = electron_app_path.join("node_modules/.bin/electron");
     let command = Command::new(electron_bin_path)
         .arg(electron_app_path)
-        .env("XRAY_SOCKET_PATH", socket_path)
         .env("XRAY_SERVER_PATH", server_bin_path)
+        .env("XRAY_SOCKET_PATH", socket_path)
+        .env("XRAY_HEADLESS", "0")
         .env("NODE_ENV", node_env)
         .stdout(Stdio::piped())
         .spawn()

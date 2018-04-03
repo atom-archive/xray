@@ -5,13 +5,11 @@ use futures_cpupool::CpuPool;
 use messages::{IncomingMessage, OutgoingMessage};
 use serde_json;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use tokio_core::reactor;
-use xray_core::window::{ViewId, Window};
-use xray_core::workspace::WorkspaceView;
+use xray_core::window::ViewId;
 use xray_core::{self, Peer, WindowId};
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
@@ -27,18 +25,18 @@ struct AppState {
 }
 
 impl App {
-    pub fn new(reactor: reactor::Handle) -> Self {
-        let executor = Rc::new(CpuPool::new_num_cpus());
+    pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
+        let bg_executor = Rc::new(CpuPool::new_num_cpus());
         Self {
             state: Rc::new(RefCell::new(AppState {
-                peer: Peer::new(false, executor),
+                peer: Peer::new(headless, bg_executor),
                 app_channel: None,
                 reactor,
             })),
         }
     }
 
-    pub fn add_connection<'a, S>(&mut self, socket: S)
+    pub fn accept_connection<'a, S>(&mut self, socket: S)
     where
         S: 'static
             + Stream<Item = IncomingMessage, Error = io::Error>
@@ -54,8 +52,8 @@ impl App {
                         IncomingMessage::StartApp => {
                             Self::start_app(app_state, outgoing, incoming);
                         }
-                        IncomingMessage::StartCli => {
-                            Self::start_cli(app_state, outgoing, incoming);
+                        IncomingMessage::StartCli { headless } => {
+                            Self::start_cli(app_state, outgoing, incoming, headless);
                         }
                         IncomingMessage::StartWindow { window_id, height } => {
                             Self::start_window(app_state, outgoing, incoming, window_id, height);
@@ -73,47 +71,52 @@ impl App {
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
         let app_state_clone = app_state.clone();
-        let mut app_state_borrow = app_state.borrow_mut();
-        if app_state_borrow.app_channel.is_some() {
-            let responses = stream::once(Ok(OutgoingMessage::Error {
+        let mut app_state = app_state.borrow_mut();
+        if app_state.peer.headless() {
+            app_state.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                description: "This is a headless application instance".into(),
+            })));
+        } else if app_state.app_channel.is_some() {
+            app_state.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                 description: "An application client is already registered".into(),
-            }));
-            app_state_borrow.reactor.spawn(
-                outgoing
-                    .send_all(responses.map_err(|_: ()| unreachable!()))
-                    .then(|_| Ok(())),
-            );
+            })));
         } else {
             let (tx, rx) = mpsc::unbounded();
-            app_state_borrow.app_channel = Some(tx.clone());
-            let responses = report_input_errors(
-                incoming
-                    .map(move |message| app_state_clone.borrow_mut().handle_app_message(message)),
-            );
-            app_state_borrow.reactor.spawn(
-                outgoing
-                    .send_all(responses.select(rx).map_err(|_| unreachable!()))
-                    .then(|_| Ok(())),
-            );
+            app_state.app_channel = Some(tx.clone());
+            let responses = rx.select(report_input_errors(
+                incoming.map(move |message|
+                    app_state_clone.borrow_mut().handle_app_message(message)
+                )
+            ));
+
+            app_state.send_responses(outgoing, responses);
         }
     }
 
-    fn start_cli<O, I>(app_state: Rc<RefCell<AppState>>, outgoing: O, incoming: I)
+    fn start_cli<O, I>(app_state: Rc<RefCell<AppState>>, outgoing: O, incoming: I, headless: bool)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        let app_state_clone = app_state.clone();
-        let responses = report_input_errors(
-            incoming.map(move |message| app_state_clone.borrow_mut().handle_app_message(message)),
-        );
-        let responses = stream::once(Ok(OutgoingMessage::Ok)).chain(responses);
+        match (app_state.borrow().peer.headless(), headless) {
+            (true, false) => {
+                return app_state.borrow().send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                    description: "Since Xray was initially started with --headless, all subsequent commands must be --headless".into()
+                })));
+            }
+            (false, true) => {
+                return app_state.borrow().send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                    description: "Since Xray was initially started without --headless, no subsequent commands may be --headless".into()
+                })));
+            },
+            _ => {}
+        }
 
-        app_state.borrow_mut().reactor.spawn(
-            outgoing
-                .send_all(responses.map_err(|_| unreachable!()))
-                .then(|_| Ok(())),
-        )
+        let app_state_clone = app_state.clone();
+        let responses = stream::once(Ok(OutgoingMessage::Ok)).chain(report_input_errors(
+            incoming.map(move |message| app_state_clone.borrow_mut().handle_app_message(message)),
+        ));
+        app_state.borrow_mut().send_responses(outgoing, responses);
     }
 
     fn start_window<O, I>(
@@ -207,6 +210,17 @@ impl AppState {
             Some(ref mut window) => window.dispatch_action(view_id, action),
             None => unimplemented!(),
         };
+    }
+
+    fn send_responses<O, I>(&self, outgoing: O, responses: I)
+    where
+        O: 'static + Sink<SinkItem = OutgoingMessage>,
+        I: 'static + Stream<Item = OutgoingMessage, Error = ()> {
+        self.reactor.spawn(
+            outgoing
+                .send_all(responses.map_err(|_| unreachable!()))
+                .then(|_| Ok(())),
+        );
     }
 }
 

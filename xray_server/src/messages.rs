@@ -7,7 +7,7 @@ use xray_core::window::{self, ViewId};
 #[serde(tag = "type")]
 pub enum IncomingMessage {
     StartApp,
-    StartCli,
+    StartCli { headless: bool },
     Listen {
         port: u16
     },

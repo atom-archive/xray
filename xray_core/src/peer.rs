@@ -24,6 +24,10 @@ impl Peer {
         }
     }
 
+    pub fn headless(&self) -> bool {
+        self.headless
+    }
+
     pub fn open_workspace(&mut self, roots: Vec<Box<fs::Tree>>) -> Option<WindowId> {
         let workspace = WorkspaceHandle::new(roots);
         let window_id = if self.headless {
