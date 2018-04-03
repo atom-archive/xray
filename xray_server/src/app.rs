@@ -1,18 +1,18 @@
-use futures::{Future, Sink, Stream};
+use fs;
 use futures::sync::mpsc;
+use futures::{stream, Future, Sink, Stream};
 use futures_cpupool::CpuPool;
 use messages::{IncomingMessage, OutgoingMessage};
+use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
-use serde_json;
-use xray_core;
-use xray_core::workspace::WorkspaceView;
-use xray_core::window::{ViewId, Window};
 use tokio_core::reactor;
-use fs;
+use xray_core;
+use xray_core::window::{ViewId, Window};
+use xray_core::workspace::WorkspaceView;
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
 pub type WindowId = usize;
@@ -48,10 +48,6 @@ impl App {
     {
         let (outgoing, incoming) = socket.split();
         let inner = self.inner.clone();
-        let incoming = incoming.map_err(|error| {
-            eprintln!("Error reading incoming message: {:?}", error);
-            error
-        });
         self.inner.borrow_mut().reactor.spawn(
             incoming
                 .into_future()
@@ -78,24 +74,29 @@ impl App {
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
+        let inner_clone = inner.clone();
         let mut inner_borrow = inner.borrow_mut();
-        let (tx, rx) = mpsc::unbounded();
         if inner_borrow.app_channel.is_some() {
-            eprintln!("Redundant app client");
-            return;
+            let responses = stream::once(Ok(OutgoingMessage::Error {
+                description: "An application client is already registered".into(),
+            }));
+            inner_borrow.reactor.spawn(
+                outgoing
+                    .send_all(responses.map_err(|_: ()| unreachable!()))
+                    .then(|_| Ok(())),
+            );
+        } else {
+            let (tx, rx) = mpsc::unbounded();
+            inner_borrow.app_channel = Some(tx.clone());
+            let responses = report_input_errors(
+                incoming.map(move |message| inner_clone.borrow_mut().handle_app_message(message)),
+            );
+            inner_borrow.reactor.spawn(
+                outgoing
+                    .send_all(responses.select(rx).map_err(|_| unreachable!()))
+                    .then(|_| Ok(())),
+            );
         }
-
-        inner_borrow.app_channel = Some(tx.clone());
-
-        let receive_incoming = Self::handle_app_messages(inner.clone(), tx, incoming);
-        let send_outgoing = outgoing
-            .send_all(rx.map_err(|_| unreachable!()))
-            .then(|_| Ok(()));
-        inner_borrow.reactor.spawn(
-            receive_incoming
-                .select(send_outgoing)
-                .then(|_: Result<((), _), ((), _)>| Ok(())),
-        );
     }
 
     fn start_cli<O, I>(inner: Rc<RefCell<Inner>>, outgoing: O, incoming: I)
@@ -103,10 +104,17 @@ impl App {
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        inner
-            .borrow_mut()
-            .reactor
-            .spawn(Self::handle_app_messages(inner.clone(), outgoing, incoming));
+        let inner_clone = inner.clone();
+        let responses = report_input_errors(
+            incoming.map(move |message| inner_clone.borrow_mut().handle_app_message(message)),
+        );
+        let responses = stream::once(Ok(OutgoingMessage::Ok)).chain(responses);
+
+        inner.borrow_mut().reactor.spawn(
+            outgoing
+                .send_all(responses.map_err(|_| unreachable!()))
+                .then(|_| Ok(())),
+        )
     }
 
     fn start_window<O, I>(
@@ -146,41 +154,20 @@ impl App {
                 .then(|_: Result<((), _), ((), _)>| Ok(())),
         );
     }
-
-    fn handle_app_messages<O, I>(
-        inner: Rc<RefCell<Inner>>,
-        outgoing: O,
-        incoming: I,
-    ) -> Box<Future<Item = (), Error = ()>>
-    where
-        O: 'static + Sink<SinkItem = OutgoingMessage>,
-        I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
-    {
-        let responses = incoming
-            .map(move |message| {
-                inner.borrow_mut().handle_app_message(message)
-            })
-            .map_err(|_| unreachable!());
-        Box::new(outgoing.send_all(responses).then(|_| Ok(())))
-    }
 }
 
 impl Inner {
     fn handle_app_message(&mut self, message: IncomingMessage) -> OutgoingMessage {
         match message {
-            IncomingMessage::OpenWorkspace { paths } => {
-                match self.open_workspace(paths) {
-                    Ok(()) => OutgoingMessage::Ok,
-                    Err(description) => OutgoingMessage::Error {
-                        description: description.to_string()
-                    }
-                }
-            }
-            _ => {
-                OutgoingMessage::Error {
-                    description: format!("Unexpected message {:?}", message)
-                }
-            }
+            IncomingMessage::OpenWorkspace { paths } => match self.open_workspace(paths) {
+                Ok(()) => OutgoingMessage::Ok,
+                Err(description) => OutgoingMessage::Error {
+                    description: description.to_string(),
+                },
+            },
+            _ => OutgoingMessage::Error {
+                description: format!("Unexpected message {:?}", message),
+            },
         }
     }
 
@@ -206,7 +193,8 @@ impl Inner {
             return Err("All paths must be absolute");
         }
 
-        let roots = paths.iter()
+        let roots = paths
+            .iter()
             .map(|path| Box::new(fs::Tree::new(path).unwrap()) as Box<xray_core::fs::Tree>)
             .collect();
 
@@ -229,4 +217,20 @@ impl Inner {
             None => unimplemented!(),
         };
     }
+}
+
+fn report_input_errors<S>(incoming: S) -> Box<Stream<Item = OutgoingMessage, Error = ()>>
+where
+    S: 'static + Stream<Item = OutgoingMessage, Error = io::Error>,
+{
+    Box::new(
+        incoming
+            .then(|value| match value {
+                Err(error) => Ok(OutgoingMessage::Error {
+                    description: format!("Error reading message on server: {}", error),
+                }),
+                _ => value,
+            })
+            .map_err(|_| ()),
+    )
 }

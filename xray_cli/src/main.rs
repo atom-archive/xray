@@ -1,13 +1,11 @@
 extern crate docopt;
 #[macro_use]
 extern crate serde_derive;
-#[macro_use]
 extern crate serde_json;
 
 use std::env;
 use std::process::{Command, Stdio};
 use std::path::{Path, PathBuf};
-use std::error::Error;
 use docopt::Docopt;
 use std::os::unix::net::UnixStream;
 use std::io::{Write, BufReader, BufRead};
@@ -29,11 +27,12 @@ Options:
 
 type PortNumber = u16;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum ServerRequest {
     StartCli,
     OpenWorkspace { paths: Vec<PathBuf> },
+    Listen { port: PortNumber },
 }
 
 #[derive(Deserialize)]
@@ -52,7 +51,7 @@ struct Args {
 }
 
 fn main() {
-    process::exit(match main_inner() {
+    process::exit(match launch() {
         Ok(()) => 0,
         Err(description) => {
             eprintln!("{}", description);
@@ -61,7 +60,7 @@ fn main() {
     })
 }
 
-fn main_inner() -> Result<(), String> {
+fn launch() -> Result<(), String> {
     let args: Args = Docopt::new(USAGE)
         .and_then(|d| d.deserialize())
         .unwrap_or_else(|e| e.exit());
@@ -95,29 +94,20 @@ fn main_inner() -> Result<(), String> {
         }
     };
 
-    send_message(&mut socket, ServerRequest::StartCli)
-        .expect("Failed to send message");
+    send_message(&mut socket, ServerRequest::StartCli)?;
 
     let mut paths = Vec::new();
     for path in args.arg_path {
         paths.push(fs::canonicalize(&path)
             .map_err(|error| format!("Invalid path {:?} - {}", path, error))?);
     }
+    send_message(&mut socket, ServerRequest::OpenWorkspace { paths })?;
 
-    send_message(&mut socket, ServerRequest::OpenWorkspace { paths })
-        .expect("Failed to send message");
-
-    let mut reader = BufReader::new(&mut socket);
-    let mut line = String::new();
-    reader.read_line(&mut line)
-        .expect("Error reading server response");
-    let response: ServerResponse = serde_json::from_str(&line)
-        .expect("Error parsing server response");
-
-    match response {
-        ServerResponse::Ok => Ok(()),
-        ServerResponse::Error { description } => Err(description),
+    if let Some(port) = args.flag_listen {
+        send_message(&mut socket, ServerRequest::Listen { port })?;
     }
+
+    Ok(())
 }
 
 fn start_headless(server_bin_path: &Path, socket_path: &Path) -> Result<UnixStream, String> {
@@ -157,8 +147,16 @@ fn start_electron(src_path: &Path, server_bin_path: &Path, socket_path: &Path, n
     UnixStream::connect(socket_path).map_err(|_| String::from("Error connecting to socket"))
 }
 
-fn send_message(socket: &mut UnixStream, message: ServerRequest) -> Result<(), Box<Error>> {
-    socket.write(&serde_json::to_vec(&message)?)?;
-    socket.write(b"\n")?;
-    Ok(())
+fn send_message(socket: &mut UnixStream, message: ServerRequest) -> Result<(), String> {
+    let bytes = serde_json::to_vec(&message).expect("Error serializing message");
+    socket.write(&bytes).expect("Error writing to server socket");
+    socket.write(b"\n").expect("Error writing to server socket");
+
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("Error reading server response");
+    match serde_json::from_str::<ServerResponse>(&line).expect("Error reading server response") {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { description } => Err(description),
+    }
 }

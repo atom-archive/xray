@@ -8,6 +8,9 @@ use xray_core::window::{self, ViewId};
 pub enum IncomingMessage {
     StartApp,
     StartCli,
+    Listen {
+        port: u16
+    },
     StartWindow {
         window_id: WindowId,
         height: f64,
