@@ -1,6 +1,6 @@
 # Shared workspaces
 
-How should we structure network communication in relation to shared workpsaces.
+How should we structure network communication in relation to shared workspaces.
 
 I think we should consider Cap'N Proto RPC, which creates the abstraction of a remote object graph. You define "interfaces", which represent remote objects and methods that they handle. You can then create a representation of a remote object and call methods on it. It can return you additional remote objects that you can also call methods on, which can return more remote objects, and so on.
 
