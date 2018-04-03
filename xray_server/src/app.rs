@@ -10,9 +10,9 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use tokio_core::reactor;
-use xray_core;
 use xray_core::window::{ViewId, Window};
 use xray_core::workspace::WorkspaceView;
+use xray_core::{self, Peer};
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
 pub type WindowId = usize;
@@ -22,6 +22,7 @@ pub struct App {
 }
 
 struct AppState {
+    peer: Peer,
     app_channel: Option<OutboundSender>,
     next_window_id: WindowId,
     windows: HashMap<WindowId, Window>,
@@ -32,6 +33,7 @@ impl App {
     pub fn new(reactor: reactor::Handle) -> Self {
         Self {
             state: Rc::new(RefCell::new(AppState {
+                peer: Peer::new(),
                 next_window_id: 1,
                 app_channel: None,
                 windows: HashMap::new(),
@@ -89,7 +91,8 @@ impl App {
             let (tx, rx) = mpsc::unbounded();
             app_state_borrow.app_channel = Some(tx.clone());
             let responses = report_input_errors(
-                incoming.map(move |message| app_state_clone.borrow_mut().handle_app_message(message)),
+                incoming
+                    .map(move |message| app_state_clone.borrow_mut().handle_app_message(message)),
             );
             app_state_borrow.reactor.spawn(
                 outgoing
@@ -198,7 +201,8 @@ impl AppState {
             .map(|path| Box::new(fs::Tree::new(path).unwrap()) as Box<xray_core::fs::Tree>)
             .collect();
 
-        let workspace_view_handle = window.add_view(WorkspaceView::new(roots));
+        let workspace = self.peer.open_workspace(roots);
+        let workspace_view_handle = window.add_view(WorkspaceView::new(workspace));
         window.set_root_view(workspace_view_handle);
         self.windows.insert(window_id, window);
 

@@ -15,8 +15,15 @@ use notify_cell::NotifyCell;
 use fs;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
 
+#[derive(Clone)]
+pub struct WorkspaceHandle(Rc<RefCell<Workspace>>);
+
+struct Workspace {
+    project: Project
+}
+
 pub struct WorkspaceView {
-    project: Project,
+    workspace: WorkspaceHandle,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
@@ -29,10 +36,22 @@ enum WorkspaceViewAction {
     ToggleFileFinder,
 }
 
-impl WorkspaceView {
+impl WorkspaceHandle {
     pub fn new(roots: Vec<Box<fs::Tree>>) -> Self {
+        WorkspaceHandle(Rc::new(RefCell::new(Workspace {
+            project: Project::new(roots)
+        })))
+    }
+
+    pub fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
+        self.0.borrow().project.search_paths(needle, max_results, include_ignored)
+    }
+}
+
+impl WorkspaceView {
+    pub fn new(workspace: WorkspaceHandle) -> Self {
         WorkspaceView {
-            project: Project::new(roots),
+            workspace,
             modal_panel: None,
             center_pane: None,
             updates: NotifyCell::new(()),
@@ -93,7 +112,7 @@ impl View for WorkspaceView {
 
 impl FileFinderViewDelegate for WorkspaceView {
     fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
-        self.project.search_paths(needle, max_results, include_ignored)
+        self.workspace.search_paths(needle, max_results, include_ignored)
     }
 
     fn did_close(&mut self) {
