@@ -25,4 +25,4 @@ mod project;
 mod movement;
 mod tree;
 
-pub use peer::Peer;
+pub use peer::{Peer, WindowId};

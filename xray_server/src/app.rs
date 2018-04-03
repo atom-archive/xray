@@ -12,10 +12,9 @@ use std::rc::Rc;
 use tokio_core::reactor;
 use xray_core::window::{ViewId, Window};
 use xray_core::workspace::WorkspaceView;
-use xray_core::{self, Peer};
+use xray_core::{self, Peer, WindowId};
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
-pub type WindowId = usize;
 
 pub struct App {
     state: Rc<RefCell<AppState>>,
@@ -24,19 +23,16 @@ pub struct App {
 struct AppState {
     peer: Peer,
     app_channel: Option<OutboundSender>,
-    next_window_id: WindowId,
-    windows: HashMap<WindowId, Window>,
     reactor: reactor::Handle,
 }
 
 impl App {
     pub fn new(reactor: reactor::Handle) -> Self {
+        let executor = Rc::new(CpuPool::new_num_cpus());
         Self {
             state: Rc::new(RefCell::new(AppState {
-                peer: Peer::new(),
-                next_window_id: 1,
+                peer: Peer::new(false, executor),
                 app_channel: None,
-                windows: HashMap::new(),
                 reactor,
             })),
         }
@@ -133,7 +129,7 @@ impl App {
         let app_state_clone = app_state.clone();
         let mut app_state = app_state.borrow_mut();
         let window_updates = {
-            let window = app_state.windows.get_mut(&window_id).unwrap();
+            let window = app_state.peer.windows.get_mut(&window_id).unwrap();
             window.set_height(height);
             window.updates()
         };
@@ -186,12 +182,6 @@ impl AppState {
     }
 
     fn open_workspace(&mut self, paths: Vec<PathBuf>) -> Result<(), &'static str> {
-        let window_id = self.next_window_id;
-        self.next_window_id += 1;
-
-        let background_executor = Box::new(CpuPool::new_num_cpus());
-        let mut window = Window::new(Some(background_executor), 0.0);
-
         if !paths.iter().all(|path| path.is_absolute()) {
             return Err("All paths must be absolute");
         }
@@ -201,22 +191,19 @@ impl AppState {
             .map(|path| Box::new(fs::Tree::new(path).unwrap()) as Box<xray_core::fs::Tree>)
             .collect();
 
-        let workspace = self.peer.open_workspace(roots);
-        let workspace_view_handle = window.add_view(WorkspaceView::new(workspace));
-        window.set_root_view(workspace_view_handle);
-        self.windows.insert(window_id, window);
-
-        if let Some(ref mut app_channel) = self.app_channel {
-            app_channel
-                .unbounded_send(OutgoingMessage::OpenWindow { window_id })
-                .expect("Tried to open a workspace with no connected app");
-        }
+        self.peer.open_workspace(roots).map(|window_id| {
+            self.app_channel.as_ref().map(|app_channel| {
+                app_channel
+                    .unbounded_send(OutgoingMessage::OpenWindow { window_id })
+                    .expect("Error sending to app channel");
+            })
+        });
 
         Ok(())
     }
 
     fn dispatch_action(&mut self, window_id: WindowId, view_id: ViewId, action: serde_json::Value) {
-        match self.windows.get_mut(&window_id) {
+        match self.peer.windows.get_mut(&window_id) {
             Some(ref mut window) => window.dispatch_action(view_id, action),
             None => unimplemented!(),
         };

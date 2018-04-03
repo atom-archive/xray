@@ -7,9 +7,7 @@ use futures::{Async, Future, Poll, Stream};
 use futures::task::{self, Task};
 use futures::future;
 
-type BoxedSendableFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
-type BoxedExecutor = Box<future::Executor<BoxedSendableFuture>>;
-
+pub type Executor = Rc<future::Executor<Box<Future<Item = (), Error = ()> + Send + 'static>>>;
 pub type ViewId = usize;
 
 pub trait View: Stream<Item = (), Error = ()> {
@@ -27,6 +25,7 @@ pub struct WindowUpdateStream {
 }
 
 pub struct Inner {
+    executor: Option<Executor>,
     next_view_id: ViewId,
     views: HashMap<ViewId, Rc<RefCell<View<Item = (), Error = ()>>>>,
     inserted: HashSet<ViewId>,
@@ -35,7 +34,6 @@ pub struct Inner {
     height: f64,
     update_stream_counter: usize,
     update_stream_task: Option<Task>,
-    executor: Option<BoxedExecutor>
 }
 
 pub struct ViewHandle {
@@ -60,9 +58,10 @@ pub struct ViewUpdate {
 }
 
 impl Window {
-    pub fn new(executor: Option<BoxedExecutor>, height: f64) -> Self {
+    pub fn new(executor: Option<Executor>, height: f64) -> Self {
         Window(
             Rc::new(RefCell::new(Inner {
+                executor,
                 next_view_id: 0,
                 views: HashMap::new(),
                 inserted: HashSet::new(),
@@ -71,7 +70,6 @@ impl Window {
                 height: height,
                 update_stream_counter: 0,
                 update_stream_task: None,
-                executor
             })),
             None,
         )
