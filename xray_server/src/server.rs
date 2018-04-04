@@ -64,19 +64,25 @@ impl Server {
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
         if server.app.headless() {
-            server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
-                description: "This is a headless application instance".into(),
-            })));
+            server.send_responses(
+                outgoing,
+                stream::once(Ok(OutgoingMessage::Error {
+                    description: "This is a headless application instance".into(),
+                })),
+            );
         } else if server.app_channel.borrow().is_some() {
-            server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
-                description: "An application client is already registered".into(),
-            })));
+            server.send_responses(
+                outgoing,
+                stream::once(Ok(OutgoingMessage::Error {
+                    description: "An application client is already registered".into(),
+                })),
+            );
         } else {
             let (tx, rx) = mpsc::unbounded();
             server.app_channel.borrow_mut().get_or_insert(tx.clone());
             let server_clone = server.clone();
             let responses = rx.select(report_input_errors(
-                incoming.map(move |message| server_clone.handle_app_message(message))
+                incoming.map(move |message| server_clone.handle_app_message(message)),
             ));
 
             server.send_responses(outgoing, responses);
@@ -98,7 +104,7 @@ impl Server {
                 return server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                     description: "Since Xray was initially started without --headless, no subsequent commands may be --headless".into()
                 })));
-            },
+            }
             _ => {}
         }
 
@@ -153,7 +159,7 @@ impl Server {
 
         match result {
             Ok(_) => OutgoingMessage::Ok,
-            Err(description) => OutgoingMessage::Error { description }
+            Err(description) => OutgoingMessage::Error { description },
         }
     }
 
@@ -192,7 +198,8 @@ impl Server {
     fn send_responses<O, I>(&self, outgoing: O, responses: I)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
-        I: 'static + Stream<Item = OutgoingMessage, Error = ()> {
+        I: 'static + Stream<Item = OutgoingMessage, Error = ()>,
+    {
         self.reactor.spawn(
             outgoing
                 .send_all(responses.map_err(|_| unreachable!()))
