@@ -1,7 +1,8 @@
 use fs;
-use workspace::{WorkspaceHandle, WorkspaceView};
+use serde_json;
 use std::collections::HashMap;
-use window::{Window, Executor};
+use window::{Executor, ViewId, Window};
+use workspace::{WorkspaceHandle, WorkspaceView};
 
 pub type WindowId = usize;
 
@@ -43,5 +44,17 @@ impl Peer {
         };
         self.workspaces.push(workspace);
         window_id
+    }
+
+    pub fn dispatch_action(
+        &mut self,
+        window_id: WindowId,
+        view_id: ViewId,
+        action: serde_json::Value,
+    ) {
+        match self.windows.get_mut(&window_id) {
+            Some(ref mut window) => window.dispatch_action(view_id, action),
+            None => unimplemented!(),
+        };
     }
 }

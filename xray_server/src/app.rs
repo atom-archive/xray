@@ -3,13 +3,11 @@ use futures::sync::mpsc;
 use futures::{stream, Future, Sink, Stream};
 use futures_cpupool::CpuPool;
 use messages::{IncomingMessage, OutgoingMessage};
-use serde_json;
 use std::cell::RefCell;
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use tokio_core::reactor;
-use xray_core::window::ViewId;
 use xray_core::{self, Peer, WindowId};
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
@@ -176,7 +174,7 @@ impl AppState {
     fn handle_window_message(&mut self, window_id: usize, message: IncomingMessage) {
         match message {
             IncomingMessage::Action { view_id, action } => {
-                self.dispatch_action(window_id, view_id, action);
+                self.peer.dispatch_action(window_id, view_id, action);
             }
             _ => {
                 eprintln!("Unexpected message {:?}", message);
@@ -203,13 +201,6 @@ impl AppState {
         });
 
         Ok(())
-    }
-
-    fn dispatch_action(&mut self, window_id: WindowId, view_id: ViewId, action: serde_json::Value) {
-        match self.peer.windows.get_mut(&window_id) {
-            Some(ref mut window) => window.dispatch_action(view_id, action),
-            None => unimplemented!(),
-        };
     }
 
     fn send_responses<O, I>(&self, outgoing: O, responses: I)
