@@ -39,16 +39,16 @@ impl Server {
         self.reactor.spawn(
             incoming
                 .into_future()
-                .map(|(first_message, incoming)| {
+                .map(move |(first_message, incoming)| {
                     first_message.map(|first_message| match first_message {
                         IncomingMessage::StartApp => {
-                            Self::start_app(server, outgoing, incoming);
+                            server.start_app(outgoing, incoming);
                         }
                         IncomingMessage::StartCli { headless } => {
-                            Self::start_cli(server, outgoing, incoming, headless);
+                            server.start_cli(outgoing, incoming, headless);
                         }
                         IncomingMessage::StartWindow { window_id, height } => {
-                            Self::start_window(server, outgoing, incoming, window_id, height);
+                            server.start_window(outgoing, incoming, window_id, height);
                         }
                         _ => eprintln!("Unexpected message {:?}", first_message),
                     });
@@ -57,21 +57,21 @@ impl Server {
         );
     }
 
-    fn start_app<O, I>(server: Server, outgoing: O, incoming: I)
+    fn start_app<O, I>(&self, outgoing: O, incoming: I)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        if server.app.headless() {
-            server.send_responses(
+        if self.app.headless() {
+            self.send_responses(
                 outgoing,
                 stream::once(Ok(OutgoingMessage::Error {
                     description: "This is a headless application instance".into(),
                 })),
             );
         } else {
-            if let Some(updates) = server.app.updates() {
-                let server_clone = server.clone();
+            if let Some(updates) = self.app.updates() {
+                let server = self.clone();
                 let responses = updates
                     .map(|update|
                         match update {
@@ -79,12 +79,12 @@ impl Server {
                         }
                     )
                     .select(
-                        report_input_errors(incoming.map(move |message| server_clone.handle_app_message(message))
+                        report_input_errors(incoming.map(move |message| server.handle_app_message(message))
                     ));
 
-                server.send_responses(outgoing, responses);
+                self.send_responses(outgoing, responses);
             } else {
-                server.send_responses(
+                self.send_responses(
                     outgoing,
                     stream::once(Ok(OutgoingMessage::Error {
                         description: "An application client is already registered".into(),
@@ -94,52 +94,52 @@ impl Server {
         }
     }
 
-    fn start_cli<O, I>(server: Server, outgoing: O, incoming: I, headless: bool)
+    fn start_cli<O, I>(&self, outgoing: O, incoming: I, headless: bool)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        match (server.app.headless(), headless) {
+        match (self.app.headless(), headless) {
             (true, false) => {
-                return server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                return self.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                     description: "Since Xray was initially started with --headless, all subsequent commands must be --headless".into()
                 })));
             }
             (false, true) => {
-                return server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                return self.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                     description: "Since Xray was initially started without --headless, no subsequent commands may be --headless".into()
                 })));
             }
             _ => {}
         }
 
-        let server_clone = server.clone();
+        let server = self.clone();
         let responses = stream::once(Ok(OutgoingMessage::Ok)).chain(report_input_errors(
-            incoming.map(move |message| server_clone.handle_app_message(message)),
+            incoming.map(move |message| server.handle_app_message(message)),
         ));
-        server.send_responses(outgoing, responses);
+        self.send_responses(outgoing, responses);
     }
 
-    pub fn start_window<O, I>(server: Server, outgoing: O, incoming: I, window_id: WindowId, height: f64)
+    pub fn start_window<O, I>(&self, outgoing: O, incoming: I, window_id: WindowId, height: f64)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        let server_clone = server.clone();
+        let server = self.clone();
         let receive_incoming = incoming
             .for_each(move |message| {
-                server_clone.handle_window_message(window_id, message);
+                server.handle_window_message(window_id, message);
                 Ok(())
             })
             .then(|_| Ok(()));
-        server.reactor.spawn(receive_incoming);
+        self.reactor.spawn(receive_incoming);
 
-        match server.app.start_window(&window_id, height) {
+        match self.app.start_window(&window_id, height) {
             Ok(updates) => {
-                server.send_responses(outgoing, updates.map(|update| OutgoingMessage::UpdateWindow(update)));
+                self.send_responses(outgoing, updates.map(|update| OutgoingMessage::UpdateWindow(update)));
             },
             Err(_) => {
-                server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                self.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                     description: format!("No window exists for id {}", window_id)
                 })));
             }
