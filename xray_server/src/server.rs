@@ -1,8 +1,8 @@
 use capnp_rpc::{self, rpc_twoparty_capnp, twoparty, RpcSystem};
 use fs;
-use futures::sync::mpsc;
 use futures::{stream, Future, Sink, Stream};
 use futures_cpupool::CpuPool;
+use messages::{IncomingMessage, OutgoingMessage};
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -10,8 +10,8 @@ use std::rc::Rc;
 use tokio_core::net::TcpListener;
 use tokio_core::reactor;
 use tokio_io::AsyncRead;
-use xray_core::messages::{IncomingMessage, OutgoingMessage};
-use xray_core::{self, schema_capnp, App};
+use xray_core::{self, schema_capnp, App, WindowId};
+use xray_core::app::AppUpdate;
 
 #[derive(Clone)]
 pub struct Server {
@@ -21,10 +21,9 @@ pub struct Server {
 
 impl Server {
     pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
-        let fg_executor = Rc::new(reactor.clone());
-        let bg_executor = Rc::new(CpuPool::new_num_cpus());
+        let executor = Rc::new(CpuPool::new_num_cpus());
         Server {
-            app: App::new(headless, fg_executor, bg_executor),
+            app: App::new(headless, executor),
             reactor,
         }
     }
@@ -49,12 +48,7 @@ impl Server {
                             Self::start_cli(server, outgoing, incoming, headless);
                         }
                         IncomingMessage::StartWindow { window_id, height } => {
-                            server.app.start_window(
-                                outgoing,
-                                incoming.map_err(|_| ()),
-                                window_id,
-                                height,
-                            );
+                            Self::start_window(server, outgoing, incoming, window_id, height);
                         }
                         _ => eprintln!("Unexpected message {:?}", first_message),
                     });
@@ -75,22 +69,28 @@ impl Server {
                     description: "This is a headless application instance".into(),
                 })),
             );
-        } else if server.app.has_client() {
-            server.send_responses(
-                outgoing,
-                stream::once(Ok(OutgoingMessage::Error {
-                    description: "An application client is already registered".into(),
-                })),
-            );
         } else {
-            let (tx, rx) = mpsc::unbounded();
-            server.app.set_client_tx(tx);
-            let server_clone = server.clone();
-            let responses = rx.select(report_input_errors(
-                incoming.map(move |message| server_clone.handle_app_message(message)),
-            ));
+            if let Some(updates) = server.app.updates() {
+                let server_clone = server.clone();
+                let responses = updates
+                    .map(|update|
+                        match update {
+                            AppUpdate::OpenWindow(window_id) => OutgoingMessage::OpenWindow { window_id }
+                        }
+                    )
+                    .select(
+                        report_input_errors(incoming.map(move |message| server_clone.handle_app_message(message))
+                    ));
 
-            server.send_responses(outgoing, responses);
+                server.send_responses(outgoing, responses);
+            } else {
+                server.send_responses(
+                    outgoing,
+                    stream::once(Ok(OutgoingMessage::Error {
+                        description: "An application client is already registered".into(),
+                    })),
+                );
+            }
         }
     }
 
@@ -119,9 +119,33 @@ impl Server {
         ));
         server.send_responses(outgoing, responses);
     }
-}
 
-impl Server {
+    pub fn start_window<O, I>(server: Server, outgoing: O, incoming: I, window_id: WindowId, height: f64)
+    where
+        O: 'static + Sink<SinkItem = OutgoingMessage>,
+        I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
+    {
+        let server_clone = server.clone();
+        let receive_incoming = incoming
+            .for_each(move |message| {
+                server_clone.handle_window_message(window_id, message);
+                Ok(())
+            })
+            .then(|_| Ok(()));
+        server.reactor.spawn(receive_incoming);
+
+        match server.app.start_window(&window_id, height) {
+            Ok(updates) => {
+                server.send_responses(outgoing, updates.map(|update| OutgoingMessage::UpdateWindow(update)));
+            },
+            Err(_) => {
+                server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                    description: format!("No window exists for id {}", window_id)
+                })));
+            }
+        }
+    }
+
     fn handle_app_message(&self, message: IncomingMessage) -> OutgoingMessage {
         let result = match message {
             IncomingMessage::OpenWorkspace { paths } => self.open_workspace(paths),
@@ -132,6 +156,17 @@ impl Server {
         match result {
             Ok(_) => OutgoingMessage::Ok,
             Err(description) => OutgoingMessage::Error { description },
+        }
+    }
+
+    fn handle_window_message(&self, window_id: WindowId, message: IncomingMessage) {
+        match message {
+            IncomingMessage::Action { view_id, action } => {
+                self.app.dispatch_action(window_id, view_id, action);
+            }
+            _ => {
+                eprintln!("Unexpected message {:?}", message);
+            }
         }
     }
 

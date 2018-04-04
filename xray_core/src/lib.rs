@@ -14,7 +14,6 @@ pub mod app;
 pub mod buffer;
 pub mod buffer_view;
 pub mod fs;
-pub mod messages;
 pub mod notify_cell;
 pub mod schema_capnp { include!(concat!(env!("OUT_DIR"), "/src/schema_capnp.rs")); }
 pub mod window;
@@ -27,3 +26,4 @@ mod movement;
 mod tree;
 
 pub use app::{App, WindowId};
+pub use window::{ViewId, WindowUpdate};
