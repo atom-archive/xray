@@ -3,7 +3,6 @@ use fs;
 use futures::sync::mpsc;
 use futures::{stream, Future, Sink, Stream};
 use futures_cpupool::CpuPool;
-use std::cell::RefCell;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -11,8 +10,8 @@ use std::rc::Rc;
 use tokio_core::net::TcpListener;
 use tokio_core::reactor;
 use tokio_io::AsyncRead;
-use xray_core::{self, schema_capnp, App, WindowId};
 use xray_core::messages::{IncomingMessage, OutgoingMessage};
+use xray_core::{self, schema_capnp, App};
 
 #[derive(Clone)]
 pub struct Server {
@@ -22,9 +21,10 @@ pub struct Server {
 
 impl Server {
     pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
+        let fg_executor = Rc::new(reactor.clone());
         let bg_executor = Rc::new(CpuPool::new_num_cpus());
         Server {
-            app: App::new(headless, bg_executor),
+            app: App::new(headless, fg_executor, bg_executor),
             reactor,
         }
     }
@@ -49,7 +49,12 @@ impl Server {
                             Self::start_cli(server, outgoing, incoming, headless);
                         }
                         IncomingMessage::StartWindow { window_id, height } => {
-                            Self::start_window(server, outgoing, incoming, window_id, height);
+                            server.app.start_window(
+                                outgoing,
+                                incoming.map_err(|_| ()),
+                                window_id,
+                                height,
+                            );
                         }
                         _ => eprintln!("Unexpected message {:?}", first_message),
                     });
@@ -114,40 +119,6 @@ impl Server {
         ));
         server.send_responses(outgoing, responses);
     }
-
-    fn start_window<O, I>(
-        server: Server,
-        outgoing: O,
-        incoming: I,
-        window_id: WindowId,
-        height: f64,
-    ) where
-        O: 'static + Sink<SinkItem = OutgoingMessage>,
-        I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
-    {
-        let server_clone = server.clone();
-        let receive_incoming = incoming
-            .for_each(move |message| {
-                server_clone.handle_window_message(window_id, message);
-                Ok(())
-            })
-            .then(|_| Ok(()));
-
-        let outgoing_messages = server
-            .app
-            .window_updates(&window_id, height)
-            .map(|update| OutgoingMessage::UpdateWindow(update));
-
-        let send_outgoing = outgoing
-            .send_all(outgoing_messages.map_err(|_| unreachable!()))
-            .then(|_| Ok(()));
-
-        server.reactor.spawn(
-            receive_incoming
-                .select(send_outgoing)
-                .then(|_: Result<((), _), ((), _)>| Ok(())),
-        );
-    }
 }
 
 impl Server {
@@ -162,17 +133,6 @@ impl Server {
             Ok(_) => OutgoingMessage::Ok,
             Err(description) => OutgoingMessage::Error { description },
         }
-    }
-
-    fn handle_window_message(&self, window_id: usize, message: IncomingMessage) {
-        match message {
-            IncomingMessage::Action { view_id, action } => {
-                self.app.dispatch_action(window_id, view_id, action);
-            }
-            _ => {
-                eprintln!("Unexpected message {:?}", message);
-            }
-        };
     }
 
     fn open_workspace(&self, paths: Vec<PathBuf>) -> Result<(), String> {
