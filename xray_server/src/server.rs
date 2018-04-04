@@ -1,3 +1,4 @@
+use capnp_rpc::{self, rpc_twoparty_capnp, twoparty, RpcSystem};
 use fs;
 use futures::sync::mpsc;
 use futures::{stream, Future, Sink, Stream};
@@ -5,10 +6,13 @@ use futures_cpupool::CpuPool;
 use messages::{IncomingMessage, OutgoingMessage};
 use std::cell::RefCell;
 use std::io;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
+use tokio_core::net::TcpListener;
 use tokio_core::reactor;
-use xray_core::{self, App, WindowId};
+use tokio_io::AsyncRead;
+use xray_core::{self, schema_capnp, App, WindowId};
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
 
@@ -154,6 +158,7 @@ impl Server {
     fn handle_app_message(&self, message: IncomingMessage) -> OutgoingMessage {
         let result = match message {
             IncomingMessage::OpenWorkspace { paths } => self.open_workspace(paths),
+            IncomingMessage::Listen { port } => self.listen(port),
             _ => Err(format!("Unexpected message {:?}", message)),
         };
 
@@ -192,6 +197,35 @@ impl Server {
             })
         });
 
+        Ok(())
+    }
+
+    fn listen(&self, port: u16) -> Result<(), String> {
+        let local_addr = SocketAddr::new("127.0.0.1".parse().unwrap(), port);
+        let listener = TcpListener::bind(&local_addr, &self.reactor)
+            .map_err(|_| "Error binding address".to_owned())?;
+        let reactor = self.reactor.clone();
+        let app = self.app.clone();
+        let handle_incoming = listener
+            .incoming()
+            .map_err(|_| eprintln!("Error accepting incoming connection"))
+            .for_each(move |(socket, _)| {
+                socket.set_nodelay(true).unwrap();
+
+                let (rx, tx) = socket.split();
+                let peer = schema_capnp::peer::ToClient::new(app.clone())
+                    .from_server::<capnp_rpc::Server>();
+                let network = twoparty::VatNetwork::new(
+                    rx,
+                    tx,
+                    rpc_twoparty_capnp::Side::Server,
+                    Default::default(),
+                );
+                let rpc = RpcSystem::new(Box::new(network), Some(peer.clone().client));
+                reactor.spawn(rpc.map_err(|err| eprintln!("Cap'N Proto RPC Error: {}", err)));
+                Ok(())
+            });
+        self.reactor.spawn(handle_incoming);
         Ok(())
     }
 

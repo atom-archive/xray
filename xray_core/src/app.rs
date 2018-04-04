@@ -69,3 +69,4 @@ impl App {
     }
 }
 
+impl schema_capnp::peer::Server for App {}

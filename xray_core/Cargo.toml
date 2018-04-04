@@ -6,7 +6,6 @@ license = "MIT"
 
 [dependencies]
 capnp = "0.8"
-capnp-rpc = "0.8"
 futures = "0.1"
 lazy_static = "1.0"
 parking_lot = "0.5"
