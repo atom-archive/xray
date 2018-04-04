@@ -1,3 +1,4 @@
+extern crate bytes;
 extern crate capnp;
 #[macro_use]
 extern crate lazy_static;
@@ -15,6 +16,7 @@ pub mod buffer;
 pub mod buffer_view;
 pub mod fs;
 pub mod notify_cell;
+pub mod rpc;
 pub mod schema_capnp { include!(concat!(env!("OUT_DIR"), "/src/schema_capnp.rs")); }
 pub mod window;
 pub mod workspace;

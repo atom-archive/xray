@@ -22,20 +22,20 @@ We want to host one or more workspaces on a remote server via a headless instanc
 
 ## Architecture
 
-### Protocol
+Here's the current thinking:
 
-How should we structure network communication in relation to shared workspaces.
+On the server, maintain a pool of "services" for each connected client. A service maps to an entity in the domain model that we want to share. The client connection is created with one or more initial services, and the first service added is considered the "bootstrap" service.
 
-I think we should consider Cap'N Proto RPC, which creates the abstraction of a remote object graph. You define "interfaces", which represent remote objects and methods that they handle. You can then create a representation of a remote object and call methods on it. It can return you additional remote objects that you can also call methods on, which can return more remote objects, and so on.
+When a client connects, they build a client side representation of this pool of services. They retrieve a *client* for the bootstrap service. Clients have no understanding of the type of the underlying service. They expose an initial snapshot for the service's state, a stream of updates, and a method to make requests to the service and receive responses back. All of these facilities are untyped and deal with raw bytes. We could potentially expose a convenient facility for imposing a typed interface on the raw values.
 
-#### Pushing messages from the server to the client
+The client is intended to be wrapped by a higher level object that is coded to the type of the service that the client interfaces with. We could potentially add some kind of facility for ensuring the client is interfacing to the service we expect, possibly by just giving services unique type names. When higher level code calls methods on the client's wrapper object, it may result in that object performing a request via the client.
 
-We need to be able to push changes to clients rather than always requesting them. In Cap'N Proto RPC, it doesn't look like you can define methods that return streaming results, but from a cursory reading of the [capnproto-rust pub/sub example](https://github.com/capnproto/capnproto-rust/tree/master/capnp-rpc/examples/pubsub), it looks like we *should* be able to achieve the same effect by calling methods on the server side's representation of client side objects. In the pub/sub example, the `Publisher` has a `subscribe` method that takes a `Subscriber` as an argument. The `Publisher` adds these `Subscriber` objects to a map and calls methods on them when it wants to broadcast messages. Clients implement the `Subscriber` interface so they can handle messages pushed by the server. We could easily relay the results of a stream to a client object by repeatedly calling a remote method with the stream's values.
+The wrapper object should also spawn a future to process incoming updates and incorporate them into locally-replicated state as necessary.
 
-#### Bootstrapping
+When the server wants to give the client access to a new service, we expect this to occur when handling a request. In the `request` method's interface, we could pass a reference to the service pool just like we do in the window. This would allow the service to add additional services and retrieve their ids. We could then include these ids as necessary in our response.
 
-A client/server connection needs to be bootstrapped, meaning there's an initial object that the server gives the client access to. What should this object be?
+On the client side, when we receive a response, we could call into the client-side representation of the service pool to take ownership of the client side of the service. When we drop the client, we can send a signal to the server that it can also drop the server side of the service.
 
-It seems like we might want to name the Cap'N Proto interface `Peer`. This interface would represent the app as a whole, and be designed to handle incoming requests from arbitrary clients. This is where we can implement authentication in the future. Since Cap'N Proto interfaces are compiled to traits, we may want `App` to implement this trait.
+So long as the client-side code always takes ownership of any service added on the server side, this should avoid leaks. What if the client side doesn't ever take ownership? With every response, we could potentially include the id of the most-recently-added service. After the response is processed, we could schedule a cleanup of any unclaimed services that were added during that request cycle and possible emit some kind of warning.
 
-From here, we can ask the `Peer` to list its workspaces. We can get a handle to one of these workspaces and interact with it over RPC. Maybe we can create a `RemoteWorkspace` to plug in as the implementation of a `Workspace` trait that is owned by our `WorkspaceView`. The `RemoteWorkspace` will cache data locally and deal with CRDT operations, etc, and it will be designed to RPC with a workspace instance on another machine.
+So to summarize, I see `Service` as a trait that server-side domain objects will implement that explains how to connect that object to RPC clients. `ServiceClient` is a concrete implementation that we wrap with domain objects.

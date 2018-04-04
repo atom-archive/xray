@@ -5,6 +5,7 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 license = "MIT"
 
 [dependencies]
+bytes = "0.4"
 capnp = "0.8"
 futures = "0.1"
 lazy_static = "1.0"
