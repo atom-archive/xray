@@ -10,11 +10,11 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate smallvec;
 
+pub mod app;
 pub mod buffer;
 pub mod buffer_view;
 pub mod fs;
 pub mod notify_cell;
-pub mod peer;
 pub mod schema_capnp { include!(concat!(env!("OUT_DIR"), "/src/schema_capnp.rs")); }
 pub mod window;
 pub mod workspace;
@@ -25,4 +25,4 @@ mod project;
 mod movement;
 mod tree;
 
-pub use peer::{Peer, WindowId};
+pub use app::{App, WindowId};

@@ -8,29 +8,24 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use tokio_core::reactor;
-use xray_core::{self, Peer, WindowId};
+use xray_core::{self, App, WindowId};
 
 type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
 
-pub struct App {
-    state: Rc<RefCell<AppState>>,
-}
-
-struct AppState {
-    peer: Peer,
-    app_channel: Option<OutboundSender>,
+#[derive(Clone)]
+pub struct Server {
+    app: xray_core::App,
+    app_channel: Rc<RefCell<Option<OutboundSender>>>,
     reactor: reactor::Handle,
 }
 
-impl App {
+impl Server {
     pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
         let bg_executor = Rc::new(CpuPool::new_num_cpus());
-        Self {
-            state: Rc::new(RefCell::new(AppState {
-                peer: Peer::new(headless, bg_executor),
-                app_channel: None,
-                reactor,
-            })),
+        Server {
+            app: App::new(headless, bg_executor),
+            app_channel: Rc::new(RefCell::new(None)),
+            reactor,
         }
     }
 
@@ -41,20 +36,20 @@ impl App {
             + Sink<SinkItem = OutgoingMessage>,
     {
         let (outgoing, incoming) = socket.split();
-        let app_state = self.state.clone();
-        self.state.borrow_mut().reactor.spawn(
+        let server = self.clone();
+        self.reactor.spawn(
             incoming
                 .into_future()
                 .map(|(first_message, incoming)| {
                     first_message.map(|first_message| match first_message {
                         IncomingMessage::StartApp => {
-                            Self::start_app(app_state, outgoing, incoming);
+                            Self::start_app(server, outgoing, incoming);
                         }
                         IncomingMessage::StartCli { headless } => {
-                            Self::start_cli(app_state, outgoing, incoming, headless);
+                            Self::start_cli(server, outgoing, incoming, headless);
                         }
                         IncomingMessage::StartWindow { window_id, height } => {
-                            Self::start_window(app_state, outgoing, incoming, window_id, height);
+                            Self::start_window(server, outgoing, incoming, window_id, height);
                         }
                         _ => eprintln!("Unexpected message {:?}", first_message),
                     });
@@ -63,62 +58,59 @@ impl App {
         );
     }
 
-    fn start_app<O, I>(app_state: Rc<RefCell<AppState>>, outgoing: O, incoming: I)
+    fn start_app<O, I>(server: Server, outgoing: O, incoming: I)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        let app_state_clone = app_state.clone();
-        let mut app_state = app_state.borrow_mut();
-        if app_state.peer.headless() {
-            app_state.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+        if server.app.headless() {
+            server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                 description: "This is a headless application instance".into(),
             })));
-        } else if app_state.app_channel.is_some() {
-            app_state.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+        } else if server.app_channel.borrow().is_some() {
+            server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                 description: "An application client is already registered".into(),
             })));
         } else {
             let (tx, rx) = mpsc::unbounded();
-            app_state.app_channel = Some(tx.clone());
+            server.app_channel.borrow_mut().get_or_insert(tx.clone());
+            let server_clone = server.clone();
             let responses = rx.select(report_input_errors(
-                incoming.map(move |message|
-                    app_state_clone.borrow_mut().handle_app_message(message)
-                )
+                incoming.map(move |message| server_clone.handle_app_message(message))
             ));
 
-            app_state.send_responses(outgoing, responses);
+            server.send_responses(outgoing, responses);
         }
     }
 
-    fn start_cli<O, I>(app_state: Rc<RefCell<AppState>>, outgoing: O, incoming: I, headless: bool)
+    fn start_cli<O, I>(server: Server, outgoing: O, incoming: I, headless: bool)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        match (app_state.borrow().peer.headless(), headless) {
+        match (server.app.headless(), headless) {
             (true, false) => {
-                return app_state.borrow().send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                return server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                     description: "Since Xray was initially started with --headless, all subsequent commands must be --headless".into()
                 })));
             }
             (false, true) => {
-                return app_state.borrow().send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                return server.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                     description: "Since Xray was initially started without --headless, no subsequent commands may be --headless".into()
                 })));
             },
             _ => {}
         }
 
-        let app_state_clone = app_state.clone();
+        let server_clone = server.clone();
         let responses = stream::once(Ok(OutgoingMessage::Ok)).chain(report_input_errors(
-            incoming.map(move |message| app_state_clone.borrow_mut().handle_app_message(message)),
+            incoming.map(move |message| server_clone.handle_app_message(message)),
         ));
-        app_state.borrow_mut().send_responses(outgoing, responses);
+        server.send_responses(outgoing, responses);
     }
 
     fn start_window<O, I>(
-        app_state: Rc<RefCell<AppState>>,
+        server: Server,
         outgoing: O,
         incoming: I,
         window_id: WindowId,
@@ -127,19 +119,16 @@ impl App {
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        let app_state_clone = app_state.clone();
-        let mut app_state = app_state.borrow_mut();
+        let server_clone = server.clone();
         let receive_incoming = incoming
             .for_each(move |message| {
-                app_state_clone
-                    .borrow_mut()
-                    .handle_window_message(window_id, message);
+                server_clone.handle_window_message(window_id, message);
                 Ok(())
             })
             .then(|_| Ok(()));
 
-        let outgoing_messages = app_state
-            .peer
+        let outgoing_messages = server
+            .app
             .window_updates(&window_id, height)
             .map(|update| OutgoingMessage::UpdateWindow(update));
 
@@ -147,7 +136,7 @@ impl App {
             .send_all(outgoing_messages.map_err(|_| unreachable!()))
             .then(|_| Ok(()));
 
-        app_state.reactor.spawn(
+        server.reactor.spawn(
             receive_incoming
                 .select(send_outgoing)
                 .then(|_: Result<((), _), ((), _)>| Ok(())),
@@ -155,25 +144,23 @@ impl App {
     }
 }
 
-impl AppState {
-    fn handle_app_message(&mut self, message: IncomingMessage) -> OutgoingMessage {
-        match message {
-            IncomingMessage::OpenWorkspace { paths } => match self.open_workspace(paths) {
-                Ok(()) => OutgoingMessage::Ok,
-                Err(description) => OutgoingMessage::Error {
-                    description: description.to_string(),
-                },
-            },
-            _ => OutgoingMessage::Error {
-                description: format!("Unexpected message {:?}", message),
-            },
+impl Server {
+    fn handle_app_message(&self, message: IncomingMessage) -> OutgoingMessage {
+        let result = match message {
+            IncomingMessage::OpenWorkspace { paths } => self.open_workspace(paths),
+            _ => Err(format!("Unexpected message {:?}", message)),
+        };
+
+        match result {
+            Ok(_) => OutgoingMessage::Ok,
+            Err(description) => OutgoingMessage::Error { description }
         }
     }
 
-    fn handle_window_message(&mut self, window_id: usize, message: IncomingMessage) {
+    fn handle_window_message(&self, window_id: usize, message: IncomingMessage) {
         match message {
             IncomingMessage::Action { view_id, action } => {
-                self.peer.dispatch_action(window_id, view_id, action);
+                self.app.dispatch_action(window_id, view_id, action);
             }
             _ => {
                 eprintln!("Unexpected message {:?}", message);
@@ -181,9 +168,9 @@ impl AppState {
         };
     }
 
-    fn open_workspace(&mut self, paths: Vec<PathBuf>) -> Result<(), &'static str> {
+    fn open_workspace(&self, paths: Vec<PathBuf>) -> Result<(), String> {
         if !paths.iter().all(|path| path.is_absolute()) {
-            return Err("All paths must be absolute");
+            return Err("All paths must be absolute".to_owned());
         }
 
         let roots = paths
@@ -191,8 +178,8 @@ impl AppState {
             .map(|path| Box::new(fs::Tree::new(path).unwrap()) as Box<xray_core::fs::Tree>)
             .collect();
 
-        self.peer.open_workspace(roots).map(|window_id| {
-            self.app_channel.as_ref().map(|app_channel| {
+        self.app.open_workspace(roots).map(|window_id| {
+            self.app_channel.borrow().as_ref().map(|app_channel| {
                 app_channel
                     .unbounded_send(OutgoingMessage::OpenWindow { window_id })
                     .expect("Error sending to app channel");

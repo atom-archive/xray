@@ -1,4 +1,4 @@
-mod app;
+mod server;
 mod fs;
 mod json_lines_codec;
 mod messages;
@@ -24,7 +24,7 @@ use tokio_io::AsyncRead;
 use tokio_uds::UnixListener;
 use json_lines_codec::JsonLinesCodec;
 use messages::{IncomingMessage, OutgoingMessage};
-use app::App;
+use server::Server;
 
 fn main() {
     let headless =
@@ -34,7 +34,7 @@ fn main() {
 
     let mut core = Core::new().unwrap();
     let handle = core.handle();
-    let mut app = App::new(headless, handle.clone());
+    let mut server = Server::new(headless, handle.clone());
 
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(socket_path, &handle).unwrap();
@@ -42,7 +42,7 @@ fn main() {
     let handle_connections = listener.incoming().for_each(move |(socket, _)| {
         let framed_socket =
             socket.framed(JsonLinesCodec::<IncomingMessage, OutgoingMessage>::new());
-        app.accept_connection(framed_socket);
+        server.accept_connection(framed_socket);
         Ok(())
     });
 
