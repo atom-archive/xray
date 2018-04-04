@@ -129,11 +129,6 @@ impl App {
     {
         let app_state_clone = app_state.clone();
         let mut app_state = app_state.borrow_mut();
-        let window_updates = {
-            let window = app_state.peer.windows.get_mut(&window_id).unwrap();
-            window.set_height(height);
-            window.updates()
-        };
         let receive_incoming = incoming
             .for_each(move |message| {
                 app_state_clone
@@ -143,7 +138,11 @@ impl App {
             })
             .then(|_| Ok(()));
 
-        let outgoing_messages = window_updates.map(|update| OutgoingMessage::UpdateWindow(update));
+        let outgoing_messages = app_state
+            .peer
+            .window_updates(&window_id, height)
+            .map(|update| OutgoingMessage::UpdateWindow(update));
+
         let send_outgoing = outgoing
             .send_all(outgoing_messages.map_err(|_| unreachable!()))
             .then(|_| Ok(()));

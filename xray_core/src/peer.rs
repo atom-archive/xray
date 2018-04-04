@@ -1,7 +1,7 @@
 use fs;
 use serde_json;
 use std::collections::HashMap;
-use window::{Executor, ViewId, Window};
+use window::{Executor, ViewId, Window, WindowUpdateStream};
 use workspace::{WorkspaceHandle, WorkspaceView};
 
 pub type WindowId = usize;
@@ -11,7 +11,7 @@ pub struct Peer {
     executor: Executor,
     workspaces: Vec<WorkspaceHandle>,
     next_window_id: WindowId,
-    pub windows: HashMap<WindowId, Window>,
+    windows: HashMap<WindowId, Window>,
 }
 
 impl Peer {
@@ -56,5 +56,11 @@ impl Peer {
             Some(ref mut window) => window.dispatch_action(view_id, action),
             None => unimplemented!(),
         };
+    }
+
+    pub fn window_updates(&mut self, id: &WindowId, height: f64) -> WindowUpdateStream {
+        let window = self.windows.get_mut(id).unwrap();
+        window.set_height(height);
+        window.updates()
     }
 }
