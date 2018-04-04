@@ -3,7 +3,6 @@ use fs;
 use futures::sync::mpsc;
 use futures::{stream, Future, Sink, Stream};
 use futures_cpupool::CpuPool;
-use messages::{IncomingMessage, OutgoingMessage};
 use std::cell::RefCell;
 use std::io;
 use std::net::SocketAddr;
@@ -13,13 +12,11 @@ use tokio_core::net::TcpListener;
 use tokio_core::reactor;
 use tokio_io::AsyncRead;
 use xray_core::{self, schema_capnp, App, WindowId};
-
-type OutboundSender = mpsc::UnboundedSender<OutgoingMessage>;
+use xray_core::messages::{IncomingMessage, OutgoingMessage};
 
 #[derive(Clone)]
 pub struct Server {
     app: xray_core::App,
-    app_channel: Rc<RefCell<Option<OutboundSender>>>,
     reactor: reactor::Handle,
 }
 
@@ -28,7 +25,6 @@ impl Server {
         let bg_executor = Rc::new(CpuPool::new_num_cpus());
         Server {
             app: App::new(headless, bg_executor),
-            app_channel: Rc::new(RefCell::new(None)),
             reactor,
         }
     }
@@ -74,7 +70,7 @@ impl Server {
                     description: "This is a headless application instance".into(),
                 })),
             );
-        } else if server.app_channel.borrow().is_some() {
+        } else if server.app.has_client() {
             server.send_responses(
                 outgoing,
                 stream::once(Ok(OutgoingMessage::Error {
@@ -83,7 +79,7 @@ impl Server {
             );
         } else {
             let (tx, rx) = mpsc::unbounded();
-            server.app_channel.borrow_mut().get_or_insert(tx.clone());
+            server.app.set_client_tx(tx);
             let server_clone = server.clone();
             let responses = rx.select(report_input_errors(
                 incoming.map(move |message| server_clone.handle_app_message(message)),
@@ -188,15 +184,7 @@ impl Server {
             .iter()
             .map(|path| Box::new(fs::Tree::new(path).unwrap()) as Box<xray_core::fs::Tree>)
             .collect();
-
-        self.app.open_workspace(roots).map(|window_id| {
-            self.app_channel.borrow().as_ref().map(|app_channel| {
-                app_channel
-                    .unbounded_send(OutgoingMessage::OpenWindow { window_id })
-                    .expect("Error sending to app channel");
-            })
-        });
-
+        self.app.open_workspace(roots);
         Ok(())
     }
 

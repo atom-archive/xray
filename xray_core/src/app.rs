@@ -1,4 +1,6 @@
 use fs;
+use futures::sync::mpsc::UnboundedSender;
+use messages::OutgoingMessage;
 use schema_capnp;
 use serde_json;
 use std::cell::RefCell;
@@ -13,6 +15,7 @@ pub type WindowId = usize;
 pub struct App(Rc<RefCell<AppState>>);
 
 struct AppState {
+    client_tx: Option<UnboundedSender<OutgoingMessage>>,
     headless: bool,
     executor: Executor,
     workspaces: Vec<WorkspaceHandle>,
@@ -24,33 +27,42 @@ impl App {
     pub fn new(headless: bool, executor: Executor) -> Self {
         App(Rc::new(RefCell::new(AppState {
             headless,
-            executor: executor,
+            executor,
+            client_tx: None,
             workspaces: Vec::new(),
             next_window_id: 1,
             windows: HashMap::new(),
         })))
     }
 
+    pub fn has_client(&self) -> bool {
+        self.0.borrow().client_tx.is_some()
+    }
+
+    pub fn set_client_tx(&self, tx: UnboundedSender<OutgoingMessage>) {
+        self.0.borrow_mut().client_tx = Some(tx);
+    }
+
     pub fn headless(&self) -> bool {
         self.0.borrow().headless
     }
 
-    pub fn open_workspace(&self, roots: Vec<Box<fs::Tree>>) -> Option<WindowId> {
+    pub fn open_workspace(&self, roots: Vec<Box<fs::Tree>>) {
         let mut state = self.0.borrow_mut();
         let workspace = WorkspaceHandle::new(roots);
-        let window_id = if state.headless {
-            None
-        } else {
+        if !state.headless {
             let mut window = Window::new(Some(state.executor.clone()), 0.0);
             let workspace_view_handle = window.add_view(WorkspaceView::new(workspace.clone()));
             window.set_root_view(workspace_view_handle);
             let window_id = state.next_window_id;
             state.next_window_id += 1;
             state.windows.insert(window_id, window);
-            Some(window_id)
+            if let Some(ref tx) = state.client_tx {
+                tx.unbounded_send(OutgoingMessage::OpenWindow { window_id })
+                    .expect("Error sending to app channel");
+            }
         };
         state.workspaces.push(workspace);
-        window_id
     }
 
     pub fn dispatch_action(&self, window_id: WindowId, view_id: ViewId, action: serde_json::Value) {

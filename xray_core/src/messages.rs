@@ -1,7 +1,7 @@
+use app::WindowId;
 use std::path::PathBuf;
 use serde_json;
-use xray_core::{WindowId};
-use xray_core::window::{self, ViewId};
+use window::{ViewId, WindowUpdate};
 
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
@@ -28,7 +28,7 @@ pub enum IncomingMessage {
 #[serde(tag = "type")]
 pub enum OutgoingMessage {
     OpenWindow { window_id: WindowId },
-    UpdateWindow(window::WindowUpdate),
+    UpdateWindow(WindowUpdate),
     Error { description: String },
     Ok,
 }

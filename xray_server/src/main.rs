@@ -1,7 +1,6 @@
 mod server;
 mod fs;
 mod json_lines_codec;
-mod messages;
 
 extern crate bytes;
 extern crate capnp_rpc;
@@ -9,8 +8,6 @@ extern crate futures;
 extern crate futures_cpupool;
 extern crate ignore;
 extern crate serde;
-#[macro_use]
-extern crate serde_derive;
 extern crate serde_json;
 extern crate tokio_core;
 extern crate tokio_io;
@@ -24,7 +21,7 @@ use tokio_core::reactor::Core;
 use tokio_io::AsyncRead;
 use tokio_uds::UnixListener;
 use json_lines_codec::JsonLinesCodec;
-use messages::{IncomingMessage, OutgoingMessage};
+use xray_core::messages::{IncomingMessage, OutgoingMessage};
 use server::Server;
 
 fn main() {
