@@ -3,14 +3,14 @@ extern crate docopt;
 extern crate serde_derive;
 extern crate serde_json;
 
-use std::env;
-use std::process::{Command, Stdio};
-use std::path::{Path, PathBuf};
 use docopt::Docopt;
-use std::os::unix::net::UnixStream;
-use std::io::{Write, BufReader, BufRead};
-use std::process;
+use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process;
+use std::process::{Command, Stdio};
 
 const USAGE: &'static str = "
 Xray
@@ -56,7 +56,7 @@ fn main() {
         Err(description) => {
             eprintln!("{}", description);
             1
-        },
+        }
     })
 }
 
@@ -68,9 +68,11 @@ fn launch() -> Result<(), String> {
     let headless = args.flag_headless.unwrap_or(false);
 
     const DEFAULT_SOCKET_PATH: &'static str = "/tmp/xray.sock";
-    let socket_path = PathBuf::from(args.flag_socket_path
-        .as_ref()
-        .map_or(DEFAULT_SOCKET_PATH, |path| path.as_str()));
+    let socket_path = PathBuf::from(
+        args.flag_socket_path
+            .as_ref()
+            .map_or(DEFAULT_SOCKET_PATH, |path| path.as_str()),
+    );
 
     let mut socket = match UnixStream::connect(&socket_path) {
         Ok(socket) => socket,
@@ -124,12 +126,19 @@ fn start_headless(server_bin_path: &Path, socket_path: &Path) -> Result<UnixStre
     let mut reader = BufReader::new(&mut stdout);
     let mut line = String::new();
     while line != "Listening\n" {
-        reader.read_line(&mut line).map_err(|_| String::from("Error reading app output"))?;
+        reader
+            .read_line(&mut line)
+            .map_err(|_| String::from("Error reading app output"))?;
     }
     UnixStream::connect(socket_path).map_err(|_| String::from("Error connecting to socket"))
 }
 
-fn start_electron(src_path: &Path, server_bin_path: &Path, socket_path: &Path, node_env: &str) -> Result<UnixStream, String> {
+fn start_electron(
+    src_path: &Path,
+    server_bin_path: &Path,
+    socket_path: &Path,
+    node_env: &str,
+) -> Result<UnixStream, String> {
     let electron_app_path = Path::new(src_path).join("xray_electron");
     let electron_bin_path = electron_app_path.join("node_modules/.bin/electron");
     let command = Command::new(electron_bin_path)
@@ -146,19 +155,25 @@ fn start_electron(src_path: &Path, server_bin_path: &Path, socket_path: &Path, n
     let mut reader = BufReader::new(&mut stdout);
     let mut line = String::new();
     while line != "Listening\n" {
-        reader.read_line(&mut line).map_err(|_| String::from("Error reading app output"))?;
+        reader
+            .read_line(&mut line)
+            .map_err(|_| String::from("Error reading app output"))?;
     }
     UnixStream::connect(socket_path).map_err(|_| String::from("Error connecting to socket"))
 }
 
 fn send_message(socket: &mut UnixStream, message: ServerRequest) -> Result<(), String> {
     let bytes = serde_json::to_vec(&message).expect("Error serializing message");
-    socket.write(&bytes).expect("Error writing to server socket");
+    socket
+        .write(&bytes)
+        .expect("Error writing to server socket");
     socket.write(b"\n").expect("Error writing to server socket");
 
     let mut reader = BufReader::new(socket);
     let mut line = String::new();
-    reader.read_line(&mut line).expect("Error reading server response");
+    reader
+        .read_line(&mut line)
+        .expect("Error reading server response");
     match serde_json::from_str::<ServerResponse>(&line).expect("Error reading server response") {
         ServerResponse::Ok => Ok(()),
         ServerResponse::Error { description } => Err(description),
