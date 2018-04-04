@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use serde_json;
 use xray_core::{WindowId, ViewId, WindowUpdate};
@@ -16,6 +17,9 @@ pub enum IncomingMessage {
     },
     OpenWorkspace {
         paths: Vec<PathBuf>,
+    },
+    ConnectToWorkspace {
+        address: SocketAddr,
     },
     Action {
         view_id: ViewId,

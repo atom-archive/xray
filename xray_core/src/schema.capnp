@@ -1,15 +1,15 @@
 @0xab03450310567eee;
 
 interface Peer {
-  workspaces @0 () -> (workspaces: List(Workspace));
+  workspaces @0 () -> (workspaces :List(Workspace));
 }
 
 interface Workspace {
-  project @0 () -> (project: Project);
+  project @0 () -> (project :Project);
 }
 
 interface Project {
-  trees @0 () -> (trees: List(FsTree));
+  trees @0 () -> (trees :List(FsTree));
 }
 
 interface FsTree {
@@ -29,5 +29,5 @@ interface FsTree {
     children @1 :List(Entry);
   }
 
-  root @0 () -> (root: Entry);
+  root @0 () -> (root :Entry);
 }

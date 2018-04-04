@@ -7,6 +7,7 @@ use docopt::Docopt;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::net::SocketAddr;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -16,13 +17,14 @@ const USAGE: &'static str = "
 Xray
 
 Usage:
-  xray [--socket-path=<path>] [--headless] [--listen=<port>] <path>...
+  xray [--socket-path=<path>] [--headless] [--listen=<port>] [--connect=<address>] [<path>...]
   xray (-h | --help)
 
 Options:
-  -h --help           Show this screen.
-  -H --headless       Start Xray in headless mode.
-  -l --listen=<port>  Listen on the specified port.
+  -h --help               Show this screen.
+  -H --headless           Start Xray in headless mode.
+  -l --listen=<port>      Listen on the specified port.
+  -c --connect=<address>  Connect to the specified address.
 ";
 
 type PortNumber = u16;
@@ -32,6 +34,7 @@ type PortNumber = u16;
 enum ServerRequest {
     StartCli { headless: bool },
     OpenWorkspace { paths: Vec<PathBuf> },
+    ConnectToWorkspace { address: SocketAddr },
     Listen { port: PortNumber },
 }
 
@@ -47,6 +50,7 @@ struct Args {
     flag_socket_path: Option<String>,
     flag_headless: Option<bool>,
     flag_listen: Option<PortNumber>,
+    flag_connect: Option<SocketAddr>,
     arg_path: Vec<PathBuf>,
 }
 
@@ -100,12 +104,16 @@ fn launch() -> Result<(), String> {
 
     send_message(&mut socket, ServerRequest::StartCli { headless })?;
 
-    let mut paths = Vec::new();
-    for path in args.arg_path {
-        paths.push(fs::canonicalize(&path)
-            .map_err(|error| format!("Invalid path {:?} - {}", path, error))?);
+    if let Some(address) = args.flag_connect {
+        send_message(&mut socket, ServerRequest::ConnectToWorkspace { address })?;
+    } else if args.arg_path.len() > 0 {
+        let mut paths = Vec::new();
+        for path in args.arg_path {
+            paths.push(fs::canonicalize(&path)
+                .map_err(|error| format!("Invalid path {:?} - {}", path, error))?);
+        }
+        send_message(&mut socket, ServerRequest::OpenWorkspace { paths })?;
     }
-    send_message(&mut socket, ServerRequest::OpenWorkspace { paths })?;
 
     if let Some(port) = args.flag_listen {
         send_message(&mut socket, ServerRequest::Listen { port })?;

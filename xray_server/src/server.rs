@@ -7,7 +7,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
-use tokio_core::net::TcpListener;
+use tokio_core::net::{TcpListener, TcpStream};
 use tokio_core::reactor;
 use tokio_io::AsyncRead;
 use xray_core::{self, schema_capnp, App, WindowId};
@@ -150,6 +150,7 @@ impl Server {
         let result = match message {
             IncomingMessage::OpenWorkspace { paths } => self.open_workspace(paths),
             IncomingMessage::Listen { port } => self.listen(port),
+            IncomingMessage::ConnectToWorkspace { address } => self.connect_to_workspace(address),
             _ => Err(format!("Unexpected message {:?}", message)),
         };
 
@@ -204,11 +205,39 @@ impl Server {
                     rpc_twoparty_capnp::Side::Server,
                     Default::default(),
                 );
-                let rpc = RpcSystem::new(Box::new(network), Some(peer.clone().client));
-                reactor.spawn(rpc.map_err(|err| eprintln!("Cap'N Proto RPC Error: {}", err)));
+                let rpc = RpcSystem::new(Box::new(network), Some(peer.client));
+                reactor.spawn(rpc.map_err(|err| eprintln!("Cap'n Proto RPC Error: {}", err)));
+
+                eprintln!("Server: OK!");
                 Ok(())
             });
         self.reactor.spawn(handle_incoming);
+        Ok(())
+    }
+
+    fn connect_to_workspace(&self, address: SocketAddr) -> Result<(), String> {
+        let stream = TcpStream::connect(&address, &self.reactor).wait().map_err(|_| "Could not connect to address")?;
+        stream.set_nodelay(true).unwrap();
+        let (rx, tx) = stream.split();
+        let network = twoparty::VatNetwork::new(rx, tx, rpc_twoparty_capnp::Side::Client, Default::default());
+        let mut rpc = RpcSystem::new(Box::new(network), None);
+        let client: schema_capnp::peer::Client = rpc.bootstrap(rpc_twoparty_capnp::Side::Server);
+        self.reactor.spawn(rpc.map_err(|err| eprintln!("Cap'N Proto RPC Error: {}", err)));
+
+        let promise = client.workspaces_request().send().promise.and_then(|response| {
+            let workspaces = response.get().unwrap().get_workspaces().unwrap();
+            match workspaces.len() {
+                1 => {
+                    let workspace = workspaces.get(0).unwrap();
+                    let project_request = workspace.project_request();
+                    let trees_request = project_request.send().pipeline.get_project();
+
+                    Ok(())
+                },
+                _ => unimplemented!()
+            }
+        });
+
         Ok(())
     }
 
