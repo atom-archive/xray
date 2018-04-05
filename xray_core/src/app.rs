@@ -2,6 +2,7 @@ use fs;
 use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::{future, Future};
 use serde_json;
+use rpc::{ConnectionToClient, Service};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -83,5 +84,32 @@ impl App {
             Some(ref mut window) => window.dispatch_action(view_id, action),
             None => unimplemented!(),
         };
+    }
+
+    pub fn accept_connection(&self) -> ConnectionToClient {
+        ConnectionToClient::new(self.clone())
+    }
+}
+
+#[derive(Serialize)]
+pub struct RemoteState {
+    workspace_count: usize
+}
+#[derive(Deserialize)]
+pub enum RemoteRequest {}
+#[derive(Serialize)]
+pub enum RemoteResponse {}
+
+impl Service for App {
+    type State = RemoteState;
+    type Update = RemoteState;
+    type Request = RemoteRequest;
+    type Response = RemoteResponse;
+    type Error = ();
+
+    fn state(&self) -> Self::State {
+        RemoteState {
+            workspace_count: self.0.borrow().workspaces.len()
+        }
     }
 }
