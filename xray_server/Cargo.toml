@@ -5,7 +5,6 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 
 [dependencies]
 bytes = "0.4"
-capnp-rpc = "0.8"
 futures = "0.1"
 futures-cpupool = "0.1"
 ignore = { git = "https://github.com/atom/ripgrep", branch = "include_ignored" }

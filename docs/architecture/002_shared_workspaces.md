@@ -39,3 +39,14 @@ On the client side, when we receive a response, we could call into the client-si
 So long as the client-side code always takes ownership of any service added on the server side, this should avoid leaks. What if the client side doesn't ever take ownership? With every response, we could potentially include the id of the most-recently-added service. After the response is processed, we could schedule a cleanup of any unclaimed services that were added during that request cycle and possible emit some kind of warning.
 
 So to summarize, I see `Service` as a trait that server-side domain objects will implement that explains how to connect that object to RPC clients. `ServiceClient` is a concrete implementation that we wrap with domain objects.
+
+### Next steps
+
+* When creating the `rpc::ConnectionToClient` object, pass `App` as a bootstrap service which will be automatically provided to any connecting client.
+* Make `ConnectionToClient` a future that we can spawn.
+* Add a `connect_to_client` method to core::App that takes an outgoing sink and incoming stream and creates and spawns a `rpc::ConnectionToClient` future on a `foreground` executor that drives communication with this client.
+* Add a `connect_to_server` method that takes an outgoing sink and incoming stream, and creates a `ConnectionToServer` and spawns it as a future.
+* When the bootstrap service client is received on the client side, wrap it in a `RemoteApp` and assign it to a collection in the local `App`.
+* Add a method that can list remote workspaces by iterating the connected `RemoteApp` instances.
+* Add a method to `RemoteApp` to fetch a remote workspace. This should respond with the id of a client, which can be gotten from the bootstrap client.
+* Once the RemoteApp has resolved

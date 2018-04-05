@@ -5,8 +5,8 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 license = "MIT"
 
 [dependencies]
+bincode = "1.0"
 bytes = "0.4"
-capnp = "0.8"
 futures = "0.1"
 lazy_static = "1.0"
 parking_lot = "0.5"
@@ -19,6 +19,3 @@ smallvec = "0.6.0"
 rand = "0.3"
 futures-cpupool = "0.1"
 tokio-core = "0.1"
-
-[build-dependencies]
-capnpc = "0.8"

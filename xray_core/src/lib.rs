@@ -1,5 +1,5 @@
+extern crate bincode;
 extern crate bytes;
-extern crate capnp;
 #[macro_use]
 extern crate lazy_static;
 extern crate futures;
@@ -17,14 +17,13 @@ pub mod buffer_view;
 pub mod fs;
 pub mod notify_cell;
 pub mod rpc;
-pub mod schema_capnp { include!(concat!(env!("OUT_DIR"), "/src/schema_capnp.rs")); }
 pub mod window;
 pub mod workspace;
 
 mod file_finder;
 mod fuzzy;
-mod project;
 mod movement;
+mod project;
 mod tree;
 
 pub use app::{App, WindowId};

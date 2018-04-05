@@ -1,4 +1,3 @@
-use capnp_rpc::{self, rpc_twoparty_capnp, twoparty, RpcSystem};
 use fs;
 use futures::{stream, Future, Sink, Stream};
 use futures_cpupool::CpuPool;
@@ -10,7 +9,7 @@ use std::rc::Rc;
 use tokio_core::net::{TcpListener, TcpStream};
 use tokio_core::reactor;
 use tokio_io::AsyncRead;
-use xray_core::{self, schema_capnp, App, WindowId};
+use xray_core::{self, App, WindowId};
 use xray_core::app::AppUpdate;
 
 #[derive(Clone)]
@@ -195,19 +194,6 @@ impl Server {
             .map_err(|_| eprintln!("Error accepting incoming connection"))
             .for_each(move |(socket, _)| {
                 socket.set_nodelay(true).unwrap();
-
-                let (rx, tx) = socket.split();
-                let peer = schema_capnp::peer::ToClient::new(app.clone())
-                    .from_server::<capnp_rpc::Server>();
-                let network = twoparty::VatNetwork::new(
-                    rx,
-                    tx,
-                    rpc_twoparty_capnp::Side::Server,
-                    Default::default(),
-                );
-                let rpc = RpcSystem::new(Box::new(network), Some(peer.client));
-                reactor.spawn(rpc.map_err(|err| eprintln!("Cap'n Proto RPC Error: {}", err)));
-
                 Ok(())
             });
         self.reactor.spawn(handle_incoming);
@@ -218,31 +204,6 @@ impl Server {
         let stream = TcpStream::connect(&address, &self.reactor).wait().map_err(|_| "Could not connect to address")?;
         stream.set_nodelay(true).unwrap();
         let (rx, tx) = stream.split();
-        let network = twoparty::VatNetwork::new(rx, tx, rpc_twoparty_capnp::Side::Client, Default::default());
-        let mut rpc = RpcSystem::new(Box::new(network), None);
-        let client: schema_capnp::peer::Client = rpc.bootstrap(rpc_twoparty_capnp::Side::Server);
-        self.reactor.spawn(rpc.map_err(|err| eprintln!("Cap'N Proto RPC Error: {}", err)));
-
-        let promise = client.workspaces_request().send().promise.and_then(|response| {
-            let workspaces = response.get().unwrap().get_workspaces().unwrap();
-            match workspaces.len() {
-                1 => {
-                    let workspace = workspaces.get(0).unwrap();
-                    let project_request = workspace.project_request();
-                    let trees_request = project_request
-                        .send()
-                        .pipeline
-                        .get_project()
-                        .trees_request()
-                        .send()
-                        .promise;
-
-                    Ok(())
-                },
-                _ => unimplemented!()
-            }
-        });
-
         Ok(())
     }
 

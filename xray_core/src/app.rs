@@ -1,7 +1,6 @@
 use fs;
 use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::{future, Future};
-use schema_capnp;
 use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -86,5 +85,3 @@ impl App {
         };
     }
 }
-
-impl schema_capnp::peer::Server for App {}

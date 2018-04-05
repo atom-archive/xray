@@ -4,7 +4,6 @@ mod fs;
 mod json_lines_codec;
 
 extern crate bytes;
-extern crate capnp_rpc;
 extern crate futures;
 extern crate futures_cpupool;
 extern crate ignore;
