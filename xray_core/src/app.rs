@@ -2,8 +2,9 @@ use BackgroundExecutor;
 use ForegroundExecutor;
 use fs;
 use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures::{Async, Stream};
-use rpc::{ConnectionToClient, Service};
+use futures::{Async, Future, Stream};
+use notify_cell::{NotifyCell, NotifyCellObserver};
+use rpc::{ConnectionToServer, ConnectionToClient, Service, ServiceClient};
 use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -23,6 +24,7 @@ struct AppState {
     background: BackgroundExecutor,
     updates_tx: UnboundedSender<AppUpdate>,
     updates_rx: Option<UnboundedReceiver<AppUpdate>>,
+    peer_list: PeerList,
     workspaces: Vec<WorkspaceHandle>,
     next_window_id: WindowId,
     windows: HashMap<WindowId, Window>,
@@ -32,11 +34,38 @@ pub enum AppUpdate {
     OpenWindow(WindowId),
 }
 
-// struct PeerList(Rc<RefCell<PeerListState>>);
-//
-// struct PeerListState {
-//     peers: Vec<Client<App>>
-// }
+struct PeerList(Rc<RefCell<PeerListState>>);
+
+struct PeerListState {
+    peers: Vec<ServiceClient<App>>,
+    updates: NotifyCell<()>
+}
+
+impl PeerList {
+    fn new() -> Self {
+        PeerList(Rc::new(RefCell::new(PeerListState {
+            peers: Vec::new(),
+            updates: NotifyCell::new(())
+        })))
+    }
+
+    fn updates(&self) -> NotifyCellObserver<()> {
+        self.0.borrow().updates.observe()
+    }
+
+    fn connect_to_server<S>(&self, incoming: S) -> Box<Future<Item = ConnectionToServer, Error = String>>
+    where
+        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>
+    {
+        let state = self.0.clone();
+        Box::new(ConnectionToServer::new(incoming).map(move |connection| {
+            let mut state = state.borrow_mut();
+            state.peers.push(connection.bootstrap::<App>());
+            state.updates.set(());
+            connection
+        }))
+    }
+}
 
 impl App {
     pub fn new(
@@ -51,6 +80,7 @@ impl App {
             background,
             updates_tx,
             updates_rx: Some(updates_rx),
+            peer_list: PeerList::new(),
             workspaces: Vec::new(),
             next_window_id: 1,
             windows: HashMap::new(),
@@ -113,15 +143,15 @@ impl App {
         ConnectionToClient::new(incoming, self.clone())
     }
 
-    pub fn connect_to_server<S>(&self, incoming: S) -> ConnectionToServer
+    pub fn connect_to_server<S>(&self, incoming: S) -> Box<Future<Item = ConnectionToServer, Error = String>>
     where
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
     {
-        self.0.borrow_mut().peer_list.connect_to_server(incoming)
+        self.0.borrow().peer_list.connect_to_server(incoming)
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RemoteState {
     workspace_count: usize,
 }
@@ -159,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_rpc() {
-        let reactor = tokio_core::reactor::Core::new().unwrap();
+        let mut reactor = tokio_core::reactor::Core::new().unwrap();
         let executor = Rc::new(reactor.handle());
 
         let server = App::new(true, executor.clone(), executor.clone());
@@ -167,11 +197,25 @@ mod tests {
         let (server_to_client_tx, server_to_client_rx) = mpsc::unbounded();
         let (client_to_server_tx, client_to_server_rx) = mpsc::unbounded();
 
-        // let client_updates = client.connect_to_server(server_to_client_rx);
-        // executor.spawn(client_to_server_tx.send_all(client_updates));
-        let server_updates = server.connect_to_client(client_to_server_rx.map_err(|_| unreachable!()));
-        executor.spawn(server_to_client_tx.send_all(server_updates.map_err(|_| unreachable!())).then(|_| Ok(())));
+        let server_updates = server.connect_to_client(
+            client_to_server_rx.map_err(|_| unreachable!())
+        );
+        executor.spawn(send_all(server_to_client_tx, server_updates));
 
-        reactor.run(updates.into_future);
+        let client_updates = reactor.run(
+            client.connect_to_server(server_to_client_rx.map_err(|_| unreachable!()))
+        ).unwrap();
+        executor.spawn(send_all(client_to_server_tx, client_updates));
+
+        let client = client.0.borrow();
+        println!("{:?}", client.peer_list.0.borrow().peers[0].state());
+    }
+
+    fn send_all<I, S1, S2>(sink: S1, stream: S2) -> Box<Future<Item = (), Error = ()>>
+    where
+        S1: 'static + Sink<SinkItem = I>,
+        S2: 'static + Stream<Item = I>
+    {
+        Box::new(sink.send_all(stream.map_err(|_| unreachable!())).then(|_| Ok(())))
     }
 }

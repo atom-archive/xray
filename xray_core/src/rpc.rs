@@ -1,21 +1,21 @@
 use bincode::{deserialize, serialize};
 use futures::stream::FuturesUnordered;
 use futures::task::{self, Task};
-use futures::{future, Async, Future, Poll, Stream};
+use futures::{future, unsync, Async, Future, Poll, Stream};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::marker::PhantomData;
 use std::mem;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 pub type RequestId = usize;
 pub type ServiceId = usize;
 
 pub trait Service {
-    type State: 'static + Serialize;
-    type Update: 'static + Serialize;
+    type State: 'static + Serialize + for<'a> Deserialize<'a>;
+    type Update: 'static + Serialize + for<'a> Deserialize<'a>;
     type Request: 'static + for<'a> Deserialize<'a>;
     type Response: 'static + Serialize;
     type Error: 'static + Serialize;
@@ -41,8 +41,16 @@ trait RawBytesService {
     ) -> Option<Box<Future<Item = Vec<u8>, Error = Vec<u8>>>>;
 }
 
-struct ServiceClient<T: Service> {
+pub struct ServiceClient<T: Service> {
+    id: ServiceId,
+    connection: Weak<RefCell<ConnectionToServerState>>,
     _marker: PhantomData<T>
+}
+
+struct ServiceClientState {
+    initial: Vec<u8>,
+    updates_rx: unsync::mpsc::UnboundedReceiver<Vec<u8>>,
+    updates_tx: unsync::mpsc::UnboundedSender<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,16 +101,31 @@ struct ResponseEnvelope {
     response: Response,
 }
 
+pub struct ConnectionToServer(Rc<RefCell<ConnectionToServerState>>);
+
+struct ConnectionToServerState {
+    services: HashMap<ServiceId, ServiceClientState>,
+    incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>
+}
+
 impl<T: Service> ServiceClient<T> {
-    fn state(&self) -> T::State {
+    pub fn state(&self) -> T::State {
+        let state = self.connection.upgrade().and_then(|connection| {
+            let connection = connection.borrow();
+            connection.services.get(&self.id).map(|state| deserialize(&state.initial).unwrap())
+        });
+
+        match state {
+            Some(state) => state,
+            None => unimplemented!()
+        }
+    }
+
+    pub fn updates(&self) -> Box<Stream<Item = T::Update, Error = ()>> {
         unimplemented!()
     }
 
-    fn updates(&self) -> Box<Stream<Item = T::Update, Error = ()>> {
-        unimplemented!()
-    }
-
-    fn request(&self, request: T::Request) -> Box<Future<Item = T::Response, Error = T::Error>> {
+    pub fn request(&self, request: T::Request) -> Box<Future<Item = T::Response, Error = T::Error>> {
         unimplemented!()
     }
 }
@@ -252,6 +275,79 @@ impl Stream for ConnectionToClient {
         }
 
         self.poll_outgoing()
+    }
+}
+
+impl ConnectionToServer {
+    pub fn new<S>(incoming: S) -> Box<Future<Item = Self, Error = String>>
+    where
+        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>
+    {
+        Box::new(incoming.into_future().then(|result| {
+            match result {
+                Ok((Some(bytes), incoming)) => {
+                    let mut connection = ConnectionToServer(Rc::new(RefCell::new(ConnectionToServerState {
+                        services: HashMap::new(),
+                        incoming: Box::new(incoming)
+                    })));
+                    connection.update(deserialize(&bytes).unwrap()).map(|_| connection)
+                },
+                Ok((None, _)) => Err(format!("Connection was interrupted during handshake")),
+                Err((error, _)) => Err(format!("{}", error))
+            }
+        }))
+    }
+
+    pub fn bootstrap<T: Service>(&self) -> ServiceClient<T> {
+        self.get_service(0).unwrap()
+    }
+
+    pub fn get_service<T: Service>(&self, id: ServiceId) -> Option<ServiceClient<T>> {
+        self.0.borrow().services.get(&id).map(|_| {
+            ServiceClient {
+                id,
+                connection: Rc::downgrade(&self.0),
+                _marker: PhantomData
+            }
+        })
+    }
+
+    fn update(&mut self, message: MessageToClient) -> Result<(), String> {
+        match message {
+            MessageToClient::Update { insertions, updates, removals, responses } => {
+                for (id, state) in insertions {
+                    let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
+                    self.0.borrow_mut().services.insert(id, ServiceClientState {
+                        initial: state,
+                        updates_tx,
+                        updates_rx,
+                    });
+                }
+
+                if updates.len() > 0 {
+                    unimplemented!()
+                }
+
+                if removals.len() > 0 {
+                    unimplemented!()
+                }
+
+                if responses.len() > 0 {
+                    unimplemented!()
+                }
+                Ok(())
+            },
+            MessageToClient::Err(description) => Err(description)
+        }
+    }
+}
+
+impl Stream for ConnectionToServer {
+    type Item = Vec<u8>;
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        Ok(Async::NotReady)
     }
 }
 
