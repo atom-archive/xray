@@ -20,33 +20,48 @@ We want to host one or more workspaces on a remote server via a headless instanc
 * If the host exposes multiple workspaces, `xray --connect hostname:port` opens an *Open Workspace* dialog that allows the user to select which workspace to open.
 * `cmd-o` in any Xray window opens the *Open Workspace* dialog listing workspaces from all connected servers.
 
-## Architecture
+## RPC System
 
-Here's the current thinking:
+**This description is currently aspirational and describes work in progress.**
 
-On the server, maintain a pool of "services" for each connected client. A service maps to an entity in the domain model that we want to share. The client connection is created with one or more initial services, and the first service added is considered the "bootstrap" service.
+We implement shared workspaces on top of an RPC system that allows objects on the client to derive their state and behavior from objects that live on the server.
 
-When a client connects, they build a client side representation of this pool of services. They retrieve a *client* for the bootstrap service. Clients have no understanding of the type of the underlying service. They expose an initial snapshot for the service's state, a stream of updates, and a method to make requests to the service and receive responses back. All of these facilities are untyped and deal with raw bytes. We could potentially expose a convenient facility for imposing a typed interface on the raw values.
+### Goals
 
-The client is intended to be wrapped by a higher level object that is coded to the type of the service that the client interfaces with. We could potentially add some kind of facility for ensuring the client is interfacing to the service we expect, possibly by just giving services unique type names. When higher level code calls methods on the client's wrapper object, it may result in that object performing a request via the client.
+#### Support replicated objects
 
-The wrapper object should also spawn a future to process incoming updates and incorporate them into locally-replicated state as necessary.
+The primary goal of the system is to support a the construction of a replicated object-oriented domain model. In addition to supporting remote procedure calls, we also want the system to explicitly support long-lived, stateful objects that change over time.
 
-When the server wants to give the client access to a new service, we expect this to occur when handling a request. In the `request` method's interface, we could pass a reference to the service pool just like we do in the window. This would allow the service to add additional services and retrieve their ids. We could then include these ids as necessary in our response.
+Replication support should be fairly additive, meaning that the domain model on the server side should be designed pretty much as if it weren't replicated. On the client side, interacting with representations of remote objects should be explicit but convenient.
 
-On the client side, when we receive a response, we could call into the client-side representation of the service pool to take ownership of the client side of the service. When we drop the client, we can send a signal to the server that it can also drop the server side of the service.
+#### Capabilities-based security
 
-So long as the client-side code always takes ownership of any service added on the server side, this should avoid leaks. What if the client side doesn't ever take ownership? With every response, we could potentially include the id of the most-recently-added service. After the response is processed, we could schedule a cleanup of any unclaimed services that were added during that request cycle and possible emit some kind of warning.
+Secure ECMA Script and Cap'N Proto introduced me to the concept of capabilities-based security, and our system adopts the same philosophy. Objects on the server can be thought of as "capabilities" that grant access to a narrow slice of functionality that is dynamically defined. Starting from a single root capability, remote users are granted increasing access by being provided with additional capabilities.
 
-So to summarize, I see `Service` as a trait that server-side domain objects will implement that explains how to connect that object to RPC clients. `ServiceClient` is a concrete implementation that we wrap with domain objects.
+#### Dynamic resource management
 
-### Next steps
+Ownership of the replication infrastructure on the server side should trace back to a client that depends on it. When a client discards a service, we should discard its supporting infrastructure on the server automatically.
 
-* When creating the `rpc::ConnectionToClient` object, pass `App` as a bootstrap service which will be automatically provided to any connecting client.
-* Make `ConnectionToClient` a future that we can spawn.
-* Add a `connect_to_client` method to core::App that takes an outgoing sink and incoming stream and creates and spawns a `rpc::ConnectionToClient` future on a `foreground` executor that drives communication with this client.
-* Add a `connect_to_server` method that takes an outgoing sink and incoming stream, and creates a `ConnectionToServer` and spawns it as a future.
-* When the bootstrap service client is received on the client side, wrap it in a `RemoteApp` and assign it to a collection in the local `App`.
-* Add a method that can list remote workspaces by iterating the connected `RemoteApp` instances.
-* Add a method to `RemoteApp` to fetch a remote workspace. This should respond with the id of a client, which can be gotten from the bootstrap client.
-* Once the RemoteApp has resolved
+#### Binary messages
+
+We want to move data efficiently between the server and client, so a binary encoding scheme for messages is important. For now, we're using bincode for convenience, but we should eventually switch to Protobuf, Flatbuffers, Cap'N Proto, to support interaction between peers speaking different versions of the protocol.
+
+### Design
+
+![Diagram](../images/rpc.png)
+
+**Services** are the fundamental abstraction of the system.
+
+In `rpc::server`, `Service` is a *trait* which can be implemented by domain objects (or custom service wrappers for domain objects) to make them accessible to remote clients. A `Service` exposes a static snapshot of the object's initial state, a stream of updates, and the ability to handle requests. The `Service` trait has various associated types for `Request`, `Response`, `Update`, and `State`.
+
+When server side code accepts connections, it creates an `rpc::server::Connection` object for each client that takes ownership of the `Stream` of that client's incoming messages. `Connection`s must be created with a *root service*, which is always sent to the client when they initially connect. The `Connection` is itself a `Stream` of outgoing messages to be sent to the `Sink` of its client.
+
+On the client side, we create a connection by passing the `Stream` of incoming messages to `rpc::client::Connection::new`, which returns a *future* for a tuple containing two objects. The first object is a `rpc::client::Service` representing the *root service* that was automatically sent from the server. The second is an instance of `client::Connection`, which is a `Stream` of outgoing messages to send to the `Sink` of the server.
+
+Using the root service, the client can make requests to gain access to additional services. In Xray, the root service is currently `App`, which includes a list of shared workspaces in its replicated state. We store the remote service handle in a `PeerList` object that is owned by the local `App` instance, which is the backing model for a `PeerList` view that lists all the connected peers along with descriptions of the workspaces they are currently sharing.
+
+When the user selects a workspace, we request a `Workspace` service from the server via its id. When handling the request on the server, we call `add_service` on the connection with the requested workspace, which returns us a `ServiceId` integer. We send that id to the client in the response. When handling the response on the client, we call `get_service` on root service with the id to take ownership of the remote service's handle.
+
+We can then create a `RemoteWorkspace` and pass it ownership of the handle to the remote workspace. `RemoteWorkspace` and `LocalWorkspace` both implement the `Workspace` trait, which allows a `RemoteWorkspace` to be used in the system in all of the same ways that a `LocalWorkspace` can.
+
+We create the illusion that remote domain objects are really local through a combination of state replication and remote procedure calls. Fuzzy finding on the project file trees is addressed through replication, since the data size is typically small and the task is latency sensitive. Project-wide search is implemented via RPC, since replicating the contents of the entire remote file system would be costly, especially for the in-browser use case.
