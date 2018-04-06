@@ -86,9 +86,9 @@ impl App {
         };
     }
 
-    pub fn accept_connection(&self) -> ConnectionToClient {
-        ConnectionToClient::new(self.clone())
-    }
+    // pub fn accept_connection(&self) -> ConnectionToClient {
+    //     ConnectionToClient::new(self.clone())
+    // }
 }
 
 #[derive(Serialize)]
@@ -100,16 +100,16 @@ pub enum RemoteRequest {}
 #[derive(Serialize)]
 pub enum RemoteResponse {}
 
-impl Service for App {
-    type State = RemoteState;
-    type Update = RemoteState;
-    type Request = RemoteRequest;
-    type Response = RemoteResponse;
-    type Error = ();
-
-    fn state(&self) -> Self::State {
-        RemoteState {
-            workspace_count: self.0.borrow().workspaces.len()
-        }
-    }
-}
+// impl Service for App {
+//     type State = RemoteState;
+//     type Update = RemoteState;
+//     type Request = RemoteRequest;
+//     type Response = RemoteResponse;
+//     type Error = ();
+//
+//     fn state(&self, _connection: &ConnectionToClient) -> Self::State {
+//         RemoteState {
+//             workspace_count: self.0.borrow().workspaces.len()
+//         }
+//     }
+// }
