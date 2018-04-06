@@ -20,9 +20,10 @@ pub struct Server {
 
 impl Server {
     pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
-        let executor = Rc::new(CpuPool::new_num_cpus());
+        let foreground = Rc::new(reactor.clone());
+        let background = Rc::new(CpuPool::new_num_cpus());
         Server {
-            app: App::new(headless, executor),
+            app: App::new(headless, foreground, background),
             reactor,
         }
     }

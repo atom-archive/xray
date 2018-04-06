@@ -26,5 +26,10 @@ mod movement;
 mod project;
 mod tree;
 
+use futures::future::{Future, Executor};
+use std::rc::Rc;
 pub use app::{App, WindowId};
 pub use window::{ViewId, WindowUpdate};
+
+pub type ForegroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + 'static>>>;
+pub type BackgroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + Send + 'static>>>;

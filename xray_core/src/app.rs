@@ -1,23 +1,26 @@
+use BackgroundExecutor;
+use ForegroundExecutor;
 use fs;
 use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures::{future, Future};
-use serde_json;
+use futures::{Async, Stream};
 use rpc::{ConnectionToClient, Service};
+use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io;
 use std::rc::Rc;
-use window::{self, ViewId, Window, WindowUpdateStream};
+use window::{ViewId, Window, WindowUpdateStream};
 use workspace::{WorkspaceHandle, WorkspaceView};
 
 pub type WindowId = usize;
-pub type Executor = Rc<future::Executor<Box<Future<Item = (), Error = ()>>>>;
 
 #[derive(Clone)]
 pub struct App(Rc<RefCell<AppState>>);
 
 struct AppState {
     headless: bool,
-    executor: window::Executor,
+    foreground: ForegroundExecutor,
+    background: BackgroundExecutor,
     updates_tx: UnboundedSender<AppUpdate>,
     updates_rx: Option<UnboundedReceiver<AppUpdate>>,
     workspaces: Vec<WorkspaceHandle>,
@@ -26,15 +29,26 @@ struct AppState {
 }
 
 pub enum AppUpdate {
-    OpenWindow(WindowId)
+    OpenWindow(WindowId),
 }
 
+// struct PeerList(Rc<RefCell<PeerListState>>);
+//
+// struct PeerListState {
+//     peers: Vec<Client<App>>
+// }
+
 impl App {
-    pub fn new(headless: bool, executor: window::Executor) -> Self {
+    pub fn new(
+        headless: bool,
+        foreground: ForegroundExecutor,
+        background: BackgroundExecutor,
+    ) -> Self {
         let (updates_tx, updates_rx) = mpsc::unbounded();
         App(Rc::new(RefCell::new(AppState {
             headless,
-            executor,
+            foreground,
+            background,
             updates_tx,
             updates_rx: Some(updates_rx),
             workspaces: Vec::new(),
@@ -55,15 +69,21 @@ impl App {
         let mut state = self.0.borrow_mut();
         let workspace = WorkspaceHandle::new(roots);
         if !state.headless {
-            let mut window = Window::new(Some(state.executor.clone()), 0.0);
+            let mut window = Window::new(Some(state.background.clone()), 0.0);
             let workspace_view_handle = window.add_view(WorkspaceView::new(workspace.clone()));
             window.set_root_view(workspace_view_handle);
             let window_id = state.next_window_id;
             state.next_window_id += 1;
             state.windows.insert(window_id, window);
-            if state.updates_tx.unbounded_send(AppUpdate::OpenWindow(window_id)).is_err() {
+            if state
+                .updates_tx
+                .unbounded_send(AppUpdate::OpenWindow(window_id))
+                .is_err()
+            {
                 let (updates_tx, updates_rx) = mpsc::unbounded();
-                updates_tx.unbounded_send(AppUpdate::OpenWindow(window_id)).unwrap();
+                updates_tx
+                    .unbounded_send(AppUpdate::OpenWindow(window_id))
+                    .unwrap();
                 state.updates_tx = updates_tx;
                 state.updates_rx = Some(updates_rx);
             }
@@ -86,30 +106,72 @@ impl App {
         };
     }
 
-    // pub fn accept_connection(&self) -> ConnectionToClient {
-    //     ConnectionToClient::new(self.clone())
-    // }
+    pub fn connect_to_client<S>(&self, incoming: S) -> ConnectionToClient
+    where
+        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
+    {
+        ConnectionToClient::new(incoming, self.clone())
+    }
+
+    pub fn connect_to_server<S>(&self, incoming: S) -> ConnectionToServer
+    where
+        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
+    {
+        self.0.borrow_mut().peer_list.connect_to_server(incoming)
+    }
 }
 
 #[derive(Serialize)]
 pub struct RemoteState {
-    workspace_count: usize
+    workspace_count: usize,
 }
+
 #[derive(Deserialize)]
 pub enum RemoteRequest {}
+
 #[derive(Serialize)]
 pub enum RemoteResponse {}
 
-// impl Service for App {
-//     type State = RemoteState;
-//     type Update = RemoteState;
-//     type Request = RemoteRequest;
-//     type Response = RemoteResponse;
-//     type Error = ();
-//
-//     fn state(&self, _connection: &ConnectionToClient) -> Self::State {
-//         RemoteState {
-//             workspace_count: self.0.borrow().workspaces.len()
-//         }
-//     }
-// }
+impl Service for App {
+    type State = RemoteState;
+    type Update = RemoteState;
+    type Request = RemoteRequest;
+    type Response = RemoteResponse;
+    type Error = ();
+
+    fn state(&self, _connection: &mut ConnectionToClient) -> Self::State {
+        RemoteState {
+            workspace_count: self.0.borrow().workspaces.len(),
+        }
+    }
+
+    fn poll_update(&mut self, _connection: &mut ConnectionToClient) -> Async<Option<Self::Update>> {
+        Async::NotReady
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate tokio_core;
+
+    use super::*;
+    use futures::{Future, Sink};
+
+    #[test]
+    fn test_rpc() {
+        let reactor = tokio_core::reactor::Core::new().unwrap();
+        let executor = Rc::new(reactor.handle());
+
+        let server = App::new(true, executor.clone(), executor.clone());
+        let client = App::new(false, executor.clone(), executor.clone());
+        let (server_to_client_tx, server_to_client_rx) = mpsc::unbounded();
+        let (client_to_server_tx, client_to_server_rx) = mpsc::unbounded();
+
+        // let client_updates = client.connect_to_server(server_to_client_rx);
+        // executor.spawn(client_to_server_tx.send_all(client_updates));
+        let server_updates = server.connect_to_client(client_to_server_rx.map_err(|_| unreachable!()));
+        executor.spawn(server_to_client_tx.send_all(server_updates.map_err(|_| unreachable!())).then(|_| Ok(())));
+
+        reactor.run(updates.into_future);
+    }
+}

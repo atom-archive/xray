@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::marker::PhantomData;
 use std::mem;
 use std::rc::Rc;
 
@@ -38,6 +39,10 @@ trait RawBytesService {
         request: Vec<u8>,
         connection: &mut ConnectionToClient,
     ) -> Option<Box<Future<Item = Vec<u8>, Error = Vec<u8>>>>;
+}
+
+struct ServiceClient<T: Service> {
+    _marker: PhantomData<T>
 }
 
 #[derive(Serialize, Deserialize)]
@@ -86,6 +91,20 @@ struct ResponseEnvelope {
     service_id: ServiceId,
     request_id: RequestId,
     response: Response,
+}
+
+impl<T: Service> ServiceClient<T> {
+    fn state(&self) -> T::State {
+        unimplemented!()
+    }
+
+    fn updates(&self) -> Box<Stream<Item = T::Update, Error = ()>> {
+        unimplemented!()
+    }
+
+    fn request(&self, request: T::Request) -> Box<Future<Item = T::Response, Error = T::Error>> {
+        unimplemented!()
+    }
 }
 
 impl ConnectionToClient {

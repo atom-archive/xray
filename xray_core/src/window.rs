@@ -1,3 +1,4 @@
+use BackgroundExecutor;
 use serde_json;
 use std::boxed::Box;
 use std::cell::RefCell;
@@ -5,9 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use futures::{Async, Future, Poll, Stream};
 use futures::task::{self, Task};
-use futures::future;
 
-pub type Executor = Rc<future::Executor<Box<Future<Item = (), Error = ()> + Send + 'static>>>;
 pub type ViewId = usize;
 
 pub trait View: Stream<Item = (), Error = ()> {
@@ -25,7 +24,7 @@ pub struct WindowUpdateStream {
 }
 
 pub struct Inner {
-    executor: Option<Executor>,
+    background: Option<BackgroundExecutor>,
     next_view_id: ViewId,
     views: HashMap<ViewId, Rc<RefCell<View<Item = (), Error = ()>>>>,
     inserted: HashSet<ViewId>,
@@ -58,10 +57,10 @@ pub struct ViewUpdate {
 }
 
 impl Window {
-    pub fn new(executor: Option<Executor>, height: f64) -> Self {
+    pub fn new(background: Option<BackgroundExecutor>, height: f64) -> Self {
         Window(
             Rc::new(RefCell::new(Inner {
-                executor,
+                background,
                 next_view_id: 0,
                 views: HashMap::new(),
                 inserted: HashSet::new(),
@@ -124,7 +123,7 @@ impl Window {
     }
 
     pub fn spawn<F: Future<Item = (), Error = ()> + Send + 'static>(&self, future: F) {
-        self.0.borrow().executor.as_ref().map(|executor| executor.execute(Box::new(future)));
+        self.0.borrow().background.as_ref().map(|background| background.execute(Box::new(future)));
     }
 }
 
