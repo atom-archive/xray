@@ -10,7 +10,6 @@ use std::rc::Rc;
 
 pub type RequestId = usize;
 pub type ServiceId = usize;
-pub type Response<T, E> = Option<Box<Future<Item = T, Error = E>>>;
 
 pub trait Service {
     type State: 'static + Serialize;
@@ -28,17 +27,14 @@ pub trait Service {
         &mut self,
         _request: Self::Request,
         _connection: &mut ConnectionToClient,
-    ) -> Response<Self::Response, Self::Error> {
+    ) -> Option<Box<Future<Item = Self::Response, Error = Self::Error>>> {
         None
     }
 }
 
 trait ErasedService {
     fn state(&self, connection: &mut ConnectionToClient) -> Vec<u8>;
-    fn poll_updates(
-        &mut self,
-        connection: &mut ConnectionToClient,
-    ) -> Async<Option<Vec<Vec<u8>>>>;
+    fn poll_updates(&mut self, connection: &mut ConnectionToClient) -> Async<Option<Vec<Vec<u8>>>>;
     fn request(
         &mut self,
         request: Bytes,
@@ -46,19 +42,23 @@ trait ErasedService {
     ) -> Option<Box<Future<Item = Vec<u8>, Error = Vec<u8>>>>;
 }
 
+trait ErasedResponseFuture {
+    fn poll(&mut self) -> Async<Vec<u8>>;
+}
+
 #[derive(Serialize, Deserialize)]
 struct MessageToClient {
     insertions: HashMap<ServiceId, Vec<u8>>,
     updates: HashMap<ServiceId, Vec<Vec<u8>>>,
     removals: HashSet<ServiceId>,
-    responses: Vec<(RequestId, Vec<u8>)>,
+    responses: Vec<(ServiceId, RequestId, Result<Vec<u8>, Vec<u8>>)>,
 }
 
 #[derive(Serialize, Deserialize)]
 enum MessageToServer {
     Request {
-        id: RequestId,
         service: ServiceId,
+        id: RequestId,
         payload: Vec<u8>,
     },
 }
@@ -68,16 +68,28 @@ pub struct ConnectionToClient {
     services: HashMap<ServiceId, Rc<RefCell<ErasedService>>>,
     inserted: HashSet<ServiceId>,
     removed: HashSet<ServiceId>,
+    requests: Box<Stream<Item = Vec<u8>, Error = ()>>,
     pending_task: Option<Task>,
 }
 
+struct ResponseFuture<T: Future> {
+    service: ServiceId,
+    request_id: RequestId,
+    response: T,
+}
+
 impl ConnectionToClient {
-    pub fn new<T: 'static + Service>(bootstrap: T) -> Self {
+    pub fn new<S, T>(requests: S, bootstrap: T) -> Self
+    where
+        S: 'static + Stream<Item = Vec<u8>, Error = ()>,
+        T: 'static + Service,
+    {
         let mut connection = Self {
             next_id: 0,
             services: HashMap::new(),
             inserted: HashSet::new(),
             removed: HashSet::new(),
+            requests: Box::new(requests),
             pending_task: None,
         };
         connection.add_service(bootstrap);
@@ -91,13 +103,25 @@ impl ConnectionToClient {
         self.inserted.insert(id);
         id
     }
-}
 
-impl Stream for ConnectionToClient {
-    type Item = Vec<u8>;
-    type Error = ();
+    fn poll_requests(&mut self) -> Poll<Option<()>, ()> {
+        match self.requests.poll() {
+            Ok(Async::Ready(Some(request))) => match deserialize(&request).unwrap() {
+                MessageToServer::Request {
+                    service,
+                    id,
+                    payload,
+                } => {
+                    if let Some(service) = self.services.get(&service) {
+                        service.borrow_mut().request(id, payload)
+                    }
+                }
+            },
+            result @ _ => result,
+        }
+    }
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_updates(&mut self) -> Poll<Option<MessageToClient>, ()> {
         let mut insertions = HashMap::new();
         let mut inserted = HashSet::new();
         mem::swap(&mut inserted, &mut self.inserted);
@@ -116,10 +140,10 @@ impl Stream for ConnectionToClient {
                     if !inserted.contains(&id) {
                         updates.insert(id, service_updates);
                     }
-                },
+                }
                 Async::Ready(None) => {
                     // TODO: Terminate service
-                },
+                }
                 Async::NotReady => {}
             }
         }
@@ -128,16 +152,38 @@ impl Stream for ConnectionToClient {
         mem::swap(&mut removals, &mut self.removed);
 
         if insertions.len() > 0 || updates.len() > 0 || removals.len() > 0 {
-            let message = serialize(&MessageToClient {
+            Ok(Async::Ready(Some(MessageToClient::Update {
                 insertions,
                 updates,
                 removals,
-                responses, // Need to queue up pending responses
-            }).unwrap();
-            Ok(Async::Ready(Some(message)))
+            })))
         } else {
-            self.pending_task = task::current();
+            self.pending_task = Some(task::current());
             Ok(Async::NotReady)
+        }
+    }
+}
+
+impl Stream for ConnectionToClient {
+    type Item = Vec<u8>;
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        
+    }
+}
+
+impl<T, I, E> ErasedResponseFuture for ResponseFuture<T>
+where
+    T: Future<Item = I, Error = E>,
+    I: Serialize,
+    E: Serialize,
+{
+    fn poll(&mut self) -> Async<Vec<u8>> {
+        match self.response.poll() {
+            Ok(Async::Ready(result)) => Async::Ready(serialize(&result).unwrap()),
+            Ok(Async::NotReady) => Async::NotReady,
+            Err(error) => Async::Ready,
         }
     }
 }
@@ -150,10 +196,7 @@ where
         serialize(&T::state(self, connection)).unwrap()
     }
 
-    fn poll_updates(
-        &mut self,
-        connection: &mut ConnectionToClient,
-    ) -> Async<Option<Vec<Vec<u8>>>> {
+    fn poll_updates(&mut self, connection: &mut ConnectionToClient) -> Async<Option<Vec<Vec<u8>>>> {
         T::poll_updates(self, connection).map(|option| {
             option.map(|updates| {
                 updates
