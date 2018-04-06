@@ -48,6 +48,7 @@ pub struct ServiceClient<T: Service> {
 }
 
 struct ServiceClientState {
+    has_client: bool,
     initial: Vec<u8>,
     updates_rx: unsync::mpsc::UnboundedReceiver<Vec<u8>>,
     updates_tx: unsync::mpsc::UnboundedSender<Vec<u8>>,
@@ -104,7 +105,7 @@ struct ResponseEnvelope {
 pub struct ConnectionToServer(Rc<RefCell<ConnectionToServerState>>);
 
 struct ConnectionToServerState {
-    services: HashMap<ServiceId, ServiceClientState>,
+    client_states: HashMap<ServiceId, ServiceClientState>,
     incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>
 }
 
@@ -112,7 +113,7 @@ impl<T: Service> ServiceClient<T> {
     pub fn state(&self) -> T::State {
         let state = self.connection.upgrade().and_then(|connection| {
             let connection = connection.borrow();
-            connection.services.get(&self.id).map(|state| deserialize(&state.initial).unwrap())
+            connection.client_states.get(&self.id).map(|state| deserialize(&state.initial).unwrap())
         });
 
         match state {
@@ -279,18 +280,22 @@ impl Stream for ConnectionToClient {
 }
 
 impl ConnectionToServer {
-    pub fn new<S>(incoming: S) -> Box<Future<Item = Self, Error = String>>
+    pub fn new<S, B>(incoming: S) -> Box<Future<Item = (Self, ServiceClient<B>), Error = String>>
     where
-        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>
+        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
+        B: 'static + Service
     {
         Box::new(incoming.into_future().then(|result| {
             match result {
                 Ok((Some(bytes), incoming)) => {
                     let mut connection = ConnectionToServer(Rc::new(RefCell::new(ConnectionToServerState {
-                        services: HashMap::new(),
+                        client_states: HashMap::new(),
                         incoming: Box::new(incoming)
                     })));
-                    connection.update(deserialize(&bytes).unwrap()).map(|_| connection)
+                    connection.update(deserialize(&bytes).unwrap()).map(|_| {
+                        let bootstrap_client = connection.get_client(0).unwrap();
+                        (connection, bootstrap_client)
+                    })
                 },
                 Ok((None, _)) => Err(format!("Connection was interrupted during handshake")),
                 Err((error, _)) => Err(format!("{}", error))
@@ -298,16 +303,17 @@ impl ConnectionToServer {
         }))
     }
 
-    pub fn bootstrap<T: Service>(&self) -> ServiceClient<T> {
-        self.get_service(0).unwrap()
-    }
-
-    pub fn get_service<T: Service>(&self, id: ServiceId) -> Option<ServiceClient<T>> {
-        self.0.borrow().services.get(&id).map(|_| {
-            ServiceClient {
-                id,
-                connection: Rc::downgrade(&self.0),
-                _marker: PhantomData
+    pub fn get_client<T: Service>(&self, id: ServiceId) -> Option<ServiceClient<T>> {
+        self.0.borrow_mut().client_states.get_mut(&id).and_then(|state| {
+            if state.has_client {
+                None
+            } else {
+                state.has_client = true;
+                Some(ServiceClient {
+                    id,
+                    connection: Rc::downgrade(&self.0),
+                    _marker: PhantomData
+                })
             }
         })
     }
@@ -317,7 +323,8 @@ impl ConnectionToServer {
             MessageToClient::Update { insertions, updates, removals, responses } => {
                 for (id, state) in insertions {
                     let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
-                    self.0.borrow_mut().services.insert(id, ServiceClientState {
+                    self.0.borrow_mut().client_states.insert(id, ServiceClientState {
+                        has_client: false,
                         initial: state,
                         updates_tx,
                         updates_rx,

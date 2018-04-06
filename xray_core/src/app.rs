@@ -14,6 +14,7 @@ use window::{ViewId, Window, WindowUpdateStream};
 use workspace::{WorkspaceHandle, WorkspaceView};
 
 pub type WindowId = usize;
+pub type PeerName = String;
 
 #[derive(Clone)]
 pub struct App(Rc<RefCell<AppState>>);
@@ -37,14 +38,14 @@ pub enum AppUpdate {
 struct PeerList(Rc<RefCell<PeerListState>>);
 
 struct PeerListState {
-    peers: Vec<ServiceClient<App>>,
+    peers: HashMap<PeerName, ServiceClient<App>>,
     updates: NotifyCell<()>
 }
 
 impl PeerList {
     fn new() -> Self {
         PeerList(Rc::new(RefCell::new(PeerListState {
-            peers: Vec::new(),
+            peers: HashMap::new(),
             updates: NotifyCell::new(())
         })))
     }
@@ -53,14 +54,14 @@ impl PeerList {
         self.0.borrow().updates.observe()
     }
 
-    fn connect_to_server<S>(&self, incoming: S) -> Box<Future<Item = ConnectionToServer, Error = String>>
+    fn connect_to_server<S>(&self, name: PeerName, incoming: S) -> Box<Future<Item = ConnectionToServer, Error = String>>
     where
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>
     {
         let state = self.0.clone();
-        Box::new(ConnectionToServer::new(incoming).map(move |connection| {
+        Box::new(ConnectionToServer::new(incoming).map(move |(connection, peer)| {
             let mut state = state.borrow_mut();
-            state.peers.push(connection.bootstrap::<App>());
+            state.peers.insert(name, peer);
             state.updates.set(());
             connection
         }))
@@ -143,11 +144,11 @@ impl App {
         ConnectionToClient::new(incoming, self.clone())
     }
 
-    pub fn connect_to_server<S>(&self, incoming: S) -> Box<Future<Item = ConnectionToServer, Error = String>>
+    pub fn connect_to_server<S>(&self, name: PeerName, incoming: S) -> Box<Future<Item = ConnectionToServer, Error = String>>
     where
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
     {
-        self.0.borrow().peer_list.connect_to_server(incoming)
+        self.0.borrow().peer_list.connect_to_server(name, incoming)
     }
 }
 
@@ -203,12 +204,14 @@ mod tests {
         executor.spawn(send_all(server_to_client_tx, server_updates));
 
         let client_updates = reactor.run(
-            client.connect_to_server(server_to_client_rx.map_err(|_| unreachable!()))
+            client.connect_to_server(String::from("server"), server_to_client_rx.map_err(|_| unreachable!()))
         ).unwrap();
         executor.spawn(send_all(client_to_server_tx, client_updates));
 
-        let client = client.0.borrow();
-        println!("{:?}", client.peer_list.0.borrow().peers[0].state());
+        let peer_list = client.peer_list();
+        assert_eq!(peer_list.state(), vec![
+            PeerState { name: String::from("") }
+        ]);
     }
 
     fn send_all<I, S1, S2>(sink: S1, stream: S2) -> Box<Future<Item = (), Error = ()>>
