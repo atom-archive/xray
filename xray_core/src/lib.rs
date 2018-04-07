@@ -10,6 +10,8 @@ extern crate serde_derive;
 #[macro_use]
 extern crate serde_json;
 extern crate smallvec;
+#[cfg(test)]
+extern crate tokio_core;
 
 pub mod app;
 pub mod buffer;

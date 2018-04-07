@@ -441,51 +441,44 @@ where
 
 #[cfg(test)]
 mod tests {
-    extern crate tokio_core;
-
     use super::*;
     use futures::{Future, Sink};
+    use tokio_core::reactor;
 
     #[test]
     fn test_connection() {
-        let mut reactor = tokio_core::reactor::Core::new().unwrap();
-        let handle = reactor.handle();
+        let mut reactor = reactor::Core::new().unwrap();
 
-        let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
-        let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
+        let root_svc = TestService::new(42);
+        let root_svc_client_1 = connect(&mut reactor, root_svc.clone());
+        assert_eq!(root_svc_client_1.state(), 42);
 
-        let service = TestService::new(42);
-        let server = ConnectionToClient::new(
-            client_to_server_rx.map_err(|_| unreachable!()),
-            service.clone(),
-        );
-        handle.spawn(send_all(server_to_client_tx, server));
-
-        let (client, service_client) = reactor
-            .run(ConnectionToServer::new::<_, TestService>(
-                server_to_client_rx.map_err(|_| unreachable!()),
-            ))
-            .unwrap();
-        handle.spawn(send_all(client_to_server_tx, client));
-        assert_eq!(service_client.state(), 42);
-
-        service.increment_by(2);
-        service.increment_by(4);
-        service.increment_by(5);
-        let client_updates = service_client.updates().unwrap();
-        let (update, client_updates) = run(&mut reactor, client_updates.into_future());
-        assert_eq!(update, Some(2));
-        let (update, client_updates) = run(&mut reactor, client_updates.into_future());
-        assert_eq!(update, Some(4));
-        let (update, client_updates) = run(&mut reactor, client_updates.into_future());
-        assert_eq!(update, Some(5));
+        root_svc.increment_by(2);
+        root_svc.increment_by(4);
+        reactor.turn(None);
+        let mut root_svc_client_1_updates = root_svc_client_1.updates().unwrap();
+        assert_eq!(root_svc_client_1_updates.poll(), Ok(Async::Ready(Some(2))));
+        assert_eq!(root_svc_client_1_updates.poll(), Ok(Async::Ready(Some(4))));
     }
 
-    fn run<F: Future>(reactor: &mut tokio_core::reactor::Core, future: F) -> F::Item {
-        match reactor.run(future) {
-            Ok(result) => result,
-            Err(_) => panic!("Unexpected error"),
-        }
+    fn connect<S: 'static + Service>(reactor: &mut reactor::Core, service: S) -> ServiceClient<S> {
+        let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
+        let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
+        let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
+        let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
+
+        let server = ConnectionToClient::new(client_to_server_rx, service);
+        reactor
+            .handle()
+            .spawn(send_all(server_to_client_tx, server));
+
+        let client_future = ConnectionToServer::new(server_to_client_rx);
+        let (client, service_client) = reactor.run(client_future).unwrap();
+        reactor
+            .handle()
+            .spawn(send_all(client_to_server_tx, client));
+
+        service_client
     }
 
     fn send_all<I, S1, S2>(sink: S1, stream: S2) -> Box<Future<Item = (), Error = ()>>
