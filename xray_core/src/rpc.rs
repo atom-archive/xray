@@ -359,7 +359,17 @@ impl ConnectionToServer {
                 }
 
                 if updates.len() > 0 {
-                    unimplemented!()
+                    let mut connection = self.0.borrow_mut();
+                    for (service_id, updates) in updates {
+                        connection
+                            .client_states
+                            .get_mut(&service_id)
+                            .map(|service_state| {
+                                for update in updates {
+                                    service_state.updates_tx.unbounded_send(update);
+                                }
+                            });
+                    }
                 }
 
                 if removals.len() > 0 {
@@ -381,6 +391,22 @@ impl Stream for ConnectionToServer {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        loop {
+            let poll_result = self.0.borrow_mut().incoming.poll();
+            match poll_result {
+                Ok(Async::Ready(Some(bytes))) => match self.update(deserialize(&bytes).unwrap()) {
+                    Ok(_) => continue,
+                    Err(description) => eprintln!("Error occurred on server: {}", description),
+                },
+                Ok(Async::Ready(None)) => unimplemented!(),
+                Ok(Async::NotReady) => return Ok(Async::NotReady),
+                Err(error) => {
+                    eprintln!("Error polling incoming connection: {}", error);
+                    return Err(());
+                }
+            }
+        }
+
         Ok(Async::NotReady)
     }
 }
@@ -510,10 +536,7 @@ mod tests {
             self.0.borrow().count
         }
 
-        fn poll_update(
-            &mut self,
-            connection: &mut ConnectionToClient,
-        ) -> Async<Option<Self::Update>> {
+        fn poll_update(&mut self, _: &mut ConnectionToClient) -> Async<Option<Self::Update>> {
             self.0.borrow_mut().updates_rx.poll().unwrap()
         }
     }
