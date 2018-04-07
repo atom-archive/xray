@@ -459,6 +459,9 @@ mod tests {
         let mut root_svc_client_1_updates = root_svc_client_1.updates().unwrap();
         assert_eq!(root_svc_client_1_updates.poll(), Ok(Async::Ready(Some(2))));
         assert_eq!(root_svc_client_1_updates.poll(), Ok(Async::Ready(Some(4))));
+
+        let root_svc_client_2 = connect(&mut reactor, root_svc.clone());
+        assert_eq!(root_svc_client_2.state(), 42 + 2 + 4);
     }
 
     fn connect<S: 'static + Service>(reactor: &mut reactor::Core, service: S) -> ServiceClient<S> {
