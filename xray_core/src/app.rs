@@ -4,7 +4,8 @@ use fs;
 use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::{Future, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
-use rpc::{ConnectionToServer, ConnectionToClient, Service, ServiceClient};
+use rpc::client;
+use rpc::server;
 use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -38,15 +39,15 @@ pub enum AppUpdate {
 struct PeerList(Rc<RefCell<PeerListState>>);
 
 struct PeerListState {
-    peers: HashMap<PeerName, ServiceClient<App>>,
-    updates: NotifyCell<()>
+    peers: HashMap<PeerName, client::Service<App>>,
+    updates: NotifyCell<()>,
 }
 
 impl PeerList {
     fn new() -> Self {
         PeerList(Rc::new(RefCell::new(PeerListState {
             peers: HashMap::new(),
-            updates: NotifyCell::new(())
+            updates: NotifyCell::new(()),
         })))
     }
 
@@ -54,17 +55,23 @@ impl PeerList {
         self.0.borrow().updates.observe()
     }
 
-    fn connect_to_server<S>(&self, name: PeerName, incoming: S) -> Box<Future<Item = ConnectionToServer, Error = String>>
+    fn connect_to_server<S>(
+        &self,
+        name: PeerName,
+        incoming: S,
+    ) -> Box<Future<Item = client::Connection, Error = String>>
     where
-        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>
+        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
     {
         let state = self.0.clone();
-        Box::new(ConnectionToServer::new(incoming).map(move |(connection, peer)| {
-            let mut state = state.borrow_mut();
-            state.peers.insert(name, peer);
-            state.updates.set(());
-            connection
-        }))
+        Box::new(
+            client::Connection::new(incoming).map(move |(connection, peer)| {
+                let mut state = state.borrow_mut();
+                state.peers.insert(name, peer);
+                state.updates.set(());
+                connection
+            }),
+        )
     }
 }
 
@@ -137,14 +144,18 @@ impl App {
         };
     }
 
-    pub fn connect_to_client<S>(&self, incoming: S) -> ConnectionToClient
+    pub fn connect_to_client<S>(&self, incoming: S) -> server::Connection
     where
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
     {
-        ConnectionToClient::new(incoming, self.clone())
+        server::Connection::new(incoming, self.clone())
     }
 
-    pub fn connect_to_server<S>(&self, name: PeerName, incoming: S) -> Box<Future<Item = ConnectionToServer, Error = String>>
+    pub fn connect_to_server<S>(
+        &self,
+        name: PeerName,
+        incoming: S,
+    ) -> Box<Future<Item = client::Connection, Error = String>>
     where
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
     {
@@ -163,20 +174,23 @@ pub enum RemoteRequest {}
 #[derive(Serialize, Deserialize)]
 pub enum RemoteResponse {}
 
-impl Service for App {
+impl server::Service for App {
     type State = RemoteState;
     type Update = RemoteState;
     type Request = RemoteRequest;
     type Response = RemoteResponse;
     type Error = ();
 
-    fn state(&self, _connection: &mut ConnectionToClient) -> Self::State {
+    fn state(&self, _connection: &mut server::Connection) -> Self::State {
         RemoteState {
             workspace_count: self.0.borrow().workspaces.len(),
         }
     }
 
-    fn updates(&mut self, _connection: &mut ConnectionToClient) -> Box<Stream<Item = Self::Update, Error = ()>> {
+    fn updates(
+        &mut self,
+        _connection: &mut server::Connection,
+    ) -> Box<Stream<Item = Self::Update, Error = ()>> {
         unimplemented!()
     }
 }
@@ -217,8 +231,11 @@ mod tests {
     fn send_all<I, S1, S2>(sink: S1, stream: S2) -> Box<Future<Item = (), Error = ()>>
     where
         S1: 'static + Sink<SinkItem = I>,
-        S2: 'static + Stream<Item = I>
+        S2: 'static + Stream<Item = I>,
     {
-        Box::new(sink.send_all(stream.map_err(|_| unreachable!())).then(|_| Ok(())))
+        Box::new(
+            sink.send_all(stream.map_err(|_| unreachable!()))
+                .then(|_| Ok(())),
+        )
     }
 }
