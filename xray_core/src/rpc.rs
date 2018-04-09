@@ -16,9 +16,9 @@ pub type ServiceId = usize;
 pub trait Service {
     type State: 'static + Serialize + for<'a> Deserialize<'a>;
     type Update: 'static + Serialize + for<'a> Deserialize<'a>;
-    type Request: 'static + for<'a> Deserialize<'a>;
-    type Response: 'static + Serialize;
-    type Error: 'static + Serialize;
+    type Request: 'static + Serialize + for<'a> Deserialize<'a>;
+    type Response: 'static + Serialize + for<'a> Deserialize<'a>;
+    type Error: 'static + Serialize + for<'a> Deserialize<'a>;
 
     fn state(&self, connection: &mut ConnectionToClient) -> Self::State;
     fn updates(
@@ -54,6 +54,7 @@ struct ServiceClientState {
     initial: Vec<u8>,
     updates_rx: Option<unsync::mpsc::UnboundedReceiver<Vec<u8>>>,
     updates_tx: unsync::mpsc::UnboundedSender<Vec<u8>>,
+    pending_requests: HashMap<RequestId, unsync::oneshot::Sender<Result<Vec<u8>, Vec<u8>>>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,12 +75,12 @@ enum Response {
     RpcErr(RpcError),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 enum RpcError {
     ServiceNotFound,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 enum MessageToServer {
     Request {
         service_id: ServiceId,
@@ -113,8 +114,11 @@ struct ResponseEnvelope {
 pub struct ConnectionToServer(Rc<RefCell<ConnectionToServerState>>);
 
 struct ConnectionToServerState {
+    next_request_id: RequestId,
     client_states: HashMap<ServiceId, ServiceClientState>,
     incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>,
+    outgoing_tx: unsync::mpsc::UnboundedSender<MessageToServer>,
+    outgoing_rx: unsync::mpsc::UnboundedReceiver<MessageToServer>,
 }
 
 impl<T: Service> ServiceClient<T> {
@@ -149,8 +153,34 @@ impl<T: Service> ServiceClient<T> {
     pub fn request(
         &self,
         request: T::Request,
-    ) -> Box<Future<Item = T::Response, Error = T::Error>> {
-        unimplemented!()
+    ) -> Option<Box<Future<Item = T::Response, Error = T::Error>>> {
+        self.connection.upgrade().and_then(|connection| {
+            let mut connection = connection.borrow_mut();
+            let connection = &mut *connection;
+
+            let request_id = connection.next_request_id;
+            connection.next_request_id += 1;
+
+            let outgoing_tx = &mut connection.outgoing_tx;
+            connection.client_states.get_mut(&self.id).map(|state| {
+                let (response_tx, response_rx) = unsync::oneshot::channel();
+                state.pending_requests.insert(request_id, response_tx);
+                let response_future =
+                    response_rx.then(|raw_response| match raw_response.unwrap() {
+                        Ok(payload) => Ok(deserialize(&payload).unwrap()),
+                        Err(payload) => Err(deserialize(&payload).unwrap()),
+                    });
+
+                let request = MessageToServer::Request {
+                    request_id,
+                    service_id: self.id,
+                    payload: serialize(&request).unwrap(),
+                };
+                outgoing_tx.unbounded_send(request);
+
+                Box::new(response_future) as Box<Future<Item = T::Response, Error = T::Error>>
+            })
+        })
     }
 }
 
@@ -319,13 +349,17 @@ impl ConnectionToServer {
         B: 'static + Service,
     {
         Box::new(incoming.into_future().then(|result| match result {
-            Ok((Some(bytes), incoming)) => {
+            Ok((Some(payload), incoming)) => {
+                let (outgoing_tx, outgoing_rx) = unsync::mpsc::unbounded();
                 let mut connection =
                     ConnectionToServer(Rc::new(RefCell::new(ConnectionToServerState {
+                        next_request_id: 0,
                         client_states: HashMap::new(),
                         incoming: Box::new(incoming),
+                        outgoing_tx,
+                        outgoing_rx,
                     })));
-                connection.update(deserialize(&bytes).unwrap()).map(|_| {
+                connection.update(deserialize(&payload).unwrap()).map(|_| {
                     let bootstrap_client = connection.get_client(0).unwrap();
                     (connection, bootstrap_client)
                 })
@@ -362,43 +396,76 @@ impl ConnectionToServer {
                 removals,
                 responses,
             } => {
-                for (id, state) in insertions {
-                    let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
-                    self.0.borrow_mut().client_states.insert(
-                        id,
-                        ServiceClientState {
-                            has_client: false,
-                            initial: state,
-                            updates_tx,
-                            updates_rx: Some(updates_rx),
-                        },
-                    );
-                }
-
-                if updates.len() > 0 {
-                    let mut connection = self.0.borrow_mut();
-                    for (service_id, updates) in updates {
-                        connection
-                            .client_states
-                            .get_mut(&service_id)
-                            .map(|service_state| {
-                                for update in updates {
-                                    service_state.updates_tx.unbounded_send(update);
-                                }
-                            });
-                    }
-                }
-
-                if removals.len() > 0 {
-                    unimplemented!()
-                }
-
-                if responses.len() > 0 {
-                    unimplemented!()
-                }
+                self.process_insertions(insertions);
+                self.process_updates(updates);
+                self.process_removals(removals);
+                self.process_responses(responses);
                 Ok(())
             }
             MessageToClient::Err(description) => Err(description),
+        }
+    }
+
+    fn process_insertions(&self, insertions: HashMap<ServiceId, Vec<u8>>) {
+        let mut connection = self.0.borrow_mut();
+        for (id, state) in insertions {
+            let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
+            connection.client_states.insert(
+                id,
+                ServiceClientState {
+                    has_client: false,
+                    initial: state,
+                    updates_tx,
+                    updates_rx: Some(updates_rx),
+                    pending_requests: HashMap::new(),
+                },
+            );
+        }
+    }
+
+    fn process_updates(&self, updates: HashMap<ServiceId, Vec<Vec<u8>>>) {
+        let mut connection = self.0.borrow_mut();
+        for (service_id, updates) in updates {
+            connection
+                .client_states
+                .get_mut(&service_id)
+                .map(|service_state| {
+                    for update in updates {
+                        service_state.updates_tx.unbounded_send(update);
+                    }
+                });
+        }
+    }
+
+    fn process_removals(&self, removals: HashSet<ServiceId>) {
+        if removals.len() > 0 {
+            unimplemented!()
+        }
+    }
+
+    fn process_responses(&self, responses: HashMap<ServiceId, Vec<(RequestId, Response)>>) {
+        let mut connection = self.0.borrow_mut();
+        for (service_id, responses) in responses {
+            if let Some(state) = connection.client_states.get_mut(&service_id) {
+                for (request_id, response) in responses {
+                    let request_tx = state.pending_requests.remove(&request_id);
+                    if let Some(request_tx) = request_tx {
+                        match response {
+                            Response::Ok(payload) => {
+                                request_tx.send(Ok(payload));
+                            }
+                            Response::Err(payload) => {
+                                request_tx.send(Err(payload));
+                            }
+                            Response::RpcErr(error) => {
+                                eprintln!("Server error during RPC: {:?}", error);
+                            }
+                        }
+                    } else {
+                        eprintln!("Received response for unknown request {}", request_id);
+                    }
+                }
+            }
         }
     }
 }
@@ -409,20 +476,36 @@ impl Stream for ConnectionToServer {
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         loop {
-            let poll_result = self.0.borrow_mut().incoming.poll();
-            match poll_result {
-                Ok(Async::Ready(Some(bytes))) => match self.update(deserialize(&bytes).unwrap()) {
-                    Ok(_) => continue,
-                    Err(description) => eprintln!("Error occurred on server: {}", description),
-                },
+            let incoming_message = self.0.borrow_mut().incoming.poll();
+            match incoming_message {
+                Ok(Async::Ready(Some(payload))) => {
+                    match self.update(deserialize(&payload).unwrap()) {
+                        Ok(_) => continue,
+                        Err(description) => eprintln!("Error occurred on server: {}", description),
+                    }
+                }
                 Ok(Async::Ready(None)) => unimplemented!(),
-                Ok(Async::NotReady) => return Ok(Async::NotReady),
+                Ok(Async::NotReady) => break,
                 Err(error) => {
                     eprintln!("Error polling incoming connection: {}", error);
                     return Err(());
                 }
             }
         }
+
+        match self.0.borrow_mut().outgoing_rx.poll() {
+            Ok(Async::Ready(Some(message))) => {
+                return Ok(Async::Ready(Some(serialize(&message).unwrap())))
+            }
+            Ok(Async::Ready(None)) => unreachable!(),
+            Ok(Async::NotReady) => {}
+            Err(_) => {
+                eprintln!("Error polling outgoing messages");
+                return Err(());
+            }
+        }
+
+        Ok(Async::NotReady)
     }
 }
 
@@ -459,21 +542,26 @@ mod tests {
     #[test]
     fn test_connection() {
         let mut reactor = reactor::Core::new().unwrap();
+        let svc = TestService::new(42);
+        let svc_client_1 = connect(&mut reactor, svc.clone());
+        assert_eq!(svc_client_1.state(), 42);
 
-        let root_svc = TestService::new(42);
-        let root_svc_client_1 = connect(&mut reactor, root_svc.clone());
-        assert_eq!(root_svc_client_1.state(), 42);
+        svc.increment_by(2);
+        let svc_client_2 = connect(&mut reactor, svc.clone());
+        assert_eq!(svc_client_2.state(), 42 + 2);
 
-        root_svc.increment_by(2);
-        let root_svc_client_2 = connect(&mut reactor, root_svc.clone());
-        assert_eq!(root_svc_client_2.state(), 42 + 2);
+        svc.increment_by(4);
+        let mut svc_client_1_updates = svc_client_1.updates().unwrap();
+        assert_eq!(poll_wait(&mut reactor, &mut svc_client_1_updates), Some(2));
+        assert_eq!(poll_wait(&mut reactor, &mut svc_client_1_updates), Some(4));
+        let mut svc_client_2_updates = svc_client_2.updates().unwrap();
+        assert_eq!(poll_wait(&mut reactor, &mut svc_client_2_updates), Some(4));
 
-        root_svc.increment_by(4);
-        let mut root_svc_client_1_updates = root_svc_client_1.updates().unwrap();
-        assert_eq!(poll_wait(&mut reactor, &mut root_svc_client_1_updates), Some(2));
-        assert_eq!(poll_wait(&mut reactor, &mut root_svc_client_1_updates), Some(4));
-        let mut root_svc_client_2_updates = root_svc_client_2.updates().unwrap();
-        assert_eq!(poll_wait(&mut reactor, &mut root_svc_client_2_updates), Some(4));
+        let request_future = svc_client_2.request(TestServiceRequest::Increment(3));
+        let response = reactor.run(request_future.unwrap()).unwrap();
+        assert_eq!(response, TestServiceResponse::Ack);
+        assert_eq!(poll_wait(&mut reactor, &mut svc_client_1_updates), Some(3));
+        assert_eq!(poll_wait(&mut reactor, &mut svc_client_2_updates), Some(3));
     }
 
     fn connect<S: 'static + Service>(reactor: &mut reactor::Core, service: S) -> ServiceClient<S> {
@@ -500,7 +588,14 @@ mod tests {
         service_client
     }
 
-    fn poll_wait<S: 'static + Stream>(reactor: &mut reactor::Core, stream: &mut S) -> Option<S::Item> where S::Item: Debug, S::Error: Debug {
+    fn poll_wait<S: 'static + Stream>(
+        reactor: &mut reactor::Core,
+        stream: &mut S,
+    ) -> Option<S::Item>
+    where
+        S::Item: Debug,
+        S::Error: Debug,
+    {
         struct TakeOne<'a, S: 'a>(&'a mut S);
 
         impl<'a, S: 'a + Stream> Future for TakeOne<'a, S> {
@@ -523,6 +618,16 @@ mod tests {
         update_txs: Vec<unsync::mpsc::UnboundedSender<usize>>,
     }
 
+    #[derive(Serialize, Deserialize)]
+    enum TestServiceRequest {
+        Increment(usize),
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    enum TestServiceResponse {
+        Ack,
+    }
+
     impl TestService {
         fn new(count: usize) -> Self {
             TestService(Rc::new(RefCell::new(TestServiceState {
@@ -543,8 +648,8 @@ mod tests {
     impl Service for TestService {
         type State = usize;
         type Update = usize;
-        type Request = ();
-        type Response = ();
+        type Request = TestServiceRequest;
+        type Response = TestServiceResponse;
         type Error = String;
 
         fn state(&self, connection: &mut ConnectionToClient) -> Self::State {
@@ -559,6 +664,18 @@ mod tests {
             let mut state = self.0.borrow_mut();
             state.update_txs.push(updates_tx);
             Box::new(updates_rx)
+        }
+
+        fn request(
+            &mut self,
+            request: Self::Request,
+            _: &mut ConnectionToClient,
+        ) -> Option<Box<Future<Item = Self::Response, Error = Self::Error>>> {
+            match request {
+                TestServiceRequest::Increment(count) => self.increment_by(count),
+            }
+
+            Some(Box::new(future::ok(TestServiceResponse::Ack)))
         }
     }
 }

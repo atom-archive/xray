@@ -2,7 +2,7 @@ use BackgroundExecutor;
 use ForegroundExecutor;
 use fs;
 use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures::{Async, Future, Stream};
+use futures::{Future, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use rpc::{ConnectionToServer, ConnectionToClient, Service, ServiceClient};
 use serde_json;
@@ -157,10 +157,10 @@ pub struct RemoteState {
     workspace_count: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum RemoteRequest {}
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub enum RemoteResponse {}
 
 impl Service for App {
