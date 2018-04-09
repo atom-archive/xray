@@ -122,7 +122,7 @@ struct ConnectionToServerState {
 }
 
 impl<T: Service> ServiceClient<T> {
-    pub fn state(&self) -> T::State {
+    pub fn state(&self) -> Option<T::State> {
         let state = self.connection.upgrade().and_then(|connection| {
             let connection = connection.borrow();
             connection
@@ -131,10 +131,7 @@ impl<T: Service> ServiceClient<T> {
                 .map(|state| deserialize(&state.initial).unwrap())
         });
 
-        match state {
-            Some(state) => state,
-            None => unimplemented!(),
-        }
+        state
     }
 
     pub fn updates(&self) -> Option<Box<Stream<Item = T::Update, Error = ()>>> {
@@ -182,6 +179,12 @@ impl<T: Service> ServiceClient<T> {
             })
         })
     }
+
+    pub fn get_client<S: Service>(&self, id: ServiceId) -> Option<ServiceClient<S>> {
+        self.connection
+            .upgrade()
+            .and_then(|connection| ConnectionToServer::service_client(&connection, id))
+    }
 }
 
 impl ConnectionToClient {
@@ -216,6 +219,11 @@ impl ConnectionToClient {
         self.services.insert(id, (service, service_updates));
         self.inserted.insert(id);
         id
+    }
+
+    pub fn remove_service(&mut self, id: ServiceId) {
+        self.services.remove(&id);
+        self.removed.insert(id);
     }
 
     fn poll_incoming(&mut self) -> Result<bool, io::Error> {
@@ -360,7 +368,7 @@ impl ConnectionToServer {
                         outgoing_rx,
                     })));
                 connection.update(deserialize(&payload).unwrap()).map(|_| {
-                    let bootstrap_client = connection.get_client(0).unwrap();
+                    let bootstrap_client = Self::service_client(&connection.0, 0).unwrap();
                     (connection, bootstrap_client)
                 })
             }
@@ -369,8 +377,11 @@ impl ConnectionToServer {
         }))
     }
 
-    pub fn get_client<T: Service>(&self, id: ServiceId) -> Option<ServiceClient<T>> {
-        self.0
+    fn service_client<S: Service>(
+        connection: &Rc<RefCell<ConnectionToServerState>>,
+        id: ServiceId,
+    ) -> Option<ServiceClient<S>> {
+        connection
             .borrow_mut()
             .client_states
             .get_mut(&id)
@@ -381,7 +392,7 @@ impl ConnectionToServer {
                     state.has_client = true;
                     Some(ServiceClient {
                         id,
-                        connection: Rc::downgrade(&self.0),
+                        connection: Rc::downgrade(&connection),
                         _marker: PhantomData,
                     })
                 }
@@ -438,8 +449,9 @@ impl ConnectionToServer {
     }
 
     fn process_removals(&self, removals: HashSet<ServiceId>) {
-        if removals.len() > 0 {
-            unimplemented!()
+        let mut connection = self.0.borrow_mut();
+        for id in removals {
+            connection.client_states.remove(&id);
         }
     }
 
@@ -544,11 +556,11 @@ mod tests {
         let mut reactor = reactor::Core::new().unwrap();
         let svc = TestService::new(42);
         let svc_client_1 = connect(&mut reactor, svc.clone());
-        assert_eq!(svc_client_1.state(), 42);
+        assert_eq!(svc_client_1.state(), Some(42));
 
         svc.increment_by(2);
         let svc_client_2 = connect(&mut reactor, svc.clone());
-        assert_eq!(svc_client_2.state(), 42 + 2);
+        assert_eq!(svc_client_2.state(), Some(42 + 2));
 
         svc.increment_by(4);
         let mut svc_client_1_updates = svc_client_1.updates().unwrap();
@@ -557,11 +569,36 @@ mod tests {
         let mut svc_client_2_updates = svc_client_2.updates().unwrap();
         assert_eq!(poll_wait(&mut reactor, &mut svc_client_2_updates), Some(4));
 
-        let request_future = svc_client_2.request(TestServiceRequest::Increment(3));
+        let request_future = svc_client_2.request(TestRequest::Increment(3));
         let response = reactor.run(request_future.unwrap()).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
         assert_eq!(poll_wait(&mut reactor, &mut svc_client_1_updates), Some(3));
         assert_eq!(poll_wait(&mut reactor, &mut svc_client_2_updates), Some(3));
+    }
+
+    #[test]
+    fn test_add_remove_service() {
+        let mut reactor = reactor::Core::new().unwrap();
+        let svc = TestService::new(42);
+        let svc_client = connect(&mut reactor, svc);
+
+        let request_future = svc_client.request(TestRequest::CreateService(12));
+        let response = reactor.run(request_future.unwrap()).unwrap();
+        assert_eq!(response, TestServiceResponse::ServiceCreated(1));
+        let child_svc_client = svc_client.get_client::<TestService>(1).unwrap();
+        assert_eq!(child_svc_client.state(), Some(12));
+        assert!(svc_client.get_client::<TestService>(1).is_none());
+
+        let request_future = svc_client.request(TestRequest::DropService(1));
+        let response = reactor.run(request_future.unwrap()).unwrap();
+        assert_eq!(response, TestServiceResponse::Ack);
+        assert!(child_svc_client.state().is_none());
+        assert!(child_svc_client.updates().is_none());
+        assert!(
+            child_svc_client
+                .request(TestRequest::Increment(5))
+                .is_none()
+        );
     }
 
     fn connect<S: 'static + Service>(reactor: &mut reactor::Core, service: S) -> ServiceClient<S> {
@@ -619,13 +656,16 @@ mod tests {
     }
 
     #[derive(Serialize, Deserialize)]
-    enum TestServiceRequest {
+    enum TestRequest {
         Increment(usize),
+        CreateService(usize),
+        DropService(ServiceId),
     }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     enum TestServiceResponse {
         Ack,
+        ServiceCreated(ServiceId),
     }
 
     impl TestService {
@@ -648,7 +688,7 @@ mod tests {
     impl Service for TestService {
         type State = usize;
         type Update = usize;
-        type Request = TestServiceRequest;
+        type Request = TestRequest;
         type Response = TestServiceResponse;
         type Error = String;
 
@@ -669,13 +709,24 @@ mod tests {
         fn request(
             &mut self,
             request: Self::Request,
-            _: &mut ConnectionToClient,
+            connection: &mut ConnectionToClient,
         ) -> Option<Box<Future<Item = Self::Response, Error = Self::Error>>> {
             match request {
-                TestServiceRequest::Increment(count) => self.increment_by(count),
+                TestRequest::Increment(count) => {
+                    self.increment_by(count);
+                    Some(Box::new(future::ok(TestServiceResponse::Ack)))
+                }
+                TestRequest::CreateService(initial_count) => {
+                    let service_id = connection.add_service(TestService::new(initial_count));
+                    Some(Box::new(future::ok(TestServiceResponse::ServiceCreated(
+                        service_id,
+                    ))))
+                }
+                TestRequest::DropService(id) => {
+                    connection.remove_service(id);
+                    Some(Box::new(future::ok(TestServiceResponse::Ack)))
+                }
             }
-
-            Some(Box::new(future::ok(TestServiceResponse::Ack)))
         }
     }
 }
