@@ -299,17 +299,28 @@ impl ConnectionToClient {
         let mut updates: HashMap<ServiceId, Vec<Vec<u8>>> = HashMap::new();
         let service_ids = self.services.keys().cloned().collect::<Vec<ServiceId>>();
         for id in service_ids {
-            let (_, service_updates) = self.services.get_mut(&id).unwrap();
-            loop {
-                match service_updates.poll().unwrap() {
-                    Async::Ready(Some(update)) => {
-                        if !inserted.contains(&id) {
-                            updates.entry(id).or_insert(Vec::new()).push(update);
+            let mut update_stream_finished = false;
+            {
+                let (_, service_updates) = self.services.get_mut(&id).unwrap();
+                loop {
+                    match service_updates.poll().unwrap() {
+                        Async::Ready(Some(update)) => {
+                            if !inserted.contains(&id) {
+                                updates.entry(id).or_insert(Vec::new()).push(update);
+                            }
                         }
+                        Async::Ready(None) => {
+                            update_stream_finished = true;
+                            break;
+                        }
+                        Async::NotReady => break,
                     }
-                    Async::Ready(None) => unimplemented!("Terminate the service"),
-                    Async::NotReady => break,
                 }
+            }
+
+            if update_stream_finished {
+                updates.remove(&id);
+                self.remove_service(id);
             }
         }
 
@@ -629,6 +640,22 @@ mod tests {
         assert_eq!(poll_wait(&mut reactor, &mut svc_client_updates), None);
     }
 
+    #[test]
+    fn test_finish_service_updates_stream() {
+        let mut reactor = reactor::Core::new().unwrap();
+        let svc = TestService::new(42);
+        let svc_client = connect(&mut reactor, svc.clone());
+        let mut svc_client_updates = svc_client.updates().unwrap();
+
+        svc.increment_by(2);
+        svc.increment_by(3);
+        svc.finish_update_stream();
+        assert_eq!(poll_wait(&mut reactor, &mut svc_client_updates), None);
+        assert!(svc_client.state().is_none());
+        assert!(svc_client.updates().is_none());
+        assert!(svc_client.request(TestRequest::Increment(1)).is_none());
+    }
+
     fn connect<S: 'static + Service>(reactor: &mut reactor::Core, service: S) -> ServiceClient<S> {
         let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
@@ -719,6 +746,11 @@ mod tests {
             for index in indices_to_delete.into_iter().rev() {
                 state.update_txs.remove(index);
             }
+        }
+
+        fn finish_update_stream(&self) {
+            let mut state = self.0.borrow_mut();
+            state.update_txs.clear();
         }
     }
 
