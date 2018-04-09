@@ -2,7 +2,7 @@ use BackgroundExecutor;
 use ForegroundExecutor;
 use fs;
 use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures::{Future, Stream};
+use futures::{Async, Future, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use rpc::client;
 use rpc::server;
@@ -193,10 +193,7 @@ impl server::Service for App {
         }
     }
 
-    fn updates(
-        &mut self,
-        _connection: &mut server::Connection,
-    ) -> Box<Stream<Item = Self::Update, Error = ()>> {
+    fn poll_update(&mut self, _: &mut server::Connection) -> Async<Option<Self::Update>> {
         unimplemented!()
     }
 }

@@ -18,10 +18,7 @@ pub trait Service {
     type Error: 'static + Serialize + for<'a> Deserialize<'a>;
 
     fn state(&self, connection: &mut Connection) -> Self::State;
-    fn updates(
-        &mut self,
-        connection: &mut Connection,
-    ) -> Box<Stream<Item = Self::Update, Error = ()>>;
+    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Self::Update>>;
     fn request(
         &mut self,
         _request: Self::Request,
@@ -33,6 +30,7 @@ pub trait Service {
 
 trait RawBytesService {
     fn state(&self, connection: &mut Connection) -> Vec<u8>;
+    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Vec<u8>>>;
     fn request(
         &mut self,
         request: Vec<u8>,
@@ -42,13 +40,7 @@ trait RawBytesService {
 
 pub struct Connection {
     next_id: ServiceId,
-    services: HashMap<
-        ServiceId,
-        (
-            Rc<RefCell<RawBytesService>>,
-            Box<Stream<Item = Vec<u8>, Error = ()>>,
-        ),
-    >,
+    services: HashMap<ServiceId, Rc<RefCell<RawBytesService>>>,
     inserted: HashSet<ServiceId>,
     removed: HashSet<ServiceId>,
     incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>,
@@ -81,17 +73,11 @@ impl Connection {
         connection
     }
 
-    pub fn add_service<T: 'static + Service>(&mut self, mut service: T) -> ServiceId {
+    pub fn add_service<T: 'static + Service>(&mut self, service: T) -> ServiceId {
         let id = self.next_id;
         self.next_id += 1;
-
-        let service_updates = Box::new(
-            service
-                .updates(self)
-                .map(|update| serialize(&update).unwrap()),
-        );
         let service = Rc::new(RefCell::new(service));
-        self.services.insert(id, (service, service_updates));
+        self.services.insert(id, service);
         self.inserted.insert(id);
         id
     }
@@ -110,10 +96,7 @@ impl Connection {
                         service_id,
                         payload,
                     } => {
-                        if let Some(service) = self.services
-                            .get(&service_id)
-                            .map(|&(ref service, _)| service.clone())
-                        {
+                        if let Some(service) = self.services.get(&service_id).cloned() {
                             if let Some(response) = service.borrow_mut().request(payload, self) {
                                 self.pending_responses.push(Box::new(response.then(
                                     move |response| {
@@ -154,7 +137,7 @@ impl Connection {
         let mut inserted = HashSet::new();
         mem::swap(&mut inserted, &mut self.inserted);
         for id in &inserted {
-            if let Some(service) = self.services.get(id).map(|&(ref service, _)| service.clone()) {
+            if let Some(service) = self.services.get(id).cloned() {
                 insertions.insert(*id, service.borrow().state(self));
             }
         }
@@ -163,19 +146,20 @@ impl Connection {
         for id in service_ids {
             let mut update_stream_finished = false;
             {
-                let &mut (_, ref mut service_updates) = self.services.get_mut(&id).unwrap();
-                loop {
-                    match service_updates.poll().unwrap() {
-                        Async::Ready(Some(update)) => {
-                            if !inserted.contains(&id) {
-                                updates.entry(id).or_insert(Vec::new()).push(update);
+                if let Some(service) = self.services.get(&id).cloned() {
+                    loop {
+                        match service.borrow_mut().poll_update(self) {
+                            Async::Ready(Some(update)) => {
+                                if !inserted.contains(&id) {
+                                    updates.entry(id).or_insert(Vec::new()).push(update);
+                                }
                             }
+                            Async::Ready(None) => {
+                                update_stream_finished = true;
+                                break;
+                            }
+                            Async::NotReady => break,
                         }
-                        Async::Ready(None) => {
-                            update_stream_finished = true;
-                            break;
-                        }
-                        Async::NotReady => break,
                     }
                 }
             }
@@ -243,6 +227,11 @@ where
 {
     fn state(&self, connection: &mut Connection) -> Vec<u8> {
         serialize(&T::state(self, connection)).unwrap()
+    }
+
+    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Vec<u8>>> {
+        T::poll_update(self, connection)
+            .map(|option| option.map(|update| serialize(&update).unwrap()))
     }
 
     fn request(
