@@ -521,7 +521,7 @@ impl Stream for ConnectionToServer {
                         Err(description) => eprintln!("Error occurred on server: {}", description),
                     }
                 }
-                Ok(Async::Ready(None)) => unimplemented!(),
+                Ok(Async::Ready(None)) => return Ok(Async::Ready(None)),
                 Ok(Async::NotReady) => break,
                 Err(error) => {
                     eprintln!("Error polling incoming connection: {}", error);
@@ -654,6 +654,48 @@ mod tests {
         assert!(svc_client.state().is_none());
         assert!(svc_client.updates().is_none());
         assert!(svc_client.request(TestRequest::Increment(1)).is_none());
+    }
+
+    #[test]
+    fn test_interrupting_connection_to_client() {
+        let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
+        let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
+        let mut server = ConnectionToClient::new(client_to_server_rx, TestService::new(42));
+        drop(client_to_server_tx);
+        assert_eq!(server.poll(), Ok(Async::Ready(None)));
+    }
+
+    #[test]
+    fn test_interrupting_connection_to_server_on_handshake() {
+        let mut reactor = reactor::Core::new().unwrap();
+        let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
+        let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
+        drop(server_to_client_tx);
+        let client_future = ConnectionToServer::new::<_, TestService>(server_to_client_rx);
+        assert!(reactor.run(client_future).is_err());
+    }
+
+    #[test]
+    fn test_interrupting_connection_to_server() {
+        let mut reactor = reactor::Core::new().unwrap();
+
+        let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
+        let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
+        let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
+        let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
+
+        let server = ConnectionToClient::new(client_to_server_rx, TestService::new(42));
+        reactor.handle().spawn(
+            server_to_client_tx
+                .send_all(server.map_err(|_| unreachable!()))
+                .then(|_| Ok(())),
+        );
+
+        let client_future = ConnectionToServer::new::<_, TestService>(server_to_client_rx);
+        let (mut client, svc_client) = reactor.run(client_future).unwrap();
+
+        drop(reactor);
+        assert_eq!(client.poll(), Ok(Async::Ready(None)));
     }
 
     fn connect<S: 'static + Service>(reactor: &mut reactor::Core, service: S) -> ServiceClient<S> {
