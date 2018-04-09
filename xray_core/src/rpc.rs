@@ -173,7 +173,7 @@ impl<T: Service> ServiceClient<T> {
                     service_id: self.id,
                     payload: serialize(&request).unwrap(),
                 };
-                outgoing_tx.unbounded_send(request);
+                outgoing_tx.unbounded_send(request).unwrap();
 
                 Box::new(response_future) as Box<Future<Item = T::Response, Error = T::Error>>
             })
@@ -442,7 +442,7 @@ impl ConnectionToServer {
                 .get_mut(&service_id)
                 .map(|service_state| {
                     for update in updates {
-                        service_state.updates_tx.unbounded_send(update);
+                        service_state.updates_tx.unbounded_send(update).unwrap();
                     }
                 });
         }
@@ -464,10 +464,10 @@ impl ConnectionToServer {
                     if let Some(request_tx) = request_tx {
                         match response {
                             Response::Ok(payload) => {
-                                request_tx.send(Ok(payload));
+                                request_tx.send(Ok(payload)).unwrap();
                             }
                             Response::Err(payload) => {
-                                request_tx.send(Err(payload));
+                                request_tx.send(Err(payload)).unwrap();
                             }
                             Response::RpcErr(error) => {
                                 eprintln!("Server error during RPC: {:?}", error);
