@@ -12,10 +12,11 @@ use std::collections::HashMap;
 use std::io;
 use std::rc::Rc;
 use window::{ViewId, Window, WindowUpdateStream};
-use workspace::{WorkspaceHandle, WorkspaceView};
+use workspace::{Workspace, WorkspaceView};
 
 pub type WindowId = usize;
 pub type PeerName = String;
+type WorkspaceId = usize;
 
 #[derive(Clone)]
 pub struct App(Rc<RefCell<AppState>>);
@@ -27,7 +28,8 @@ struct AppState {
     updates_tx: UnboundedSender<AppUpdate>,
     updates_rx: Option<UnboundedReceiver<AppUpdate>>,
     peer_list: PeerList,
-    workspaces: Vec<WorkspaceHandle>,
+    next_workspace_id: WorkspaceId,
+    workspaces: HashMap<WorkspaceId, Workspace>,
     next_window_id: WindowId,
     windows: HashMap<WindowId, Window>,
 }
@@ -89,7 +91,8 @@ impl App {
             updates_tx,
             updates_rx: Some(updates_rx),
             peer_list: PeerList::new(),
-            workspaces: Vec::new(),
+            next_workspace_id: 0,
+            workspaces: HashMap::new(),
             next_window_id: 1,
             windows: HashMap::new(),
         })))
@@ -105,7 +108,7 @@ impl App {
 
     pub fn open_workspace(&self, roots: Vec<Box<fs::Tree>>) {
         let mut state = self.0.borrow_mut();
-        let workspace = WorkspaceHandle::new(roots);
+        let workspace = Workspace::new(roots);
         if !state.headless {
             let mut window = Window::new(Some(state.background.clone()), 0.0);
             let workspace_view_handle = window.add_view(WorkspaceView::new(workspace.clone()));
@@ -126,7 +129,10 @@ impl App {
                 state.updates_rx = Some(updates_rx);
             }
         };
-        state.workspaces.push(workspace);
+
+        let id = state.next_workspace_id;
+        state.next_window_id += 1;
+        state.workspaces.insert(id, workspace);
     }
 
     pub fn start_window(&self, id: &WindowId, height: f64) -> Result<WindowUpdateStream, ()> {

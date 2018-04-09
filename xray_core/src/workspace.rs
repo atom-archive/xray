@@ -16,14 +16,14 @@ use fs;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
 
 #[derive(Clone)]
-pub struct WorkspaceHandle(Rc<RefCell<Workspace>>);
+pub struct Workspace(Rc<RefCell<WorkspaceState>>);
 
-struct Workspace {
+struct WorkspaceState {
     project: Project
 }
 
 pub struct WorkspaceView {
-    workspace: WorkspaceHandle,
+    workspace: Workspace,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
@@ -36,9 +36,9 @@ enum WorkspaceViewAction {
     ToggleFileFinder,
 }
 
-impl WorkspaceHandle {
+impl Workspace {
     pub fn new(roots: Vec<Box<fs::Tree>>) -> Self {
-        WorkspaceHandle(Rc::new(RefCell::new(Workspace {
+        Workspace(Rc::new(RefCell::new(WorkspaceState {
             project: Project::new(roots)
         })))
     }
@@ -49,7 +49,7 @@ impl WorkspaceHandle {
 }
 
 impl WorkspaceView {
-    pub fn new(workspace: WorkspaceHandle) -> Self {
+    pub fn new(workspace: Workspace) -> Self {
         WorkspaceView {
             workspace,
             modal_panel: None,
