@@ -87,6 +87,7 @@ enum MessageToServer {
         request_id: RequestId,
         payload: Vec<u8>,
     },
+    ServiceClientDropped(ServiceId),
 }
 
 pub struct ConnectionToClient {
@@ -187,6 +188,18 @@ impl<T: Service> ServiceClient<T> {
     }
 }
 
+impl<T: Service> Drop for ServiceClient<T> {
+    fn drop(&mut self) {
+        self.connection.upgrade().map(|connection| {
+            connection
+                .borrow_mut()
+                .outgoing_tx
+                .unbounded_send(MessageToServer::ServiceClientDropped(self.id))
+                .unwrap();
+        });
+    }
+}
+
 impl ConnectionToClient {
     pub fn new<S, T>(incoming: S, bootstrap: T) -> Self
     where
@@ -262,6 +275,7 @@ impl ConnectionToClient {
                                 })));
                         }
                     }
+                    MessageToServer::ServiceClientDropped(id) => self.remove_service(id),
                 },
                 Ok(Async::Ready(None)) => return Ok(false),
                 Ok(Async::NotReady) => return Ok(true),
@@ -601,6 +615,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_drop_service_client() {
+        let mut reactor = reactor::Core::new().unwrap();
+        let svc = TestService::new(42);
+        let svc_client = connect(&mut reactor, svc.clone());
+        let mut svc_client_updates = svc_client.updates().unwrap();
+
+        svc.increment_by(1);
+        assert_eq!(poll_wait(&mut reactor, &mut svc_client_updates), Some(1));
+
+        drop(svc_client);
+        assert_eq!(poll_wait(&mut reactor, &mut svc_client_updates), None);
+    }
+
     fn connect<S: 'static + Service>(reactor: &mut reactor::Core, service: S) -> ServiceClient<S> {
         let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
@@ -679,8 +707,17 @@ mod tests {
         fn increment_by(&self, count: usize) {
             let mut state = self.0.borrow_mut();
             state.count += count;
-            for updates_tx in &mut state.update_txs {
-                updates_tx.unbounded_send(count).unwrap();
+
+            let mut indices_to_delete = Vec::new();
+            for (index, updates_tx) in state.update_txs.iter_mut().enumerate() {
+                match updates_tx.unbounded_send(count) {
+                    Ok(()) => {}
+                    Err(_) => indices_to_delete.push(index),
+                }
+            }
+
+            for index in indices_to_delete.into_iter().rev() {
+                state.update_txs.remove(index);
             }
         }
     }
