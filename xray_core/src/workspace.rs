@@ -2,7 +2,7 @@ use project::{Project, PathSearch, PathSearchStatus};
 use notify_cell::NotifyCellObserver;
 use futures::{Poll, Stream};
 use serde_json;
-use std::cell::RefCell;
+use std::cell::{RefCell, Ref};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::fs::File;
@@ -41,6 +41,10 @@ impl Workspace {
         Workspace(Rc::new(RefCell::new(WorkspaceState {
             project: Project::new(roots)
         })))
+    }
+
+    pub fn project(&self) -> Ref<Project> {
+        Ref::map(self.0.borrow(), |state| &state.project)
     }
 
     pub fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {

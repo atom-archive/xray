@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct Project {
-    pub trees: Vec<Box<fs::Tree>>,
+    trees: Vec<Box<fs::Tree>>,
 }
 
 pub struct PathSearch {
@@ -50,6 +50,10 @@ enum MatchMarker {
 impl Project {
     pub fn new(trees: Vec<Box<fs::Tree>>) -> Self {
         Project { trees }
+    }
+
+    pub fn trees(&self) -> &[Box<fs::Tree>] {
+        &self.trees
     }
 
     pub fn search_paths(
