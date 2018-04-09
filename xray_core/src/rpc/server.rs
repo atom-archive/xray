@@ -63,7 +63,7 @@ struct ResponseEnvelope {
 }
 
 impl Connection {
-    pub fn new<S, T>(incoming: S, bootstrap: T) -> Self
+    pub fn new<S, T>(incoming: S, root_service: T) -> Self
     where
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
         T: 'static + Service,
@@ -77,7 +77,7 @@ impl Connection {
             pending_responses: FuturesUnordered::new(),
             pending_task: None,
         };
-        connection.add_service(bootstrap);
+        connection.add_service(root_service);
         connection
     }
 

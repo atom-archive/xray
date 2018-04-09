@@ -127,8 +127,8 @@ impl Connection {
                     outgoing_rx,
                 })));
                 connection.update(deserialize(&payload).unwrap()).map(|_| {
-                    let bootstrap_client = Self::service(&connection.0, 0).unwrap();
-                    (connection, bootstrap_client)
+                    let root_service = Self::service(&connection.0, 0).unwrap();
+                    (connection, root_service)
                 })
             }
             Ok((None, _)) => Err(format!("Connection was interrupted during handshake")),
