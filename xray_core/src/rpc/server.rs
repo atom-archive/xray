@@ -112,7 +112,7 @@ impl Connection {
                     } => {
                         if let Some(service) = self.services
                             .get(&service_id)
-                            .map(|(service, _)| service.clone())
+                            .map(|&(ref service, _)| service.clone())
                         {
                             if let Some(response) = service.borrow_mut().request(payload, self) {
                                 self.pending_responses.push(Box::new(response.then(
@@ -154,7 +154,7 @@ impl Connection {
         let mut inserted = HashSet::new();
         mem::swap(&mut inserted, &mut self.inserted);
         for id in &inserted {
-            if let Some((service, _)) = self.services.get(id) {
+            if let Some(service) = self.services.get(id).map(|&(ref service, _)| service.clone()) {
                 insertions.insert(*id, service.borrow().state(self));
             }
         }
@@ -163,7 +163,7 @@ impl Connection {
         for id in service_ids {
             let mut update_stream_finished = false;
             {
-                let (_, service_updates) = self.services.get_mut(&id).unwrap();
+                let &mut (_, ref mut service_updates) = self.services.get_mut(&id).unwrap();
                 loop {
                     match service_updates.poll().unwrap() {
                         Async::Ready(Some(update)) => {
