@@ -21,7 +21,10 @@ pub trait Service {
     type Error: 'static + Serialize;
 
     fn state(&self, connection: &mut ConnectionToClient) -> Self::State;
-    fn poll_update(&mut self, connection: &mut ConnectionToClient) -> Async<Option<Self::Update>>;
+    fn updates(
+        &mut self,
+        connection: &mut ConnectionToClient,
+    ) -> Box<Stream<Item = Self::Update, Error = ()>>;
     fn request(
         &mut self,
         _request: Self::Request,
@@ -33,7 +36,6 @@ pub trait Service {
 
 trait RawBytesService {
     fn state(&self, connection: &mut ConnectionToClient) -> Vec<u8>;
-    fn poll_update(&mut self, connection: &mut ConnectionToClient) -> Async<Option<Vec<u8>>>;
     fn request(
         &mut self,
         request: Vec<u8>,
@@ -88,7 +90,13 @@ enum MessageToServer {
 
 pub struct ConnectionToClient {
     next_id: ServiceId,
-    services: HashMap<ServiceId, Rc<RefCell<RawBytesService>>>,
+    services: HashMap<
+        ServiceId,
+        (
+            Rc<RefCell<RawBytesService>>,
+            Box<Stream<Item = Vec<u8>, Error = ()>>,
+        ),
+    >,
     inserted: HashSet<ServiceId>,
     removed: HashSet<ServiceId>,
     incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>,
@@ -165,10 +173,17 @@ impl ConnectionToClient {
         connection
     }
 
-    pub fn add_service<T: 'static + Service>(&mut self, service: T) -> ServiceId {
+    pub fn add_service<T: 'static + Service>(&mut self, mut service: T) -> ServiceId {
         let id = self.next_id;
         self.next_id += 1;
-        self.services.insert(id, Rc::new(RefCell::new(service)));
+
+        let service_updates = Box::new(
+            service
+                .updates(self)
+                .map(|update| serialize(&update).unwrap()),
+        );
+        let service = Rc::new(RefCell::new(service));
+        self.services.insert(id, (service, service_updates));
         self.inserted.insert(id);
         id
     }
@@ -182,7 +197,10 @@ impl ConnectionToClient {
                         service_id,
                         payload,
                     } => {
-                        if let Some(service) = self.services.get(&service_id).cloned() {
+                        if let Some(service) = self.services
+                            .get(&service_id)
+                            .map(|(service, _)| service.clone())
+                        {
                             if let Some(response) = service.borrow_mut().request(payload, self) {
                                 self.pending_responses.push(Box::new(response.then(
                                     move |response| {
@@ -222,17 +240,16 @@ impl ConnectionToClient {
         let mut inserted = HashSet::new();
         mem::swap(&mut inserted, &mut self.inserted);
         for id in &inserted {
-            if let Some(service) = self.services.get(id).cloned() {
+            if let Some((service, _)) = self.services.get(id) {
                 insertions.insert(*id, service.borrow().state(self));
             }
         }
         let mut updates: HashMap<ServiceId, Vec<Vec<u8>>> = HashMap::new();
         let service_ids = self.services.keys().cloned().collect::<Vec<ServiceId>>();
         for id in service_ids {
-            let service = self.services.get(&id).unwrap().clone();
-            let mut service_borrow = service.borrow_mut();
+            let (_, service_updates) = self.services.get_mut(&id).unwrap();
             loop {
-                match service_borrow.poll_update(self) {
+                match service_updates.poll().unwrap() {
                     Async::Ready(Some(update)) => {
                         if !inserted.contains(&id) {
                             updates.entry(id).or_insert(Vec::new()).push(update);
@@ -406,8 +423,6 @@ impl Stream for ConnectionToServer {
                 }
             }
         }
-
-        Ok(Async::NotReady)
     }
 }
 
@@ -417,11 +432,6 @@ where
 {
     fn state(&self, connection: &mut ConnectionToClient) -> Vec<u8> {
         serialize(&T::state(self, connection)).unwrap()
-    }
-
-    fn poll_update(&mut self, connection: &mut ConnectionToClient) -> Async<Option<Vec<u8>>> {
-        T::poll_update(self, connection)
-            .map(|option| option.map(|update| serialize(&update).unwrap()))
     }
 
     fn request(
@@ -442,7 +452,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::{Future, Sink};
+    use futures::{future, Future, Sink};
+    use std::fmt::Debug;
     use tokio_core::reactor;
 
     #[test]
@@ -454,14 +465,15 @@ mod tests {
         assert_eq!(root_svc_client_1.state(), 42);
 
         root_svc.increment_by(2);
-        root_svc.increment_by(4);
-        reactor.turn(None);
-        let mut root_svc_client_1_updates = root_svc_client_1.updates().unwrap();
-        assert_eq!(root_svc_client_1_updates.poll(), Ok(Async::Ready(Some(2))));
-        assert_eq!(root_svc_client_1_updates.poll(), Ok(Async::Ready(Some(4))));
-
         let root_svc_client_2 = connect(&mut reactor, root_svc.clone());
-        assert_eq!(root_svc_client_2.state(), 42 + 2 + 4);
+        assert_eq!(root_svc_client_2.state(), 42 + 2);
+
+        root_svc.increment_by(4);
+        let mut root_svc_client_1_updates = root_svc_client_1.updates().unwrap();
+        assert_eq!(poll_wait(&mut reactor, &mut root_svc_client_1_updates), Some(2));
+        assert_eq!(poll_wait(&mut reactor, &mut root_svc_client_1_updates), Some(4));
+        let mut root_svc_client_2_updates = root_svc_client_2.updates().unwrap();
+        assert_eq!(poll_wait(&mut reactor, &mut root_svc_client_2_updates), Some(4));
     }
 
     fn connect<S: 'static + Service>(reactor: &mut reactor::Core, service: S) -> ServiceClient<S> {
@@ -471,28 +483,36 @@ mod tests {
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
 
         let server = ConnectionToClient::new(client_to_server_rx, service);
-        reactor
-            .handle()
-            .spawn(send_all(server_to_client_tx, server));
+        reactor.handle().spawn(
+            server_to_client_tx
+                .send_all(server.map_err(|_| unreachable!()))
+                .then(|_| Ok(())),
+        );
 
         let client_future = ConnectionToServer::new(server_to_client_rx);
         let (client, service_client) = reactor.run(client_future).unwrap();
-        reactor
-            .handle()
-            .spawn(send_all(client_to_server_tx, client));
+        reactor.handle().spawn(
+            client_to_server_tx
+                .send_all(client.map_err(|_| unreachable!()))
+                .then(|_| Ok(())),
+        );
 
         service_client
     }
 
-    fn send_all<I, S1, S2>(sink: S1, stream: S2) -> Box<Future<Item = (), Error = ()>>
-    where
-        S1: 'static + Sink<SinkItem = I>,
-        S2: 'static + Stream<Item = I>,
-    {
-        Box::new(
-            sink.send_all(stream.map_err(|_| unreachable!()))
-                .then(|_| Ok(())),
-        )
+    fn poll_wait<S: 'static + Stream>(reactor: &mut reactor::Core, stream: &mut S) -> Option<S::Item> where S::Item: Debug, S::Error: Debug {
+        struct TakeOne<'a, S: 'a>(&'a mut S);
+
+        impl<'a, S: 'a + Stream> Future for TakeOne<'a, S> {
+            type Item = Option<S::Item>;
+            type Error = S::Error;
+
+            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+                self.0.poll()
+            }
+        }
+
+        reactor.run(TakeOne(stream)).unwrap()
     }
 
     #[derive(Clone)]
@@ -500,24 +520,23 @@ mod tests {
 
     struct TestServiceState {
         count: usize,
-        updates_tx: unsync::mpsc::UnboundedSender<usize>,
-        updates_rx: unsync::mpsc::UnboundedReceiver<usize>,
+        update_txs: Vec<unsync::mpsc::UnboundedSender<usize>>,
     }
 
     impl TestService {
         fn new(count: usize) -> Self {
-            let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
             TestService(Rc::new(RefCell::new(TestServiceState {
                 count,
-                updates_tx,
-                updates_rx,
+                update_txs: Vec::new(),
             })))
         }
 
         fn increment_by(&self, count: usize) {
             let mut state = self.0.borrow_mut();
             state.count += count;
-            state.updates_tx.unbounded_send(count).unwrap();
+            for updates_tx in &mut state.update_txs {
+                updates_tx.unbounded_send(count).unwrap();
+            }
         }
     }
 
@@ -532,8 +551,14 @@ mod tests {
             self.0.borrow().count
         }
 
-        fn poll_update(&mut self, _: &mut ConnectionToClient) -> Async<Option<Self::Update>> {
-            self.0.borrow_mut().updates_rx.poll().unwrap()
+        fn updates(
+            &mut self,
+            _: &mut ConnectionToClient,
+        ) -> Box<Stream<Item = Self::Update, Error = ()>> {
+            let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
+            let mut state = self.0.borrow_mut();
+            state.update_txs.push(updates_tx);
+            Box::new(updates_rx)
         }
     }
 }

@@ -176,8 +176,8 @@ impl Service for App {
         }
     }
 
-    fn poll_update(&mut self, _connection: &mut ConnectionToClient) -> Async<Option<Self::Update>> {
-        Async::NotReady
+    fn updates(&mut self, _connection: &mut ConnectionToClient) -> Box<Stream<Item = Self::Update, Error = ()>> {
+        unimplemented!()
     }
 }
 
