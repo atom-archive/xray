@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::mem;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 pub trait Service {
     type State: 'static + Serialize + for<'a> Deserialize<'a>;
@@ -17,12 +17,12 @@ pub trait Service {
     type Response: 'static + Serialize + for<'a> Deserialize<'a>;
     type Error: 'static + Serialize + for<'a> Deserialize<'a>;
 
-    fn state(&self, connection: &mut Connection) -> Self::State;
-    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Self::Update>>;
+    fn state(&self, connection: &Connection) -> Self::State;
+    fn poll_update(&mut self, connection: &Connection) -> Async<Option<Self::Update>>;
     fn request(
         &mut self,
         _request: Self::Request,
-        _connection: &mut Connection,
+        _connection: &Connection,
     ) -> Option<Box<Future<Item = Self::Response, Error = Self::Error>>> {
         None
     }
@@ -39,6 +39,11 @@ trait RawBytesService {
 }
 
 pub struct Connection {
+    state: Rc<RefCell<ConnectionState>>,
+    root_service: Option<ServiceHandle>,
+}
+
+struct ConnectionState {
     next_id: ServiceId,
     services: HashMap<ServiceId, Rc<RefCell<RawBytesService>>>,
     inserted: HashSet<ServiceId>,
@@ -46,6 +51,11 @@ pub struct Connection {
     incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>,
     pending_responses: FuturesUnordered<Box<Future<Item = ResponseEnvelope, Error = ()>>>,
     pending_task: Option<Task>,
+}
+
+pub struct ServiceHandle {
+    pub service_id: ServiceId,
+    connection: Weak<RefCell<ConnectionState>>,
 }
 
 struct ResponseEnvelope {
@@ -61,45 +71,49 @@ impl Connection {
         T: 'static + Service,
     {
         let mut connection = Self {
-            next_id: 0,
-            services: HashMap::new(),
-            inserted: HashSet::new(),
-            removed: HashSet::new(),
-            incoming: Box::new(incoming),
-            pending_responses: FuturesUnordered::new(),
-            pending_task: None,
+            state: Rc::new(RefCell::new(ConnectionState {
+                next_id: 0,
+                services: HashMap::new(),
+                inserted: HashSet::new(),
+                removed: HashSet::new(),
+                incoming: Box::new(incoming),
+                pending_responses: FuturesUnordered::new(),
+                pending_task: None,
+            })),
+            root_service: None,
         };
-        connection.add_service(root_service);
+        connection.root_service = Some(connection.add_service(root_service));
         connection
     }
 
-    pub fn add_service<T: 'static + Service>(&mut self, service: T) -> ServiceId {
-        let id = self.next_id;
-        self.next_id += 1;
+    pub fn add_service<T: 'static + Service>(&self, service: T) -> ServiceHandle {
+        let mut state = self.state.borrow_mut();
+        let id = state.next_id;
+        state.next_id += 1;
         let service = Rc::new(RefCell::new(service));
-        self.services.insert(id, service);
-        self.inserted.insert(id);
-        id
-    }
+        state.services.insert(id, service);
+        state.inserted.insert(id);
 
-    pub fn remove_service(&mut self, id: ServiceId) {
-        self.services.remove(&id);
-        self.removed.insert(id);
+        ServiceHandle {
+            connection: Rc::downgrade(&self.state),
+            service_id: id,
+        }
     }
 
     fn poll_incoming(&mut self) -> Result<bool, io::Error> {
         loop {
-            match self.incoming.poll() {
+            let poll = self.state.borrow_mut().incoming.poll();
+            match poll {
                 Ok(Async::Ready(Some(request))) => match deserialize(&request).unwrap() {
                     MessageToServer::Request {
                         request_id,
                         service_id,
                         payload,
                     } => {
-                        if let Some(service) = self.services.get(&service_id).cloned() {
+                        if let Some(service) = self.get_service(service_id) {
                             if let Some(response) = service.borrow_mut().request(payload, self) {
-                                self.pending_responses.push(Box::new(response.then(
-                                    move |response| {
+                                self.state.borrow_mut().pending_responses.push(Box::new(
+                                    response.then(move |response| {
                                         Ok(ResponseEnvelope {
                                             request_id,
                                             service_id,
@@ -108,11 +122,13 @@ impl Connection {
                                                 Err(payload) => Response::Err(payload),
                                             },
                                         })
-                                    },
-                                )));
+                                    }),
+                                ));
                             }
                         } else {
-                            self.pending_responses
+                            self.state
+                                .borrow_mut()
+                                .pending_responses
                                 .push(Box::new(future::ok(ResponseEnvelope {
                                     request_id,
                                     service_id,
@@ -120,7 +136,6 @@ impl Connection {
                                 })));
                         }
                     }
-                    MessageToServer::ServiceClientDropped(id) => self.remove_service(id),
                 },
                 Ok(Async::Ready(None)) => return Ok(false),
                 Ok(Async::NotReady) => return Ok(true),
@@ -135,18 +150,22 @@ impl Connection {
     fn poll_outgoing(&mut self) -> Poll<Option<Vec<u8>>, ()> {
         let mut insertions = HashMap::new();
         let mut inserted = HashSet::new();
-        mem::swap(&mut inserted, &mut self.inserted);
+        mem::swap(&mut inserted, &mut self.state.borrow_mut().inserted);
         for id in &inserted {
-            if let Some(service) = self.services.get(id).cloned() {
+            if let Some(service) = self.get_service(*id) {
                 insertions.insert(*id, service.borrow().state(self));
             }
         }
         let mut updates: HashMap<ServiceId, Vec<Vec<u8>>> = HashMap::new();
-        let service_ids = self.services.keys().cloned().collect::<Vec<ServiceId>>();
+        let service_ids = self.state
+            .borrow()
+            .services
+            .keys()
+            .cloned()
+            .collect::<Vec<ServiceId>>();
         for id in service_ids {
-            let mut update_stream_finished = false;
             {
-                if let Some(service) = self.services.get(&id).cloned() {
+                if let Some(service) = self.get_service(id) {
                     loop {
                         match service.borrow_mut().poll_update(self) {
                             Async::Ready(Some(update)) => {
@@ -154,28 +173,21 @@ impl Connection {
                                     updates.entry(id).or_insert(Vec::new()).push(update);
                                 }
                             }
-                            Async::Ready(None) => {
-                                update_stream_finished = true;
-                                break;
-                            }
+                            Async::Ready(None) => break,
                             Async::NotReady => break,
                         }
                     }
                 }
             }
-
-            if update_stream_finished {
-                updates.remove(&id);
-                self.remove_service(id);
-            }
         }
 
+        let mut state = self.state.borrow_mut();
         let mut removals = HashSet::new();
-        mem::swap(&mut removals, &mut self.removed);
+        mem::swap(&mut removals, &mut state.removed);
 
         let mut responses = HashMap::new();
         loop {
-            match self.pending_responses.poll() {
+            match state.pending_responses.poll() {
                 Ok(Async::Ready(Some(envelope))) => {
                     responses
                         .entry(envelope.service_id)
@@ -188,6 +200,8 @@ impl Connection {
         }
 
         if insertions.len() > 0 || updates.len() > 0 || removals.len() > 0 || responses.len() > 0 {
+            eprintln!("Sending removals {:?}", removals);
+
             let message = serialize(&MessageToClient::Update {
                 insertions,
                 updates,
@@ -196,9 +210,13 @@ impl Connection {
             }).unwrap();
             Ok(Async::Ready(Some(message)))
         } else {
-            self.pending_task = Some(task::current());
+            state.pending_task = Some(task::current());
             Ok(Async::NotReady)
         }
+    }
+
+    fn get_service(&self, id: ServiceId) -> Option<Rc<RefCell<RawBytesService>>> {
+        self.state.borrow_mut().services.get(&id).cloned()
     }
 }
 
@@ -218,6 +236,17 @@ impl Stream for Connection {
         }
 
         self.poll_outgoing()
+    }
+}
+
+impl Drop for ServiceHandle {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.upgrade() {
+            let mut connection = connection.borrow_mut();
+            connection.services.remove(&self.service_id);
+            connection.removed.insert(self.service_id);
+            connection.pending_task.as_ref().map(|task| task.notify());
+        }
     }
 }
 

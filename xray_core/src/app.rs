@@ -187,13 +187,13 @@ impl server::Service for App {
     type Response = RemoteResponse;
     type Error = ();
 
-    fn state(&self, _connection: &mut server::Connection) -> Self::State {
+    fn state(&self, _connection: &server::Connection) -> Self::State {
         RemoteState {
             workspace_count: self.0.borrow().workspaces.len(),
         }
     }
 
-    fn poll_update(&mut self, _: &mut server::Connection) -> Async<Option<Self::Update>> {
+    fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
         unimplemented!()
     }
 }

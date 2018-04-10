@@ -98,18 +98,6 @@ impl<T: server::Service> Service<T> {
     }
 }
 
-impl<T: server::Service> Drop for Service<T> {
-    fn drop(&mut self) {
-        self.connection.upgrade().map(|connection| {
-            connection
-                .borrow_mut()
-                .outgoing_tx
-                .unbounded_send(MessageToServer::ServiceClientDropped(self.id))
-                .unwrap();
-        });
-    }
-}
-
 impl Connection {
     pub fn new<S, B>(incoming: S) -> Box<Future<Item = (Self, Service<B>), Error = String>>
     where

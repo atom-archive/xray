@@ -8,8 +8,9 @@ pub use self::messages::ServiceId;
 mod tests {
     use super::*;
     use futures::{future, unsync, Async, Future, Poll, Sink, Stream};
-    use std::cell::RefCell;
     use notify_cell::{NotifyCell, NotifyCellObserver};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::fmt::Debug;
     use std::rc::Rc;
     use tokio_core::reactor;
@@ -76,22 +77,6 @@ mod tests {
 
         drop(svc_client);
         assert_eq!(poll_wait(&mut reactor, &mut svc_client_updates), None);
-    }
-
-    #[test]
-    fn test_finish_service_updates_stream() {
-        let mut reactor = reactor::Core::new().unwrap();
-        let model = TestModel::new(42);
-        let svc_client = connect(&mut reactor, TestService::new(model.clone()));
-        let mut svc_client_updates = svc_client.updates().unwrap();
-
-        model.increment_by(2);
-        model.increment_by(3);
-        drop(model);
-        assert_eq!(poll_wait(&mut reactor, &mut svc_client_updates), None);
-        assert!(svc_client.state().is_none());
-        assert!(svc_client.updates().is_none());
-        assert!(svc_client.request(TestRequest::Increment(1)).is_none());
     }
 
     #[test]
@@ -188,11 +173,12 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct TestModel(Rc<RefCell<NotifyCell<Option<usize>>>>);
+    struct TestModel(Rc<RefCell<NotifyCell<usize>>>);
 
     struct TestService {
         model: TestModel,
-        observer: NotifyCellObserver<Option<usize>>,
+        observer: NotifyCellObserver<usize>,
+        child_services: HashMap<ServiceId, server::ServiceHandle>,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -211,24 +197,7 @@ mod tests {
     impl TestService {
         fn new(model: TestModel) -> Self {
             let observer = model.0.borrow().observe();
-            TestService { model, observer }
-        }
-    }
-
-    impl TestModel {
-        fn new(count: usize) -> Self {
-            TestModel(Rc::new(RefCell::new(NotifyCell::new(Some(count)))))
-        }
-
-        fn increment_by(&self, delta: usize) {
-            let cell = self.0.borrow();
-            cell.set(cell.get().map(|count| count + delta));
-        }
-    }
-
-    impl Drop for TestModel {
-        fn drop(&mut self) {
-            self.0.borrow().set(None);
+            TestService { model, observer, child_services: HashMap::new() }
         }
     }
 
@@ -239,18 +208,18 @@ mod tests {
         type Response = TestServiceResponse;
         type Error = String;
 
-        fn state(&self, _: &mut server::Connection) -> Self::State {
-            self.model.0.borrow().get().unwrap()
+        fn state(&self, _: &server::Connection) -> Self::State {
+            self.model.0.borrow().get()
         }
 
-        fn poll_update(&mut self, _: &mut server::Connection) -> Async<Option<Self::Update>> {
-            self.observer.poll().unwrap().map(|value| value.unwrap())
+        fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
+            self.observer.poll().unwrap()
         }
 
         fn request(
             &mut self,
             request: Self::Request,
-            connection: &mut server::Connection,
+            connection: &server::Connection,
         ) -> Option<Box<Future<Item = Self::Response, Error = Self::Error>>> {
             match request {
                 TestRequest::Increment(count) => {
@@ -258,16 +227,30 @@ mod tests {
                     Some(Box::new(future::ok(TestServiceResponse::Ack)))
                 }
                 TestRequest::CreateService(initial_count) => {
-                    let service_id = connection.add_service(TestService::new(TestModel::new(initial_count)));
+                    let handle =
+                        connection.add_service(TestService::new(TestModel::new(initial_count)));
+                    let service_id = handle.service_id;
+                    self.child_services.insert(service_id, handle);
                     Some(Box::new(future::ok(TestServiceResponse::ServiceCreated(
                         service_id,
                     ))))
                 }
                 TestRequest::DropService(id) => {
-                    connection.remove_service(id);
+                    self.child_services.remove(&id);
                     Some(Box::new(future::ok(TestServiceResponse::Ack)))
                 }
             }
+        }
+    }
+
+    impl TestModel {
+        fn new(count: usize) -> Self {
+            TestModel(Rc::new(RefCell::new(NotifyCell::new(count))))
+        }
+
+        fn increment_by(&self, delta: usize) {
+            let cell = self.0.borrow();
+            cell.set(cell.get() + delta);
         }
     }
 }
