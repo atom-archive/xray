@@ -26,6 +26,8 @@ mod file_finder;
 mod fuzzy;
 mod movement;
 mod project;
+#[cfg(test)]
+mod stream_ext;
 mod tree;
 
 use futures::future::{Future, Executor};

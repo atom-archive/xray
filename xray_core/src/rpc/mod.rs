@@ -7,12 +7,12 @@ pub use self::messages::ServiceId;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::{future, unsync, Async, Future, Poll, Sink, Stream};
+    use futures::{future, unsync, Async, Future, Sink, Stream};
     use notify_cell::{NotifyCell, NotifyCellObserver};
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::fmt::Debug;
     use std::rc::Rc;
+    use stream_ext::StreamExt;
     use tokio_core::reactor;
 
     #[test]
@@ -28,16 +28,16 @@ mod tests {
 
         model.increment_by(4);
         let mut svc_client_1_updates = svc_client_1.updates().unwrap();
-        assert_eq!(poll_wait(&mut reactor, &mut svc_client_1_updates), Some(44));
-        assert_eq!(poll_wait(&mut reactor, &mut svc_client_1_updates), Some(48));
+        assert_eq!(svc_client_1_updates.wait_next(&mut reactor), Some(44));
+        assert_eq!(svc_client_1_updates.wait_next(&mut reactor), Some(48));
         let mut svc_client_2_updates = svc_client_2.updates().unwrap();
-        assert_eq!(poll_wait(&mut reactor, &mut svc_client_2_updates), Some(48));
+        assert_eq!(svc_client_2_updates.wait_next(&mut reactor), Some(48));
 
         let request_future = svc_client_2.request(TestRequest::Increment(3));
         let response = reactor.run(request_future.unwrap()).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
-        assert_eq!(poll_wait(&mut reactor, &mut svc_client_1_updates), Some(51));
-        assert_eq!(poll_wait(&mut reactor, &mut svc_client_2_updates), Some(51));
+        assert_eq!(svc_client_1_updates.wait_next(&mut reactor), Some(51));
+        assert_eq!(svc_client_2_updates.wait_next(&mut reactor), Some(51));
     }
 
     #[test]
@@ -82,16 +82,16 @@ mod tests {
         reactor
             .run(child_client.request(TestRequest::Increment(1)))
             .unwrap();
-        assert_eq!(poll_wait(&mut reactor, &mut child_client_updates), Some(13));
+        assert_eq!(child_client_updates.wait_next(&mut reactor), Some(13));
         drop(child_client);
-        assert_eq!(poll_wait(&mut reactor, &mut child_client_updates), None);
+        assert_eq!(child_client_updates.wait_next(&mut reactor), None);
 
         let child_client = root_client.get_service::<TestService>(1).unwrap();
         let mut child_client_updates = child_client.updates().unwrap();
         reactor
             .run(child_client.request(TestRequest::Increment(1)))
             .unwrap();
-        assert_eq!(poll_wait(&mut reactor, &mut child_client_updates), Some(14));
+        assert_eq!(child_client_updates.wait_next(&mut reactor), Some(14));
     }
 
     #[test]
@@ -163,28 +163,6 @@ mod tests {
         );
 
         service_client
-    }
-
-    fn poll_wait<S: 'static + Stream>(
-        reactor: &mut reactor::Core,
-        stream: &mut S,
-    ) -> Option<S::Item>
-    where
-        S::Item: Debug,
-        S::Error: Debug,
-    {
-        struct TakeOne<'a, S: 'a>(&'a mut S);
-
-        impl<'a, S: 'a + Stream> Future for TakeOne<'a, S> {
-            type Item = Option<S::Item>;
-            type Error = S::Error;
-
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-                self.0.poll()
-            }
-        }
-
-        reactor.run(TakeOne(stream)).unwrap()
     }
 
     #[derive(Clone)]
