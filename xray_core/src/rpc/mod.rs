@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn test_interrupting_connection_to_server_on_handshake() {
+    fn test_interrupting_connection_to_server_during_handshake() {
         let mut reactor = reactor::Core::new().unwrap();
         let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn test_interrupting_connection_to_server() {
+    fn test_interrupting_connection_to_server_after_handshake() {
         let mut reactor = reactor::Core::new().unwrap();
 
         let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
