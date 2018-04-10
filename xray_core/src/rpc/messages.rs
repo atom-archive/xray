@@ -32,5 +32,5 @@ pub enum MessageToServer {
         service_id: ServiceId,
         request_id: RequestId,
         payload: Vec<u8>,
-    }
+    },
 }

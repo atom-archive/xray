@@ -200,8 +200,6 @@ impl Connection {
         }
 
         if insertions.len() > 0 || updates.len() > 0 || removals.len() > 0 || responses.len() > 0 {
-            eprintln!("Sending removals {:?}", removals);
-
             let message = serialize(&MessageToClient::Update {
                 insertions,
                 updates,
