@@ -1,10 +1,14 @@
-use futures::Stream;
+use futures::{Async, Future, Stream};
+use futures::task::{self, Task};
 use parking_lot::RwLock;
 use std::ffi::{OsStr, OsString};
 use std::iter::Iterator;
 use std::path::Path;
 use std::result;
 use std::sync::Arc;
+use std::rc::Rc;
+use std::rpc::{server, client};
+use notify_cell::NotifyCellObserver;
 
 pub type EntryId = usize;
 pub type Result<T> = result::Result<T, ()>;
@@ -13,6 +17,32 @@ pub trait Tree {
     fn path(&self) -> &Path;
     fn root(&self) -> &Entry;
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>>;
+
+    // Returns a promise that resolves once tree is populated
+    // We could potentially implement this promise from an observer for a boolean notify cell
+    // to avoid needing to maintain a set of oneshot channels or something similar.
+    // cell.observe().skip_while(|resolved| !resolved).into_future().then(Ok(()))
+    fn populated() -> Box<Future<Item = (), Error = ()>>;
+
+    // Returns an iterator that
+    fn iter() -> TreeIter {
+
+    }
+}
+
+struct TreeIter {}
+
+impl Iterator for TreeIter {
+    type Item = TreeUpdate;
+
+    fn next(&mut self) -> Option<Self::Item> {
+
+    }
+}
+
+struct TreeService {
+    tree: Rc<Tree>,
+    populated: Option<Box<Future<Item=(), Error = ()>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +66,27 @@ pub struct FileInner {
     name_chars: Vec<char>,
     symlink: bool,
     ignored: bool,
+}
+
+enum TreeUpdate {
+
+}
+
+impl server::Service for TreeService {
+    type State = ();
+    type Update = TreeUpdate;
+
+    fn new(tree: Rc<Tree>) -> Self {
+        Self { tree, populated }
+    }
+
+    fn state(&self, _: &server::Connection) -> Self::State {
+        ()
+    }
+
+    fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
+        self.updates.poll().unwrap()
+    }
 }
 
 impl Entry {
