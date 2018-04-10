@@ -63,20 +63,35 @@ mod tests {
                 .request(TestRequest::Increment(5))
                 .is_none()
         );
+
+        drop(child_svc_client);
+        assert!(svc_client.get_service::<TestService>(1).is_none());
     }
 
     #[test]
     fn test_drop_service_client() {
         let mut reactor = reactor::Core::new().unwrap();
         let model = TestModel::new(42);
-        let svc_client = connect(&mut reactor, TestService::new(model.clone()));
-        let mut svc_client_updates = svc_client.updates().unwrap();
+        let root_client = connect(&mut reactor, TestService::new(model.clone()));
+        reactor
+            .run(root_client.request(TestRequest::CreateService(12)))
+            .unwrap();
 
-        model.increment_by(1);
-        assert_eq!(poll_wait(&mut reactor, &mut svc_client_updates), Some(43));
+        let child_client = root_client.get_service::<TestService>(1).unwrap();
+        let mut child_client_updates = child_client.updates().unwrap();
+        reactor
+            .run(child_client.request(TestRequest::Increment(1)))
+            .unwrap();
+        assert_eq!(poll_wait(&mut reactor, &mut child_client_updates), Some(13));
+        drop(child_client);
+        assert_eq!(poll_wait(&mut reactor, &mut child_client_updates), None);
 
-        drop(svc_client);
-        assert_eq!(poll_wait(&mut reactor, &mut svc_client_updates), None);
+        let child_client = root_client.get_service::<TestService>(1).unwrap();
+        let mut child_client_updates = child_client.updates().unwrap();
+        reactor
+            .run(child_client.request(TestRequest::Increment(1)))
+            .unwrap();
+        assert_eq!(poll_wait(&mut reactor, &mut child_client_updates), Some(14));
     }
 
     #[test]
@@ -197,7 +212,11 @@ mod tests {
     impl TestService {
         fn new(model: TestModel) -> Self {
             let observer = model.0.borrow().observe();
-            TestService { model, observer, child_services: HashMap::new() }
+            TestService {
+                model,
+                observer,
+                child_services: HashMap::new(),
+            }
         }
     }
 

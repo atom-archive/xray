@@ -98,6 +98,23 @@ impl<T: server::Service> Service<T> {
     }
 }
 
+impl<T: server::Service> Drop for Service<T> {
+    fn drop(&mut self) {
+        self.connection.upgrade().map(|connection| {
+            let mut connection = connection.borrow_mut();
+            connection.client_states.get_mut(&self.id).map(|state| {
+                if state.updates_rx.is_none() {
+                    let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
+                    state.updates_tx = updates_tx;
+                    state.updates_rx = Some(updates_rx);
+                }
+
+                state.has_client = false;
+            });
+        });
+    }
+}
+
 impl Connection {
     pub fn new<S, B>(incoming: S) -> Box<Future<Item = (Self, Service<B>), Error = String>>
     where
