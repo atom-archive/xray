@@ -19,53 +19,49 @@ mod tests {
     fn test_connection() {
         let mut reactor = reactor::Core::new().unwrap();
         let model = TestModel::new(42);
-        let svc_client_1 = connect(&mut reactor, TestService::new(model.clone()));
-        assert_eq!(svc_client_1.state(), Some(42));
+        let client_1 = connect(&mut reactor, TestService::new(model.clone()));
+        assert_eq!(client_1.state(), Some(42));
 
         model.increment_by(2);
-        let svc_client_2 = connect(&mut reactor, TestService::new(model.clone()));
-        assert_eq!(svc_client_2.state(), Some(44));
+        let client_2 = connect(&mut reactor, TestService::new(model.clone()));
+        assert_eq!(client_2.state(), Some(44));
 
         model.increment_by(4);
-        let mut svc_client_1_updates = svc_client_1.updates().unwrap();
-        assert_eq!(svc_client_1_updates.wait_next(&mut reactor), Some(44));
-        assert_eq!(svc_client_1_updates.wait_next(&mut reactor), Some(48));
-        let mut svc_client_2_updates = svc_client_2.updates().unwrap();
-        assert_eq!(svc_client_2_updates.wait_next(&mut reactor), Some(48));
+        let mut client_1_updates = client_1.updates().unwrap();
+        assert_eq!(client_1_updates.wait_next(&mut reactor), Some(44));
+        assert_eq!(client_1_updates.wait_next(&mut reactor), Some(48));
+        let mut client_2_updates = client_2.updates().unwrap();
+        assert_eq!(client_2_updates.wait_next(&mut reactor), Some(48));
 
-        let request_future = svc_client_2.request(TestRequest::Increment(3));
+        let request_future = client_2.request(TestRequest::Increment(3));
         let response = reactor.run(request_future.unwrap()).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
-        assert_eq!(svc_client_1_updates.wait_next(&mut reactor), Some(51));
-        assert_eq!(svc_client_2_updates.wait_next(&mut reactor), Some(51));
+        assert_eq!(client_1_updates.wait_next(&mut reactor), Some(51));
+        assert_eq!(client_2_updates.wait_next(&mut reactor), Some(51));
     }
 
     #[test]
     fn test_add_remove_service() {
         let mut reactor = reactor::Core::new().unwrap();
         let model = TestModel::new(42);
-        let svc_client = connect(&mut reactor, TestService::new(model));
+        let client = connect(&mut reactor, TestService::new(model));
 
-        let request_future = svc_client.request(TestRequest::CreateService(12));
+        let request_future = client.request(TestRequest::CreateService(12));
         let response = reactor.run(request_future.unwrap()).unwrap();
         assert_eq!(response, TestServiceResponse::ServiceCreated(1));
-        let child_svc_client = svc_client.get_service::<TestService>(1).unwrap();
-        assert_eq!(child_svc_client.state(), Some(12));
-        assert!(svc_client.get_service::<TestService>(1).is_none());
+        let child_client = client.get_service::<TestService>(1).unwrap();
+        assert_eq!(child_client.state(), Some(12));
+        assert!(client.get_service::<TestService>(1).is_none());
 
-        let request_future = svc_client.request(TestRequest::DropService(1));
+        let request_future = client.request(TestRequest::DropService(1));
         let response = reactor.run(request_future.unwrap()).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
-        assert!(child_svc_client.state().is_none());
-        assert!(child_svc_client.updates().is_none());
-        assert!(
-            child_svc_client
-                .request(TestRequest::Increment(5))
-                .is_none()
-        );
+        assert!(child_client.state().is_none());
+        assert!(child_client.updates().is_none());
+        assert!(child_client.request(TestRequest::Increment(5)).is_none());
 
-        drop(child_svc_client);
-        assert!(svc_client.get_service::<TestService>(1).is_none());
+        drop(child_client);
+        assert!(client.get_service::<TestService>(1).is_none());
     }
 
     #[test]
