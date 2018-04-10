@@ -1,8 +1,9 @@
 use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
 use super::server;
 use bincode::{deserialize, serialize};
-use futures::{unsync, Async, Future, Poll, Stream};
-use std::cell::RefCell;
+use futures::{stream, unsync, Async, Future, Poll, Stream};
+use serde::{Deserialize, Serialize};
+use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::marker::PhantomData;
@@ -14,9 +15,14 @@ pub struct Service<T: server::Service> {
     _marker: PhantomData<T>,
 }
 
+pub struct FullUpdateService<T: server::Service> {
+    latest_state: Rc<RefCell<Option<T::State>>>,
+    service: Service<T>,
+}
+
 struct ServiceState {
     has_client: bool,
-    initial: Vec<u8>,
+    state: Vec<u8>,
     updates_rx: Option<unsync::mpsc::UnboundedReceiver<Vec<u8>>>,
     updates_tx: unsync::mpsc::UnboundedSender<Vec<u8>>,
     pending_requests: HashMap<RequestId, unsync::oneshot::Sender<Result<Vec<u8>, Vec<u8>>>>,
@@ -39,7 +45,7 @@ impl<T: server::Service> Service<T> {
             connection
                 .client_states
                 .get(&self.id)
-                .map(|state| deserialize(&state.initial).unwrap())
+                .map(|client_state| deserialize(&client_state.state).unwrap())
         })
     }
 
@@ -110,6 +116,54 @@ impl<T: server::Service> Drop for Service<T> {
                 state.has_client = false;
             });
         });
+    }
+}
+
+impl<T, S> FullUpdateService<S>
+where
+    T: 'static + Serialize + for<'a> Deserialize<'a>,
+    S: server::Service<State = T, Update = T>,
+{
+    pub fn new(service: Service<S>) -> Self {
+        FullUpdateService {
+            latest_state: Rc::new(RefCell::new(service.state())),
+            service,
+        }
+    }
+
+    pub fn latest_state(&self) -> Option<Ref<T>> {
+        let state = self.latest_state.borrow();
+        if state.is_some() {
+            Some(Ref::map(state, |state| state.as_ref().unwrap()))
+        } else {
+            None
+        }
+    }
+
+    pub fn updates(&self) -> Option<Box<Stream<Item = (), Error = ()>>> {
+        let latest_state_1 = self.latest_state.clone();
+        let latest_state_2 = self.latest_state.clone();
+        self.service.updates().map(|updates| {
+            let update_latest_state = updates.map(move |update| {
+                *latest_state_1.borrow_mut() = Some(update);
+            });
+            let clear_latest_state = stream::once(Ok(())).map(move |_| {
+                *latest_state_2.borrow_mut() = None;
+            });
+            Box::new(update_latest_state.chain(clear_latest_state))
+                as Box<Stream<Item = (), Error = ()>>
+        })
+    }
+
+    pub fn request(
+        &self,
+        request: S::Request,
+    ) -> Option<Box<Future<Item = S::Response, Error = S::Error>>> {
+        self.service.request(request)
+    }
+
+    pub fn get_service<S2: server::Service>(&self, id: ServiceId) -> Option<Service<S2>> {
+        self.service.get_service(id)
     }
 }
 
@@ -187,7 +241,7 @@ impl Connection {
                 id,
                 ServiceState {
                     has_client: false,
-                    initial: state,
+                    state,
                     updates_tx,
                     updates_rx: Some(updates_rx),
                     pending_requests: HashMap::new(),
