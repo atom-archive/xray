@@ -105,7 +105,7 @@ mod tests {
 
         let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
-        let (_, client_to_server_rx) = unsync::mpsc::unbounded();
+        let (_client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
 
         let model = TestModel::new(42);
