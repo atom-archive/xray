@@ -10,12 +10,13 @@ use std::io;
 use std::mem;
 use std::rc::{Rc, Weak};
 
+pub enum Never {}
+
 pub trait Service {
     type State: 'static + Serialize + for<'a> Deserialize<'a>;
     type Update: 'static + Serialize + for<'a> Deserialize<'a>;
     type Request: 'static + Serialize + for<'a> Deserialize<'a>;
     type Response: 'static + Serialize + for<'a> Deserialize<'a>;
-    type Error: 'static + Serialize + for<'a> Deserialize<'a>;
 
     fn state(&self, connection: &Connection) -> Self::State;
     fn poll_update(&mut self, connection: &Connection) -> Async<Option<Self::Update>>;
@@ -23,7 +24,7 @@ pub trait Service {
         &mut self,
         _request: Self::Request,
         _connection: &Connection,
-    ) -> Option<Box<Future<Item = Self::Response, Error = Self::Error>>> {
+    ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
         None
     }
 }
@@ -35,7 +36,7 @@ trait RawBytesService {
         &mut self,
         request: Vec<u8>,
         connection: &mut Connection,
-    ) -> Option<Box<Future<Item = Vec<u8>, Error = Vec<u8>>>>;
+    ) -> Option<Box<Future<Item = Vec<u8>, Error = Never>>>;
 }
 
 pub struct Connection {
@@ -49,7 +50,7 @@ struct ConnectionState {
     inserted: HashSet<ServiceId>,
     removed: HashSet<ServiceId>,
     incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>,
-    pending_responses: FuturesUnordered<Box<Future<Item = ResponseEnvelope, Error = ()>>>,
+    pending_responses: FuturesUnordered<Box<Future<Item = ResponseEnvelope, Error = Never>>>,
     pending_task: Option<Task>,
 }
 
@@ -113,15 +114,10 @@ impl Connection {
                         if let Some(service) = self.get_service(service_id) {
                             if let Some(response) = service.borrow_mut().request(payload, self) {
                                 self.state.borrow_mut().pending_responses.push(Box::new(
-                                    response.then(move |response| {
-                                        Ok(ResponseEnvelope {
-                                            request_id,
-                                            service_id,
-                                            response: match response {
-                                                Ok(payload) => Response::Ok(payload),
-                                                Err(payload) => Response::Err(payload),
-                                            },
-                                        })
+                                    response.map(move |response| ResponseEnvelope {
+                                        request_id,
+                                        service_id,
+                                        response: Ok(response),
                                     }),
                                 ));
                             }
@@ -132,7 +128,7 @@ impl Connection {
                                 .push(Box::new(future::ok(ResponseEnvelope {
                                     request_id,
                                     service_id,
-                                    response: Response::RpcErr(RpcError::ServiceNotFound),
+                                    response: Err(RpcError::ServiceNotFound),
                                 })));
                         }
                     }
@@ -265,13 +261,10 @@ where
         &mut self,
         request: Vec<u8>,
         connection: &mut Connection,
-    ) -> Option<Box<Future<Item = Vec<u8>, Error = Vec<u8>>>> {
+    ) -> Option<Box<Future<Item = Vec<u8>, Error = Never>>> {
         T::request(self, deserialize(&request).unwrap(), connection).map(|future| {
-            Box::new(
-                future
-                    .map(|item| serialize(&item).unwrap())
-                    .map_err(|err| serialize(&err).unwrap()),
-            ) as Box<Future<Item = Vec<u8>, Error = Vec<u8>>>
+            Box::new(future.map(|item| serialize(&item).unwrap()))
+                as Box<Future<Item = Vec<u8>, Error = Never>>
         })
     }
 }

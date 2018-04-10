@@ -1,7 +1,7 @@
-use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
+use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId, RpcError};
 use super::server;
 use bincode::{deserialize, serialize};
-use futures::{stream, unsync, Async, Future, Poll, Stream};
+use futures::{self, stream, unsync, Async, Future, Poll, Stream};
 use serde::{Deserialize, Serialize};
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -25,7 +25,7 @@ struct ServiceState {
     state: Vec<u8>,
     updates_rx: Option<unsync::mpsc::UnboundedReceiver<Vec<u8>>>,
     updates_tx: unsync::mpsc::UnboundedSender<Vec<u8>>,
-    pending_requests: HashMap<RequestId, unsync::oneshot::Sender<Result<Vec<u8>, Vec<u8>>>>,
+    pending_requests: HashMap<RequestId, unsync::oneshot::Sender<Result<Vec<u8>, RpcError>>>,
 }
 
 pub struct Connection(Rc<RefCell<ConnectionState>>);
@@ -65,7 +65,7 @@ impl<T: server::Service> Service<T> {
     pub fn request(
         &self,
         request: T::Request,
-    ) -> Option<Box<Future<Item = T::Response, Error = T::Error>>> {
+    ) -> Option<Box<Future<Item = T::Response, Error = RpcError>>> {
         self.connection.upgrade().and_then(|connection| {
             let mut connection = connection.borrow_mut();
             let connection = &mut *connection;
@@ -77,10 +77,10 @@ impl<T: server::Service> Service<T> {
             connection.client_states.get_mut(&self.id).map(|state| {
                 let (response_tx, response_rx) = unsync::oneshot::channel();
                 state.pending_requests.insert(request_id, response_tx);
-                let response_future =
-                    response_rx.then(|raw_response| match raw_response.unwrap() {
-                        Ok(payload) => Ok(deserialize(&payload).unwrap()),
-                        Err(payload) => Err(deserialize(&payload).unwrap()),
+                let response_future = response_rx
+                    .map_err(|_: futures::Canceled| RpcError::ServiceDropped)
+                    .and_then(|response| {
+                        response.map(|payload| deserialize(&payload).unwrap())
                     });
 
                 let request = MessageToServer::Request {
@@ -90,7 +90,7 @@ impl<T: server::Service> Service<T> {
                 };
                 outgoing_tx.unbounded_send(request).unwrap();
 
-                Box::new(response_future) as Box<Future<Item = T::Response, Error = T::Error>>
+                Box::new(response_future) as Box<Future<Item = T::Response, Error = RpcError>>
             })
         })
     }
@@ -158,7 +158,7 @@ where
     pub fn request(
         &self,
         request: S::Request,
-    ) -> Option<Box<Future<Item = S::Response, Error = S::Error>>> {
+    ) -> Option<Box<Future<Item = S::Response, Error = RpcError>>> {
         self.service.request(request)
     }
 
@@ -279,14 +279,11 @@ impl Connection {
                     let request_tx = state.pending_requests.remove(&request_id);
                     if let Some(request_tx) = request_tx {
                         match response {
-                            Response::Ok(payload) => {
+                            Ok(payload) => {
                                 request_tx.send(Ok(payload)).unwrap();
                             }
-                            Response::Err(payload) => {
-                                request_tx.send(Err(payload)).unwrap();
-                            }
-                            Response::RpcErr(error) => {
-                                eprintln!("Server error during RPC: {:?}", error);
+                            Err(error) => {
+                                request_tx.send(Err(error)).unwrap();
                             }
                         }
                     } else {

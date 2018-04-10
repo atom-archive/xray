@@ -14,16 +14,12 @@ pub enum MessageToClient {
     Err(String),
 }
 
-#[derive(Serialize, Deserialize)]
-pub enum Response {
-    Ok(Vec<u8>),
-    Err(Vec<u8>),
-    RpcErr(RpcError),
-}
+pub type Response = Result<Vec<u8>, RpcError>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RpcError {
     ServiceNotFound,
+    ServiceDropped
 }
 
 #[derive(Debug, Serialize, Deserialize)]

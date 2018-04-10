@@ -2,7 +2,7 @@ pub mod client;
 mod messages;
 pub mod server;
 
-pub use self::messages::ServiceId;
+pub use self::messages::{ServiceId, Response};
 
 #[cfg(test)]
 mod tests {
@@ -199,7 +199,6 @@ mod tests {
         type Update = usize;
         type Request = TestRequest;
         type Response = TestServiceResponse;
-        type Error = String;
 
         fn state(&self, _: &server::Connection) -> Self::State {
             self.model.0.borrow().get()
@@ -213,7 +212,7 @@ mod tests {
             &mut self,
             request: Self::Request,
             connection: &server::Connection,
-        ) -> Option<Box<Future<Item = Self::Response, Error = Self::Error>>> {
+        ) -> Option<Box<Future<Item = Self::Response, Error = server::Never>>> {
             match request {
                 TestRequest::Increment(count) => {
                     self.model.increment_by(count);
