@@ -10,7 +10,7 @@ use tokio_core::net::{TcpListener, TcpStream};
 use tokio_core::reactor;
 use tokio_io::AsyncRead;
 use xray_core::{self, App, WindowId};
-use xray_core::app::AppUpdate;
+use xray_core::app::Command;
 
 #[derive(Clone)]
 pub struct Server {
@@ -75,7 +75,7 @@ impl Server {
                 let responses = commands
                     .map(|update|
                         match update {
-                            AppUpdate::OpenWindow(window_id) => OutgoingMessage::OpenWindow { window_id }
+                            Command::OpenWindow(window_id) => OutgoingMessage::OpenWindow { window_id }
                         }
                     )
                     .select(

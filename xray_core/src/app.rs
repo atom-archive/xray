@@ -24,8 +24,8 @@ pub struct App(Rc<RefCell<AppState>>);
 struct AppState {
     headless: bool,
     background: BackgroundExecutor,
-    commands_tx: UnboundedSender<AppCommand>,
-    commands_rx: Option<UnboundedReceiver<AppCommand>>,
+    commands_tx: UnboundedSender<Command>,
+    commands_rx: Option<UnboundedReceiver<Command>>,
     peer_list: PeerList,
     next_workspace_id: WorkspaceId,
     workspaces: HashMap<WorkspaceId, Box<Workspace>>,
@@ -34,7 +34,7 @@ struct AppState {
     updates: NotifyCell<()>,
 }
 
-pub enum AppCommand {
+pub enum Command {
     OpenWindow(WindowId),
 }
 
@@ -95,7 +95,7 @@ impl App {
         })))
     }
 
-    pub fn commands(&self) -> Option<UnboundedReceiver<AppCommand>> {
+    pub fn commands(&self) -> Option<UnboundedReceiver<Command>> {
         self.0.borrow_mut().commands_rx.take()
     }
 
@@ -118,12 +118,12 @@ impl App {
             state.windows.insert(window_id, window);
             if state
                 .commands_tx
-                .unbounded_send(AppCommand::OpenWindow(window_id))
+                .unbounded_send(Command::OpenWindow(window_id))
                 .is_err()
             {
                 let (commands_tx, commands_rx) = mpsc::unbounded();
                 commands_tx
-                    .unbounded_send(AppCommand::OpenWindow(window_id))
+                    .unbounded_send(Command::OpenWindow(window_id))
                     .unwrap();
                 state.commands_tx = commands_tx;
                 state.commands_rx = Some(commands_rx);
