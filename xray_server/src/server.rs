@@ -70,9 +70,9 @@ impl Server {
                 })),
             );
         } else {
-            if let Some(updates) = self.app.updates() {
+            if let Some(commands) = self.app.commands() {
                 let server = self.clone();
-                let responses = updates
+                let responses = commands
                     .map(|update|
                         match update {
                             AppUpdate::OpenWindow(window_id) => OutgoingMessage::OpenWindow { window_id }

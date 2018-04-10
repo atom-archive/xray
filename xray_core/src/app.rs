@@ -25,8 +25,8 @@ struct AppState {
     headless: bool,
     foreground: ForegroundExecutor,
     background: BackgroundExecutor,
-    updates_tx: UnboundedSender<AppUpdate>,
-    updates_rx: Option<UnboundedReceiver<AppUpdate>>,
+    commands_tx: UnboundedSender<AppCommand>,
+    commands_rx: Option<UnboundedReceiver<AppCommand>>,
     peer_list: PeerList,
     next_workspace_id: WorkspaceId,
     workspaces: HashMap<WorkspaceId, Workspace>,
@@ -34,7 +34,7 @@ struct AppState {
     windows: HashMap<WindowId, Window>,
 }
 
-pub enum AppUpdate {
+pub enum AppCommand {
     OpenWindow(WindowId),
 }
 
@@ -83,14 +83,14 @@ impl App {
         foreground: ForegroundExecutor,
         background: BackgroundExecutor,
     ) -> Self {
-        let (updates_tx, updates_rx) = mpsc::unbounded();
+        let (commands_tx, commands_rx) = mpsc::unbounded();
         App(Rc::new(RefCell::new(AppState {
             headless,
             foreground,
             background,
-            updates_tx,
-            updates_rx: Some(updates_rx),
             peer_list: PeerList::new(),
+            commands_tx,
+            commands_rx: Some(commands_rx),
             next_workspace_id: 0,
             workspaces: HashMap::new(),
             next_window_id: 1,
@@ -100,6 +100,8 @@ impl App {
 
     pub fn updates(&self) -> Option<UnboundedReceiver<AppUpdate>> {
         self.0.borrow_mut().updates_rx.take()
+    pub fn commands(&self) -> Option<UnboundedReceiver<AppCommand>> {
+        self.0.borrow_mut().commands_rx.take()
     }
 
     pub fn headless(&self) -> bool {
@@ -117,16 +119,16 @@ impl App {
             state.next_window_id += 1;
             state.windows.insert(window_id, window);
             if state
-                .updates_tx
-                .unbounded_send(AppUpdate::OpenWindow(window_id))
+                .commands_tx
+                .unbounded_send(AppCommand::OpenWindow(window_id))
                 .is_err()
             {
-                let (updates_tx, updates_rx) = mpsc::unbounded();
-                updates_tx
-                    .unbounded_send(AppUpdate::OpenWindow(window_id))
+                let (commands_tx, commands_rx) = mpsc::unbounded();
+                commands_tx
+                    .unbounded_send(AppCommand::OpenWindow(window_id))
                     .unwrap();
-                state.updates_tx = updates_tx;
-                state.updates_rx = Some(updates_rx);
+                state.commands_tx = commands_tx;
+                state.commands_rx = Some(commands_rx);
             }
         };
 
