@@ -15,15 +15,19 @@ use notify_cell::NotifyCell;
 use fs;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
 
-#[derive(Clone)]
-pub struct Workspace(Rc<RefCell<WorkspaceState>>);
+pub trait Workspace {
+    fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
+}
 
-struct WorkspaceState {
+#[derive(Clone)]
+pub struct LocalWorkspace(Rc<RefCell<LocalWorkspaceState>>);
+
+struct LocalWorkspaceState {
     project: Project
 }
 
 pub struct WorkspaceView {
-    workspace: Workspace,
+    workspace: Box<Workspace>,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
@@ -36,9 +40,9 @@ enum WorkspaceViewAction {
     ToggleFileFinder,
 }
 
-impl Workspace {
+impl LocalWorkspace {
     pub fn new(roots: Vec<Box<fs::Tree>>) -> Self {
-        Workspace(Rc::new(RefCell::new(WorkspaceState {
+        LocalWorkspace(Rc::new(RefCell::new(LocalWorkspaceState {
             project: Project::new(roots)
         })))
     }
@@ -46,16 +50,18 @@ impl Workspace {
     pub fn project(&self) -> Ref<Project> {
         Ref::map(self.0.borrow(), |state| &state.project)
     }
+}
 
-    pub fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
+impl Workspace for LocalWorkspace {
+    fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
         self.0.borrow().project.search_paths(needle, max_results, include_ignored)
     }
 }
 
 impl WorkspaceView {
-    pub fn new(workspace: Workspace) -> Self {
+    pub fn new<T: 'static + Workspace>(workspace: T) -> Self {
         WorkspaceView {
-            workspace,
+            workspace: Box::new(workspace),
             modal_panel: None,
             center_pane: None,
             updates: NotifyCell::new(()),

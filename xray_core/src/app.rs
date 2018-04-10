@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io;
 use std::rc::Rc;
 use window::{ViewId, Window, WindowUpdateStream};
-use workspace::{Workspace, WorkspaceView};
+use workspace::{LocalWorkspace, Workspace, WorkspaceView};
 use BackgroundExecutor;
 use ForegroundExecutor;
 
@@ -28,7 +28,7 @@ struct AppState {
     commands_rx: Option<UnboundedReceiver<AppCommand>>,
     peer_list: PeerList,
     next_workspace_id: WorkspaceId,
-    workspaces: HashMap<WorkspaceId, Workspace>,
+    workspaces: HashMap<WorkspaceId, Box<Workspace>>,
     next_window_id: WindowId,
     windows: HashMap<WindowId, Window>,
     updates: NotifyCell<()>,
@@ -104,8 +104,11 @@ impl App {
     }
 
     pub fn open_workspace(&self, roots: Vec<Box<fs::Tree>>) {
+        self.add_workspace(LocalWorkspace::new(roots));
+    }
+
+    fn add_workspace<T: 'static + Workspace + Clone>(&self, workspace: T) {
         let mut state = self.0.borrow_mut();
-        let workspace = Workspace::new(roots);
         if !state.headless {
             let mut window = Window::new(Some(state.background.clone()), 0.0);
             let workspace_view_handle = window.add_view(WorkspaceView::new(workspace.clone()));
@@ -125,11 +128,11 @@ impl App {
                 state.commands_tx = commands_tx;
                 state.commands_rx = Some(commands_rx);
             }
-        };
+        }
 
         let id = state.next_workspace_id;
         state.next_workspace_id += 1;
-        state.workspaces.insert(id, workspace);
+        state.workspaces.insert(id, Box::new(workspace));
         state.updates.set(());
     }
 
