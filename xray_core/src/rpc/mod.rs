@@ -65,7 +65,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_drop_service_client() {
+    fn test_drop_client() {
         let mut reactor = reactor::Core::new().unwrap();
         let model = TestModel::new(42);
         let root_client = connect(&mut reactor, TestService::new(model.clone()));
@@ -73,21 +73,21 @@ pub(crate) mod tests {
             .run(root_client.request(TestRequest::CreateService(12)))
             .unwrap();
 
-        let child_client = root_client.get_service::<TestService>(1).unwrap();
-        let mut child_client_updates = child_client.updates().unwrap();
-        reactor
-            .run(child_client.request(TestRequest::Increment(1)))
-            .unwrap();
-        assert_eq!(child_client_updates.wait_next(&mut reactor), Some(13));
-        drop(child_client);
-        assert_eq!(child_client_updates.wait_next(&mut reactor), None);
+        assert!(root_client.get_service::<TestService>(1).is_some());
+        assert!(root_client.get_service::<TestService>(1).is_none());
+    }
 
-        let child_client = root_client.get_service::<TestService>(1).unwrap();
-        let mut child_client_updates = child_client.updates().unwrap();
-        reactor
-            .run(child_client.request(TestRequest::Increment(1)))
-            .unwrap();
-        assert_eq!(child_client_updates.wait_next(&mut reactor), Some(14));
+    #[test]
+    fn test_drop_client_updates() {
+        let mut reactor = reactor::Core::new().unwrap();
+        let model = TestModel::new(42);
+        let root_client = connect(&mut reactor, TestService::new(model.clone()));
+
+        let updates = root_client.updates();
+        drop(updates);
+
+        model.increment_by(3);
+        reactor.turn(None);
     }
 
     #[test]

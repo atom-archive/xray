@@ -102,23 +102,6 @@ impl<T: server::Service> Service<T> {
     }
 }
 
-impl<T: server::Service> Drop for Service<T> {
-    fn drop(&mut self) {
-        self.connection.upgrade().map(|connection| {
-            let mut connection = connection.borrow_mut();
-            connection.client_states.get_mut(&self.id).map(|state| {
-                if state.updates_rx.is_none() {
-                    let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
-                    state.updates_tx = updates_tx;
-                    state.updates_rx = Some(updates_rx);
-                }
-
-                state.has_client = false;
-            });
-        });
-    }
-}
-
 impl<T, S> FullUpdateService<S>
 where
     T: 'static + Serialize + for<'a> Deserialize<'a>,
@@ -258,7 +241,7 @@ impl Connection {
                 .get_mut(&service_id)
                 .map(|service_state| {
                     for update in updates {
-                        service_state.updates_tx.unbounded_send(update).unwrap();
+                        let _ = service_state.updates_tx.unbounded_send(update);
                     }
                 });
         }
