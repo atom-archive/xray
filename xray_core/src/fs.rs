@@ -1,14 +1,19 @@
+use serde::de::SeqAccess;
+use serde::de::Visitor;
 use futures::{Async, Future, Stream};
-use futures::task::{self, Task};
+use notify_cell::NotifyCellObserver;
 use parking_lot::RwLock;
+use rpc::{client, server};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::de;
+use serde::ser::{SerializeSeq, SerializeTupleVariant};
 use std::ffi::{OsStr, OsString};
 use std::iter::Iterator;
 use std::path::Path;
+use std::rc::Rc;
 use std::result;
 use std::sync::Arc;
-use std::rc::Rc;
-use std::rpc::{server, client};
-use notify_cell::NotifyCellObserver;
+use std::fmt;
 
 pub type EntryId = usize;
 pub type Result<T> = result::Result<T, ()>;
@@ -22,27 +27,17 @@ pub trait Tree {
     // We could potentially implement this promise from an observer for a boolean notify cell
     // to avoid needing to maintain a set of oneshot channels or something similar.
     // cell.observe().skip_while(|resolved| !resolved).into_future().then(Ok(()))
-    fn populated() -> Box<Future<Item = (), Error = ()>>;
+    fn populated(&self) -> Box<Future<Item = (), Error = ()>>;
 
     // Returns an iterator that
-    fn iter() -> TreeIter {
-
-    }
+    // fn iter(&self) -> TreeIter {}
 }
 
 struct TreeIter {}
 
-impl Iterator for TreeIter {
-    type Item = TreeUpdate;
-
-    fn next(&mut self) -> Option<Self::Item> {
-
-    }
-}
-
 struct TreeService {
     tree: Rc<Tree>,
-    populated: Option<Box<Future<Item=(), Error = ()>>>,
+    populated: Option<Box<Future<Item = (), Error = ()>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -68,24 +63,34 @@ pub struct FileInner {
     ignored: bool,
 }
 
-enum TreeUpdate {
-
+impl TreeService {
+    fn new(tree: Rc<Tree>) -> Self {
+        Self {
+            tree,
+            populated: Some(tree.populated()),
+        }
+    }
 }
 
 impl server::Service for TreeService {
     type State = ();
-    type Update = TreeUpdate;
-
-    fn new(tree: Rc<Tree>) -> Self {
-        Self { tree, populated }
-    }
+    type Update = Entry;
+    type Request = ();
+    type Response = ();
 
     fn state(&self, _: &server::Connection) -> Self::State {
         ()
     }
 
     fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
-        self.updates.poll().unwrap()
+        if let Some(populated) = self.populated {
+            if let Ok(Async::NotReady) = populated.poll() {
+                return Async::NotReady;
+            }
+        }
+
+        self.populated.take();
+        Async::Ready(Some(self.tree.root().clone()))
     }
 }
 
@@ -179,6 +184,78 @@ impl Entry {
             }
             &Entry::File(_) => Err(()),
         }
+    }
+}
+
+impl Serialize for Entry {
+    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Entry::Dir(dir) => {
+                let mut variant = serializer.serialize_tuple_variant("Entry", 0, "Dir", 4)?;
+                variant.serialize_field(&dir.name)?;
+                variant.serialize_field(&dir.ignored)?;
+                variant.serialize_field(&dir.symlink)?;
+                variant.serialize_field(&**dir.children.read())?;
+                variant.end()
+            },
+            Entry::File(file) => {
+                let mut variant = serializer.serialize_tuple_variant("Entry", 1, "File", 3)?;
+                variant.serialize_field(&file.name)?;
+                variant.serialize_field(&file.ignored)?;
+                variant.serialize_field(&file.symlink)?;
+                variant.end()
+            }
+        }
+    }
+}
+
+impl<'a> Deserialize<'a> for Entry {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: Deserializer<'a>,
+    {
+        struct EntryVisitor;
+
+        impl<'de> Visitor<'de> for EntryVisitor {
+            type Value = Entry;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct Duration")
+            }
+
+            fn visit_seq<V>(self, mut seq: V) -> result::Result<Entry, V::Error>
+                where V: SeqAccess<'de>
+            {
+                let is_dir = seq.next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+
+                if is_dir {
+                    let name = seq.next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                    let ignored = seq.next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(2, &self))?;
+                    let symlink = seq.next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(3, &self))?;
+                    let child_count: u64 = seq.next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(3, &self))?;
+                    Ok(Entry::dir(name, ignored, symlink))
+                } else {
+                    let name = seq.next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                    let ignored = seq.next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(2, &self))?;
+                    let symlink = seq.next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(3, &self))?;
+                    Ok(Entry::file(name, ignored, symlink))
+                }
+            }
+        }
+
+        const VARIANTS: &'static [&'static str] = &["Dir", "File"];
+        deserializer.deserialize_enum("Entry", VARIANTS, EntryVisitor)
     }
 }
 
