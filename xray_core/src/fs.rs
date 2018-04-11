@@ -234,43 +234,6 @@ mod tests {
     use bincode::{deserialize, serialize};
     use serde_json;
 
-    impl Entry {
-        fn from_json(name: &str, json: &serde_json::Value) -> Self {
-            if json.is_object() {
-                let object = json.as_object().unwrap();
-                let dir = Entry::dir(OsString::from(name), false, false);
-                for (key, value) in object {
-                    let child_entry = Self::from_json(key, value);
-                    assert_eq!(dir.insert(child_entry), Ok(()));
-                }
-                dir
-            } else {
-                Entry::file(OsString::from(name), false, false)
-            }
-        }
-
-        fn entry_names(&self) -> Vec<String> {
-            match self {
-                &Entry::Dir(ref inner) => inner
-                    .children
-                    .read()
-                    .iter()
-                    .map(|ref entry| entry.name().to_string_lossy().into_owned())
-                    .collect(),
-                _ => panic!(),
-            }
-        }
-    }
-
-    impl PartialEq for Entry {
-        fn eq(&self, other: &Self) -> bool {
-            self.name() == other.name() && self.name_chars() == other.name_chars()
-                && self.is_dir() == other.is_dir()
-                && self.is_ignored() == other.is_ignored()
-                && self.children() == other.children()
-        }
-    }
-
     #[test]
     fn test_insert() {
         let root = Entry::dir(OsString::from("root"), false, false);
@@ -314,5 +277,42 @@ mod tests {
             deserialize::<Entry>(&serialize(&root).unwrap()).unwrap(),
             root
         );
+    }
+
+    impl Entry {
+        fn from_json(name: &str, json: &serde_json::Value) -> Self {
+            if json.is_object() {
+                let object = json.as_object().unwrap();
+                let dir = Entry::dir(OsString::from(name), false, false);
+                for (key, value) in object {
+                    let child_entry = Self::from_json(key, value);
+                    assert_eq!(dir.insert(child_entry), Ok(()));
+                }
+                dir
+            } else {
+                Entry::file(OsString::from(name), false, false)
+            }
+        }
+
+        fn entry_names(&self) -> Vec<String> {
+            match self {
+                &Entry::Dir(ref inner) => inner
+                    .children
+                    .read()
+                    .iter()
+                    .map(|ref entry| entry.name().to_string_lossy().into_owned())
+                    .collect(),
+                _ => panic!(),
+            }
+        }
+    }
+
+    impl PartialEq for Entry {
+        fn eq(&self, other: &Self) -> bool {
+            self.name() == other.name() && self.name_chars() == other.name_chars()
+                && self.is_dir() == other.is_dir()
+                && self.is_ignored() == other.is_ignored()
+                && self.children() == other.children()
+        }
     }
 }
