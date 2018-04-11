@@ -5,7 +5,7 @@ pub mod server;
 pub use self::messages::{ServiceId, Response};
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use futures::{future, unsync, Async, Future, Sink, Stream};
     use notify_cell::{NotifyCell, NotifyCellObserver};
@@ -134,7 +134,7 @@ mod tests {
         assert_eq!(client.poll(), Ok(Async::Ready(None)));
     }
 
-    fn connect<S: 'static + server::Service>(
+    pub fn connect<S: 'static + server::Service>(
         reactor: &mut reactor::Core,
         service: S,
     ) -> client::Service<S> {
