@@ -11,7 +11,7 @@ use movement;
 use window::{View, WeakViewHandle, Window};
 
 pub struct BufferView {
-    buffer: Rc<RefCell<Buffer>>,
+    pub buffer: Rc<RefCell<Buffer>>,
     updates: NotifyCell<()>,
     dropped: NotifyCell<bool>,
     selections: Vec<Selection>,
