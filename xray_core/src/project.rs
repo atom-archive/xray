@@ -401,6 +401,10 @@ mod tests {
             &self.path
         }
 
+        fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
+            unimplemented!()
+        }
+
         fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
             unimplemented!()
         }
