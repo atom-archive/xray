@@ -393,8 +393,8 @@ mod tests {
     }
 
     impl fs::Tree for TestTree {
-        fn root(&self) -> &fs::Entry {
-            &self.root
+        fn root(&self) -> fs::Entry {
+            self.root.clone()
         }
 
         fn path(&self) -> &Path {

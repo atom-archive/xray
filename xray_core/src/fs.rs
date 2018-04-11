@@ -1,22 +1,25 @@
 use futures::{Async, Future, Stream};
+use notify_cell::NotifyCell;
 use parking_lot::RwLock;
-use rpc::server;
+use rpc::{client, server};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(test)]
 use serde_json;
+use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
 use std::iter::Iterator;
 use std::path::Path;
 use std::rc::Rc;
 use std::result;
 use std::sync::Arc;
+use ForegroundExecutor;
 
 pub type EntryId = usize;
 pub type Result<T> = result::Result<T, ()>;
 
 pub trait Tree {
     fn path(&self) -> &Path;
-    fn root(&self) -> &Entry;
+    fn root(&self) -> Entry;
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>>;
 
     // Returns a promise that resolves once tree is populated
@@ -24,11 +27,6 @@ pub trait Tree {
     // to avoid needing to maintain a set of oneshot channels or something similar.
     // cell.observe().skip_while(|resolved| !resolved).into_future().then(Ok(()))
     fn populated(&self) -> Box<Future<Item = (), Error = ()>>;
-}
-
-struct TreeService {
-    tree: Rc<Tree>,
-    populated: Option<Box<Future<Item = (), Error = ()>>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,6 +55,18 @@ pub struct FileInner {
     name_chars: Vec<char>,
     symlink: bool,
     ignored: bool,
+}
+
+pub struct TreeService {
+    tree: Rc<Tree>,
+    populated: Option<Box<Future<Item = (), Error = ()>>>,
+}
+
+pub struct RemoteTree(Rc<RefCell<RemoteTreeState>>);
+
+struct RemoteTreeState {
+    root: Entry,
+    updates: NotifyCell<()>,
 }
 
 impl Entry {
@@ -121,6 +131,13 @@ impl Entry {
         match self {
             &Entry::Dir(ref inner) => &inner.name_chars,
             &Entry::File(ref inner) => &inner.name_chars,
+        }
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        match self {
+            &Entry::Dir(ref inner) => inner.symlink,
+            &Entry::File(ref inner) => inner.symlink,
         }
     }
 
@@ -215,20 +232,21 @@ fn deserialize_dir_children<'de, D: Deserializer<'de>>(
 }
 
 impl TreeService {
-    fn new(tree: Rc<Tree>) -> Self {
+    pub fn new(tree: Rc<Tree>) -> Self {
         let populated = Some(tree.populated());
         Self { tree, populated }
     }
 }
 
 impl server::Service for TreeService {
-    type State = ();
+    type State = Entry;
     type Update = Entry;
     type Request = ();
     type Response = ();
 
     fn state(&self, _: &server::Connection) -> Self::State {
-        ()
+        let root = self.tree.root();
+        Entry::dir(root.name().to_owned(), root.is_symlink(), root.is_ignored())
     }
 
     fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
@@ -245,11 +263,54 @@ impl server::Service for TreeService {
     }
 }
 
+impl RemoteTree {
+    pub fn new(foreground: ForegroundExecutor, client: client::Service<TreeService>) -> Self {
+        let state = Rc::new(RefCell::new(RemoteTreeState {
+            root: client.state().unwrap(),
+            updates: NotifyCell::new(()),
+        }));
+
+        let state_clone = state.clone();
+        foreground
+            .execute(Box::new(client.updates().unwrap().for_each(move |root| {
+                let mut state = state_clone.borrow_mut();
+                state.root = root;
+                state.updates.set(());
+                Ok(())
+            })))
+            .unwrap();
+
+        RemoteTree(state)
+    }
+}
+
+impl Tree for RemoteTree {
+    fn path(&self) -> &Path {
+        unimplemented!()
+    }
+
+    fn root(&self) -> Entry {
+        self.0.borrow().root.clone()
+    }
+
+    fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
+        Box::new(self.0.borrow().updates.observe())
+    }
+
+    fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
+        unimplemented!()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bincode::{deserialize, serialize};
-    use serde_json;
+    use notify_cell::NotifyCell;
+    use rpc;
+    use std::path::PathBuf;
+    use stream_ext::StreamExt;
+    use tokio_core::reactor;
 
     #[test]
     fn test_insert() {
@@ -296,8 +357,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_tree_replication() {
+        let mut reactor = reactor::Core::new().unwrap();
+        let handle = Rc::new(reactor.handle());
+
+        let local_tree = Rc::new(TestTree::new(
+            "/foo/bar",
+            Entry::from_json(
+                "root",
+                &json!({
+                    "child-1": {
+                        "subchild": null
+                    },
+                    "child-2": null,
+                }),
+            ),
+        ));
+        let remote_tree = RemoteTree::new(
+            handle,
+            rpc::tests::connect(&mut reactor, TreeService::new(local_tree.clone())),
+        );
+        assert_eq!(remote_tree.root().name(), local_tree.root().name());
+        assert_eq!(remote_tree.root().children().unwrap().len(), 0);
+
+        let mut remote_tree_updates = remote_tree.updates();
+        local_tree.populated.set(true);
+        remote_tree_updates.wait_next(&mut reactor);
+        assert_eq!(remote_tree.root(), local_tree.root());
+    }
+
+    struct TestTree {
+        path: PathBuf,
+        root: Entry,
+        populated: NotifyCell<bool>,
+    }
+
+    impl TestTree {
+        fn new(path: &str, root: Entry) -> Self {
+            Self {
+                path: path.into(),
+                root,
+                populated: NotifyCell::new(false),
             }
         }
+    }
+
+    impl Tree for TestTree {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn root(&self) -> Entry {
+            self.root.clone()
+        }
+
+        fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
+            unimplemented!()
+        }
+
+        fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
+            Box::new(
+                self.populated
+                    .observe()
+                    .skip_while(|p| Ok(!p))
+                    .into_future()
+                    .then(|_| Ok(())),
+            )
+        }
+    }
 
     impl Entry {
         fn entry_names(&self) -> Vec<String> {

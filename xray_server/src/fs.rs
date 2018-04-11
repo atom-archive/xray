@@ -1,4 +1,4 @@
-use futures::Stream;
+use futures::{Future, Stream};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -59,11 +59,15 @@ impl fs::Tree for Tree {
         &self.path
     }
 
-    fn root(&self) -> &fs::Entry {
-        &self.root
+    fn root(&self) -> fs::Entry {
+        self.root.clone()
     }
 
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
         Box::new(self.updates.observe())
+    }
+
+    fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
+        unimplemented!()
     }
 }
