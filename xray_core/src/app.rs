@@ -247,7 +247,6 @@ impl server::Service for AppService {
     type Update = RemoteState;
     type Request = RemoteRequest;
     type Response = RemoteResponse;
-    type Error = ();
 
     fn state(&self, _connection: &server::Connection) -> Self::State {
         RemoteState {
