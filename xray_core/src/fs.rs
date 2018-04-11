@@ -2,6 +2,8 @@ use futures::{Async, Future, Stream};
 use parking_lot::RwLock;
 use rpc::server;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+#[cfg(test)]
+use serde_json;
 use std::ffi::{OsStr, OsString};
 use std::iter::Iterator;
 use std::path::Path;
@@ -77,6 +79,21 @@ impl Entry {
             symlink,
             ignored,
         }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_json(name: &str, json: &serde_json::Value) -> Self {
+        if json.is_object() {
+            let object = json.as_object().unwrap();
+            let dir = Entry::dir(OsString::from(name), false, false);
+            for (key, value) in object {
+                let child_entry = Self::from_json(key, value);
+                assert_eq!(dir.insert(child_entry), Ok(()));
+            }
+            dir
+        } else {
+            Entry::file(OsString::from(name), false, false)
+        }
     }
 
     pub fn is_dir(&self) -> bool {
@@ -279,21 +296,10 @@ mod tests {
         );
     }
 
-    impl Entry {
-        fn from_json(name: &str, json: &serde_json::Value) -> Self {
-            if json.is_object() {
-                let object = json.as_object().unwrap();
-                let dir = Entry::dir(OsString::from(name), false, false);
-                for (key, value) in object {
-                    let child_entry = Self::from_json(key, value);
-                    assert_eq!(dir.insert(child_entry), Ok(()));
-                }
-                dir
-            } else {
-                Entry::file(OsString::from(name), false, false)
             }
         }
 
+    impl Entry {
         fn entry_names(&self) -> Vec<String> {
             match self {
                 &Entry::Dir(ref inner) => inner
