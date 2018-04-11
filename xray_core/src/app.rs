@@ -103,7 +103,7 @@ impl App {
         self.0.borrow().headless
     }
 
-    pub fn open_workspace(&self, roots: Vec<Box<fs::Tree>>) {
+    pub fn open_workspace<T: 'static + fs::Tree>(&self, roots: Vec<T>) {
         self.add_workspace(LocalWorkspace::new(roots));
     }
 
@@ -183,6 +183,7 @@ impl PeerList {
         })))
     }
 
+    #[cfg(test)]
     fn state(&self) -> Vec<PeerState> {
         self.0
             .borrow()
@@ -201,6 +202,7 @@ impl PeerList {
             .collect()
     }
 
+    #[cfg(test)]
     fn updates(&self) -> NotifyCellObserver<()> {
         self.0.borrow().updates.observe()
     }
@@ -269,6 +271,7 @@ mod tests {
     use futures::{unsync, Future, Sink};
     use stream_ext::StreamExt;
     use tokio_core::reactor;
+    use fs::tests::TestTree;
 
     #[test]
     fn test_remote_workspaces() {
@@ -291,7 +294,7 @@ mod tests {
             }]
         );
 
-        server.open_workspace(vec![]);
+        server.open_workspace(Vec::<TestTree>::new());
         peer_list_updates.wait_next(&mut reactor);
         assert_eq!(
             peer_list.state(),

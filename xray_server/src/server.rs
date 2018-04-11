@@ -178,7 +178,7 @@ impl Server {
 
         let roots = paths
             .iter()
-            .map(|path| Box::new(fs::Tree::new(path).unwrap()) as Box<xray_core::fs::Tree>)
+            .map(|path| fs::Tree::new(path).unwrap())
             .collect();
         self.app.open_workspace(roots);
         Ok(())

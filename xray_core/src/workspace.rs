@@ -1,29 +1,31 @@
-use project::{Project, PathSearch, PathSearchStatus};
-use notify_cell::NotifyCellObserver;
-use futures::{Poll, Stream};
-use serde_json;
-use std::cell::{RefCell, Ref};
-use std::path::PathBuf;
-use std::rc::Rc;
-use std::fs::File;
-use std::io::BufReader;
-use std::io::prelude::*;
-use window::{View, ViewHandle, WeakViewHandle, Window};
-use buffer::Buffer;
 use buffer_view::BufferView;
-use notify_cell::NotifyCell;
-use fs;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
+use fs;
+use futures::{Poll, Stream};
+use notify_cell::NotifyCell;
+use notify_cell::NotifyCellObserver;
+use project::{PathSearch, PathSearchStatus, Project, TreeId};
+use serde_json;
+use std::cell::{Ref, RefCell};
+use std::path::Path;
+use std::rc::Rc;
+use window::{View, ViewHandle, WeakViewHandle, Window};
 
 pub trait Workspace {
-    fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
+    fn search_paths(
+        &self,
+        needle: &str,
+        max_results: usize,
+        include_ignored: bool,
+    ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
+    fn project(&self) -> Ref<Project>;
 }
 
 #[derive(Clone)]
 pub struct LocalWorkspace(Rc<RefCell<LocalWorkspaceState>>);
 
 struct LocalWorkspaceState {
-    project: Project
+    project: Project,
 }
 
 pub struct WorkspaceView {
@@ -41,20 +43,28 @@ enum WorkspaceViewAction {
 }
 
 impl LocalWorkspace {
-    pub fn new(roots: Vec<Box<fs::Tree>>) -> Self {
+    pub fn new<T: 'static + fs::Tree>(roots: Vec<T>) -> Self {
         LocalWorkspace(Rc::new(RefCell::new(LocalWorkspaceState {
-            project: Project::new(roots)
+            project: Project::new(roots),
         })))
-    }
-
-    pub fn project(&self) -> Ref<Project> {
-        Ref::map(self.0.borrow(), |state| &state.project)
     }
 }
 
 impl Workspace for LocalWorkspace {
-    fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
-        self.0.borrow().project.search_paths(needle, max_results, include_ignored)
+    fn search_paths(
+        &self,
+        needle: &str,
+        max_results: usize,
+        include_ignored: bool,
+    ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
+        self.0
+            .borrow()
+            .project
+            .search_paths(needle, max_results, include_ignored)
+    }
+
+    fn project(&self) -> Ref<Project> {
+        Ref::map(self.0.borrow(), |state| &state.project)
     }
 }
 
@@ -79,20 +89,6 @@ impl WorkspaceView {
             self.modal_panel = Some(view);
         }
         self.updates.set(());
-    }
-
-    fn open_path(&self, path: PathBuf) -> BufferView {
-        let file = File::open(path).unwrap();
-        let mut buf_reader = BufReader::new(file);
-        let mut contents = String::new();
-        buf_reader.read_to_string(&mut contents).unwrap();
-
-        let mut buffer = Buffer::new(1);
-        buffer.splice(0..0, contents.as_str());
-
-        let mut buffer_view = BufferView::new(Rc::new(RefCell::new(buffer)));
-        buffer_view.set_line_height(20.0);
-        buffer_view
     }
 }
 
@@ -121,8 +117,14 @@ impl View for WorkspaceView {
 }
 
 impl FileFinderViewDelegate for WorkspaceView {
-    fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
-        self.workspace.search_paths(needle, max_results, include_ignored)
+    fn search_paths(
+        &self,
+        needle: &str,
+        max_results: usize,
+        include_ignored: bool,
+    ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
+        self.workspace
+            .search_paths(needle, max_results, include_ignored)
     }
 
     fn did_close(&mut self) {
@@ -130,12 +132,21 @@ impl FileFinderViewDelegate for WorkspaceView {
         self.updates.set(());
     }
 
-    fn did_confirm(&mut self, path: PathBuf, window: &mut Window) {
-        let buffer_view = window.add_view(self.open_path(path));
-        buffer_view.focus().unwrap();
-        self.center_pane = Some(buffer_view);
-        self.modal_panel = None;
-        self.updates.set(());
+    fn did_confirm(&mut self, tree_id: TreeId, path: &Path, window: &mut Window) {
+        match self.workspace.project().open_buffer(tree_id, path) {
+            Ok(buffer) => {
+                let mut buffer_view = BufferView::new(Rc::new(RefCell::new(buffer)));
+                buffer_view.set_line_height(20.0);
+                let buffer_view = window.add_view(buffer_view);
+                buffer_view.focus().unwrap();
+                self.center_pane = Some(buffer_view);
+                self.modal_panel = None;
+                self.updates.set(());
+            }
+            Err(error) => {
+                unimplemented!("Error handling for open_buffer: {:?}", error);
+            }
+        }
     }
 }
 

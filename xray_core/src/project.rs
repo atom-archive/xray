@@ -1,18 +1,24 @@
+use buffer::Buffer;
 use fs;
 use futures::{Async, Future, Poll};
 use fuzzy;
 use notify_cell::{NotifyCell, NotifyCellObserver, WeakNotifyCell};
 use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{self, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub type TreeId = usize;
+
 pub struct Project {
-    trees: Vec<Box<fs::Tree>>,
+    next_tree_id: TreeId,
+    trees: HashMap<TreeId, Box<fs::Tree>>,
 }
 
 pub struct PathSearch {
-    root_paths: Vec<PathBuf>,
+    tree_ids: Vec<TreeId>,
     roots: Arc<Vec<fs::Entry>>,
     needle: Vec<char>,
     max_results: usize,
@@ -31,8 +37,9 @@ pub enum PathSearchStatus {
 pub struct PathSearchResult {
     pub score: fuzzy::Score,
     pub positions: Vec<usize>,
-    pub absolute_path: PathBuf,
-    pub relative_path: PathBuf
+    pub tree_id: TreeId,
+    pub relative_path: PathBuf,
+    pub display_path: PathBuf,
 }
 
 struct StackEntry {
@@ -47,13 +54,50 @@ enum MatchMarker {
     IsMatch,
 }
 
+#[derive(Debug)]
+pub enum OpenError {
+    TreeNotFound,
+    IOError(io::Error),
+}
+
 impl Project {
-    pub fn new(trees: Vec<Box<fs::Tree>>) -> Self {
-        Project { trees }
+    pub fn new<T: 'static + fs::Tree>(trees: Vec<T>) -> Self {
+        let mut project = Self {
+            next_tree_id: 0,
+            trees: HashMap::new(),
+        };
+        for tree in trees {
+            project.add_tree(tree);
+        }
+        project
     }
 
-    pub fn trees(&self) -> &[Box<fs::Tree>] {
-        &self.trees
+    fn add_tree<T: 'static + fs::Tree>(&mut self, tree: T) {
+        let id = self.next_tree_id;
+        self.next_tree_id += 1;
+        self.trees.insert(id, Box::new(tree));
+    }
+
+    pub fn trees(&self) -> Vec<&fs::Tree> {
+        self.trees.values().map(|tree| tree.as_ref()).collect()
+    }
+
+    pub fn open_buffer(&self, tree_id: TreeId, relative_path: &Path) -> Result<Buffer, OpenError> {
+        let tree = self.trees.get(&tree_id).ok_or(OpenError::TreeNotFound)?;
+        let mut absolute_path = tree.path().to_owned();
+        absolute_path.push(relative_path);
+
+        let file = File::open(absolute_path).map_err(|error| OpenError::IOError(error))?;
+        let mut buf_reader = BufReader::new(file);
+        let mut contents = String::new();
+        buf_reader
+            .read_to_string(&mut contents)
+            .map_err(|error| OpenError::IOError(error))?;
+
+        let mut buffer = Buffer::new(1);
+        buffer.splice(0..0, contents.as_str());
+
+        Ok(buffer)
     }
 
     pub fn search_paths(
@@ -63,9 +107,17 @@ impl Project {
         include_ignored: bool,
     ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
         let (updates, updates_observer) = NotifyCell::weak(PathSearchStatus::Pending);
+
+        let mut tree_ids = Vec::new();
+        let mut roots = Vec::new();
+        for (id, tree) in &self.trees {
+            tree_ids.push(*id);
+            roots.push(tree.root().clone());
+        }
+
         let search = PathSearch {
-            root_paths: self.trees.iter().map(|tree| PathBuf::from(tree.path())).collect(),
-            roots: Arc::new(self.trees.iter().map(|tree| tree.root().clone()).collect()),
+            tree_ids,
+            roots: Arc::new(roots),
             needle: needle.chars().collect(),
             max_results,
             include_ignored,
@@ -181,16 +233,29 @@ impl PathSearch {
                 if children[child_index].is_ignored() && !self.include_ignored {
                     child_index += 1;
                 } else if children[child_index].is_dir() {
-                    let descend = found_match || {
+                    let descend;
+                    let child_is_match;
+
+                    if found_match {
+                        child_is_match = true;
+                        descend = true;
+                    } else {
                         match matches.get(&children[child_index].id()) {
                             Some(&MatchMarker::IsMatch) => {
-                                found_match = true;
-                                true
+                                child_is_match = true;
+                                descend = true;
                             }
-                            Some(&MatchMarker::ContainsMatch) => true,
-                            None => false,
+                            Some(&MatchMarker::ContainsMatch) => {
+                                child_is_match = false;
+                                descend = true;
+                            },
+                            None => {
+                                child_is_match = false;
+                                descend = false;
+                            },
                         }
                     };
+
                     if descend {
                         scorer.push(children[child_index].name_chars(), None);
                         let next_children = children[child_index].children().unwrap();
@@ -199,6 +264,7 @@ impl PathSearch {
                             children,
                             found_match,
                         });
+                        found_match = child_is_match;
                         children = next_children;
                         child_index = 0;
                     } else {
@@ -212,32 +278,33 @@ impl PathSearch {
                         if results.len() < self.max_results
                             || score > results.peek().map(|r| r.score).unwrap()
                         {
-                            let mut absolute_path = if self.roots.len() == 1 {
-                                self.root_paths[0].to_path_buf()
+                            let tree_id = if self.roots.len() == 1 {
+                                self.tree_ids[0]
                             } else {
-                                let mut root_path = self.root_paths[stack[0].child_index].to_path_buf();
-                                root_path.pop();
-                                root_path
+                                self.tree_ids[stack[0].child_index]
                             };
 
                             let mut relative_path = PathBuf::new();
-                            for entry in stack {
+                            let mut display_path = PathBuf::new();
+                            for (i, entry) in stack.iter().enumerate() {
                                 let name = entry.children[entry.child_index].name();
-                                absolute_path.push(name);
-                                relative_path.push(name);
+                                if self.roots.len() == 1 || i != 0 {
+                                    relative_path.push(name);
+                                }
+                                display_path.push(name);
                             }
                             let file_name = children[child_index].name();
-                            absolute_path.push(file_name);
                             relative_path.push(file_name);
-
+                            display_path.push(file_name);
                             if results.len() == self.max_results {
                                 results.pop();
                             }
                             results.push(PathSearchResult {
                                 score,
-                                absolute_path,
+                                tree_id,
                                 relative_path,
-                                positions: positions.clone()
+                                display_path,
+                                positions: positions.clone(),
                             });
                         }
                     }
@@ -259,7 +326,11 @@ impl PathSearch {
     }
 
     #[inline(always)]
-    fn check_cancellation(&self, steps_since_last_check: &mut usize, steps_between_checks: usize) -> Result<(), ()> {
+    fn check_cancellation(
+        &self,
+        steps_since_last_check: &mut usize,
+        steps_between_checks: usize,
+    ) -> Result<(), ()> {
         *steps_since_last_check += 1;
         if *steps_since_last_check == steps_between_checks {
             if self.updates.has_observers() {
@@ -291,10 +362,8 @@ impl Eq for PathSearchResult {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs::tests::TestTree;
     use futures::Stream;
-    use serde_json;
-    use std::ffi::OsString;
-    use std::path::Path;
 
     #[test]
     fn test_search_one_tree() {
@@ -316,16 +385,28 @@ mod tests {
                 }
             }),
         );
-        let project = Project::new(vec![Box::new(tree)]);
+        let project = Project::new(vec![tree]);
         let (mut search, observer) = project.search_paths("sub2", 10, true);
 
         assert_eq!(search.poll(), Ok(Async::Ready(())));
         assert_eq!(
-            summarize_results(&observer.get()),
+            summarize_results(&project, &observer.get()),
             Some(vec![
-                ("/Users/someone/tree/root-2/subdir-2/file-3", "root-2/subdir-2/file-3", vec![7, 8, 9, 14]),
-                ("/Users/someone/tree/root-2/subdir-2/file-4", "root-2/subdir-2/file-4", vec![7, 8, 9, 14]),
-                ("/Users/someone/tree/root-1/subdir-1/file-2", "root-1/subdir-1/file-2", vec![7, 8, 9, 21]),
+                (
+                    "/Users/someone/tree/root-2/subdir-2/file-3".to_string(),
+                    "root-2/subdir-2/file-3".to_string(),
+                    vec![7, 8, 9, 14],
+                ),
+                (
+                    "/Users/someone/tree/root-2/subdir-2/file-4".to_string(),
+                    "root-2/subdir-2/file-4".to_string(),
+                    vec![7, 8, 9, 14],
+                ),
+                (
+                    "/Users/someone/tree/root-1/subdir-1/file-2".to_string(),
+                    "root-1/subdir-1/file-2".to_string(),
+                    vec![7, 8, 9, 21],
+                ),
             ])
         );
     }
@@ -353,69 +434,58 @@ mod tests {
                         "foo": null,
                     }
                 }
-            })
+            }),
         );
-        let project = Project::new(vec![Box::new(tree_1), Box::new(tree_2)]);
+        let project = Project::new(vec![tree_1, tree_2]);
 
         let (mut search, observer) = project.search_paths("bar", 10, true);
         assert_eq!(search.poll(), Ok(Async::Ready(())));
         assert_eq!(
-            summarize_results(&observer.get()),
+            summarize_results(&project, &observer.get()),
             Some(vec![
-                ("/Users/someone/bar/subdir-b/subdir-2/foo", "bar/subdir-b/subdir-2/foo", vec![0, 1, 2]),
-                ("/Users/someone/foo/subdir-a/subdir-1/bar", "foo/subdir-a/subdir-1/bar", vec![22, 23, 24]),
-                ("/Users/someone/bar/subdir-b/subdir-2/file-3", "bar/subdir-b/subdir-2/file-3", vec![0, 1, 2]),
-                ("/Users/someone/foo/subdir-a/subdir-1/file-1", "foo/subdir-a/subdir-1/file-1", vec![6, 11, 18]),
+                (
+                    "/Users/someone/bar/subdir-b/subdir-2/foo".to_string(),
+                    "bar/subdir-b/subdir-2/foo".to_string(),
+                    vec![0, 1, 2],
+                ),
+                (
+                    "/Users/someone/foo/subdir-a/subdir-1/bar".to_string(),
+                    "foo/subdir-a/subdir-1/bar".to_string(),
+                    vec![22, 23, 24],
+                ),
+                (
+                    "/Users/someone/bar/subdir-b/subdir-2/file-3".to_string(),
+                    "bar/subdir-b/subdir-2/file-3".to_string(),
+                    vec![0, 1, 2],
+                ),
+                (
+                    "/Users/someone/foo/subdir-a/subdir-1/file-1".to_string(),
+                    "foo/subdir-a/subdir-1/file-1".to_string(),
+                    vec![6, 11, 18],
+                ),
             ])
         );
     }
 
-    fn summarize_results(results: &PathSearchStatus) -> Option<Vec<(&str, &str, Vec<usize>)>> {
+    fn summarize_results<'a>(
+        project: &Project,
+        results: &'a PathSearchStatus,
+    ) -> Option<Vec<(String, String, Vec<usize>)>> {
         match results {
             &PathSearchStatus::Pending => None,
             &PathSearchStatus::Ready(ref results) => {
                 let summary = results
                     .iter()
                     .map(|result| {
-                        let absolute_path = result.absolute_path.to_str().unwrap();
-                        let relative_path = result.relative_path.to_str().unwrap();
-                        (absolute_path, relative_path, result.positions.clone())
+                        let mut absolute_path =
+                            PathBuf::from(project.trees.get(&result.tree_id).unwrap().path());
+                        absolute_path.push(&result.relative_path);
+                        let absolute_path = absolute_path.to_str().unwrap().to_string();
+                        let display_path = result.display_path.to_str().unwrap().to_string();
+                        (absolute_path, display_path, result.positions.clone())
                     })
                     .collect();
                 Some(summary)
-            }
-        }
-    }
-
-    struct TestTree {
-        root: fs::Entry,
-        path: PathBuf,
-    }
-
-    impl fs::Tree for TestTree {
-        fn root(&self) -> fs::Entry {
-            self.root.clone()
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-
-        fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
-            unimplemented!()
-        }
-
-        fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
-            unimplemented!()
-        }
-    }
-
-    impl TestTree {
-        fn from_json<T: Into<PathBuf>>(path: T, json: serde_json::Value) -> Self {
-            let path = path.into();
-            Self {
-                root: fs::Entry::from_json(path.file_name().unwrap().to_str().unwrap(), &json),
-                path,
             }
         }
     }

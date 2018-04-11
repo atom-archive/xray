@@ -1,14 +1,19 @@
 use futures::{Async, Poll, Stream};
-use std::path::PathBuf;
-use project::{PathSearch, PathSearchStatus, PathSearchResult};
-use window::{View, WeakViewHandle, Window};
 use notify_cell::{NotifyCell, NotifyCellObserver};
+use project::{PathSearch, PathSearchResult, PathSearchStatus, TreeId};
 use serde_json;
+use std::path::Path;
+use window::{View, WeakViewHandle, Window};
 
 pub trait FileFinderViewDelegate {
-    fn search_paths(&self, needle: &str, max_results: usize, include_ignored: bool) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
+    fn search_paths(
+        &self,
+        needle: &str,
+        max_results: usize,
+        include_ignored: bool,
+    ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
     fn did_close(&mut self);
-    fn did_confirm(&mut self, path: PathBuf, window: &mut Window);
+    fn did_confirm(&mut self, tree_id: TreeId, relative_path: &Path, window: &mut Window);
 }
 
 pub struct FileFinderView<T: FileFinderViewDelegate> {
@@ -48,7 +53,9 @@ impl<T: FileFinderViewDelegate> View for FileFinderView<T> {
     fn dispatch_action(&mut self, action: serde_json::Value, window: &mut Window) {
         match serde_json::from_value(action) {
             Ok(FileFinderAction::UpdateQuery { query }) => self.update_query(query, window),
-            Ok(FileFinderAction::UpdateIncludeIgnored { include_ignored }) => self.update_include_ignored(include_ignored, window),
+            Ok(FileFinderAction::UpdateIncludeIgnored { include_ignored }) => {
+                self.update_include_ignored(include_ignored, window)
+            }
             Ok(FileFinderAction::SelectPrevious) => self.select_previous(),
             Ok(FileFinderAction::SelectNext) => self.select_next(),
             Ok(FileFinderAction::Confirm) => self.confirm(window),
@@ -63,21 +70,24 @@ impl<T: FileFinderViewDelegate> Stream for FileFinderView<T> {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let search_poll = self.search_updates.as_mut().map(|s| s.poll()).unwrap_or(Ok(Async::NotReady))?;
+        let search_poll = self.search_updates
+            .as_mut()
+            .map(|s| s.poll())
+            .unwrap_or(Ok(Async::NotReady))?;
         let updates_poll = self.updates.poll()?;
         match (search_poll, updates_poll) {
             (Async::NotReady, Async::NotReady) => Ok(Async::NotReady),
             (Async::Ready(Some(search_status)), _) => {
                 match search_status {
-                    PathSearchStatus::Pending => {},
+                    PathSearchStatus::Pending => {}
                     PathSearchStatus::Ready(results) => {
                         self.search_results = results;
-                    },
+                    }
                 }
 
                 Ok(Async::Ready(Some(())))
-            },
-            _ => Ok(Async::Ready(Some(())))
+            }
+            _ => Ok(Async::Ready(Some(()))),
         }
     }
 }
@@ -127,9 +137,9 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
 
     fn confirm(&mut self, window: &mut Window) {
         if let Some(search_result) = self.search_results.get(self.selected_index) {
-            self.delegate.map(|delegate|
-                delegate.did_confirm(search_result.absolute_path.clone(), window)
-            );
+            self.delegate.map(|delegate| {
+                delegate.did_confirm(search_result.tree_id, &search_result.relative_path, window)
+            });
         }
     }
 
@@ -138,9 +148,8 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
     }
 
     fn search(&mut self, window: &mut Window) {
-        let search = self.delegate.map(|delegate|
-            delegate.search_paths(&self.query, 10, self.include_ignored)
-        );
+        let search = self.delegate
+            .map(|delegate| delegate.search_paths(&self.query, 10, self.include_ignored));
 
         if let Some((search, search_updates)) = search {
             self.search_updates = Some(search_updates);

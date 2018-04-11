@@ -91,21 +91,6 @@ impl Entry {
         }))
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_json(name: &str, json: &serde_json::Value) -> Self {
-        if json.is_object() {
-            let object = json.as_object().unwrap();
-            let dir = Entry::dir(OsString::from(name), false, false);
-            for (key, value) in object {
-                let child_entry = Self::from_json(key, value);
-                assert_eq!(dir.insert(child_entry), Ok(()));
-            }
-            dir
-        } else {
-            Entry::file(OsString::from(name), false, false)
-        }
-    }
-
     pub fn is_dir(&self) -> bool {
         match self {
             &Entry::Dir(_) => true,
@@ -303,7 +288,7 @@ impl Tree for RemoteTree {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use bincode::{deserialize, serialize};
     use notify_cell::NotifyCell;
@@ -331,7 +316,7 @@ mod tests {
             root.insert(Entry::file(OsString::from("a"), false, false)),
             Err(())
         );
-        assert_eq!(root.entry_names(), vec!["a", "b", "c"]);
+        assert_eq!(root.child_names(), vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -387,19 +372,25 @@ mod tests {
         assert_eq!(remote_tree.root(), local_tree.root());
     }
 
-    struct TestTree {
+    pub struct TestTree {
         path: PathBuf,
         root: Entry,
         populated: NotifyCell<bool>,
     }
 
     impl TestTree {
-        fn new(path: &str, root: Entry) -> Self {
+        pub fn new<T: Into<PathBuf>>(path: T, root: Entry) -> Self {
             Self {
                 path: path.into(),
                 root,
                 populated: NotifyCell::new(false),
             }
+        }
+
+        pub fn from_json<T: Into<PathBuf>>(path: T, json: serde_json::Value) -> Self {
+            let path = path.into();
+            let root = Entry::from_json(path.file_name().unwrap(), &json);
+            Self::new(path, root)
         }
     }
 
@@ -428,7 +419,21 @@ mod tests {
     }
 
     impl Entry {
-        fn entry_names(&self) -> Vec<String> {
+        fn from_json<T: Into<OsString>>(name: T, json: &serde_json::Value) -> Self {
+            if json.is_object() {
+                let object = json.as_object().unwrap();
+                let dir = Entry::dir(name.into(), false, false);
+                for (key, value) in object {
+                    let child_entry = Self::from_json(key, value);
+                    assert_eq!(dir.insert(child_entry), Ok(()));
+                }
+                dir
+            } else {
+                Entry::file(name.into(), false, false)
+            }
+        }
+
+        fn child_names(&self) -> Vec<String> {
             match self {
                 &Entry::Dir(ref inner) => inner
                     .children
