@@ -228,9 +228,13 @@ impl server::Service for TreeService {
     type Request = ();
     type Response = ();
 
-    fn init(&mut self, _: &server::Connection) -> Self::State {
-        let root = self.tree.root();
-        Entry::dir(root.name().to_owned(), root.is_symlink(), root.is_ignored())
+    fn init(&mut self, connection: &server::Connection) -> Self::State {
+        if let Async::Ready(Some(tree)) = self.poll_update(connection) {
+            tree
+        } else {
+            let root = self.tree.root();
+            Entry::dir(root.name().to_owned(), root.is_symlink(), root.is_ignored())
+        }
     }
 
     fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
