@@ -16,9 +16,7 @@ pub struct Tree {
     updates: Arc<NotifyCell<()>>,
 }
 
-pub struct IoProvider {
-    background: BackgroundExecutor,
-}
+pub struct IoProvider;
 
 impl Tree {
     pub fn new<T: Into<PathBuf>>(path: T) -> Result<Self, &'static str> {
@@ -98,18 +96,17 @@ impl fs::LocalTree for Tree {
 }
 
 impl IoProvider {
-    pub fn new(background: BackgroundExecutor) -> Self {
-        IoProvider { background }
+    pub fn new() -> Self {
+        IoProvider
     }
 }
 
 impl fs::IoProvider for IoProvider {
     fn read(&self, path: &Path) -> Box<Future<Item = String, Error = io::Error>> {
         let path = path.to_owned();
-
         let (tx, rx) = futures::sync::oneshot::channel();
 
-        self.background.execute(Box::new(future::lazy(move || {
+        thread::spawn(|| {
             fn read(path: PathBuf) -> Result<String, io::Error> {
                 let file = File::open(path)?;
                 let mut buf_reader = io::BufReader::new(file);
@@ -119,13 +116,8 @@ impl fs::IoProvider for IoProvider {
             }
 
             let _ = tx.send(read(path));
-            Ok(())
-        }))).unwrap();
+        });
 
-        Box::new(rx.then(|result|
-            result.unwrap_or(
-                Err(io::Error::new(io::ErrorKind::Interrupted, "The read task was dropped"))
-            )
-        ))
+        Box::new(rx.then(|result| result.expect("Sender should not be dropped")))
     }
 }

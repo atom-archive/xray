@@ -22,7 +22,7 @@ impl Server {
     pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
         let foreground = Rc::new(reactor.clone());
         let background = Rc::new(CpuPool::new_num_cpus());
-        let io = fs::IoProvider::new(background.clone());
+        let io = fs::IoProvider::new();
         Server {
             app: App::new(headless, foreground, background, io),
             reactor,
