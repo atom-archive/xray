@@ -219,7 +219,7 @@ impl rpc::server::Service for ProjectService {
     type Request = ();
     type Response = ();
 
-    fn state(&self, _connection: &rpc::server::Connection) -> Self::State {
+    fn init(&mut self, _connection: &rpc::server::Connection) -> Self::State {
         unimplemented!()
     }
 

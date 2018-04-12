@@ -200,7 +200,7 @@ pub(crate) mod tests {
         type Request = TestRequest;
         type Response = TestServiceResponse;
 
-        fn state(&self, _: &server::Connection) -> Self::State {
+        fn init(&mut self, _: &server::Connection) -> Self::State {
             self.model.0.borrow().get()
         }
 

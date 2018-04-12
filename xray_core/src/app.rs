@@ -242,6 +242,12 @@ impl AppService {
         let updates = app.0.borrow().updates.observe();
         Self { app, updates }
     }
+
+    fn state(&self) -> RemoteState {
+        RemoteState {
+            workspace_ids: self.app.0.borrow().workspaces.keys().cloned().collect(),
+        }
+    }
 }
 
 impl server::Service for AppService {
@@ -250,15 +256,13 @@ impl server::Service for AppService {
     type Request = RemoteRequest;
     type Response = RemoteResponse;
 
-    fn state(&self, _connection: &server::Connection) -> Self::State {
-        RemoteState {
-            workspace_ids: self.app.0.borrow().workspaces.keys().cloned().collect(),
-        }
+    fn init(&mut self, _connection: &server::Connection) -> Self::State {
+        self.state()
     }
 
     fn poll_update(&mut self, connection: &server::Connection) -> Async<Option<Self::Update>> {
         match self.updates.poll() {
-            Ok(Async::Ready(Some(()))) => Async::Ready(Some(self.state(connection))),
+            Ok(Async::Ready(Some(()))) => Async::Ready(Some(self.state())),
             Ok(Async::Ready(None)) | Err(_) => Async::Ready(None),
             Ok(Async::NotReady) => Async::NotReady,
         }
@@ -268,10 +272,10 @@ impl server::Service for AppService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs::tests::TestTree;
     use futures::{unsync, Future, Sink};
     use stream_ext::StreamExt;
     use tokio_core::reactor;
-    use fs::tests::TestTree;
 
     #[test]
     fn test_remote_workspaces() {

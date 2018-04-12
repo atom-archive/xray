@@ -18,7 +18,7 @@ pub trait Service {
     type Request: 'static + Serialize + for<'a> Deserialize<'a>;
     type Response: 'static + Serialize + for<'a> Deserialize<'a>;
 
-    fn state(&self, connection: &Connection) -> Self::State;
+    fn init(&mut self, connection: &Connection) -> Self::State;
     fn poll_update(&mut self, connection: &Connection) -> Async<Option<Self::Update>>;
     fn request(
         &mut self,
@@ -30,7 +30,7 @@ pub trait Service {
 }
 
 trait RawBytesService {
-    fn state(&self, connection: &mut Connection) -> Vec<u8>;
+    fn init(&mut self, connection: &mut Connection) -> Vec<u8>;
     fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Vec<u8>>>;
     fn request(
         &mut self,
@@ -149,7 +149,7 @@ impl Connection {
         mem::swap(&mut inserted, &mut self.state.borrow_mut().inserted);
         for id in &inserted {
             if let Some(service) = self.get_service(*id) {
-                insertions.insert(*id, service.borrow().state(self));
+                insertions.insert(*id, service.borrow_mut().init(self));
             }
         }
         let mut updates: HashMap<ServiceId, Vec<Vec<u8>>> = HashMap::new();
@@ -248,8 +248,8 @@ impl<T> RawBytesService for T
 where
     T: Service,
 {
-    fn state(&self, connection: &mut Connection) -> Vec<u8> {
-        serialize(&T::state(self, connection)).unwrap()
+    fn init(&mut self, connection: &mut Connection) -> Vec<u8> {
+        serialize(&T::init(self, connection)).unwrap()
     }
 
     fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Vec<u8>>> {

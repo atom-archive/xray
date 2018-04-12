@@ -228,7 +228,7 @@ impl server::Service for TreeService {
     type Request = ();
     type Response = ();
 
-    fn state(&self, _: &server::Connection) -> Self::State {
+    fn init(&mut self, _: &server::Connection) -> Self::State {
         let root = self.tree.root();
         Entry::dir(root.name().to_owned(), root.is_symlink(), root.is_ignored())
     }
