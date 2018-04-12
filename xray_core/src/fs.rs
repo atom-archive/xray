@@ -18,15 +18,14 @@ pub type EntryId = usize;
 pub type Result<T> = result::Result<T, ()>;
 
 pub trait Tree {
-    fn path(&self) -> &Path;
     fn root(&self) -> Entry;
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>>;
+}
 
-    // Returns a promise that resolves once tree is populated
-    // We could potentially implement this promise from an observer for a boolean notify cell
-    // to avoid needing to maintain a set of oneshot channels or something similar.
-    // cell.observe().skip_while(|resolved| !resolved).into_future().then(Ok(()))
+pub trait LocalTree: Tree {
+    fn path(&self) -> &Path;
     fn populated(&self) -> Box<Future<Item = (), Error = ()>>;
+    fn as_tree(&self) -> &Tree;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,7 +57,7 @@ pub struct FileInner {
 }
 
 pub struct TreeService {
-    tree: Rc<Tree>,
+    tree: Rc<LocalTree>,
     populated: Option<Box<Future<Item = (), Error = ()>>>,
 }
 
@@ -217,7 +216,7 @@ fn deserialize_dir_children<'de, D: Deserializer<'de>>(
 }
 
 impl TreeService {
-    pub fn new(tree: Rc<Tree>) -> Self {
+    pub fn new(tree: Rc<LocalTree>) -> Self {
         let populated = Some(tree.populated());
         Self { tree, populated }
     }
@@ -270,20 +269,12 @@ impl RemoteTree {
 }
 
 impl Tree for RemoteTree {
-    fn path(&self) -> &Path {
-        unimplemented!()
-    }
-
     fn root(&self) -> Entry {
         self.0.borrow().root.clone()
     }
 
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
         Box::new(self.0.borrow().updates.observe())
-    }
-
-    fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
-        unimplemented!()
     }
 }
 
@@ -395,16 +386,19 @@ pub(crate) mod tests {
     }
 
     impl Tree for TestTree {
-        fn path(&self) -> &Path {
-            &self.path
-        }
-
         fn root(&self) -> Entry {
             self.root.clone()
         }
 
         fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
             unimplemented!()
+        }
+
+    }
+
+    impl LocalTree for TestTree {
+        fn path(&self) -> &Path {
+            &self.path
         }
 
         fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
@@ -415,6 +409,10 @@ pub(crate) mod tests {
                     .into_future()
                     .then(|_| Ok(())),
             )
+        }
+
+        fn as_tree(&self) -> &Tree {
+            self
         }
     }
 

@@ -43,7 +43,7 @@ enum WorkspaceViewAction {
 }
 
 impl LocalWorkspace {
-    pub fn new<T: 'static + fs::Tree>(roots: Vec<T>) -> Self {
+    pub fn new<T: 'static + fs::LocalTree>(roots: Vec<T>) -> Self {
         LocalWorkspace(Rc::new(RefCell::new(LocalWorkspaceState {
             project: Project::new(roots),
         })))

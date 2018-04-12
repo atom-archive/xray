@@ -103,7 +103,7 @@ impl App {
         self.0.borrow().headless
     }
 
-    pub fn open_workspace<T: 'static + fs::Tree>(&self, roots: Vec<T>) {
+    pub fn open_workspace<T: 'static + fs::LocalTree>(&self, roots: Vec<T>) {
         self.add_workspace(LocalWorkspace::new(roots));
     }
 

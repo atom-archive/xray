@@ -14,7 +14,7 @@ pub type TreeId = usize;
 
 pub struct Project {
     next_tree_id: TreeId,
-    trees: HashMap<TreeId, Box<fs::Tree>>,
+    trees: HashMap<TreeId, Box<fs::LocalTree>>,
 }
 
 pub struct PathSearch {
@@ -61,7 +61,7 @@ pub enum OpenError {
 }
 
 impl Project {
-    pub fn new<T: 'static + fs::Tree>(trees: Vec<T>) -> Self {
+    pub fn new<T: 'static + fs::LocalTree>(trees: Vec<T>) -> Self {
         let mut project = Self {
             next_tree_id: 0,
             trees: HashMap::new(),
@@ -72,14 +72,14 @@ impl Project {
         project
     }
 
-    fn add_tree<T: 'static + fs::Tree>(&mut self, tree: T) {
+    fn add_tree<T: 'static + fs::LocalTree>(&mut self, tree: T) {
         let id = self.next_tree_id;
         self.next_tree_id += 1;
         self.trees.insert(id, Box::new(tree));
     }
 
     pub fn trees(&self) -> Vec<&fs::Tree> {
-        self.trees.values().map(|tree| tree.as_ref()).collect()
+        self.trees.values().map(|tree| tree.as_tree()).collect()
     }
 
     pub fn open_buffer(&self, tree_id: TreeId, relative_path: &Path) -> Result<Buffer, OpenError> {

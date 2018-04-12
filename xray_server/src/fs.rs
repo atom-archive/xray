@@ -55,10 +55,6 @@ impl Tree {
 }
 
 impl fs::Tree for Tree {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
     fn root(&self) -> fs::Entry {
         self.root.clone()
     }
@@ -66,8 +62,19 @@ impl fs::Tree for Tree {
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
         Box::new(self.updates.observe())
     }
+}
+
+
+impl fs::LocalTree for Tree {
+    fn path(&self) -> &Path {
+        &self.path
+    }
 
     fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
         unimplemented!()
+    }
+
+    fn as_tree(&self) -> &fs::Tree {
+        self
     }
 }
