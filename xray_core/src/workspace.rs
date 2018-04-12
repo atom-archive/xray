@@ -1,10 +1,9 @@
 use buffer_view::BufferView;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
-use fs;
-use futures::{Poll, Stream};
+use futures::{Poll, Stream, Future};
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
-use project::{LocalProject, PathSearch, PathSearchStatus, Project, TreeId};
+use project::{PathSearch, PathSearchStatus, Project, TreeId};
 use serde_json;
 use std::cell::{Ref, RefCell};
 use std::path::Path;
@@ -33,9 +32,9 @@ enum WorkspaceViewAction {
 }
 
 impl Workspace {
-    pub fn new<T: 'static + fs::LocalTree>(roots: Vec<T>) -> Self {
+    pub fn new<T: 'static + Project>(project: T) -> Self {
         Workspace(Rc::new(RefCell::new(WorkspaceState {
-            project: Box::new(LocalProject::new(roots)),
+            project: Box::new(project),
         })))
     }
 
@@ -121,7 +120,7 @@ impl FileFinderViewDelegate for WorkspaceView {
     }
 
     fn did_confirm(&mut self, tree_id: TreeId, path: &Path, window: &mut Window) {
-        match self.workspace.project().open_buffer(tree_id, path) {
+        match self.workspace.project().open_buffer(tree_id, path).wait() {
             Ok(buffer) => {
                 let mut buffer_view = BufferView::new(Rc::new(RefCell::new(buffer)));
                 buffer_view.set_line_height(20.0);

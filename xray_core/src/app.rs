@@ -2,6 +2,7 @@ use fs;
 use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::{Async, Future, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
+use project::LocalProject;
 use rpc::client;
 use rpc::server;
 use serde_json;
@@ -24,6 +25,7 @@ pub struct App(Rc<RefCell<AppState>>);
 struct AppState {
     headless: bool,
     background: BackgroundExecutor,
+    io: Rc<fs::IoProvider>,
     commands_tx: UnboundedSender<Command>,
     commands_rx: Option<UnboundedReceiver<Command>>,
     peer_list: PeerList,
@@ -75,15 +77,17 @@ pub enum RemoteRequest {}
 pub enum RemoteResponse {}
 
 impl App {
-    pub fn new(
+    pub fn new<T: 'static + fs::IoProvider>(
         headless: bool,
         foreground: ForegroundExecutor,
         background: BackgroundExecutor,
+        io: T,
     ) -> Self {
         let (commands_tx, commands_rx) = mpsc::unbounded();
         App(Rc::new(RefCell::new(AppState {
             headless,
             background,
+            io: Rc::new(io),
             commands_tx,
             commands_rx: Some(commands_rx),
             peer_list: PeerList::new(foreground),
@@ -104,7 +108,8 @@ impl App {
     }
 
     pub fn open_workspace<T: 'static + fs::LocalTree>(&self, roots: Vec<T>) {
-        self.add_workspace(Workspace::new(roots));
+        let io = self.0.borrow().io.clone();
+        self.add_workspace(Workspace::new(LocalProject::new(io, roots)));
     }
 
     fn add_workspace(&self, workspace: Workspace) {
@@ -272,7 +277,7 @@ impl server::Service for AppService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs::tests::TestTree;
+    use fs::tests::{TestIoProvider, TestTree};
     use futures::{unsync, Future, Sink};
     use stream_ext::StreamExt;
     use tokio_core::reactor;
@@ -281,8 +286,18 @@ mod tests {
     fn test_remote_workspaces() {
         let mut reactor = reactor::Core::new().unwrap();
         let executor = Rc::new(reactor.handle());
-        let mut server = App::new(true, executor.clone(), executor.clone());
-        let mut client = App::new(false, executor.clone(), executor.clone());
+        let mut server = App::new(
+            true,
+            executor.clone(),
+            executor.clone(),
+            TestIoProvider::new(),
+        );
+        let mut client = App::new(
+            false,
+            executor.clone(),
+            executor.clone(),
+            TestIoProvider::new(),
+        );
 
         let peer_list = client.peer_list();
         let mut peer_list_updates = peer_list.updates();

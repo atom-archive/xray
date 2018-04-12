@@ -22,8 +22,9 @@ impl Server {
     pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
         let foreground = Rc::new(reactor.clone());
         let background = Rc::new(CpuPool::new_num_cpus());
+        let io = fs::IoProvider::new(background.clone());
         Server {
-            app: App::new(headless, foreground, background),
+            app: App::new(headless, foreground, background, io),
             reactor,
         }
     }
@@ -188,8 +189,6 @@ impl Server {
         let local_addr = SocketAddr::new("127.0.0.1".parse().unwrap(), port);
         let listener = TcpListener::bind(&local_addr, &self.reactor)
             .map_err(|_| "Error binding address".to_owned())?;
-        let reactor = self.reactor.clone();
-        let app = self.app.clone();
         let handle_incoming = listener
             .incoming()
             .map_err(|_| eprintln!("Error accepting incoming connection"))

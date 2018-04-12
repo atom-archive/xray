@@ -1,6 +1,6 @@
 use buffer::Buffer;
 use fs;
-use futures::{Async, Future, Poll};
+use futures::{future, Async, Future, Poll};
 use fuzzy;
 use notify_cell::{NotifyCell, NotifyCellObserver, WeakNotifyCell};
 use rpc;
@@ -17,7 +17,11 @@ use ForegroundExecutor;
 pub type TreeId = usize;
 
 pub trait Project {
-    fn open_buffer(&self, tree_id: TreeId, relative_path: &Path) -> Result<Buffer, OpenError>;
+    fn open_buffer(
+        &self,
+        tree_id: TreeId,
+        relative_path: &Path,
+    ) -> Box<Future<Item = Buffer, Error = OpenError>>;
     fn search_paths(
         &self,
         needle: &str,
@@ -30,6 +34,7 @@ pub trait Project {
 pub struct LocalProject(Rc<RefCell<LocalProjectState>>);
 
 struct LocalProjectState {
+    io: Rc<fs::IoProvider>,
     next_tree_id: TreeId,
     trees: HashMap<TreeId, Rc<fs::LocalTree>>,
 }
@@ -45,8 +50,21 @@ pub struct ProjectService {
 }
 
 #[derive(Deserialize, Serialize)]
-pub struct ProjectServiceState {
+pub struct RpcState {
     trees: HashMap<TreeId, rpc::ServiceId>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub enum RpcRequest {
+    OpenBuffer {
+        tree_id: TreeId,
+        relative_path: PathBuf,
+    },
+}
+
+#[derive(Deserialize, Serialize)]
+pub enum RpcResponse {
+    OpenedBuffer(rpc::ServiceId),
 }
 
 pub struct PathSearch {
@@ -93,8 +111,12 @@ pub enum OpenError {
 }
 
 impl LocalProject {
-    pub fn new<T: 'static + fs::LocalTree>(trees: Vec<T>) -> Self {
+    pub fn new<T>(io: Rc<fs::IoProvider>, trees: Vec<T>) -> Self
+    where
+        T: 'static + fs::LocalTree,
+    {
         let project = LocalProject(Rc::new(RefCell::new(LocalProjectState {
+            io,
             next_tree_id: 0,
             trees: HashMap::new(),
         })));
@@ -113,23 +135,31 @@ impl LocalProject {
 }
 
 impl Project for LocalProject {
-    fn open_buffer(&self, tree_id: TreeId, relative_path: &Path) -> Result<Buffer, OpenError> {
+    fn open_buffer(
+        &self,
+        tree_id: TreeId,
+        relative_path: &Path,
+    ) -> Box<Future<Item = Buffer, Error = OpenError>> {
         let state = self.0.borrow();
-        let tree = state.trees.get(&tree_id).ok_or(OpenError::TreeNotFound)?;
-        let mut absolute_path = tree.path().to_owned();
-        absolute_path.push(relative_path);
 
-        let file = File::open(absolute_path).map_err(|error| OpenError::IoError(error))?;
-        let mut buf_reader = BufReader::new(file);
-        let mut contents = String::new();
-        buf_reader
-            .read_to_string(&mut contents)
-            .map_err(|error| OpenError::IoError(error))?;
+        if let Some(tree) = state.trees.get(&tree_id) {
+            let mut absolute_path = tree.path().to_owned();
+            absolute_path.push(relative_path);
 
-        let mut buffer = Buffer::new(1);
-        buffer.splice(0..0, contents.as_str());
-
-        Ok(buffer)
+            Box::new(
+                state
+                    .io
+                    .read(&absolute_path)
+                    .map_err(|error| OpenError::IoError(error))
+                    .and_then(|content| {
+                        let mut buffer = Buffer::new(1);
+                        buffer.splice(0..0, content.as_str());
+                        Ok(buffer)
+                    }),
+            )
+        } else {
+            Box::new(future::err(OpenError::TreeNotFound))
+        }
     }
 
     fn search_paths(
@@ -181,7 +211,7 @@ impl RemoteProject {
 }
 
 impl Project for RemoteProject {
-    fn open_buffer(&self, _tree_id: TreeId, _relative_path: &Path) -> Result<Buffer, OpenError> {
+    fn open_buffer(&self, tree_id: TreeId, relative_path: &Path) -> Box<Future<Item = Buffer, Error = OpenError>> {
         unimplemented!()
     }
 
@@ -224,13 +254,13 @@ impl ProjectService {
 }
 
 impl rpc::server::Service for ProjectService {
-    type State = ProjectServiceState;
-    type Update = ProjectServiceState;
-    type Request = ();
-    type Response = ();
+    type State = RpcState;
+    type Update = RpcState;
+    type Request = RpcRequest;
+    type Response = RpcResponse;
 
     fn init(&mut self, connection: &rpc::server::Connection) -> Self::State {
-        let mut state = ProjectServiceState {
+        let mut state = RpcState {
             trees: HashMap::new(),
         };
         for (tree_id, tree) in &self.project.0.borrow().trees {
@@ -483,7 +513,7 @@ impl Eq for PathSearchResult {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs::tests::TestTree;
+    use fs::tests::{TestIoProvider, TestTree};
     use tokio_core::reactor;
 
     #[test]
@@ -506,7 +536,7 @@ mod tests {
                 }
             }),
         );
-        let project = LocalProject::new(vec![tree]);
+        let project = LocalProject::new(Rc::new(TestIoProvider::new()), vec![tree]);
         let (mut search, observer) = project.search_paths("sub2", 10, true);
 
         assert_eq!(search.poll(), Ok(Async::Ready(())));
@@ -621,7 +651,7 @@ mod tests {
         );
         tree_2.populated.set(true);
 
-        LocalProject::new(vec![tree_1, tree_2])
+        LocalProject::new(Rc::new(TestIoProvider::new()), vec![tree_1, tree_2])
     }
 
     fn summarize_results(

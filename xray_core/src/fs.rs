@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json;
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
+use std::io;
 use std::iter::Iterator;
 use std::path::Path;
 use std::rc::Rc;
@@ -26,6 +27,10 @@ pub trait LocalTree: Tree {
     fn path(&self) -> &Path;
     fn populated(&self) -> Box<Future<Item = (), Error = ()>>;
     fn as_tree(&self) -> &Tree;
+}
+
+pub trait IoProvider {
+    fn read(&self, path: &Path) -> Box<Future<Item = String, Error = io::Error>>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -286,12 +291,13 @@ impl Tree for RemoteTree {
 pub(crate) mod tests {
     use super::*;
     use bincode::{deserialize, serialize};
-    use futures::future;
+    use futures::{future, IntoFuture};
     use notify_cell::NotifyCell;
     use rpc;
     use std::path::PathBuf;
     use stream_ext::StreamExt;
     use tokio_core::reactor;
+    use std::collections::HashMap;
 
     #[test]
     fn test_insert() {
@@ -372,6 +378,10 @@ pub(crate) mod tests {
         path: PathBuf,
         root: Entry,
         pub populated: NotifyCell<bool>,
+    }
+
+    pub struct TestIoProvider {
+        files: HashMap<PathBuf, String>,
     }
 
     impl TestTree {
@@ -458,6 +468,30 @@ pub(crate) mod tests {
                 && self.is_dir() == other.is_dir()
                 && self.is_ignored() == other.is_ignored()
                 && self.children() == other.children()
+        }
+    }
+
+    impl TestIoProvider {
+        pub fn new() -> Self {
+            TestIoProvider {
+                files: HashMap::new(),
+            }
+        }
+
+        pub fn write_sync<P: Into<PathBuf>, S: Into<String>>(&mut self, path: P, content: S) {
+            self.files.insert(path.into(), content.into());
+        }
+    }
+
+    impl IoProvider for TestIoProvider {
+        fn read(&self, path: &Path) -> Box<Future<Item = String, Error = io::Error>> {
+            Box::new(
+                self.files
+                    .get(path)
+                    .cloned()
+                    .ok_or(io::Error::new(io::ErrorKind::NotFound, "Path not found"))
+                    .into_future()
+            )
         }
     }
 }
