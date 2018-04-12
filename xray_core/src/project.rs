@@ -89,7 +89,7 @@ enum MatchMarker {
 #[derive(Debug)]
 pub enum OpenError {
     TreeNotFound,
-    IOError(io::Error),
+    IoError(io::Error),
 }
 
 impl LocalProject {
@@ -119,12 +119,12 @@ impl Project for LocalProject {
         let mut absolute_path = tree.path().to_owned();
         absolute_path.push(relative_path);
 
-        let file = File::open(absolute_path).map_err(|error| OpenError::IOError(error))?;
+        let file = File::open(absolute_path).map_err(|error| OpenError::IoError(error))?;
         let mut buf_reader = BufReader::new(file);
         let mut contents = String::new();
         buf_reader
             .read_to_string(&mut contents)
-            .map_err(|error| OpenError::IOError(error))?;
+            .map_err(|error| OpenError::IoError(error))?;
 
         let mut buffer = Buffer::new(1);
         buffer.splice(0..0, contents.as_str());
