@@ -12,7 +12,17 @@ use std::sync::Arc;
 
 pub type TreeId = usize;
 
-pub struct Project {
+pub trait Project {
+    fn open_buffer(&self, tree_id: TreeId, relative_path: &Path) -> Result<Buffer, OpenError>;
+    fn search_paths(
+        &self,
+        needle: &str,
+        max_results: usize,
+        include_ignored: bool,
+    ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
+}
+
+pub struct LocalProject {
     next_tree_id: TreeId,
     trees: HashMap<TreeId, Box<fs::LocalTree>>,
 }
@@ -60,7 +70,7 @@ pub enum OpenError {
     IOError(io::Error),
 }
 
-impl Project {
+impl LocalProject {
     pub fn new<T: 'static + fs::LocalTree>(trees: Vec<T>) -> Self {
         let mut project = Self {
             next_tree_id: 0,
@@ -77,12 +87,10 @@ impl Project {
         self.next_tree_id += 1;
         self.trees.insert(id, Box::new(tree));
     }
+}
 
-    pub fn trees(&self) -> Vec<&fs::Tree> {
-        self.trees.values().map(|tree| tree.as_tree()).collect()
-    }
-
-    pub fn open_buffer(&self, tree_id: TreeId, relative_path: &Path) -> Result<Buffer, OpenError> {
+impl Project for LocalProject {
+    fn open_buffer(&self, tree_id: TreeId, relative_path: &Path) -> Result<Buffer, OpenError> {
         let tree = self.trees.get(&tree_id).ok_or(OpenError::TreeNotFound)?;
         let mut absolute_path = tree.path().to_owned();
         absolute_path.push(relative_path);
@@ -100,7 +108,7 @@ impl Project {
         Ok(buffer)
     }
 
-    pub fn search_paths(
+    fn search_paths(
         &self,
         needle: &str,
         max_results: usize,
@@ -248,11 +256,11 @@ impl PathSearch {
                             Some(&MatchMarker::ContainsMatch) => {
                                 child_is_match = false;
                                 descend = true;
-                            },
+                            }
                             None => {
                                 child_is_match = false;
                                 descend = false;
-                            },
+                            }
                         }
                     };
 
@@ -363,7 +371,6 @@ impl Eq for PathSearchResult {}
 mod tests {
     use super::*;
     use fs::tests::TestTree;
-    use futures::Stream;
 
     #[test]
     fn test_search_one_tree() {
@@ -385,7 +392,7 @@ mod tests {
                 }
             }),
         );
-        let project = Project::new(vec![tree]);
+        let project = LocalProject::new(vec![tree]);
         let (mut search, observer) = project.search_paths("sub2", 10, true);
 
         assert_eq!(search.poll(), Ok(Async::Ready(())));
@@ -436,7 +443,7 @@ mod tests {
                 }
             }),
         );
-        let project = Project::new(vec![tree_1, tree_2]);
+        let project = LocalProject::new(vec![tree_1, tree_2]);
 
         let (mut search, observer) = project.search_paths("bar", 10, true);
         assert_eq!(search.poll(), Ok(Async::Ready(())));
@@ -468,7 +475,7 @@ mod tests {
     }
 
     fn summarize_results<'a>(
-        project: &Project,
+        project: &LocalProject,
         results: &'a PathSearchStatus,
     ) -> Option<Vec<(String, String, Vec<usize>)>> {
         match results {

@@ -4,28 +4,18 @@ use fs;
 use futures::{Poll, Stream};
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
-use project::{PathSearch, PathSearchStatus, Project, TreeId};
+use project::{LocalProject, PathSearch, PathSearchStatus, Project, TreeId};
 use serde_json;
 use std::cell::{Ref, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 use window::{View, ViewHandle, WeakViewHandle, Window};
 
-pub trait Workspace {
-    fn search_paths(
-        &self,
-        needle: &str,
-        max_results: usize,
-        include_ignored: bool,
-    ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
-    fn project(&self) -> Ref<Project>;
-}
-
 #[derive(Clone)]
-pub struct LocalWorkspace(Rc<RefCell<LocalWorkspaceState>>);
+pub struct Workspace(Rc<RefCell<WorkspaceState>>);
 
-struct LocalWorkspaceState {
-    project: Project,
+struct WorkspaceState {
+    project: Box<Project>,
 }
 
 pub struct WorkspaceView {
@@ -42,15 +32,13 @@ enum WorkspaceViewAction {
     ToggleFileFinder,
 }
 
-impl LocalWorkspace {
+impl Workspace {
     pub fn new<T: 'static + fs::LocalTree>(roots: Vec<T>) -> Self {
-        LocalWorkspace(Rc::new(RefCell::new(LocalWorkspaceState {
-            project: Project::new(roots),
+        Workspace(Rc::new(RefCell::new(WorkspaceState {
+            project: Box::new(LocalProject::new(roots)),
         })))
     }
-}
 
-impl Workspace for LocalWorkspace {
     fn search_paths(
         &self,
         needle: &str,
@@ -64,12 +52,12 @@ impl Workspace for LocalWorkspace {
     }
 
     fn project(&self) -> Ref<Project> {
-        Ref::map(self.0.borrow(), |state| &state.project)
+        Ref::map(self.0.borrow(), |state| state.project.as_ref())
     }
 }
 
 impl WorkspaceView {
-    pub fn new<T: 'static + Workspace>(workspace: T) -> Self {
+    pub fn new(workspace: Workspace) -> Self {
         WorkspaceView {
             workspace: Box::new(workspace),
             modal_panel: None,

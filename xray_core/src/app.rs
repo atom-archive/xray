@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io;
 use std::rc::Rc;
 use window::{ViewId, Window, WindowUpdateStream};
-use workspace::{LocalWorkspace, Workspace, WorkspaceView};
+use workspace::{Workspace, WorkspaceView};
 use BackgroundExecutor;
 use ForegroundExecutor;
 
@@ -104,10 +104,10 @@ impl App {
     }
 
     pub fn open_workspace<T: 'static + fs::LocalTree>(&self, roots: Vec<T>) {
-        self.add_workspace(LocalWorkspace::new(roots));
+        self.add_workspace(Workspace::new(roots));
     }
 
-    fn add_workspace<T: 'static + Workspace + Clone>(&self, workspace: T) {
+    fn add_workspace(&self, workspace: Workspace) {
         let mut state = self.0.borrow_mut();
         if !state.headless {
             let mut window = Window::new(Some(state.background.clone()), 0.0);
