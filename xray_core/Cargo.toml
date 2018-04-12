@@ -17,3 +17,8 @@ smallvec = "0.6.0"
 rand = "0.3"
 futures-cpupool = "0.1"
 tokio-core = "0.1"
+criterion = "0.2"
+
+[[bench]]
+name = "bench"
+harness = false
