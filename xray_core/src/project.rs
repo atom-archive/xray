@@ -31,7 +31,7 @@ pub struct LocalProject(Rc<RefCell<LocalProjectState>>);
 
 struct LocalProjectState {
     next_tree_id: TreeId,
-    trees: HashMap<TreeId, Box<fs::LocalTree>>,
+    trees: HashMap<TreeId, Rc<fs::LocalTree>>,
 }
 
 pub struct RemoteProject {
@@ -41,6 +41,7 @@ pub struct RemoteProject {
 
 pub struct ProjectService {
     project: LocalProject,
+    tree_services: HashMap<TreeId, rpc::server::ServiceHandle>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -93,7 +94,7 @@ pub enum OpenError {
 
 impl LocalProject {
     pub fn new<T: 'static + fs::LocalTree>(trees: Vec<T>) -> Self {
-        let mut project = LocalProject(Rc::new(RefCell::new(LocalProjectState {
+        let project = LocalProject(Rc::new(RefCell::new(LocalProjectState {
             next_tree_id: 0,
             trees: HashMap::new(),
         })));
@@ -107,7 +108,7 @@ impl LocalProject {
         let mut state = self.0.borrow_mut();
         let id = state.next_tree_id;
         state.next_tree_id += 1;
-        state.trees.insert(id, Box::new(tree));
+        state.trees.insert(id, Rc::new(tree));
     }
 }
 
@@ -213,21 +214,39 @@ impl Project for RemoteProject {
     }
 }
 
+impl ProjectService {
+    fn new(project: LocalProject) -> Self {
+        Self {
+            project,
+            tree_services: HashMap::new(),
+        }
+    }
+}
+
 impl rpc::server::Service for ProjectService {
     type State = ProjectServiceState;
     type Update = ProjectServiceState;
     type Request = ();
     type Response = ();
 
-    fn init(&mut self, _connection: &rpc::server::Connection) -> Self::State {
-        unimplemented!()
+    fn init(&mut self, connection: &rpc::server::Connection) -> Self::State {
+        let mut state = ProjectServiceState {
+            trees: HashMap::new(),
+        };
+        for (tree_id, tree) in &self.project.0.borrow().trees {
+            let handle = connection.add_service(fs::TreeService::new(tree.clone()));
+            state.trees.insert(*tree_id, handle.service_id);
+            self.tree_services.insert(*tree_id, handle);
+        }
+
+        state
     }
 
     fn poll_update(
         &mut self,
         _connection: &rpc::server::Connection,
     ) -> Async<Option<Self::Update>> {
-        unimplemented!()
+        Async::NotReady
     }
 }
 
@@ -562,10 +581,18 @@ mod tests {
         let handle = Rc::new(reactor.handle());
 
         let local_project = build_project();
-
         let remote_project = RemoteProject::new(
             handle,
             rpc::tests::connect(&mut reactor, ProjectService::new(local_project.clone())),
+        ).unwrap();
+
+        let (mut local_search, local_observer) = local_project.search_paths("bar", 10, true);
+        let (mut remote_search, remote_observer) = remote_project.search_paths("bar", 10, true);
+        assert_eq!(local_search.poll(), Ok(Async::Ready(())));
+        assert_eq!(remote_search.poll(), Ok(Async::Ready(())));
+        assert_eq!(
+            summarize_results(&remote_observer.get()),
+            summarize_results(&local_observer.get())
         );
     }
 
@@ -582,6 +609,8 @@ mod tests {
                 }
             }),
         );
+        tree_1.populated.set(true);
+
         let tree_2 = TestTree::from_json(
             "/Users/someone/bar",
             json!({
@@ -593,6 +622,8 @@ mod tests {
                 }
             }),
         );
+        tree_2.populated.set(true);
+
         LocalProject::new(vec![tree_1, tree_2])
     }
 

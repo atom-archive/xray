@@ -1,4 +1,4 @@
-use futures::{Async, Future, Stream};
+use futures::{future, Async, Future, Stream};
 use notify_cell::NotifyCell;
 use parking_lot::RwLock;
 use rpc::{client, server};
@@ -370,7 +370,7 @@ pub(crate) mod tests {
     pub struct TestTree {
         path: PathBuf,
         root: Entry,
-        populated: NotifyCell<bool>,
+        pub populated: NotifyCell<bool>,
     }
 
     impl TestTree {
@@ -397,7 +397,6 @@ pub(crate) mod tests {
         fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
             unimplemented!()
         }
-
     }
 
     impl LocalTree for TestTree {
@@ -406,13 +405,17 @@ pub(crate) mod tests {
         }
 
         fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
-            Box::new(
-                self.populated
-                    .observe()
-                    .skip_while(|p| Ok(!p))
-                    .into_future()
-                    .then(|_| Ok(())),
-            )
+            if self.populated.get() {
+                Box::new(future::ok(()))
+            } else {
+                Box::new(
+                    self.populated
+                        .observe()
+                        .skip_while(|p| Ok(!p))
+                        .into_future()
+                        .then(|_| Ok(())),
+                )
+            }
         }
 
         fn as_tree(&self) -> &Tree {
