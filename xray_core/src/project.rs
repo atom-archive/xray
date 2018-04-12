@@ -491,20 +491,23 @@ mod tests {
 
         assert_eq!(search.poll(), Ok(Async::Ready(())));
         assert_eq!(
-            summarize_results(&project, &observer.get()),
+            summarize_results(&observer.get()),
             Some(vec![
                 (
-                    "/Users/someone/tree/root-2/subdir-2/file-3".to_string(),
+                    0,
+                    "root-2/subdir-2/file-3".to_string(),
                     "root-2/subdir-2/file-3".to_string(),
                     vec![7, 8, 9, 14],
                 ),
                 (
-                    "/Users/someone/tree/root-2/subdir-2/file-4".to_string(),
+                    0,
+                    "root-2/subdir-2/file-4".to_string(),
                     "root-2/subdir-2/file-4".to_string(),
                     vec![7, 8, 9, 14],
                 ),
                 (
-                    "/Users/someone/tree/root-1/subdir-1/file-2".to_string(),
+                    0,
+                    "root-1/subdir-1/file-2".to_string(),
                     "root-1/subdir-1/file-2".to_string(),
                     vec![7, 8, 9, 21],
                 ),
@@ -519,25 +522,29 @@ mod tests {
         let (mut search, observer) = project.search_paths("bar", 10, true);
         assert_eq!(search.poll(), Ok(Async::Ready(())));
         assert_eq!(
-            summarize_results(&project, &observer.get()),
+            summarize_results(&observer.get()),
             Some(vec![
                 (
-                    "/Users/someone/bar/subdir-b/subdir-2/foo".to_string(),
+                    1,
+                    "subdir-b/subdir-2/foo".to_string(),
                     "bar/subdir-b/subdir-2/foo".to_string(),
                     vec![0, 1, 2],
                 ),
                 (
-                    "/Users/someone/foo/subdir-a/subdir-1/bar".to_string(),
+                    0,
+                    "subdir-a/subdir-1/bar".to_string(),
                     "foo/subdir-a/subdir-1/bar".to_string(),
                     vec![22, 23, 24],
                 ),
                 (
-                    "/Users/someone/bar/subdir-b/subdir-2/file-3".to_string(),
+                    1,
+                    "subdir-b/subdir-2/file-3".to_string(),
                     "bar/subdir-b/subdir-2/file-3".to_string(),
                     vec![0, 1, 2],
                 ),
                 (
-                    "/Users/someone/foo/subdir-a/subdir-1/file-1".to_string(),
+                    0,
+                    "subdir-a/subdir-1/file-1".to_string(),
                     "foo/subdir-a/subdir-1/file-1".to_string(),
                     vec![6, 11, 18],
                 ),
@@ -590,21 +597,19 @@ mod tests {
     }
 
     fn summarize_results(
-        project: &LocalProject,
         results: &PathSearchStatus,
-    ) -> Option<Vec<(String, String, Vec<usize>)>> {
+    ) -> Option<Vec<(TreeId, String, String, Vec<usize>)>> {
         match results {
             &PathSearchStatus::Pending => None,
             &PathSearchStatus::Ready(ref results) => {
                 let summary = results
                     .iter()
                     .map(|result| {
-                        let tree = project.0.borrow().trees.get(&result.tree_id).unwrap();
-                        let mut absolute_path = PathBuf::from(tree.path());
-                        absolute_path.push(&result.relative_path);
-                        let absolute_path = absolute_path.to_str().unwrap().to_string();
+                        let tree_id = result.tree_id;
+                        let relative_path = result.relative_path.to_str().unwrap().to_string();
                         let display_path = result.display_path.to_str().unwrap().to_string();
-                        (absolute_path, display_path, result.positions.clone())
+                        let positions = result.positions.clone();
+                        (tree_id, relative_path, display_path, positions)
                     })
                     .collect();
                 Some(summary)
