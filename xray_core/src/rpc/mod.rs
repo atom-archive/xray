@@ -2,7 +2,7 @@ pub mod client;
 mod messages;
 pub mod server;
 
-pub use self::messages::{ServiceId, Response};
+pub use self::messages::{Response, ServiceId};
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -62,6 +62,64 @@ pub(crate) mod tests {
 
         drop(child_client);
         assert!(client.get_service::<TestService>(1).is_none());
+    }
+
+    #[test]
+    fn test_add_service_on_init_or_update() {
+        struct NoopService {
+            init_called: bool,
+            services_to_add_on_init: usize,
+            services_to_add_on_update: usize,
+            child_services: Vec<server::ServiceHandle>,
+        }
+
+        impl NoopService {
+            fn new(services_to_add_on_init: usize, services_to_add_on_update: usize) -> Self {
+                Self {
+                    init_called: false,
+                    services_to_add_on_init,
+                    services_to_add_on_update,
+                    child_services: Vec::new(),
+                }
+            }
+        }
+
+        impl server::Service for NoopService {
+            type State = ();
+            type Update = ();
+            type Request = ();
+            type Response = ();
+
+            fn init(&mut self, connection: &server::Connection) -> Self::State {
+                self.init_called = true;
+                while self.services_to_add_on_init != 0 {
+                    self.child_services
+                        .push(connection.add_service(NoopService::new(0, 0)));
+                    self.services_to_add_on_init -= 1;
+                }
+                ()
+            }
+
+            fn poll_update(
+                &mut self,
+                connection: &server::Connection,
+            ) -> Async<Option<Self::Update>> {
+                assert!(self.init_called);
+                while self.services_to_add_on_update != 0 {
+                    self.child_services
+                        .push(connection.add_service(NoopService::new(0, 0)));
+                    self.services_to_add_on_update -= 1;
+                }
+                Async::NotReady
+            }
+        }
+
+        let mut reactor = reactor::Core::new().unwrap();
+        let client = connect(&mut reactor, NoopService::new(1, 2));
+        assert!(client.get_service::<NoopService>(1).is_some());
+        assert!(client.get_service::<NoopService>(2).is_some());
+        assert!(client.get_service::<NoopService>(3).is_some());
+        assert!(client.get_service::<NoopService>(4).is_none());
     }
 
     #[test]

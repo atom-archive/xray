@@ -144,34 +144,34 @@ impl Connection {
     }
 
     fn poll_outgoing(&mut self) -> Poll<Option<Vec<u8>>, ()> {
-        let mut insertions = HashMap::new();
-        let mut inserted = HashSet::new();
-        mem::swap(&mut inserted, &mut self.state.borrow_mut().inserted);
-        for id in &inserted {
-            if let Some(service) = self.get_service(*id) {
-                insertions.insert(*id, service.borrow_mut().init(self));
+        let existing_service_ids = {
+            let state = self.state.borrow();
+            state
+                .services
+                .keys()
+                .cloned()
+                .filter(|id| !state.inserted.contains(id))
+                .collect::<Vec<ServiceId>>()
+        };
+
+        let mut updates: HashMap<ServiceId, Vec<Vec<u8>>> = HashMap::new();
+        for id in existing_service_ids {
+            if let Some(service) = self.get_service(id) {
+                while let Async::Ready(Some(update)) = service.borrow_mut().poll_update(self) {
+                    updates.entry(id).or_insert(Vec::new()).push(update);
+                }
             }
         }
-        let mut updates: HashMap<ServiceId, Vec<Vec<u8>>> = HashMap::new();
-        let service_ids = self.state
-            .borrow()
-            .services
-            .keys()
-            .cloned()
-            .collect::<Vec<ServiceId>>();
-        for id in service_ids {
-            {
+
+        let mut insertions = HashMap::new();
+        while self.state.borrow().inserted.len() > 0 {
+            let inserted = mem::replace(&mut self.state.borrow_mut().inserted, HashSet::new());
+            for id in inserted {
                 if let Some(service) = self.get_service(id) {
-                    loop {
-                        match service.borrow_mut().poll_update(self) {
-                            Async::Ready(Some(update)) => {
-                                if !inserted.contains(&id) {
-                                    updates.entry(id).or_insert(Vec::new()).push(update);
-                                }
-                            }
-                            Async::Ready(None) => break,
-                            Async::NotReady => break,
-                        }
+                    let mut service = service.borrow_mut();
+                    insertions.insert(id, service.init(self));
+                    while let Async::Ready(Some(update)) = service.poll_update(self) {
+                        updates.entry(id).or_insert(Vec::new()).push(update);
                     }
                 }
             }
