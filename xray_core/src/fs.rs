@@ -1,4 +1,4 @@
-use futures::{future, Async, Future, Stream};
+use futures::{Async, Future, Stream};
 use notify_cell::NotifyCell;
 use parking_lot::RwLock;
 use rpc::{client, server};
@@ -286,6 +286,7 @@ impl Tree for RemoteTree {
 pub(crate) mod tests {
     use super::*;
     use bincode::{deserialize, serialize};
+    use futures::future;
     use notify_cell::NotifyCell;
     use rpc;
     use std::path::PathBuf;

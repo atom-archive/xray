@@ -484,6 +484,7 @@ impl Eq for PathSearchResult {}
 mod tests {
     use super::*;
     use fs::tests::TestTree;
+    use tokio_core::reactor;
 
     #[test]
     fn test_search_one_tree() {
@@ -573,10 +574,6 @@ mod tests {
 
     #[test]
     fn test_replication() {
-        use super::*;
-        use stream_ext::StreamExt;
-        use tokio_core::reactor;
-
         let mut reactor = reactor::Core::new().unwrap();
         let handle = Rc::new(reactor.handle());
 

@@ -260,7 +260,7 @@ impl server::Service for AppService {
         self.state()
     }
 
-    fn poll_update(&mut self, connection: &server::Connection) -> Async<Option<Self::Update>> {
+    fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
         match self.updates.poll() {
             Ok(Async::Ready(Some(()))) => Async::Ready(Some(self.state())),
             Ok(Async::Ready(None)) | Err(_) => Async::Ready(None),
