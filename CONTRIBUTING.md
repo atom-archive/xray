@@ -28,31 +28,37 @@ Later versions may work, but you should ideally run the build with the same vers
 
 You can install Rust via [`rustup`](https://www.rustup.rs/). We currently build correctly on Rust 1.24.1, but frequently build on the nightly channel in development to enable formatting of generated bindings. The nightly channel should not be *required* however, and if it is, that's a bug.
 
-### Build the Cargo workspace
+### Run the build script
 
-This repository contains several components in top-level folders prefixed with `xray_*`. To build all of the rust components, simply run this in the root of the repository:
-
-```sh
-cargo build
-```
-
-### Install the Electron app's dependencies
-
-You'll need to install the Electron's app's dependencies with npm by running this:
-
+This repository contains several components in top-level folders prefixed with `xray_*`. To build all of the components, simply run this in the root of the repository:
 
 ```sh
-# Move to this subdirectory of the repository:
-cd xray_electron
-
-# Install and build dependencies:
-npm install
+script/build
 ```
 
-### Launch via xray_cli
+To build a release version (which will be much faster):
+
+```sh
+script/build --release
+```
+
+## Running
 
 We currently *only* support launching the application via the CLI. For this to work, you need to set the `XRAY_SRC_PATH` environment variable to the location of your repository. The CLI also currently *requires* an argument:
 
 ```sh
-XRAY_SRC_PATH=. cargo run -p xray_cli .
+XRAY_SRC_PATH=. script/xray .
 ```
+
+That assumes you built with `--release`. To run the debug version, use `xray_debug` instead:
+
+```sh
+XRAY_SRC_PATH=. script/xray_debug .
+```
+
+## Running tests and benchmarks
+
+* All tests: `script/test`
+* Rust tests: `cargo test` in the root of the repository or a Rust subfolder.
+* Front-end tests: `cd xray_electron && npm test`
+* Benchmarks: `cargo bench`
