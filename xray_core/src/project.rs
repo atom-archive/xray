@@ -144,7 +144,7 @@ impl Project for LocalProject {
                     .read(&absolute_path)
                     .map_err(|error| OpenError::IoError(error))
                     .and_then(|content| {
-                        let mut buffer = Buffer::new(1);
+                        let mut buffer = Buffer::new();
                         buffer.splice(0..0, content.as_str());
                         Ok(buffer)
                     }),

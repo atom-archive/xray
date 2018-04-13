@@ -1,3 +1,4 @@
+use super::rpc::client;
 use super::tree::{self, SeekBias, Tree};
 use notify_cell::NotifyCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -6,13 +7,11 @@ use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::iter;
 use std::ops::{Add, AddAssign, Range, Sub};
-use std::result;
 use std::sync::Arc;
 
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
 type LamportTimestamp = usize;
-type Result<T> = result::Result<T, Error>;
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum Error {
@@ -23,6 +22,7 @@ pub enum Error {
 #[derive(Debug)]
 pub struct Buffer {
     replica_id: ReplicaId,
+    next_replica_id: Option<ReplicaId>,
     local_clock: LocalTimestamp,
     lamport_clock: LamportTimestamp,
     fragments: Tree<Fragment>,
@@ -32,7 +32,7 @@ pub struct Buffer {
     pub version: NotifyCell<Version>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Version(LocalTimestamp);
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
@@ -132,29 +132,41 @@ struct InsertionSplitSummary {
 struct InsertionOffset(usize);
 
 mod rpc {
-    use super::{Buffer, ChangeId, FragmentId, Insertion, InsertionSplit};
+    use super::{Buffer, ChangeId, FragmentId, Insertion, InsertionSplit, LamportTimestamp,
+                ReplicaId, Version};
     use futures::Async;
     use rpc;
+    use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
+    use std::rc::Rc;
 
     #[derive(Serialize, Deserialize)]
     pub struct State {
-        fragments: Vec<Fragment>,
-        insertions: HashMap<ChangeId, Insertion>,
-        insertion_splits: HashMap<ChangeId, Vec<InsertionSplit>>,
+        pub(super) replica_id: ReplicaId,
+        pub(super) fragments: Vec<Fragment>,
+        pub(super) insertions: HashMap<ChangeId, Insertion>,
+        pub(super) insertion_splits: HashMap<ChangeId, Vec<InsertionSplit>>,
+        pub(super) lamport_clock: LamportTimestamp,
+        pub(super) version: Version,
     }
 
     #[derive(Serialize, Deserialize)]
-    pub struct Fragment {
-        id: FragmentId,
-        insertion_id: ChangeId,
-        start_offset: usize,
-        end_offset: usize,
-        deletions: HashSet<ChangeId>,
+    pub(super) struct Fragment {
+        pub id: FragmentId,
+        pub insertion_id: ChangeId,
+        pub start_offset: usize,
+        pub end_offset: usize,
+        pub deletions: HashSet<ChangeId>,
     }
 
     pub struct Service {
-        buffer: Buffer,
+        buffer: Rc<RefCell<Buffer>>,
+    }
+
+    impl Service {
+        pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
+            Self { buffer }
+        }
     }
 
     impl rpc::server::Service for Service {
@@ -164,13 +176,19 @@ mod rpc {
         type Response = ();
 
         fn init(&mut self, _: &rpc::server::Connection) -> Self::State {
+            let mut buffer = self.buffer.borrow_mut();
             let mut state = State {
+                replica_id: buffer
+                    .next_replica_id()
+                    .expect("Cannot replicate a remote buffer"),
                 fragments: Vec::new(),
                 insertions: HashMap::new(),
                 insertion_splits: HashMap::new(),
+                lamport_clock: buffer.lamport_clock,
+                version: buffer.version.get(),
             };
 
-            for fragment in self.buffer.fragments.iter() {
+            for fragment in buffer.fragments.iter() {
                 state
                     .insertions
                     .entry(fragment.insertion.id)
@@ -185,7 +203,7 @@ mod rpc {
                 });
             }
 
-            for (insertion_id, splits) in &self.buffer.insertion_splits {
+            for (insertion_id, splits) in &buffer.insertion_splits {
                 state
                     .insertion_splits
                     .insert(*insertion_id, splits.iter().cloned().collect());
@@ -201,9 +219,8 @@ mod rpc {
 }
 
 impl Buffer {
-    pub fn new(replica_id: ReplicaId) -> Self {
-        assert!(replica_id > 0);
-        let mut fragments = Tree::<Fragment>::new();
+    pub fn new() -> Self {
+        let mut fragments = Tree::new();
 
         // Push start sentinel.
         fragments.push(Fragment::new(
@@ -224,8 +241,9 @@ impl Buffer {
             },
         ));
 
-        Buffer {
-            replica_id,
+        Self {
+            replica_id: 1,
+            next_replica_id: Some(2),
             local_clock: 0,
             lamport_clock: 0,
             fragments,
@@ -236,11 +254,54 @@ impl Buffer {
         }
     }
 
+    pub fn remote(client: client::Service<rpc::Service>) -> Option<Buffer> {
+        client.state().map(|state| {
+            let mut insertions = HashMap::new();
+            for (change_id, insertion) in state.insertions {
+                insertions.insert(change_id, Arc::new(insertion));
+            }
+
+            let mut fragments = Tree::new();
+            fragments.extend(state.fragments.into_iter().map(|fragment| Fragment {
+                id: fragment.id,
+                insertion: insertions.get(&fragment.insertion_id).unwrap().clone(),
+                start_offset: fragment.start_offset,
+                end_offset: fragment.end_offset,
+                deletions: fragment.deletions,
+            }));
+
+            let mut insertion_splits = HashMap::new();
+            for (insertion_id, splits) in state.insertion_splits {
+                let mut split_tree = Tree::new();
+                split_tree.extend(splits);
+                insertion_splits.insert(insertion_id, split_tree);
+            }
+
+            Buffer {
+                replica_id: state.replica_id,
+                next_replica_id: None,
+                local_clock: 0,
+                lamport_clock: state.lamport_clock,
+                fragments,
+                insertion_splits,
+                anchor_cache: RefCell::new(HashMap::new()),
+                offset_cache: RefCell::new(HashMap::new()),
+                version: NotifyCell::new(state.version),
+            }
+        })
+    }
+
+    pub fn next_replica_id(&mut self) -> Result<ReplicaId, ()> {
+        let replica_id = self.next_replica_id.ok_or(())?;
+        self.next_replica_id = Some(replica_id + 1);
+        Ok(replica_id)
+    }
+
     pub fn len(&self) -> usize {
         self.fragments.len::<CharacterCount>().0
     }
 
-    pub fn len_for_row(&self, row: u32) -> Result<u32> {
+    pub fn len_for_row(&self, row: u32) -> Result<u32, Error> {
         let row_start_offset = self.offset_for_point(Point::new(row, 0))?;
         let row_end_offset = if row >= self.max_point().row {
             self.len()
@@ -489,15 +550,15 @@ impl Buffer {
         )
     }
 
-    pub fn anchor_before_offset(&self, offset: usize) -> Result<Anchor> {
+    pub fn anchor_before_offset(&self, offset: usize) -> Result<Anchor, Error> {
         self.anchor_for_offset(offset, AnchorBias::Left)
     }
 
-    pub fn anchor_after_offset(&self, offset: usize) -> Result<Anchor> {
+    pub fn anchor_after_offset(&self, offset: usize) -> Result<Anchor, Error> {
         self.anchor_for_offset(offset, AnchorBias::Right)
     }
 
-    fn anchor_for_offset(&self, offset: usize, bias: AnchorBias) -> Result<Anchor> {
+    fn anchor_for_offset(&self, offset: usize, bias: AnchorBias) -> Result<Anchor, Error> {
         let max_offset = self.len();
         if offset > max_offset {
             return Err(Error::OffsetOutOfRange);
@@ -536,15 +597,15 @@ impl Buffer {
         Ok(anchor)
     }
 
-    pub fn anchor_before_point(&self, point: Point) -> Result<Anchor> {
+    pub fn anchor_before_point(&self, point: Point) -> Result<Anchor, Error> {
         self.anchor_for_point(point, AnchorBias::Left)
     }
 
-    pub fn anchor_after_point(&self, point: Point) -> Result<Anchor> {
+    pub fn anchor_after_point(&self, point: Point) -> Result<Anchor, Error> {
         self.anchor_for_point(point, AnchorBias::Right)
     }
 
-    fn anchor_for_point(&self, point: Point, bias: AnchorBias) -> Result<Anchor> {
+    fn anchor_for_point(&self, point: Point, bias: AnchorBias) -> Result<Anchor, Error> {
         let max_point = self.max_point();
         if point > max_point {
             return Err(Error::OffsetOutOfRange);
@@ -583,15 +644,15 @@ impl Buffer {
         Ok(anchor)
     }
 
-    pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<usize> {
+    pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<usize, Error> {
         Ok(self.position_for_anchor(anchor)?.0)
     }
 
-    pub fn point_for_anchor(&self, anchor: &Anchor) -> Result<Point> {
+    pub fn point_for_anchor(&self, anchor: &Anchor) -> Result<Point, Error> {
         Ok(self.position_for_anchor(anchor)?.1)
     }
 
-    fn position_for_anchor(&self, anchor: &Anchor) -> Result<(usize, Point)> {
+    fn position_for_anchor(&self, anchor: &Anchor) -> Result<(usize, Point), Error> {
         match &anchor.0 {
             &AnchorInner::Start => Ok((0, Point { row: 0, column: 0 })),
             &AnchorInner::End => Ok((self.len(), self.fragments.len::<Point>())),
@@ -648,7 +709,7 @@ impl Buffer {
         }
     }
 
-    fn offset_for_point(&self, point: Point) -> Result<usize> {
+    fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
         let cached_offset = {
             let offset_cache = self.offset_cache.try_borrow().ok();
             offset_cache
@@ -675,7 +736,7 @@ impl Buffer {
         }
     }
 
-    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<cmp::Ordering> {
+    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<cmp::Ordering, Error> {
         let a_offset = self.offset_for_anchor(a)?;
         let b_offset = self.offset_for_anchor(b)?;
         Ok(a_offset.cmp(&b_offset))
@@ -850,7 +911,7 @@ impl Text {
         self.code_units.len()
     }
 
-    fn point_for_offset(&self, offset: usize) -> Result<Point> {
+    fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
         if offset > self.len() {
             Err(Error::OffsetOutOfRange)
         } else {
@@ -868,7 +929,7 @@ impl Text {
         }
     }
 
-    fn offset_for_point(&self, point: Point) -> Result<usize> {
+    fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
         let row_start_offset = if point.row == 0 {
             0
         } else {
@@ -966,13 +1027,13 @@ impl AddAssign for FragmentId {
 fn serialize_fragment_id<S: Serializer>(
     fragment_id: &Arc<Vec<u16>>,
     serializer: S,
-) -> result::Result<S::Ok, S::Error> {
+) -> Result<S::Ok, S::Error> {
     fragment_id.serialize(serializer)
 }
 
 fn deserialize_fragment_id<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> result::Result<Arc<Vec<u16>>, D::Error> {
+) -> Result<Arc<Vec<u16>>, D::Error> {
     Ok(Arc::new(Vec::deserialize(deserializer)?))
 }
 
@@ -1008,7 +1069,7 @@ impl Fragment {
         self.deletions.is_empty()
     }
 
-    fn point_for_offset(&self, offset: usize) -> Result<Point> {
+    fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
         let text = &self.insertion.text;
         let offset_in_insertion = self.start_offset + offset;
         Ok(
@@ -1017,7 +1078,7 @@ impl Fragment {
         )
     }
 
-    fn offset_for_point(&self, point: Point) -> Result<usize> {
+    fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
         let text = &self.insertion.text;
         let point_in_insertion = text.point_for_offset(self.start_offset)? + &point;
         Ok(text.offset_for_point(point_in_insertion)? - self.start_offset)
@@ -1150,11 +1211,14 @@ mod tests {
     extern crate rand;
 
     use super::*;
+    use rpc;
     use std::cmp::Ordering;
+    use tokio_core::reactor;
+    use IntoShared;
 
     #[test]
     fn splice() {
-        let mut buffer = Buffer::new(1);
+        let mut buffer = Buffer::new();
         buffer.splice(0..0, "abc");
         assert_eq!(buffer.to_string(), "abc");
         buffer.splice(3..3, "def");
@@ -1177,7 +1241,7 @@ mod tests {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new(1);
+            let mut buffer = Buffer::new();
             let mut reference_string = String::new();
 
             for _i in 0..30 {
@@ -1209,7 +1273,7 @@ mod tests {
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new(1);
+        let mut buffer = Buffer::new();
         buffer.splice(0..0, "abcd\nefg\nhij");
         buffer.splice(12..12, "kl\nmno");
         buffer.splice(18..18, "\npqrs\n");
@@ -1226,7 +1290,7 @@ mod tests {
 
     #[test]
     fn iter_starting_at_row() {
-        let mut buffer = Buffer::new(1);
+        let mut buffer = Buffer::new();
         buffer.splice(0..0, "abcd\nefgh\nij");
         buffer.splice(12..12, "kl\nmno");
         buffer.splice(18..18, "\npqrs");
@@ -1345,7 +1409,7 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new(1);
+        let mut buffer = Buffer::new();
         buffer.splice(0..0, "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
@@ -1487,7 +1551,7 @@ mod tests {
 
     #[test]
     fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new(1);
+        let mut buffer = Buffer::new();
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
@@ -1506,5 +1570,20 @@ mod tests {
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
         assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_replication() {
+        let local_buffer = Buffer::new().into_shared();
+        local_buffer.borrow_mut().splice(0..0, "abcd\nefgh\nij");
+        local_buffer.borrow_mut().splice(12..12, "kl\nmno");
+        local_buffer.borrow_mut().splice(18..18, "\npqrs");
+        local_buffer.borrow_mut().splice(18..21, "\nPQ");
+
+        let mut reactor = reactor::Core::new().unwrap();
+        let client =
+            rpc::tests::connect(&mut reactor, super::rpc::Service::new(local_buffer.clone()));
+        let remote_buffer = Buffer::remote(client).unwrap();
+        assert_eq!(remote_buffer.to_string(), local_buffer.borrow().to_string());
     }
 }

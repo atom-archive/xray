@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_cursor_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
         editor.buffer.borrow_mut().splice(0..0, "abc");
         editor.buffer.borrow_mut().splice(3..3, "\n");
         editor.buffer.borrow_mut().splice(4..4, "\ndef");
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_selection_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
         editor.buffer.borrow_mut().splice(0..0, "abc");
         editor.buffer.borrow_mut().splice(3..3, "\n");
         editor.buffer.borrow_mut().splice(4..4, "\ndef");
@@ -816,7 +816,7 @@ mod tests {
 
     #[test]
     fn test_add_selection() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
         editor
             .buffer
             .borrow_mut()
@@ -870,7 +870,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_above() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
         editor.buffer.borrow_mut().splice(
             0..0,
             "\
@@ -939,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_below() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
         editor.buffer.borrow_mut().splice(
             0..0,
             "\
@@ -999,7 +999,7 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
 
         editor
             .buffer
@@ -1025,7 +1025,7 @@ mod tests {
 
     #[test]
     fn test_render() {
-        let buffer = Rc::new(RefCell::new(Buffer::new(1)));
+        let buffer = Rc::new(RefCell::new(Buffer::new()));
         buffer
             .borrow_mut()
             .splice(0..0, "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
@@ -1098,7 +1098,7 @@ mod tests {
     #[test]
     fn test_render_past_last_line() {
         let line_height = 4.0;
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(1))));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
 
         editor
             .set_height(3.0 * line_height)
