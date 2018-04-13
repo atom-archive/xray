@@ -1,4 +1,5 @@
-use super::messages::{MessageToClient, MessageToServer, RequestId, Response, RpcError, ServiceId};
+use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
+use super::Error;
 use bincode::{deserialize, serialize};
 use futures::stream::FuturesUnordered;
 use futures::task::{self, Task};
@@ -128,7 +129,7 @@ impl Connection {
                                 .push(Box::new(future::ok(ResponseEnvelope {
                                     request_id,
                                     service_id,
-                                    response: Err(RpcError::ServiceNotFound),
+                                    response: Err(Error::ServiceNotFound),
                                 })));
                         }
                     }

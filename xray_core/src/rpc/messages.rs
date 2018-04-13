@@ -1,3 +1,4 @@
+use super::Error;
 use std::collections::{HashMap, HashSet};
 
 pub type RequestId = usize;
@@ -14,13 +15,7 @@ pub enum MessageToClient {
     Err(String),
 }
 
-pub type Response = Result<Vec<u8>, RpcError>;
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum RpcError {
-    ServiceNotFound,
-    ServiceDropped
-}
+pub type Response = Result<Vec<u8>, Error>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MessageToServer {

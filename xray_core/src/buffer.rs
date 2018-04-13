@@ -1,4 +1,4 @@
-use super::rpc::client;
+use super::rpc::{client, Error as RpcError};
 use super::tree::{self, SeekBias, Tree};
 use notify_cell::NotifyCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -254,40 +254,40 @@ impl Buffer {
         }
     }
 
-    pub fn remote(client: client::Service<rpc::Service>) -> Option<Buffer> {
-        client.state().map(|state| {
-            let mut insertions = HashMap::new();
-            for (change_id, insertion) in state.insertions {
-                insertions.insert(change_id, Arc::new(insertion));
-            }
+    pub fn remote(client: client::Service<rpc::Service>) -> Result<Buffer, RpcError> {
+        let state = client.state()?;
 
-            let mut fragments = Tree::new();
-            fragments.extend(state.fragments.into_iter().map(|fragment| Fragment {
-                id: fragment.id,
-                insertion: insertions.get(&fragment.insertion_id).unwrap().clone(),
-                start_offset: fragment.start_offset,
-                end_offset: fragment.end_offset,
-                deletions: fragment.deletions,
-            }));
+        let mut insertions = HashMap::new();
+        for (change_id, insertion) in state.insertions {
+            insertions.insert(change_id, Arc::new(insertion));
+        }
 
-            let mut insertion_splits = HashMap::new();
-            for (insertion_id, splits) in state.insertion_splits {
-                let mut split_tree = Tree::new();
-                split_tree.extend(splits);
-                insertion_splits.insert(insertion_id, split_tree);
-            }
+        let mut fragments = Tree::new();
+        fragments.extend(state.fragments.into_iter().map(|fragment| Fragment {
+            id: fragment.id,
+            insertion: insertions.get(&fragment.insertion_id).unwrap().clone(),
+            start_offset: fragment.start_offset,
+            end_offset: fragment.end_offset,
+            deletions: fragment.deletions,
+        }));
 
-            Buffer {
-                replica_id: state.replica_id,
-                next_replica_id: None,
-                local_clock: 0,
-                lamport_clock: state.lamport_clock,
-                fragments,
-                insertion_splits,
-                anchor_cache: RefCell::new(HashMap::new()),
-                offset_cache: RefCell::new(HashMap::new()),
-                version: NotifyCell::new(state.version),
-            }
+        let mut insertion_splits = HashMap::new();
+        for (insertion_id, splits) in state.insertion_splits {
+            let mut split_tree = Tree::new();
+            split_tree.extend(splits);
+            insertion_splits.insert(insertion_id, split_tree);
+        }
+
+        Ok(Buffer {
+            replica_id: state.replica_id,
+            next_replica_id: None,
+            local_clock: 0,
+            lamport_clock: state.lamport_clock,
+            fragments,
+            insertion_splits,
+            anchor_cache: RefCell::new(HashMap::new()),
+            offset_cache: RefCell::new(HashMap::new()),
+            version: NotifyCell::new(state.version),
         })
     }
 

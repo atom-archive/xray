@@ -191,7 +191,7 @@ impl PeerList {
         self.peers
             .iter()
             .filter_map(|(name, peer)| {
-                peer.latest_state().map(|state| PeerState {
+                peer.latest_state().ok().map(|state| PeerState {
                     name: name.clone(),
                     workspaces: state
                         .workspace_ids

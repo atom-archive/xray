@@ -4,6 +4,15 @@ pub mod server;
 
 pub use self::messages::{Response, ServiceId};
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Error {
+    ConnectionDropped,
+    ServiceDropped,
+    ServiceNotFound,
+    ServiceTaken,
+    UpdatesTaken,
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -20,11 +29,11 @@ pub(crate) mod tests {
         let mut reactor = reactor::Core::new().unwrap();
         let model = TestModel::new(42);
         let client_1 = connect(&mut reactor, TestService::new(model.clone()));
-        assert_eq!(client_1.state(), Some(42));
+        assert_eq!(client_1.state(), Ok(42));
 
         model.increment_by(2);
         let client_2 = connect(&mut reactor, TestService::new(model.clone()));
-        assert_eq!(client_2.state(), Some(44));
+        assert_eq!(client_2.state(), Ok(44));
 
         model.increment_by(4);
         let mut client_1_updates = client_1.updates().unwrap();
@@ -50,18 +59,18 @@ pub(crate) mod tests {
         let response = reactor.run(request_future.unwrap()).unwrap();
         assert_eq!(response, TestServiceResponse::ServiceCreated(1));
         let child_client = client.get_service::<TestService>(1).unwrap();
-        assert_eq!(child_client.state(), Some(12));
-        assert!(client.get_service::<TestService>(1).is_none());
+        assert_eq!(child_client.state(), Ok(12));
+        assert!(client.get_service::<TestService>(1).is_err());
 
         let request_future = client.request(TestRequest::DropService(1));
         let response = reactor.run(request_future.unwrap()).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
-        assert!(child_client.state().is_none());
-        assert!(child_client.updates().is_none());
-        assert!(child_client.request(TestRequest::Increment(5)).is_none());
+        assert!(child_client.state().is_err());
+        assert!(child_client.updates().is_err());
+        assert!(child_client.request(TestRequest::Increment(5)).is_err());
 
         drop(child_client);
-        assert!(client.get_service::<TestService>(1).is_none());
+        assert!(client.get_service::<TestService>(1).is_err());
     }
 
     #[test]
@@ -116,10 +125,10 @@ pub(crate) mod tests {
 
         let mut reactor = reactor::Core::new().unwrap();
         let client = connect(&mut reactor, NoopService::new(1, 2));
-        assert!(client.get_service::<NoopService>(1).is_some());
-        assert!(client.get_service::<NoopService>(2).is_some());
-        assert!(client.get_service::<NoopService>(3).is_some());
-        assert!(client.get_service::<NoopService>(4).is_none());
+        assert!(client.get_service::<NoopService>(1).is_ok());
+        assert!(client.get_service::<NoopService>(2).is_ok());
+        assert!(client.get_service::<NoopService>(3).is_ok());
+        assert!(client.get_service::<NoopService>(4).is_err());
     }
 
     #[test]
@@ -128,11 +137,11 @@ pub(crate) mod tests {
         let model = TestModel::new(42);
         let root_client = connect(&mut reactor, TestService::new(model.clone()));
         reactor
-            .run(root_client.request(TestRequest::CreateService(12)))
+            .run(root_client.request(TestRequest::CreateService(12)).unwrap())
             .unwrap();
 
-        assert!(root_client.get_service::<TestService>(1).is_some());
-        assert!(root_client.get_service::<TestService>(1).is_none());
+        assert!(root_client.get_service::<TestService>(1).is_ok());
+        assert!(root_client.get_service::<TestService>(1).is_err());
     }
 
     #[test]

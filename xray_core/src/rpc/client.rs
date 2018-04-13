@@ -1,5 +1,5 @@
-use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId, RpcError};
-use super::server;
+use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
+use super::{server, Error};
 use bincode::{deserialize, serialize};
 use futures::{self, stream, unsync, Async, Future, Poll, Stream};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub struct Service<T: server::Service> {
 }
 
 pub struct FullUpdateService<T: server::Service> {
-    latest_state: Rc<RefCell<Option<T::State>>>,
+    latest_state: Rc<RefCell<Result<T::State, Error>>>,
     service: Service<T>,
 }
 
@@ -25,7 +25,7 @@ struct ServiceState {
     state: Vec<u8>,
     updates_rx: Option<unsync::mpsc::UnboundedReceiver<Vec<u8>>>,
     updates_tx: unsync::mpsc::UnboundedSender<Vec<u8>>,
-    pending_requests: HashMap<RequestId, unsync::oneshot::Sender<Result<Vec<u8>, RpcError>>>,
+    pending_requests: HashMap<RequestId, unsync::oneshot::Sender<Result<Vec<u8>, Error>>>,
 }
 
 pub struct Connection(Rc<RefCell<ConnectionState>>);
@@ -39,66 +39,62 @@ struct ConnectionState {
 }
 
 impl<T: server::Service> Service<T> {
-    pub fn state(&self) -> Option<T::State> {
-        self.connection.upgrade().and_then(|connection| {
-            let connection = connection.borrow();
-            connection
-                .client_states
-                .get(&self.id)
-                .map(|client_state| deserialize(&client_state.state).unwrap())
-        })
+    pub fn state(&self) -> Result<T::State, Error> {
+        let connection = self.connection.upgrade().ok_or(Error::ConnectionDropped)?;
+        let connection = connection.borrow();
+        let client_state = connection
+            .client_states
+            .get(&self.id)
+            .ok_or(Error::ServiceDropped)?;
+        Ok(deserialize(&client_state.state).unwrap())
     }
 
-    pub fn updates(&self) -> Option<Box<Stream<Item = T::Update, Error = ()>>> {
-        self.connection.upgrade().and_then(|connection| {
-            let mut connection = connection.borrow_mut();
-            let client_state = connection.client_states.get_mut(&self.id);
-            client_state.and_then(|state| {
-                state.updates_rx.take().map(|updates| {
-                    let deserialized_updates = updates.map(|update| deserialize(&update).unwrap());
-                    Box::new(deserialized_updates) as Box<Stream<Item = T::Update, Error = ()>>
-                })
-            })
-        })
+    pub fn updates(&self) -> Result<Box<Stream<Item = T::Update, Error = ()>>, Error> {
+        let connection = self.connection.upgrade().ok_or(Error::ConnectionDropped)?;
+        let mut connection = connection.borrow_mut();
+        let client_state = connection
+            .client_states
+            .get_mut(&self.id)
+            .ok_or(Error::ServiceDropped)?;
+        let updates = client_state.updates_rx.take().ok_or(Error::UpdatesTaken)?;
+        let deserialized_updates = updates.map(|update| deserialize(&update).unwrap());
+        Ok(Box::new(deserialized_updates))
     }
 
     pub fn request(
         &self,
         request: T::Request,
-    ) -> Option<Box<Future<Item = T::Response, Error = RpcError>>> {
-        self.connection.upgrade().and_then(|connection| {
-            let mut connection = connection.borrow_mut();
-            let connection = &mut *connection;
+    ) -> Result<Box<Future<Item = T::Response, Error = Error>>, Error> {
+        let connection = self.connection.upgrade().ok_or(Error::ConnectionDropped)?;
+        let mut connection = connection.borrow_mut();
 
-            let request_id = connection.next_request_id;
-            connection.next_request_id += 1;
+        let request_id = connection.next_request_id;
+        connection.next_request_id += 1;
 
-            let outgoing_tx = &mut connection.outgoing_tx;
-            connection.client_states.get_mut(&self.id).map(|state| {
-                let (response_tx, response_rx) = unsync::oneshot::channel();
-                state.pending_requests.insert(request_id, response_tx);
-                let response_future = response_rx
-                    .map_err(|_: futures::Canceled| RpcError::ServiceDropped)
-                    .and_then(|response| {
-                        response.map(|payload| deserialize(&payload).unwrap())
-                    });
+        let (response_tx, response_rx) = unsync::oneshot::channel();
+        connection
+            .client_states
+            .get_mut(&self.id)
+            .ok_or(Error::ServiceDropped)?
+            .pending_requests
+            .insert(request_id, response_tx);
+        let response_future = response_rx
+            .map_err(|_: futures::Canceled| Error::ServiceDropped)
+            .and_then(|response| response.map(|payload| deserialize(&payload).unwrap()));
 
-                let request = MessageToServer::Request {
-                    request_id,
-                    service_id: self.id,
-                    payload: serialize(&request).unwrap(),
-                };
-                outgoing_tx.unbounded_send(request).unwrap();
+        let request = MessageToServer::Request {
+            request_id,
+            service_id: self.id,
+            payload: serialize(&request).unwrap(),
+        };
+        connection.outgoing_tx.unbounded_send(request).unwrap();
 
-                Box::new(response_future) as Box<Future<Item = T::Response, Error = RpcError>>
-            })
-        })
+        Ok(Box::new(response_future))
     }
 
-    pub fn get_service<S: server::Service>(&self, id: ServiceId) -> Option<Service<S>> {
-        self.connection
-            .upgrade()
-            .and_then(|connection| Connection::service(&connection, id))
+    pub fn get_service<S: server::Service>(&self, id: ServiceId) -> Result<Service<S>, Error> {
+        let connection = self.connection.upgrade().ok_or(Error::ConnectionDropped)?;
+        Ok(Connection::service(&connection, id)?)
     }
 }
 
@@ -114,24 +110,24 @@ where
         }
     }
 
-    pub fn latest_state(&self) -> Option<Ref<T>> {
+    pub fn latest_state(&self) -> Result<Ref<T>, Error> {
         let state = self.latest_state.borrow();
-        if state.is_some() {
-            Some(Ref::map(state, |state| state.as_ref().unwrap()))
+        if state.is_ok() {
+            Ok(Ref::map(state, |state| state.as_ref().unwrap()))
         } else {
-            None
+            Err(state.as_ref().err().unwrap().clone())
         }
     }
 
-    pub fn updates(&self) -> Option<Box<Stream<Item = (), Error = ()>>> {
+    pub fn updates(&self) -> Result<Box<Stream<Item = (), Error = ()>>, Error> {
         let latest_state_1 = self.latest_state.clone();
         let latest_state_2 = self.latest_state.clone();
         self.service.updates().map(|updates| {
             let update_latest_state = updates.map(move |update| {
-                *latest_state_1.borrow_mut() = Some(update);
+                *latest_state_1.borrow_mut() = Ok(update);
             });
             let clear_latest_state = stream::once(Ok(())).map(move |_| {
-                *latest_state_2.borrow_mut() = None;
+                *latest_state_2.borrow_mut() = Err(Error::ServiceDropped);
             });
             Box::new(update_latest_state.chain(clear_latest_state))
                 as Box<Stream<Item = (), Error = ()>>
@@ -141,11 +137,11 @@ where
     pub fn request(
         &self,
         request: S::Request,
-    ) -> Option<Box<Future<Item = S::Response, Error = RpcError>>> {
+    ) -> Result<Box<Future<Item = S::Response, Error = Error>>, Error> {
         self.service.request(request)
     }
 
-    pub fn get_service<S2: server::Service>(&self, id: ServiceId) -> Option<Service<S2>> {
+    pub fn get_service<S2: server::Service>(&self, id: ServiceId) -> Result<Service<S2>, Error> {
         self.service.get_service(id)
     }
 }
@@ -179,23 +175,23 @@ impl Connection {
     fn service<S: server::Service>(
         connection: &Rc<RefCell<ConnectionState>>,
         id: ServiceId,
-    ) -> Option<Service<S>> {
-        connection
-            .borrow_mut()
+    ) -> Result<Service<S>, Error> {
+        let mut connection_state = connection.borrow_mut();
+        let service_state = connection_state
             .client_states
             .get_mut(&id)
-            .and_then(|state| {
-                if state.has_client {
-                    None
-                } else {
-                    state.has_client = true;
-                    Some(Service {
-                        id,
-                        connection: Rc::downgrade(&connection),
-                        _marker: PhantomData,
-                    })
-                }
+            .ok_or(Error::ServiceNotFound)?;
+
+        if service_state.has_client {
+            Err(Error::ServiceTaken)
+        } else {
+            service_state.has_client = true;
+            Ok(Service {
+                id,
+                connection: Rc::downgrade(&connection),
+                _marker: PhantomData,
             })
+        }
     }
 
     fn update(&mut self, message: MessageToClient) -> Result<(), String> {

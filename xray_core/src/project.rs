@@ -187,18 +187,17 @@ impl RemoteProject {
     fn new(
         foreground: ForegroundExecutor,
         service: rpc::client::Service<ProjectService>,
-    ) -> Option<Self> {
-        service.state().map(|state| {
-            let mut trees = HashMap::new();
-            for (tree_id, service_id) in &state.trees {
-                let tree_service = service.get_service(*service_id).expect(
-                    "The server should create services for each tree in our project state.",
-                );
-                let remote_tree = fs::RemoteTree::new(foreground.clone(), tree_service);
-                trees.insert(*tree_id, Box::new(remote_tree) as Box<fs::Tree>);
-            }
-            Self { service, trees }
-        })
+    ) -> Result<Self, rpc::Error> {
+        let state = service.state()?;
+        let mut trees = HashMap::new();
+        for (tree_id, service_id) in &state.trees {
+            let tree_service = service
+                .get_service(*service_id)
+                .expect("The server should create services for each tree in our project state.");
+            let remote_tree = fs::RemoteTree::new(foreground.clone(), tree_service);
+            trees.insert(*tree_id, Box::new(remote_tree) as Box<fs::Tree>);
+        }
+        Ok(Self { service, trees })
     }
 }
 
