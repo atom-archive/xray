@@ -1,3 +1,6 @@
+use super::tree::{self, SeekBias, Tree};
+use notify_cell::NotifyCell;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
@@ -5,8 +8,6 @@ use std::iter;
 use std::ops::{Add, AddAssign, Range, Sub};
 use std::result;
 use std::sync::Arc;
-use super::tree::{self, SeekBias, Tree};
-use notify_cell::NotifyCell;
 
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
@@ -25,7 +26,7 @@ pub struct Buffer {
     local_clock: LocalTimestamp,
     lamport_clock: LamportTimestamp,
     fragments: Tree<Fragment>,
-    insertions: HashMap<ChangeId, Tree<FragmentMapping>>,
+    insertion_splits: HashMap<ChangeId, Tree<InsertionSplit>>,
     anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
     offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: NotifyCell<Version>,
@@ -65,7 +66,7 @@ pub struct Iter<'a> {
     fragment_offset: usize,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 struct Insertion {
     id: ChangeId,
     parent_id: ChangeId,
@@ -75,20 +76,24 @@ struct Insertion {
     text: Text,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Text {
     code_units: Vec<u16>,
     newline_offsets: Vec<usize>,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
 struct ChangeId {
     replica_id: ReplicaId,
     local_timestamp: LocalTimestamp,
 }
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
-struct FragmentId(Arc<Vec<u16>>);
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
+struct FragmentId(
+    #[serde(serialize_with = "serialize_fragment_id")]
+    #[serde(deserialize_with = "deserialize_fragment_id")]
+    Arc<Vec<u16>>,
+);
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct Fragment {
@@ -112,19 +117,88 @@ struct CharacterCount(usize);
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct NewlineCount(usize);
 
-#[derive(Eq, PartialEq, Clone, Debug)]
-struct FragmentMapping {
+#[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
+struct InsertionSplit {
     extent: usize,
     fragment_id: FragmentId,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
-struct FragmentMappingSummary {
+struct InsertionSplitSummary {
     extent: usize,
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct InsertionOffset(usize);
+
+mod rpc {
+    use super::{Buffer, ChangeId, FragmentId, Insertion, InsertionSplit};
+    use futures::Async;
+    use rpc;
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Serialize, Deserialize)]
+    pub struct State {
+        fragments: Vec<Fragment>,
+        insertions: HashMap<ChangeId, Insertion>,
+        insertion_splits: HashMap<ChangeId, Vec<InsertionSplit>>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct Fragment {
+        id: FragmentId,
+        insertion_id: ChangeId,
+        start_offset: usize,
+        end_offset: usize,
+        deletions: HashSet<ChangeId>,
+    }
+
+    pub struct Service {
+        buffer: Buffer,
+    }
+
+    impl rpc::server::Service for Service {
+        type State = State;
+        type Update = ();
+        type Request = ();
+        type Response = ();
+
+        fn init(&mut self, _: &rpc::server::Connection) -> Self::State {
+            let mut state = State {
+                fragments: Vec::new(),
+                insertions: HashMap::new(),
+                insertion_splits: HashMap::new(),
+            };
+
+            for fragment in self.buffer.fragments.iter() {
+                state
+                    .insertions
+                    .entry(fragment.insertion.id)
+                    .or_insert_with(|| (*fragment.insertion).clone());
+
+                state.fragments.push(Fragment {
+                    id: fragment.id.clone(),
+                    insertion_id: fragment.insertion.id,
+                    start_offset: fragment.start_offset,
+                    end_offset: fragment.end_offset,
+                    deletions: fragment.deletions.clone(),
+                });
+            }
+
+            for (insertion_id, splits) in &self.buffer.insertion_splits {
+                state
+                    .insertion_splits
+                    .insert(*insertion_id, splits.iter().cloned().collect());
+            }
+
+            state
+        }
+
+        fn poll_update(&mut self, _: &rpc::server::Connection) -> Async<Option<Self::Update>> {
+            Async::NotReady
+        }
+    }
+}
 
 impl Buffer {
     pub fn new(replica_id: ReplicaId) -> Self {
@@ -155,7 +229,7 @@ impl Buffer {
             local_clock: 0,
             lamport_clock: 0,
             fragments,
-            insertions: HashMap::new(),
+            insertion_splits: HashMap::new(),
             anchor_cache: RefCell::new(HashMap::new()),
             offset_cache: RefCell::new(HashMap::new()),
             version: NotifyCell::new(Version(0)),
@@ -345,26 +419,26 @@ impl Buffer {
         if within_range.is_some() || after_range.is_some() {
             let mut updated_split_tree;
             {
-                let split_tree = self.insertions.get(&fragment.insertion.id).unwrap();
+                let split_tree = self.insertion_splits.get(&fragment.insertion.id).unwrap();
                 let mut cursor = split_tree.cursor();
                 updated_split_tree =
                     cursor.build_prefix(&InsertionOffset(fragment.start_offset), SeekBias::Right);
 
                 if let Some(ref fragment) = before_range {
-                    updated_split_tree.push(FragmentMapping {
+                    updated_split_tree.push(InsertionSplit {
                         extent: range.start - fragment_start,
                         fragment_id: fragment.id.clone(),
                     })
                 }
 
                 if let Some(ref fragment) = within_range {
-                    updated_split_tree.push(FragmentMapping {
+                    updated_split_tree.push(InsertionSplit {
                         extent: range.end - range.start,
                         fragment_id: fragment.id.clone(),
                     })
                 }
                 if let Some(ref fragment) = after_range {
-                    updated_split_tree.push(FragmentMapping {
+                    updated_split_tree.push(InsertionSplit {
                         extent: fragment_end - range.end,
                         fragment_id: fragment.id.clone(),
                     })
@@ -374,7 +448,7 @@ impl Buffer {
                 updated_split_tree.push_tree(cursor.build_suffix());
             }
 
-            self.insertions
+            self.insertion_splits
                 .insert(fragment.insertion.id, updated_split_tree);
         }
 
@@ -396,11 +470,11 @@ impl Buffer {
         );
 
         let mut split_tree = Tree::new();
-        split_tree.push(FragmentMapping {
+        split_tree.push(InsertionSplit {
             extent: text.len(),
             fragment_id: new_fragment_id.clone(),
         });
-        self.insertions.insert(change_id, split_tree);
+        self.insertion_splits.insert(change_id, split_tree);
 
         Fragment::new(
             new_fragment_id,
@@ -541,7 +615,7 @@ impl Buffer {
                         &AnchorBias::Right => SeekBias::Right,
                     };
 
-                    let splits = self.insertions
+                    let splits = self.insertion_splits
                         .get(&insertion_id)
                         .ok_or(Error::InvalidAnchor)?;
                     let mut splits_cursor = splits.cursor();
@@ -889,6 +963,19 @@ impl AddAssign for FragmentId {
     }
 }
 
+fn serialize_fragment_id<S: Serializer>(
+    fragment_id: &Arc<Vec<u16>>,
+    serializer: S,
+) -> result::Result<S::Ok, S::Error> {
+    fragment_id.serialize(serializer)
+}
+
+fn deserialize_fragment_id<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> result::Result<Arc<Vec<u16>>, D::Error> {
+    Ok(Arc::new(Vec::deserialize(deserializer)?))
+}
+
 impl Fragment {
     fn new(id: FragmentId, ins: Insertion) -> Self {
         let end_offset = ins.text.len();
@@ -1007,30 +1094,30 @@ impl AddAssign for CharacterCount {
     }
 }
 
-impl tree::Item for FragmentMapping {
-    type Summary = FragmentMappingSummary;
+impl tree::Item for InsertionSplit {
+    type Summary = InsertionSplitSummary;
 
     fn summarize(&self) -> Self::Summary {
-        FragmentMappingSummary {
+        InsertionSplitSummary {
             extent: self.extent,
         }
     }
 }
 
-impl<'a> AddAssign<&'a FragmentMappingSummary> for FragmentMappingSummary {
+impl<'a> AddAssign<&'a InsertionSplitSummary> for InsertionSplitSummary {
     fn add_assign(&mut self, other: &Self) {
         self.extent += other.extent;
     }
 }
 
-impl Default for FragmentMappingSummary {
+impl Default for InsertionSplitSummary {
     fn default() -> Self {
-        FragmentMappingSummary { extent: 0 }
+        InsertionSplitSummary { extent: 0 }
     }
 }
 
 impl tree::Dimension for InsertionOffset {
-    type Summary = FragmentMappingSummary;
+    type Summary = InsertionSplitSummary;
 
     fn from_summary(summary: &Self::Summary) -> Self {
         InsertionOffset(summary.extent)
