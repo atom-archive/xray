@@ -2,6 +2,7 @@ use fs;
 use futures::{stream, Future, Sink, Stream};
 use futures_cpupool::CpuPool;
 use messages::{IncomingMessage, OutgoingMessage};
+use std::cell::RefCell;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -9,12 +10,12 @@ use std::rc::Rc;
 use tokio_core::net::{TcpListener, TcpStream};
 use tokio_core::reactor;
 use tokio_io::AsyncRead;
-use xray_core::{self, App, WindowId};
 use xray_core::app::Command;
+use xray_core::{self, App, WindowId};
 
 #[derive(Clone)]
 pub struct Server {
-    app: xray_core::App,
+    app: Rc<RefCell<xray_core::App>>,
     reactor: reactor::Handle,
 }
 
@@ -24,7 +25,7 @@ impl Server {
         let background = Rc::new(CpuPool::new_num_cpus());
         let io = fs::IoProvider::new();
         Server {
-            app: App::new(headless, foreground, background, io),
+            app: Rc::new(RefCell::new(App::new(headless, foreground, background, io))),
             reactor,
         }
     }
@@ -63,7 +64,7 @@ impl Server {
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        if self.app.headless() {
+        if self.app.borrow().headless() {
             self.send_responses(
                 outgoing,
                 stream::once(Ok(OutgoingMessage::Error {
@@ -71,16 +72,14 @@ impl Server {
                 })),
             );
         } else {
-            if let Some(commands) = self.app.commands() {
+            if let Some(commands) = self.app.borrow_mut().commands() {
                 let server = self.clone();
                 let responses = commands
-                    .map(|update|
-                        match update {
-                            Command::OpenWindow(window_id) => OutgoingMessage::OpenWindow { window_id }
-                        }
-                    )
-                    .select(
-                        report_input_errors(incoming.map(move |message| server.handle_app_message(message))
+                    .map(|update| match update {
+                        Command::OpenWindow(window_id) => OutgoingMessage::OpenWindow { window_id },
+                    })
+                    .select(report_input_errors(
+                        incoming.map(move |message| server.handle_app_message(message)),
                     ));
 
                 self.send_responses(outgoing, responses);
@@ -100,7 +99,7 @@ impl Server {
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        match (self.app.headless(), headless) {
+        match (self.app.borrow().headless(), headless) {
             (true, false) => {
                 return self.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
                     description: "Since Xray was initially started with --headless, all subsequent commands must be --headless".into()
@@ -135,14 +134,20 @@ impl Server {
             .then(|_| Ok(()));
         self.reactor.spawn(receive_incoming);
 
-        match self.app.start_window(&window_id, height) {
+        match self.app.borrow_mut().start_window(&window_id, height) {
             Ok(updates) => {
-                self.send_responses(outgoing, updates.map(|update| OutgoingMessage::UpdateWindow(update)));
-            },
+                self.send_responses(
+                    outgoing,
+                    updates.map(|update| OutgoingMessage::UpdateWindow(update)),
+                );
+            }
             Err(_) => {
-                self.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
-                    description: format!("No window exists for id {}", window_id)
-                })));
+                self.send_responses(
+                    outgoing,
+                    stream::once(Ok(OutgoingMessage::Error {
+                        description: format!("No window exists for id {}", window_id),
+                    })),
+                );
             }
         }
     }
@@ -164,7 +169,9 @@ impl Server {
     fn handle_window_message(&self, window_id: WindowId, message: IncomingMessage) {
         match message {
             IncomingMessage::Action { view_id, action } => {
-                self.app.dispatch_action(window_id, view_id, action);
+                self.app
+                    .borrow_mut()
+                    .dispatch_action(window_id, view_id, action);
             }
             _ => {
                 eprintln!("Unexpected message {:?}", message);
@@ -181,7 +188,7 @@ impl Server {
             .iter()
             .map(|path| fs::Tree::new(path).unwrap())
             .collect();
-        self.app.open_workspace(roots);
+        self.app.borrow_mut().open_workspace(roots);
         Ok(())
     }
 
@@ -201,7 +208,9 @@ impl Server {
     }
 
     fn connect_to_workspace(&self, address: SocketAddr) -> Result<(), String> {
-        let stream = TcpStream::connect(&address, &self.reactor).wait().map_err(|_| "Could not connect to address")?;
+        let stream = TcpStream::connect(&address, &self.reactor)
+            .wait()
+            .map_err(|_| "Could not connect to address")?;
         stream.set_nodelay(true).unwrap();
         let (rx, tx) = stream.split();
         Ok(())
