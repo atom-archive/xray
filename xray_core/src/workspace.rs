@@ -1,24 +1,21 @@
 use buffer_view::BufferView;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
-use futures::{Poll, Stream, Future};
+use futures::{Future, Poll, Stream};
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
 use project::{PathSearch, PathSearchStatus, Project, TreeId};
 use serde_json;
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 use window::{View, ViewHandle, WeakViewHandle, Window};
 
-#[derive(Clone)]
-pub struct Workspace(Rc<RefCell<WorkspaceState>>);
-
-struct WorkspaceState {
+pub struct Workspace {
     project: Box<Project>,
 }
 
 pub struct WorkspaceView {
-    workspace: Box<Workspace>,
+    workspace: Rc<RefCell<Workspace>>,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
     updates: NotifyCell<()>,
@@ -33,9 +30,9 @@ enum WorkspaceViewAction {
 
 impl Workspace {
     pub fn new<T: 'static + Project>(project: T) -> Self {
-        Workspace(Rc::new(RefCell::new(WorkspaceState {
+        Workspace {
             project: Box::new(project),
-        })))
+        }
     }
 
     fn search_paths(
@@ -44,21 +41,19 @@ impl Workspace {
         max_results: usize,
         include_ignored: bool,
     ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
-        self.0
-            .borrow()
-            .project
+        self.project
             .search_paths(needle, max_results, include_ignored)
     }
 
-    fn project(&self) -> Ref<Project> {
-        Ref::map(self.0.borrow(), |state| state.project.as_ref())
+    fn project(&self) -> &Project {
+        self.project.as_ref()
     }
 }
 
 impl WorkspaceView {
-    pub fn new(workspace: Workspace) -> Self {
+    pub fn new(workspace: Rc<RefCell<Workspace>>) -> Self {
         WorkspaceView {
-            workspace: Box::new(workspace),
+            workspace,
             modal_panel: None,
             center_pane: None,
             updates: NotifyCell::new(()),
@@ -111,6 +106,7 @@ impl FileFinderViewDelegate for WorkspaceView {
         include_ignored: bool,
     ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
         self.workspace
+            .borrow()
             .search_paths(needle, max_results, include_ignored)
     }
 
@@ -120,7 +116,7 @@ impl FileFinderViewDelegate for WorkspaceView {
     }
 
     fn did_confirm(&mut self, tree_id: TreeId, path: &Path, window: &mut Window) {
-        match self.workspace.project().open_buffer(tree_id, path).wait() {
+        match self.workspace.borrow().project().open_buffer(tree_id, path).wait() {
             Ok(buffer) => {
                 let mut buffer_view = BufferView::new(Rc::new(RefCell::new(buffer)));
                 buffer_view.set_line_height(20.0);

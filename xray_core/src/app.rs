@@ -6,7 +6,7 @@ use project::LocalProject;
 use rpc::client;
 use rpc::server;
 use serde_json;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::io;
 use std::rc::Rc;
@@ -14,23 +14,21 @@ use window::{ViewId, Window, WindowUpdateStream};
 use workspace::{Workspace, WorkspaceView};
 use BackgroundExecutor;
 use ForegroundExecutor;
+use IntoShared;
 
 pub type WindowId = usize;
 pub type PeerName = String;
 type WorkspaceId = usize;
 
-#[derive(Clone)]
-pub struct App(Rc<RefCell<AppState>>);
-
-struct AppState {
+pub struct App {
     headless: bool,
     background: BackgroundExecutor,
     io: Rc<fs::IoProvider>,
     commands_tx: UnboundedSender<Command>,
     commands_rx: Option<UnboundedReceiver<Command>>,
-    peer_list: PeerList,
+    peer_list: Rc<RefCell<PeerList>>,
     next_workspace_id: WorkspaceId,
-    workspaces: HashMap<WorkspaceId, Box<Workspace>>,
+    workspaces: HashMap<WorkspaceId, Rc<RefCell<Workspace>>>,
     next_window_id: WindowId,
     windows: HashMap<WindowId, Window>,
     updates: NotifyCell<()>,
@@ -40,10 +38,7 @@ pub enum Command {
     OpenWindow(WindowId),
 }
 
-#[derive(Clone)]
-pub struct PeerList(Rc<RefCell<PeerListState>>);
-
-struct PeerListState {
+pub struct PeerList {
     foreground: ForegroundExecutor,
     peers: HashMap<PeerName, client::FullUpdateService<AppService>>,
     updates: NotifyCell<()>,
@@ -61,7 +56,7 @@ struct WorkspaceDescriptor {
 }
 
 struct AppService {
-    app: App,
+    app: Rc<RefCell<App>>,
     updates: NotifyCellObserver<()>,
 }
 
@@ -84,45 +79,44 @@ impl App {
         io: T,
     ) -> Self {
         let (commands_tx, commands_rx) = mpsc::unbounded();
-        App(Rc::new(RefCell::new(AppState {
+        App {
             headless,
             background,
             io: Rc::new(io),
             commands_tx,
             commands_rx: Some(commands_rx),
-            peer_list: PeerList::new(foreground),
+            peer_list: PeerList::new(foreground).into_shared(),
             next_workspace_id: 0,
             workspaces: HashMap::new(),
             next_window_id: 1,
             windows: HashMap::new(),
             updates: NotifyCell::new(()),
-        })))
+        }
     }
 
-    pub fn commands(&self) -> Option<UnboundedReceiver<Command>> {
-        self.0.borrow_mut().commands_rx.take()
+    pub fn commands(&mut self) -> Option<UnboundedReceiver<Command>> {
+        self.commands_rx.take()
     }
 
     pub fn headless(&self) -> bool {
-        self.0.borrow().headless
+        self.headless
     }
 
-    pub fn open_workspace<T: 'static + fs::LocalTree>(&self, roots: Vec<T>) {
-        let io = self.0.borrow().io.clone();
+    pub fn open_workspace<T: 'static + fs::LocalTree>(&mut self, roots: Vec<T>) {
+        let io = self.io.clone();
         self.add_workspace(Workspace::new(LocalProject::new(io, roots)));
     }
 
-    fn add_workspace(&self, workspace: Workspace) {
-        let mut state = self.0.borrow_mut();
-        if !state.headless {
-            let mut window = Window::new(Some(state.background.clone()), 0.0);
+    fn add_workspace(&mut self, workspace: Workspace) {
+        let workspace = workspace.into_shared();
+        if !self.headless {
+            let mut window = Window::new(Some(self.background.clone()), 0.0);
             let workspace_view_handle = window.add_view(WorkspaceView::new(workspace.clone()));
             window.set_root_view(workspace_view_handle);
-            let window_id = state.next_window_id;
-            state.next_window_id += 1;
-            state.windows.insert(window_id, window);
-            if state
-                .commands_tx
+            let window_id = self.next_window_id;
+            self.next_window_id += 1;
+            self.windows.insert(window_id, window);
+            if self.commands_tx
                 .unbounded_send(Command::OpenWindow(window_id))
                 .is_err()
             {
@@ -130,37 +124,40 @@ impl App {
                 commands_tx
                     .unbounded_send(Command::OpenWindow(window_id))
                     .unwrap();
-                state.commands_tx = commands_tx;
-                state.commands_rx = Some(commands_rx);
+                self.commands_tx = commands_tx;
+                self.commands_rx = Some(commands_rx);
             }
         }
 
-        let id = state.next_workspace_id;
-        state.next_workspace_id += 1;
-        state.workspaces.insert(id, Box::new(workspace));
-        state.updates.set(());
+        let id = self.next_workspace_id;
+        self.next_workspace_id += 1;
+        self.workspaces.insert(id, workspace);
+        self.updates.set(());
     }
 
-    pub fn start_window(&self, id: &WindowId, height: f64) -> Result<WindowUpdateStream, ()> {
-        let mut state = self.0.borrow_mut();
-        let window = state.windows.get_mut(id).ok_or(())?;
+    pub fn start_window(&mut self, id: &WindowId, height: f64) -> Result<WindowUpdateStream, ()> {
+        let window = self.windows.get_mut(id).ok_or(())?;
         window.set_height(height);
         Ok(window.updates())
     }
 
-    pub fn dispatch_action(&self, window_id: WindowId, view_id: ViewId, action: serde_json::Value) {
-        let mut state = self.0.borrow_mut();
-        match state.windows.get_mut(&window_id) {
+    pub fn dispatch_action(
+        &mut self,
+        window_id: WindowId,
+        view_id: ViewId,
+        action: serde_json::Value,
+    ) {
+        match self.windows.get_mut(&window_id) {
             Some(ref mut window) => window.dispatch_action(view_id, action),
             None => unimplemented!(),
         };
     }
 
-    pub fn connect_to_client<S>(&self, incoming: S) -> server::Connection
+    pub fn connect_to_client<S>(app: Rc<RefCell<App>>, incoming: S) -> server::Connection
     where
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
     {
-        server::Connection::new(incoming, AppService::new(self.clone()))
+        server::Connection::new(incoming, AppService::new(app.clone()))
     }
 
     pub fn connect_to_server<S>(
@@ -171,28 +168,27 @@ impl App {
     where
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
     {
-        self.0.borrow().peer_list.connect_to_server(name, incoming)
+        PeerList::connect_to_server(self.peer_list.clone(), name, incoming)
     }
 
-    pub fn peer_list(&self) -> PeerList {
-        self.0.borrow().peer_list.clone()
+    #[cfg(test)]
+    pub fn peer_list(&self) -> Ref<PeerList> {
+        self.peer_list.borrow()
     }
 }
 
 impl PeerList {
     fn new(foreground: ForegroundExecutor) -> Self {
-        PeerList(Rc::new(RefCell::new(PeerListState {
+        PeerList {
             foreground,
             peers: HashMap::new(),
             updates: NotifyCell::new(()),
-        })))
+        }
     }
 
     #[cfg(test)]
     fn state(&self) -> Vec<PeerState> {
-        self.0
-            .borrow()
-            .peers
+        self.peers
             .iter()
             .filter_map(|(name, peer)| {
                 peer.latest_state().map(|state| PeerState {
@@ -209,33 +205,32 @@ impl PeerList {
 
     #[cfg(test)]
     fn updates(&self) -> NotifyCellObserver<()> {
-        self.0.borrow().updates.observe()
+        self.updates.observe()
     }
 
     fn connect_to_server<S>(
-        &self,
+        peer_list: Rc<RefCell<PeerList>>,
         name: PeerName,
         incoming: S,
     ) -> Box<Future<Item = client::Connection, Error = String>>
     where
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
     {
-        let state = self.0.clone();
         Box::new(
             client::Connection::new(incoming).map(move |(connection, peer)| {
                 let peer = client::FullUpdateService::new(peer);
 
-                let mut state = state.borrow_mut();
-                let updates = state.updates.clone();
-                state
+                let mut peer_list = peer_list.borrow_mut();
+                let updates = peer_list.updates.clone();
+                peer_list
                     .foreground
                     .execute(Box::new(peer.updates().unwrap().for_each(move |_| {
                         updates.set(());
                         Ok(())
                     })))
                     .unwrap();
-                state.peers.insert(name, peer);
-                state.updates.set(());
+                peer_list.peers.insert(name, peer);
+                peer_list.updates.set(());
                 connection
             }),
         )
@@ -243,14 +238,14 @@ impl PeerList {
 }
 
 impl AppService {
-    fn new(app: App) -> Self {
-        let updates = app.0.borrow().updates.observe();
+    fn new(app: Rc<RefCell<App>>) -> Self {
+        let updates = app.borrow().updates.observe();
         Self { app, updates }
     }
 
     fn state(&self) -> RemoteState {
         RemoteState {
-            workspace_ids: self.app.0.borrow().workspaces.keys().cloned().collect(),
+            workspace_ids: self.app.borrow().workspaces.keys().cloned().collect(),
         }
     }
 }
@@ -281,17 +276,18 @@ mod tests {
     use futures::{unsync, Future, Sink};
     use stream_ext::StreamExt;
     use tokio_core::reactor;
+    use IntoShared;
 
     #[test]
     fn test_remote_workspaces() {
         let mut reactor = reactor::Core::new().unwrap();
         let executor = Rc::new(reactor.handle());
-        let mut server = App::new(
+        let server = App::new(
             true,
             executor.clone(),
             executor.clone(),
             TestIoProvider::new(),
-        );
+        ).into_shared();
         let mut client = App::new(
             false,
             executor.clone(),
@@ -299,24 +295,23 @@ mod tests {
             TestIoProvider::new(),
         );
 
-        let peer_list = client.peer_list();
-        let mut peer_list_updates = peer_list.updates();
-        assert_eq!(peer_list.state(), vec![]);
+        let mut peer_list_updates = client.peer_list().updates();
+        assert_eq!(client.peer_list().state(), vec![]);
 
-        connect("server", &mut reactor, &mut server, &mut client);
+        connect("server", &mut reactor, server.clone(), &mut client);
         peer_list_updates.wait_next(&mut reactor);
         assert_eq!(
-            peer_list.state(),
+            client.peer_list().state(),
             vec![PeerState {
                 name: String::from("server"),
                 workspaces: vec![],
             }]
         );
 
-        server.open_workspace(Vec::<TestTree>::new());
+        server.borrow_mut().open_workspace(Vec::<TestTree>::new());
         peer_list_updates.wait_next(&mut reactor);
         assert_eq!(
-            peer_list.state(),
+            client.peer_list().state(),
             vec![PeerState {
                 name: String::from("server"),
                 workspaces: vec![WorkspaceDescriptor { id: 0 }],
@@ -324,13 +319,18 @@ mod tests {
         );
     }
 
-    fn connect(name: &str, reactor: &mut reactor::Core, server: &mut App, client: &mut App) {
+    fn connect(
+        name: &str,
+        reactor: &mut reactor::Core,
+        server: Rc<RefCell<App>>,
+        client: &mut App,
+    ) {
         let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
         let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
 
-        let server_outgoing = server.connect_to_client(client_to_server_rx);
+        let server_outgoing = App::connect_to_client(server, client_to_server_rx);
         reactor.handle().spawn(
             server_to_client_tx
                 .send_all(server_outgoing.map_err(|_| unreachable!()))

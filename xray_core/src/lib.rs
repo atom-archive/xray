@@ -30,10 +30,21 @@ mod project;
 mod stream_ext;
 mod tree;
 
-use futures::future::{Future, Executor};
-use std::rc::Rc;
 pub use app::{App, WindowId};
+use futures::future::{Executor, Future};
+use std::cell::RefCell;
+use std::rc::Rc;
 pub use window::{ViewId, WindowUpdate};
 
 pub type ForegroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + 'static>>>;
 pub type BackgroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + Send + 'static>>>;
+
+pub(crate) trait IntoShared {
+    fn into_shared(self) -> Rc<RefCell<Self>>;
+}
+
+impl<T> IntoShared for T {
+    fn into_shared(self) -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(self))
+    }
+}

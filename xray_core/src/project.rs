@@ -7,8 +7,7 @@ use rpc;
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
-use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -30,10 +29,7 @@ pub trait Project {
     ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
 }
 
-#[derive(Clone)]
-pub struct LocalProject(Rc<RefCell<LocalProjectState>>);
-
-struct LocalProjectState {
+pub struct LocalProject {
     io: Rc<fs::IoProvider>,
     next_tree_id: TreeId,
     trees: HashMap<TreeId, Rc<fs::LocalTree>>,
@@ -45,7 +41,7 @@ pub struct RemoteProject {
 }
 
 pub struct ProjectService {
-    project: LocalProject,
+    project: Rc<RefCell<LocalProject>>,
     tree_services: HashMap<TreeId, rpc::server::ServiceHandle>,
 }
 
@@ -115,22 +111,21 @@ impl LocalProject {
     where
         T: 'static + fs::LocalTree,
     {
-        let project = LocalProject(Rc::new(RefCell::new(LocalProjectState {
+        let mut project = LocalProject {
             io,
             next_tree_id: 0,
             trees: HashMap::new(),
-        })));
+        };
         for tree in trees {
             project.add_tree(tree);
         }
         project
     }
 
-    fn add_tree<T: 'static + fs::LocalTree>(&self, tree: T) {
-        let mut state = self.0.borrow_mut();
-        let id = state.next_tree_id;
-        state.next_tree_id += 1;
-        state.trees.insert(id, Rc::new(tree));
+    fn add_tree<T: 'static + fs::LocalTree>(&mut self, tree: T) {
+        let id = self.next_tree_id;
+        self.next_tree_id += 1;
+        self.trees.insert(id, Rc::new(tree));
     }
 }
 
@@ -140,15 +135,12 @@ impl Project for LocalProject {
         tree_id: TreeId,
         relative_path: &Path,
     ) -> Box<Future<Item = Buffer, Error = OpenError>> {
-        let state = self.0.borrow();
-
-        if let Some(tree) = state.trees.get(&tree_id) {
+        if let Some(tree) = self.trees.get(&tree_id) {
             let mut absolute_path = tree.path().to_owned();
             absolute_path.push(relative_path);
 
             Box::new(
-                state
-                    .io
+                self.io
                     .read(&absolute_path)
                     .map_err(|error| OpenError::IoError(error))
                     .and_then(|content| {
@@ -172,7 +164,7 @@ impl Project for LocalProject {
 
         let mut tree_ids = Vec::new();
         let mut roots = Vec::new();
-        for (id, tree) in &self.0.borrow().trees {
+        for (id, tree) in &self.trees {
             tree_ids.push(*id);
             roots.push(tree.root().clone());
         }
@@ -211,7 +203,11 @@ impl RemoteProject {
 }
 
 impl Project for RemoteProject {
-    fn open_buffer(&self, tree_id: TreeId, relative_path: &Path) -> Box<Future<Item = Buffer, Error = OpenError>> {
+    fn open_buffer(
+        &self,
+        tree_id: TreeId,
+        relative_path: &Path,
+    ) -> Box<Future<Item = Buffer, Error = OpenError>> {
         unimplemented!()
     }
 
@@ -245,7 +241,7 @@ impl Project for RemoteProject {
 }
 
 impl ProjectService {
-    fn new(project: LocalProject) -> Self {
+    fn new(project: Rc<RefCell<LocalProject>>) -> Self {
         Self {
             project,
             tree_services: HashMap::new(),
@@ -263,7 +259,7 @@ impl rpc::server::Service for ProjectService {
         let mut state = RpcState {
             trees: HashMap::new(),
         };
-        for (tree_id, tree) in &self.project.0.borrow().trees {
+        for (tree_id, tree) in &self.project.borrow().trees {
             let handle = connection.add_service(fs::TreeService::new(tree.clone()));
             state.trees.insert(*tree_id, handle.service_id);
             self.tree_services.insert(*tree_id, handle);
@@ -515,6 +511,7 @@ mod tests {
     use super::*;
     use fs::tests::{TestIoProvider, TestTree};
     use tokio_core::reactor;
+    use IntoShared;
 
     #[test]
     fn test_search_one_tree() {
@@ -607,13 +604,14 @@ mod tests {
         let mut reactor = reactor::Core::new().unwrap();
         let handle = Rc::new(reactor.handle());
 
-        let local_project = build_project();
+        let local_project = build_project().into_shared();
         let remote_project = RemoteProject::new(
             handle,
             rpc::tests::connect(&mut reactor, ProjectService::new(local_project.clone())),
         ).unwrap();
 
-        let (mut local_search, local_observer) = local_project.search_paths("bar", 10, true);
+        let (mut local_search, local_observer) =
+            local_project.borrow().search_paths("bar", 10, true);
         let (mut remote_search, remote_observer) = remote_project.search_paths("bar", 10, true);
         assert_eq!(local_search.poll(), Ok(Async::Ready(())));
         assert_eq!(remote_search.poll(), Ok(Async::Ready(())));
