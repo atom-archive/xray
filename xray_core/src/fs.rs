@@ -294,10 +294,10 @@ pub(crate) mod tests {
     use futures::{future, IntoFuture};
     use notify_cell::NotifyCell;
     use rpc;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use stream_ext::StreamExt;
     use tokio_core::reactor;
-    use std::collections::HashMap;
 
     #[test]
     fn test_insert() {
@@ -380,7 +380,9 @@ pub(crate) mod tests {
         pub populated: NotifyCell<bool>,
     }
 
-    pub struct TestIoProvider {
+    pub struct TestIoProvider(Rc<RefCell<TestIoProviderState>>);
+
+    struct TestIoProviderState {
         files: HashMap<PathBuf, String>,
     }
 
@@ -473,24 +475,25 @@ pub(crate) mod tests {
 
     impl TestIoProvider {
         pub fn new() -> Self {
-            TestIoProvider {
+            TestIoProvider(Rc::new(RefCell::new(TestIoProviderState {
                 files: HashMap::new(),
-            }
+            })))
         }
 
-        pub fn write_sync<P: Into<PathBuf>, S: Into<String>>(&mut self, path: P, content: S) {
-            self.files.insert(path.into(), content.into());
+        pub fn write_sync<P: Into<PathBuf>, S: Into<String>>(&self, path: P, content: S) {
+            self.0.borrow_mut().files.insert(path.into(), content.into());
         }
     }
 
     impl IoProvider for TestIoProvider {
         fn read(&self, path: &Path) -> Box<Future<Item = String, Error = io::Error>> {
             Box::new(
-                self.files
+                self.0.borrow()
+                    .files
                     .get(path)
                     .cloned()
                     .ok_or(io::Error::new(io::ErrorKind::NotFound, "Path not found"))
-                    .into_future()
+                    .into_future(),
             )
         }
     }

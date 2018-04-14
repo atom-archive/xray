@@ -118,7 +118,7 @@ impl FileFinderViewDelegate for WorkspaceView {
     fn did_confirm(&mut self, tree_id: TreeId, path: &Path, window: &mut Window) {
         match self.workspace.borrow().project().open_buffer(tree_id, path).wait() {
             Ok(buffer) => {
-                let mut buffer_view = BufferView::new(Rc::new(RefCell::new(buffer)));
+                let mut buffer_view = BufferView::new(buffer);
                 buffer_view.set_line_height(20.0);
                 let buffer_view = window.add_view(buffer_view);
                 buffer_view.focus().unwrap();

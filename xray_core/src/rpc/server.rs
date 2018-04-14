@@ -4,14 +4,13 @@ use bincode::{deserialize, serialize};
 use futures::stream::FuturesUnordered;
 use futures::task::{self, Task};
 use futures::{future, Async, Future, Poll, Stream};
+use never::Never;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::mem;
 use std::rc::{Rc, Weak};
-
-pub enum Never {}
 
 pub trait Service {
     type State: 'static + Serialize + for<'a> Deserialize<'a>;
@@ -40,18 +39,18 @@ trait RawBytesService {
     ) -> Option<Box<Future<Item = Vec<u8>, Error = Never>>>;
 }
 
-pub struct Connection {
-    state: Rc<RefCell<ConnectionState>>,
-    root_service: Option<ServiceHandle>,
-}
+#[derive(Clone)]
+pub struct Connection(Rc<RefCell<ConnectionState>>);
 
 struct ConnectionState {
+    root_service: Option<ServiceHandle>,
     next_id: ServiceId,
     services: HashMap<ServiceId, Rc<RefCell<RawBytesService>>>,
     inserted: HashSet<ServiceId>,
     removed: HashSet<ServiceId>,
     incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>,
-    pending_responses: FuturesUnordered<Box<Future<Item = ResponseEnvelope, Error = Never>>>,
+    pending_responses:
+        Rc<RefCell<FuturesUnordered<Box<Future<Item = ResponseEnvelope, Error = Never>>>>>,
     pending_task: Option<Task>,
 }
 
@@ -72,24 +71,22 @@ impl Connection {
         S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
         T: 'static + Service,
     {
-        let mut connection = Self {
-            state: Rc::new(RefCell::new(ConnectionState {
-                next_id: 0,
-                services: HashMap::new(),
-                inserted: HashSet::new(),
-                removed: HashSet::new(),
-                incoming: Box::new(incoming),
-                pending_responses: FuturesUnordered::new(),
-                pending_task: None,
-            })),
+        let connection = Connection(Rc::new(RefCell::new(ConnectionState {
             root_service: None,
-        };
-        connection.root_service = Some(connection.add_service(root_service));
+            next_id: 0,
+            services: HashMap::new(),
+            inserted: HashSet::new(),
+            removed: HashSet::new(),
+            incoming: Box::new(incoming),
+            pending_responses: Rc::new(RefCell::new(FuturesUnordered::new())),
+            pending_task: None,
+        })));
+        connection.0.borrow_mut().root_service = Some(connection.add_service(root_service));
         connection
     }
 
     pub fn add_service<T: 'static + Service>(&self, service: T) -> ServiceHandle {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.0.borrow_mut();
         let id = state.next_id;
         state.next_id += 1;
         let service = Rc::new(RefCell::new(service));
@@ -97,43 +94,47 @@ impl Connection {
         state.inserted.insert(id);
 
         ServiceHandle {
-            connection: Rc::downgrade(&self.state),
+            connection: Rc::downgrade(&self.0),
             service_id: id,
         }
     }
 
     fn poll_incoming(&mut self) -> Result<bool, io::Error> {
         loop {
-            let poll = self.state.borrow_mut().incoming.poll();
+            let poll = self.0.borrow_mut().incoming.poll();
             match poll {
-                Ok(Async::Ready(Some(request))) => match deserialize(&request).unwrap() {
-                    MessageToServer::Request {
-                        request_id,
-                        service_id,
-                        payload,
-                    } => {
-                        if let Some(service) = self.get_service(service_id) {
-                            if let Some(response) = service.borrow_mut().request(payload, self) {
-                                self.state.borrow_mut().pending_responses.push(Box::new(
-                                    response.map(move |response| ResponseEnvelope {
+                Ok(Async::Ready(Some(request))) => {
+                    match deserialize(&request).unwrap() {
+                        MessageToServer::Request {
+                            request_id,
+                            service_id,
+                            payload,
+                        } => {
+                            let pending_responses = self.0.borrow().pending_responses.clone();
+
+                            if let Some(service) = self.get_service(service_id) {
+                                if let Some(response) = service.borrow_mut().request(payload, self)
+                                {
+                                    pending_responses.borrow_mut().push(
+                                        Box::new(response.map(move |response| ResponseEnvelope {
+                                            request_id,
+                                            service_id,
+                                            response: Ok(response),
+                                        })),
+                                    );
+                                }
+                            } else {
+                                pending_responses
+                                    .borrow_mut()
+                                    .push(Box::new(future::ok(ResponseEnvelope {
                                         request_id,
                                         service_id,
-                                        response: Ok(response),
-                                    }),
-                                ));
+                                        response: Err(Error::ServiceNotFound),
+                                    })));
                             }
-                        } else {
-                            self.state
-                                .borrow_mut()
-                                .pending_responses
-                                .push(Box::new(future::ok(ResponseEnvelope {
-                                    request_id,
-                                    service_id,
-                                    response: Err(Error::ServiceNotFound),
-                                })));
                         }
                     }
-                },
+                }
                 Ok(Async::Ready(None)) => return Ok(false),
                 Ok(Async::NotReady) => return Ok(true),
                 Err(error) => {
@@ -146,7 +147,7 @@ impl Connection {
 
     fn poll_outgoing(&mut self) -> Poll<Option<Vec<u8>>, ()> {
         let existing_service_ids = {
-            let state = self.state.borrow();
+            let state = self.0.borrow();
             state
                 .services
                 .keys()
@@ -165,8 +166,8 @@ impl Connection {
         }
 
         let mut insertions = HashMap::new();
-        while self.state.borrow().inserted.len() > 0 {
-            let inserted = mem::replace(&mut self.state.borrow_mut().inserted, HashSet::new());
+        while self.0.borrow().inserted.len() > 0 {
+            let inserted = mem::replace(&mut self.0.borrow_mut().inserted, HashSet::new());
             for id in inserted {
                 if let Some(service) = self.get_service(id) {
                     let mut service = service.borrow_mut();
@@ -178,13 +179,13 @@ impl Connection {
             }
         }
 
-        let mut state = self.state.borrow_mut();
         let mut removals = HashSet::new();
-        mem::swap(&mut removals, &mut state.removed);
+        mem::swap(&mut removals, &mut self.0.borrow_mut().removed);
 
+        let pending_responses = self.0.borrow_mut().pending_responses.clone();
         let mut responses = HashMap::new();
         loop {
-            match state.pending_responses.poll() {
+            match pending_responses.borrow_mut().poll() {
                 Ok(Async::Ready(Some(envelope))) => {
                     responses
                         .entry(envelope.service_id)
@@ -205,13 +206,13 @@ impl Connection {
             }).unwrap();
             Ok(Async::Ready(Some(message)))
         } else {
-            state.pending_task = Some(task::current());
+            self.0.borrow_mut().pending_task = Some(task::current());
             Ok(Async::NotReady)
         }
     }
 
     fn get_service(&self, id: ServiceId) -> Option<Rc<RefCell<RawBytesService>>> {
-        self.state.borrow_mut().services.get(&id).cloned()
+        self.0.borrow_mut().services.get(&id).cloned()
     }
 }
 

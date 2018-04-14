@@ -3,6 +3,7 @@ mod messages;
 pub mod server;
 
 pub use self::messages::{Response, ServiceId};
+use never::Never;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Error {
@@ -43,7 +44,7 @@ pub(crate) mod tests {
         assert_eq!(client_2_updates.wait_next(&mut reactor), Some(48));
 
         let request_future = client_2.request(TestRequest::Increment(3));
-        let response = reactor.run(request_future.unwrap()).unwrap();
+        let response = reactor.run(request_future).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
         assert_eq!(client_1_updates.wait_next(&mut reactor), Some(51));
         assert_eq!(client_2_updates.wait_next(&mut reactor), Some(51));
@@ -56,18 +57,18 @@ pub(crate) mod tests {
         let client = connect(&mut reactor, TestService::new(model));
 
         let request_future = client.request(TestRequest::CreateService(12));
-        let response = reactor.run(request_future.unwrap()).unwrap();
+        let response = reactor.run(request_future).unwrap();
         assert_eq!(response, TestServiceResponse::ServiceCreated(1));
         let child_client = client.get_service::<TestService>(1).unwrap();
         assert_eq!(child_client.state(), Ok(12));
         assert!(client.get_service::<TestService>(1).is_err());
 
         let request_future = client.request(TestRequest::DropService(1));
-        let response = reactor.run(request_future.unwrap()).unwrap();
+        let response = reactor.run(request_future).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
         assert!(child_client.state().is_err());
         assert!(child_client.updates().is_err());
-        assert!(child_client.request(TestRequest::Increment(5)).is_err());
+        assert!(child_client.request(TestRequest::Increment(5)).wait().is_err());
 
         drop(child_client);
         assert!(client.get_service::<TestService>(1).is_err());
@@ -137,7 +138,7 @@ pub(crate) mod tests {
         let model = TestModel::new(42);
         let root_client = connect(&mut reactor, TestService::new(model.clone()));
         reactor
-            .run(root_client.request(TestRequest::CreateService(12)).unwrap())
+            .run(root_client.request(TestRequest::CreateService(12)))
             .unwrap();
 
         assert!(root_client.get_service::<TestService>(1).is_ok());
@@ -279,7 +280,7 @@ pub(crate) mod tests {
             &mut self,
             request: Self::Request,
             connection: &server::Connection,
-        ) -> Option<Box<Future<Item = Self::Response, Error = server::Never>>> {
+        ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
             match request {
                 TestRequest::Increment(count) => {
                     self.model.increment_by(count);

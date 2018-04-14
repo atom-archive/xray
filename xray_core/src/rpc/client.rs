@@ -1,7 +1,7 @@
 use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
 use super::{server, Error};
 use bincode::{deserialize, serialize};
-use futures::{self, stream, unsync, Async, Future, Poll, Stream};
+use futures::{self, future, stream, unsync, Async, Future, Poll, Stream};
 use serde::{Deserialize, Serialize};
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -61,35 +61,43 @@ impl<T: server::Service> Service<T> {
         Ok(Box::new(deserialized_updates))
     }
 
-    pub fn request(
-        &self,
-        request: T::Request,
-    ) -> Result<Box<Future<Item = T::Response, Error = Error>>, Error> {
-        let connection = self.connection.upgrade().ok_or(Error::ConnectionDropped)?;
-        let mut connection = connection.borrow_mut();
+    pub fn request(&self, request: T::Request) -> Box<Future<Item = T::Response, Error = Error>> {
+        fn perform_request<T: server::Service>(
+            connection: &Weak<RefCell<ConnectionState>>,
+            id: ServiceId,
+            request: T::Request,
+        ) -> Result<Box<Future<Item = T::Response, Error = Error>>, Error> {
+            let connection = connection.upgrade().ok_or(Error::ConnectionDropped)?;
+            let mut connection = connection.borrow_mut();
 
-        let request_id = connection.next_request_id;
-        connection.next_request_id += 1;
+            let request_id = connection.next_request_id;
+            connection.next_request_id += 1;
 
-        let (response_tx, response_rx) = unsync::oneshot::channel();
-        connection
-            .client_states
-            .get_mut(&self.id)
-            .ok_or(Error::ServiceDropped)?
-            .pending_requests
-            .insert(request_id, response_tx);
-        let response_future = response_rx
-            .map_err(|_: futures::Canceled| Error::ServiceDropped)
-            .and_then(|response| response.map(|payload| deserialize(&payload).unwrap()));
+            let (response_tx, response_rx) = unsync::oneshot::channel();
+            connection
+                .client_states
+                .get_mut(&id)
+                .ok_or(Error::ServiceDropped)?
+                .pending_requests
+                .insert(request_id, response_tx);
+            let response_future = response_rx
+                .map_err(|_: futures::Canceled| Error::ServiceDropped)
+                .and_then(|response| response.map(|payload| deserialize(&payload).unwrap()));
 
-        let request = MessageToServer::Request {
-            request_id,
-            service_id: self.id,
-            payload: serialize(&request).unwrap(),
-        };
-        connection.outgoing_tx.unbounded_send(request).unwrap();
+            let request = MessageToServer::Request {
+                request_id,
+                service_id: id,
+                payload: serialize(&request).unwrap(),
+            };
+            connection.outgoing_tx.unbounded_send(request).unwrap();
 
-        Ok(Box::new(response_future))
+            Ok(Box::new(response_future))
+        }
+
+        match perform_request::<T>(&self.connection, self.id, request) {
+            Ok(future) => future,
+            Err(error) => Box::new(future::err(error)),
+        }
     }
 
     pub fn get_service<S: server::Service>(&self, id: ServiceId) -> Result<Service<S>, Error> {
@@ -137,7 +145,7 @@ where
     pub fn request(
         &self,
         request: S::Request,
-    ) -> Result<Box<Future<Item = S::Response, Error = Error>>, Error> {
+    ) -> Box<Future<Item = S::Response, Error = Error>> {
         self.service.request(request)
     }
 

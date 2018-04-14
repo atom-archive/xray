@@ -131,7 +131,7 @@ struct InsertionSplitSummary {
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct InsertionOffset(usize);
 
-mod rpc {
+pub mod rpc {
     use super::{Buffer, ChangeId, FragmentId, Insertion, InsertionSplit, LamportTimestamp,
                 ReplicaId, Version};
     use futures::Async;
