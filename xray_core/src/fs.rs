@@ -29,8 +29,15 @@ pub trait LocalTree: Tree {
     fn as_tree(&self) -> &Tree;
 }
 
-pub trait IoProvider {
-    fn read(&self, path: &Path) -> Box<Future<Item = String, Error = io::Error>>;
+pub trait FileProvider {
+    fn open(&self, path: &Path) -> Box<Future<Item = Box<File>, Error = io::Error>>;
+}
+
+type FileId = u64;
+
+pub trait File {
+    fn id(&self) -> FileId;
+    fn read(&self) -> Box<Future<Item = String, Error = io::Error>>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -380,10 +387,19 @@ pub(crate) mod tests {
         pub populated: NotifyCell<bool>,
     }
 
-    pub struct TestIoProvider(Rc<RefCell<TestIoProviderState>>);
+    pub struct TestFileProvider(Rc<RefCell<TestFileProviderState>>);
 
-    struct TestIoProviderState {
-        files: HashMap<PathBuf, String>,
+    struct TestFileProviderState {
+        next_file_id: FileId,
+        files: HashMap<PathBuf, TestFile>,
+    }
+
+    #[derive(Clone)]
+    struct TestFile(Rc<RefCell<TestFileState>>);
+
+    struct TestFileState {
+        id: FileId,
+        content: String,
     }
 
     impl TestTree {
@@ -473,28 +489,51 @@ pub(crate) mod tests {
         }
     }
 
-    impl TestIoProvider {
+    impl TestFileProvider {
         pub fn new() -> Self {
-            TestIoProvider(Rc::new(RefCell::new(TestIoProviderState {
+            TestFileProvider(Rc::new(RefCell::new(TestFileProviderState {
+                next_file_id: 0,
                 files: HashMap::new(),
             })))
         }
 
         pub fn write_sync<P: Into<PathBuf>, S: Into<String>>(&self, path: P, content: S) {
-            self.0.borrow_mut().files.insert(path.into(), content.into());
+            let mut state = self.0.borrow_mut();
+
+            let file_id = state.next_file_id;
+            state.next_file_id += 1;
+
+            state.files.insert(
+                path.into(),
+                TestFile(Rc::new(RefCell::new(TestFileState {
+                    id: file_id,
+                    content: content.into(),
+                }))),
+            );
         }
     }
 
-    impl IoProvider for TestIoProvider {
-        fn read(&self, path: &Path) -> Box<Future<Item = String, Error = io::Error>> {
+    impl FileProvider for TestFileProvider {
+        fn open(&self, path: &Path) -> Box<Future<Item = Box<File>, Error = io::Error>> {
             Box::new(
-                self.0.borrow()
+                self.0
+                    .borrow()
                     .files
                     .get(path)
-                    .cloned()
+                    .map(|file| Box::new(file.clone()) as Box<File>)
                     .ok_or(io::Error::new(io::ErrorKind::NotFound, "Path not found"))
                     .into_future(),
             )
+        }
+    }
+
+    impl File for TestFile {
+        fn id(&self) -> FileId {
+            self.0.borrow().id
+        }
+
+        fn read(&self) -> Box<Future<Item = String, Error = io::Error>> {
+            Box::new(future::ok(self.0.borrow().content.clone()))
         }
     }
 }

@@ -16,7 +16,7 @@ pub struct Tree {
     updates: Arc<NotifyCell<()>>,
 }
 
-pub struct IoProvider;
+pub struct FileProvider;
 
 impl Tree {
     pub fn new<T: Into<PathBuf>>(path: T) -> Result<Self, &'static str> {
@@ -95,29 +95,30 @@ impl fs::LocalTree for Tree {
     }
 }
 
-impl IoProvider {
+impl FileProvider {
     pub fn new() -> Self {
-        IoProvider
+        FileProvider
     }
 }
 
-impl fs::IoProvider for IoProvider {
-    fn read(&self, path: &Path) -> Box<Future<Item = String, Error = io::Error>> {
-        let path = path.to_owned();
-        let (tx, rx) = futures::sync::oneshot::channel();
-
-        thread::spawn(|| {
-            fn read(path: PathBuf) -> Result<String, io::Error> {
-                let file = File::open(path)?;
-                let mut buf_reader = io::BufReader::new(file);
-                let mut contents = String::new();
-                buf_reader.read_to_string(&mut contents)?;
-                Ok(contents)
-            }
-
-            let _ = tx.send(read(path));
-        });
-
-        Box::new(rx.then(|result| result.expect("Sender should not be dropped")))
+impl fs::FileProvider for FileProvider {
+    fn open(&self, path: &Path) -> Box<Future<Item = Box<fs::File>, Error = io::Error>> {
+        unimplemented!()
+        // let path = path.to_owned();
+        // let (tx, rx) = futures::sync::oneshot::channel();
+        //
+        // thread::spawn(|| {
+        //     fn read(path: PathBuf) -> Result<String, io::Error> {
+        //         let file = File::open(path)?;
+        //         let mut buf_reader = io::BufReader::new(file);
+        //         let mut contents = String::new();
+        //         buf_reader.read_to_string(&mut contents)?;
+        //         Ok(contents)
+        //     }
+        //
+        //     let _ = tx.send(read(path));
+        // });
+        //
+        // Box::new(rx.then(|result| result.expect("Sender should not be dropped")))
     }
 }

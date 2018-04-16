@@ -33,7 +33,7 @@ pub trait Project {
 }
 
 pub struct LocalProject {
-    io: Rc<fs::IoProvider>,
+    file_provider: Rc<fs::FileProvider>,
     next_tree_id: TreeId,
     trees: HashMap<TreeId, Rc<fs::LocalTree>>,
 }
@@ -111,12 +111,12 @@ pub enum OpenError {
 }
 
 impl LocalProject {
-    pub fn new<T>(io: Rc<fs::IoProvider>, trees: Vec<T>) -> Self
+    pub fn new<T>(file_provider: Rc<fs::FileProvider>, trees: Vec<T>) -> Self
     where
         T: 'static + fs::LocalTree,
     {
         let mut project = LocalProject {
-            io,
+            file_provider,
             next_tree_id: 0,
             trees: HashMap::new(),
         };
@@ -149,8 +149,9 @@ impl Project for LocalProject {
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
         if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
             Box::new(
-                self.io
-                    .read(&absolute_path)
+                self.file_provider
+                    .open(&absolute_path)
+                    .and_then(|file| file.read())
                     .map_err(|error| error.into())
                     .and_then(|content| {
                         let mut buffer = Buffer::new();
@@ -586,7 +587,7 @@ impl From<rpc::Error> for OpenError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs::tests::{TestIoProvider, TestTree};
+    use fs::tests::{TestFileProvider, TestTree};
     use tokio_core::reactor;
     use IntoShared;
 
@@ -610,7 +611,7 @@ mod tests {
                 }
             }),
         );
-        let project = LocalProject::new(Rc::new(TestIoProvider::new()), vec![tree]);
+        let project = LocalProject::new(Rc::new(TestFileProvider::new()), vec![tree]);
         let (mut search, observer) = project.search_paths("sub2", 10, true);
 
         assert_eq!(search.poll(), Ok(Async::Ready(())));
@@ -641,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_search_many_trees() {
-        let project = build_project(Rc::new(TestIoProvider::new()));
+        let project = build_project(Rc::new(TestFileProvider::new()));
 
         let (mut search, observer) = project.search_paths("bar", 10, true);
         assert_eq!(search.poll(), Ok(Async::Ready(())));
@@ -680,9 +681,9 @@ mod tests {
     fn test_replication() {
         let mut reactor = reactor::Core::new().unwrap();
         let handle = Rc::new(reactor.handle());
-        let io = Rc::new(TestIoProvider::new());
+        let file_provider = Rc::new(TestFileProvider::new());
 
-        let local_project = build_project(io.clone()).into_shared();
+        let local_project = build_project(file_provider.clone()).into_shared();
         let remote_project = RemoteProject::new(
             handle,
             rpc::tests::connect(&mut reactor, ProjectService::new(local_project.clone())),
@@ -708,7 +709,7 @@ mod tests {
             .borrow()
             .resolve_path(tree_id, &relative_path)
             .unwrap();
-        io.write_sync(absolute_path, "abc");
+        file_provider.write_sync(absolute_path, "abc");
 
         let remote_buffer = reactor
             .run(remote_project.open_buffer(tree_id, &relative_path))
@@ -723,7 +724,7 @@ mod tests {
         );
     }
 
-    fn build_project(io: Rc<TestIoProvider>) -> LocalProject {
+    fn build_project(file_provider: Rc<TestFileProvider>) -> LocalProject {
         let tree_1 = TestTree::from_json(
             "/Users/someone/foo",
             json!({
@@ -751,7 +752,7 @@ mod tests {
         );
         tree_2.populated.set(true);
 
-        LocalProject::new(io, vec![tree_1, tree_2])
+        LocalProject::new(file_provider, vec![tree_1, tree_2])
     }
 
     fn summarize_results(

@@ -23,9 +23,14 @@ impl Server {
     pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
         let foreground = Rc::new(reactor.clone());
         let background = Rc::new(CpuPool::new_num_cpus());
-        let io = fs::IoProvider::new();
+        let file_provider = fs::FileProvider::new();
         Server {
-            app: Rc::new(RefCell::new(App::new(headless, foreground, background, io))),
+            app: Rc::new(RefCell::new(App::new(
+                headless,
+                foreground,
+                background,
+                file_provider,
+            ))),
             reactor,
         }
     }

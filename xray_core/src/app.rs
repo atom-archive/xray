@@ -23,7 +23,7 @@ type WorkspaceId = usize;
 pub struct App {
     headless: bool,
     background: BackgroundExecutor,
-    io: Rc<fs::IoProvider>,
+    file_provider: Rc<fs::FileProvider>,
     commands_tx: UnboundedSender<Command>,
     commands_rx: Option<UnboundedReceiver<Command>>,
     peer_list: Rc<RefCell<PeerList>>,
@@ -72,17 +72,17 @@ pub enum RemoteRequest {}
 pub enum RemoteResponse {}
 
 impl App {
-    pub fn new<T: 'static + fs::IoProvider>(
+    pub fn new<T: 'static + fs::FileProvider>(
         headless: bool,
         foreground: ForegroundExecutor,
         background: BackgroundExecutor,
-        io: T,
+        file_provider: T,
     ) -> Self {
         let (commands_tx, commands_rx) = mpsc::unbounded();
         App {
             headless,
             background,
-            io: Rc::new(io),
+            file_provider: Rc::new(file_provider),
             commands_tx,
             commands_rx: Some(commands_rx),
             peer_list: PeerList::new(foreground).into_shared(),
@@ -103,8 +103,8 @@ impl App {
     }
 
     pub fn open_workspace<T: 'static + fs::LocalTree>(&mut self, roots: Vec<T>) {
-        let io = self.io.clone();
-        self.add_workspace(Workspace::new(LocalProject::new(io, roots)));
+        let file_provider = self.file_provider.clone();
+        self.add_workspace(Workspace::new(LocalProject::new(file_provider, roots)));
     }
 
     fn add_workspace(&mut self, workspace: Workspace) {
@@ -272,7 +272,7 @@ impl server::Service for AppService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs::tests::{TestIoProvider, TestTree};
+    use fs::tests::{TestFileProvider, TestTree};
     use futures::{unsync, Future, Sink};
     use stream_ext::StreamExt;
     use tokio_core::reactor;
@@ -286,13 +286,13 @@ mod tests {
             true,
             executor.clone(),
             executor.clone(),
-            TestIoProvider::new(),
+            TestFileProvider::new(),
         ).into_shared();
         let mut client = App::new(
             false,
             executor.clone(),
             executor.clone(),
-            TestIoProvider::new(),
+            TestFileProvider::new(),
         );
 
         let mut peer_list_updates = client.peer_list().updates();
