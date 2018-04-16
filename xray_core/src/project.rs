@@ -232,16 +232,16 @@ impl Project for RemoteProject {
                 })
                 .then(move |response| {
                     response
-                        .map_err(|error| OpenError::RpcError(error))
+                        .map_err(|error| error.into())
                         .and_then(|response| match response {
                             RpcResponse::OpenedBuffer(result) => result.and_then(|service_id| {
                                 service
                                     .borrow()
                                     .get_service(service_id)
-                                    .map_err(|error| OpenError::RpcError(error))
+                                    .map_err(|error| error.into())
                                     .and_then(|buffer_service| {
                                         Buffer::remote(buffer_service)
-                                            .map_err(|error| OpenError::RpcError(error))
+                                            .map_err(|error| error.into())
                                             .map(|buffer| buffer.into_shared())
                                     })
                             }),
@@ -579,6 +579,12 @@ impl Eq for PathSearchResult {}
 impl From<io::Error> for OpenError {
     fn from(error: io::Error) -> Self {
         OpenError::IoError(error.description().to_owned())
+    }
+}
+
+impl From<rpc::Error> for OpenError {
+    fn from(error: rpc::Error) -> Self {
+        OpenError::RpcError(error)
     }
 }
 
