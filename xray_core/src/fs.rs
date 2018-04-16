@@ -11,12 +11,11 @@ use std::io;
 use std::iter::Iterator;
 use std::path::Path;
 use std::rc::Rc;
-use std::result;
 use std::sync::Arc;
 use ForegroundExecutor;
 
 pub type EntryId = usize;
-pub type Result<T> = result::Result<T, ()>;
+pub type FileId = u64;
 
 pub trait Tree {
     fn root(&self) -> Entry;
@@ -32,8 +31,6 @@ pub trait LocalTree: Tree {
 pub trait FileProvider {
     fn open(&self, path: &Path) -> Box<Future<Item = Box<File>, Error = io::Error>>;
 }
-
-type FileId = u64;
 
 pub trait File {
     fn id(&self) -> FileId;
@@ -151,7 +148,7 @@ impl Entry {
         }
     }
 
-    pub fn insert(&self, new_entry: Entry) -> Result<()> {
+    pub fn insert(&self, new_entry: Entry) -> Result<(), ()> {
         match self {
             &Entry::Dir(ref inner) => {
                 let mut children = inner.children.write();
@@ -180,16 +177,11 @@ impl Entry {
     }
 }
 
-fn serialize_dir<S: Serializer>(
-    dir: &Arc<DirInner>,
-    serializer: S,
-) -> result::Result<S::Ok, S::Error> {
+fn serialize_dir<S: Serializer>(dir: &Arc<DirInner>, serializer: S) -> Result<S::Ok, S::Error> {
     dir.serialize(serializer)
 }
 
-fn deserialize_dir<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> result::Result<Arc<DirInner>, D::Error> {
+fn deserialize_dir<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<DirInner>, D::Error> {
     let mut inner = DirInner::deserialize(deserializer)?;
 
     let mut name_chars: Vec<char> = inner.name.to_string_lossy().chars().collect();
@@ -199,16 +191,13 @@ fn deserialize_dir<'de, D: Deserializer<'de>>(
     Ok(Arc::new(inner))
 }
 
-fn serialize_file<S: Serializer>(
-    file: &Arc<FileInner>,
-    serializer: S,
-) -> result::Result<S::Ok, S::Error> {
+fn serialize_file<S: Serializer>(file: &Arc<FileInner>, serializer: S) -> Result<S::Ok, S::Error> {
     file.serialize(serializer)
 }
 
 fn deserialize_file<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> result::Result<Arc<FileInner>, D::Error> {
+) -> Result<Arc<FileInner>, D::Error> {
     let mut inner = FileInner::deserialize(deserializer)?;
     inner.name_chars = inner.name.to_string_lossy().chars().collect();
     Ok(Arc::new(inner))
@@ -217,13 +206,13 @@ fn deserialize_file<'de, D: Deserializer<'de>>(
 fn serialize_dir_children<S: Serializer>(
     children: &RwLock<Arc<Vec<Entry>>>,
     serializer: S,
-) -> result::Result<S::Ok, S::Error> {
+) -> Result<S::Ok, S::Error> {
     children.read().serialize(serializer)
 }
 
 fn deserialize_dir_children<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> result::Result<RwLock<Arc<Vec<Entry>>>, D::Error> {
+) -> Result<RwLock<Arc<Vec<Entry>>>, D::Error> {
     Ok(RwLock::new(Arc::new(Vec::deserialize(deserializer)?)))
 }
 
@@ -298,7 +287,8 @@ impl Tree for RemoteTree {
 pub(crate) mod tests {
     use super::*;
     use bincode::{deserialize, serialize};
-    use futures::{future, IntoFuture};
+    use futures::{future, stream, task, Async, IntoFuture, Poll};
+    use never::Never;
     use notify_cell::NotifyCell;
     use rpc;
     use std::collections::HashMap;
@@ -401,6 +391,8 @@ pub(crate) mod tests {
         id: FileId,
         content: String,
     }
+
+    struct NextTick(bool);
 
     impl TestTree {
         pub fn new<T: Into<PathBuf>>(path: T, root: Entry) -> Self {
@@ -515,15 +507,17 @@ pub(crate) mod tests {
 
     impl FileProvider for TestFileProvider {
         fn open(&self, path: &Path) -> Box<Future<Item = Box<File>, Error = io::Error>> {
-            Box::new(
-                self.0
-                    .borrow()
+            let path = path.to_owned();
+            let state = self.0.clone();
+            Box::new(NextTick::new().then(move |_| {
+                let state = state.borrow();
+                state
                     .files
-                    .get(path)
+                    .get(&path)
                     .map(|file| Box::new(file.clone()) as Box<File>)
                     .ok_or(io::Error::new(io::ErrorKind::NotFound, "Path not found"))
-                    .into_future(),
-            )
+                    .into_future()
+            }))
         }
     }
 
@@ -533,7 +527,32 @@ pub(crate) mod tests {
         }
 
         fn read(&self) -> Box<Future<Item = String, Error = io::Error>> {
-            Box::new(future::ok(self.0.borrow().content.clone()))
+            let file = self.0.clone();
+            Box::new(NextTick::new().then(move |_| {
+                let file = file.borrow();
+                future::ok(file.content.clone())
+            }))
+        }
+    }
+
+    impl NextTick {
+        fn new() -> Self {
+            NextTick(false)
+        }
+    }
+
+    impl Future for NextTick {
+        type Item = ();
+        type Error = Never;
+
+        fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+            if self.0 {
+                Ok(Async::Ready(()))
+            } else {
+                self.0 = true;
+                task::current().notify();
+                Ok(Async::NotReady)
+            }
         }
     }
 }

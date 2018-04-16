@@ -36,6 +36,7 @@ pub struct LocalProject {
     file_provider: Rc<fs::FileProvider>,
     next_tree_id: TreeId,
     trees: HashMap<TreeId, Rc<fs::LocalTree>>,
+    buffers: Rc<RefCell<HashMap<fs::FileId, Rc<RefCell<Buffer>>>>>,
 }
 
 pub struct RemoteProject {
@@ -119,6 +120,7 @@ impl LocalProject {
             file_provider,
             next_tree_id: 0,
             trees: HashMap::new(),
+            buffers: Rc::new(RefCell::new(HashMap::new())),
         };
         for tree in trees {
             project.add_tree(tree);
@@ -148,16 +150,31 @@ impl Project for LocalProject {
         relative_path: &Path,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
         if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
+            let buffers = self.buffers.clone();
             Box::new(
                 self.file_provider
                     .open(&absolute_path)
-                    .and_then(|file| file.read())
-                    .map_err(|error| error.into())
-                    .and_then(|content| {
-                        let mut buffer = Buffer::new();
-                        buffer.splice(0..0, content.as_str());
-                        Ok(buffer.into_shared())
-                    }),
+                    .and_then(move |file| {
+                        // The borrow checker won't let us inline the following local variable:
+                        let buffer = buffers.borrow().get(&file.id()).cloned();
+                        if let Some(buffer) = buffer {
+                            Box::new(future::ok(buffer))
+                                as Box<Future<Item = Rc<RefCell<Buffer>>, Error = io::Error>>
+                        } else {
+                            Box::new(file.read().and_then(move |content| {
+                                let mut buffers = buffers.borrow_mut();
+                                Ok(buffers
+                                    .entry(file.id())
+                                    .or_insert_with(|| {
+                                        let mut buffer = Buffer::new();
+                                        buffer.splice(0..0, content.as_str());
+                                        buffer.into_shared()
+                                    })
+                                    .clone())
+                            }))
+                        }
+                    })
+                    .map_err(|error| error.into()),
             )
         } else {
             Box::new(future::err(OpenError::TreeNotFound))
@@ -592,6 +609,24 @@ mod tests {
     use IntoShared;
 
     #[test]
+    fn test_open_same_path_concurrently() {
+        let file_provider = Rc::new(TestFileProvider::new());
+        let project = build_project(file_provider.clone());
+
+        let tree_id = 0;
+        let relative_path = PathBuf::from("subdir-a/subdir-1/bar");
+        file_provider.write_sync(
+            project.resolve_path(tree_id, &relative_path).unwrap(),
+            "abc",
+        );
+
+        let buffer_future_1 = project.open_buffer(tree_id, &relative_path);
+        let buffer_future_2 = project.open_buffer(tree_id, &relative_path);
+        let (buffer_1, buffer_2) = buffer_future_1.join(buffer_future_2).wait().unwrap();
+        assert!(Rc::ptr_eq(&buffer_1, &buffer_2));
+    }
+
+    #[test]
     fn test_search_one_tree() {
         let tree = TestTree::from_json(
             "/Users/someone/tree",
@@ -715,7 +750,7 @@ mod tests {
             .run(remote_project.open_buffer(tree_id, &relative_path))
             .unwrap();
         let local_buffer = reactor
-            .run(remote_project.open_buffer(tree_id, &relative_path))
+            .run(local_project.borrow().open_buffer(tree_id, &relative_path))
             .unwrap();
 
         assert_eq!(
