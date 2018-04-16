@@ -202,7 +202,7 @@ impl RemoteProject {
         let mut trees = HashMap::new();
         for (tree_id, service_id) in &state.trees {
             let tree_service = service
-                .get_service(*service_id)
+                .take_service(*service_id)
                 .expect("The server should create services for each tree in our project state.");
             let remote_tree = fs::RemoteTree::new(foreground.clone(), tree_service);
             trees.insert(*tree_id, Box::new(remote_tree) as Box<fs::Tree>);
@@ -237,7 +237,7 @@ impl Project for RemoteProject {
                             RpcResponse::OpenedBuffer(result) => result.and_then(|service_id| {
                                 service
                                     .borrow()
-                                    .get_service(service_id)
+                                    .take_service(service_id)
                                     .map_err(|error| error.into())
                                     .and_then(|buffer_service| {
                                         Buffer::remote(buffer_service)
@@ -301,7 +301,7 @@ impl rpc::server::Service for ProjectService {
         };
         for (tree_id, tree) in &self.project.borrow().trees {
             let handle = connection.add_service(fs::TreeService::new(tree.clone()));
-            state.trees.insert(*tree_id, handle.service_id);
+            state.trees.insert(*tree_id, handle.service_id());
             self.tree_services.insert(*tree_id, handle);
         }
 
@@ -335,7 +335,7 @@ impl rpc::server::Service for ProjectService {
                             Ok(RpcResponse::OpenedBuffer(result.map(|buffer| {
                                 let service_handle =
                                     connection.add_service(buffer::rpc::Service::new(buffer));
-                                let service_id = service_handle.service_id;
+                                let service_id = service_handle.service_id();
                                 buffer_services.borrow_mut().push(service_handle);
                                 service_id
                             })))

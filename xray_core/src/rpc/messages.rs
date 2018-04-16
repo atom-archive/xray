@@ -24,4 +24,5 @@ pub enum MessageToServer {
         request_id: RequestId,
         payload: Vec<u8>,
     },
+    DroppedService(ServiceId),
 }

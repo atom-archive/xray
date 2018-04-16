@@ -28,7 +28,7 @@ pub(crate) mod tests {
     #[test]
     fn test_connection() {
         let mut reactor = reactor::Core::new().unwrap();
-        let model = TestModel::new(42);
+        let model = Rc::new(TestModel::new(42));
         let client_1 = connect(&mut reactor, TestService::new(model.clone()));
         assert_eq!(client_1.state(), Ok(42));
 
@@ -51,27 +51,45 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_add_remove_service() {
+    fn test_create_and_drop_service() {
         let mut reactor = reactor::Core::new().unwrap();
-        let model = TestModel::new(42);
-        let client = connect(&mut reactor, TestService::new(model));
+        let mut root_model = TestModel::new(42);
+        let child_model = Rc::new(TestModel::new(12));
+        root_model.child_model = Some(child_model.clone());
+        let root_model = Rc::new(root_model);
+        let client = connect(&mut reactor, TestService::new(root_model.clone()));
+        assert_eq!(Rc::strong_count(&child_model), 2);
 
-        let request_future = client.request(TestRequest::CreateService(12));
+        let request_future = client.request(TestRequest::CreateService);
         let response = reactor.run(request_future).unwrap();
         assert_eq!(response, TestServiceResponse::ServiceCreated(1));
-        let child_client = client.get_service::<TestService>(1).unwrap();
+        let child_client = client.take_service::<TestService>(1).unwrap();
+        let mut child_updates = child_client.updates().unwrap();
         assert_eq!(child_client.state(), Ok(12));
-        assert!(client.get_service::<TestService>(1).is_err());
+        assert!(client.take_service::<TestService>(1).is_err());
+        assert_eq!(Rc::strong_count(&child_model), 3);
 
-        let request_future = client.request(TestRequest::DropService(1));
+        let request_future = client.request(TestRequest::DropService);
         let response = reactor.run(request_future).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
-        assert!(child_client.state().is_err());
-        assert!(child_client.updates().is_err());
-        assert!(child_client.request(TestRequest::Increment(5)).wait().is_err());
+        assert!(child_client.state().is_ok());
+        assert!(
+            reactor
+                .run(child_client.request(TestRequest::Increment(5)))
+                .is_ok()
+        );
+        assert_eq!(Rc::strong_count(&child_model), 3);
 
         drop(child_client);
-        assert!(client.get_service::<TestService>(1).is_err());
+        assert_eq!(child_updates.poll(), Ok(Async::Ready(Some(17))));
+        assert_eq!(Rc::strong_count(&child_model), 3);
+
+        drop(child_updates);
+        reactor.turn(None); // Send drop message
+        reactor.turn(None); // Receive drop message
+
+        assert!(client.take_service::<TestService>(1).is_err());
+        assert_eq!(Rc::strong_count(&child_model), 2);
     }
 
     #[test]
@@ -126,29 +144,16 @@ pub(crate) mod tests {
 
         let mut reactor = reactor::Core::new().unwrap();
         let client = connect(&mut reactor, NoopService::new(1, 2));
-        assert!(client.get_service::<NoopService>(1).is_ok());
-        assert!(client.get_service::<NoopService>(2).is_ok());
-        assert!(client.get_service::<NoopService>(3).is_ok());
-        assert!(client.get_service::<NoopService>(4).is_err());
-    }
-
-    #[test]
-    fn test_drop_client() {
-        let mut reactor = reactor::Core::new().unwrap();
-        let model = TestModel::new(42);
-        let root_client = connect(&mut reactor, TestService::new(model.clone()));
-        reactor
-            .run(root_client.request(TestRequest::CreateService(12)))
-            .unwrap();
-
-        assert!(root_client.get_service::<TestService>(1).is_ok());
-        assert!(root_client.get_service::<TestService>(1).is_err());
+        assert!(client.take_service::<NoopService>(1).is_ok());
+        assert!(client.take_service::<NoopService>(2).is_ok());
+        assert!(client.take_service::<NoopService>(3).is_ok());
+        assert!(client.take_service::<NoopService>(4).is_err());
     }
 
     #[test]
     fn test_drop_client_updates() {
         let mut reactor = reactor::Core::new().unwrap();
-        let model = TestModel::new(42);
+        let model = Rc::new(TestModel::new(42));
         let root_client = connect(&mut reactor, TestService::new(model.clone()));
 
         let updates = root_client.updates();
@@ -162,7 +167,7 @@ pub(crate) mod tests {
     fn test_interrupting_connection_to_client() {
         let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
-        let model = TestModel::new(42);
+        let model = Rc::new(TestModel::new(42));
         let mut server = server::Connection::new(client_to_server_rx, TestService::new(model));
         drop(client_to_server_tx);
         assert_eq!(server.poll(), Ok(Async::Ready(None)));
@@ -187,7 +192,7 @@ pub(crate) mod tests {
         let (_client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
 
-        let model = TestModel::new(42);
+        let model = Rc::new(TestModel::new(42));
         let server = server::Connection::new(client_to_server_rx, TestService::new(model));
         reactor.handle().spawn(
             server_to_client_tx
@@ -230,19 +235,22 @@ pub(crate) mod tests {
     }
 
     #[derive(Clone)]
-    struct TestModel(Rc<RefCell<NotifyCell<usize>>>);
+    struct TestModel {
+        cell: NotifyCell<usize>,
+        child_model: Option<Rc<TestModel>>,
+    }
 
     struct TestService {
-        model: TestModel,
+        model: Rc<TestModel>,
         observer: NotifyCellObserver<usize>,
-        child_services: HashMap<ServiceId, server::ServiceHandle>,
+        child_service: Option<server::ServiceHandle>,
     }
 
     #[derive(Serialize, Deserialize)]
     enum TestRequest {
         Increment(usize),
-        CreateService(usize),
-        DropService(ServiceId),
+        CreateService,
+        DropService,
     }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -252,12 +260,12 @@ pub(crate) mod tests {
     }
 
     impl TestService {
-        fn new(model: TestModel) -> Self {
-            let observer = model.0.borrow().observe();
+        fn new(model: Rc<TestModel>) -> Self {
+            let observer = model.cell.observe();
             TestService {
                 model,
                 observer,
-                child_services: HashMap::new(),
+                child_service: None,
             }
         }
     }
@@ -269,7 +277,7 @@ pub(crate) mod tests {
         type Response = TestServiceResponse;
 
         fn init(&mut self, _: &server::Connection) -> Self::State {
-            self.model.0.borrow().get()
+            self.model.cell.get()
         }
 
         fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
@@ -286,17 +294,18 @@ pub(crate) mod tests {
                     self.model.increment_by(count);
                     Some(Box::new(future::ok(TestServiceResponse::Ack)))
                 }
-                TestRequest::CreateService(initial_count) => {
-                    let handle =
-                        connection.add_service(TestService::new(TestModel::new(initial_count)));
-                    let service_id = handle.service_id;
-                    self.child_services.insert(service_id, handle);
+                TestRequest::CreateService => {
+                    let handle = connection.add_service(TestService::new(
+                        self.model.child_model.as_ref().unwrap().clone(),
+                    ));
+                    let service_id = handle.service_id();
+                    self.child_service = Some(handle);
                     Some(Box::new(future::ok(TestServiceResponse::ServiceCreated(
                         service_id,
                     ))))
                 }
-                TestRequest::DropService(id) => {
-                    self.child_services.remove(&id);
+                TestRequest::DropService => {
+                    self.child_service.take();
                     Some(Box::new(future::ok(TestServiceResponse::Ack)))
                 }
             }
@@ -305,12 +314,14 @@ pub(crate) mod tests {
 
     impl TestModel {
         fn new(count: usize) -> Self {
-            TestModel(Rc::new(RefCell::new(NotifyCell::new(count))))
+            TestModel {
+                cell: NotifyCell::new(count),
+                child_model: None,
+            }
         }
 
         fn increment_by(&self, delta: usize) {
-            let cell = self.0.borrow();
-            cell.set(cell.get() + delta);
+            self.cell.set(self.cell.get() + delta);
         }
     }
 }

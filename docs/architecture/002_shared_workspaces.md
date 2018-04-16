@@ -60,7 +60,7 @@ On the client side, we create a connection by passing the `Stream` of incoming m
 
 Using the root service, the client can make requests to gain access to additional services. In Xray, the root service is currently `App`, which includes a list of shared workspaces in its replicated state. We store the remote service handle in a `PeerList` object that is owned by the local `App` instance, which is the backing model for a `PeerList` view that lists all the connected peers along with descriptions of the workspaces they are currently sharing.
 
-When the user selects a workspace, we request a `Workspace` service from the server via its id. When handling the request on the server, we call `add_service` on the connection with the requested workspace, which returns us a `ServiceId` integer. We send that id to the client in the response. When handling the response on the client, we call `get_service` on root service with the id to take ownership of the remote service's handle.
+When the user selects a workspace, we request a `Workspace` service from the server via its id. When handling the request on the server, we call `add_service` on the connection with the requested workspace, which returns us a `ServiceId` integer. We send that id to the client in the response. When handling the response on the client, we call `take_service` on root service with the id to take ownership of the remote service's handle.
 
 We can then create a `RemoteWorkspace` and pass it ownership of the handle to the remote workspace. `RemoteWorkspace` and `LocalWorkspace` both implement the `Workspace` trait, which allows a `RemoteWorkspace` to be used in the system in all of the same ways that a `LocalWorkspace` can.
 

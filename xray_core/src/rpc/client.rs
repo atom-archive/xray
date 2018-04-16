@@ -10,9 +10,18 @@ use std::marker::PhantomData;
 use std::rc::{Rc, Weak};
 
 pub struct Service<T: server::Service> {
-    id: ServiceId,
-    connection: Weak<RefCell<ConnectionState>>,
+    registration: Rc<ServiceRegistration>,
     _marker: PhantomData<T>,
+}
+
+pub struct ServiceUpdateStream {
+    registration: Rc<ServiceRegistration>,
+    updates: unsync::mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+pub struct ServiceRegistration {
+    service_id: ServiceId,
+    connection: Weak<RefCell<ConnectionState>>,
 }
 
 pub struct FullUpdateService<T: server::Service> {
@@ -40,34 +49,36 @@ struct ConnectionState {
 
 impl<T: server::Service> Service<T> {
     pub fn state(&self) -> Result<T::State, Error> {
-        let connection = self.connection.upgrade().ok_or(Error::ConnectionDropped)?;
+        let connection = self.registration.connection()?;
         let connection = connection.borrow();
         let client_state = connection
             .client_states
-            .get(&self.id)
+            .get(&self.registration.service_id)
             .ok_or(Error::ServiceDropped)?;
         Ok(deserialize(&client_state.state).unwrap())
     }
 
     pub fn updates(&self) -> Result<Box<Stream<Item = T::Update, Error = ()>>, Error> {
-        let connection = self.connection.upgrade().ok_or(Error::ConnectionDropped)?;
+        let connection = self.registration.connection()?;
         let mut connection = connection.borrow_mut();
         let client_state = connection
             .client_states
-            .get_mut(&self.id)
+            .get_mut(&self.registration.service_id)
             .ok_or(Error::ServiceDropped)?;
-        let updates = client_state.updates_rx.take().ok_or(Error::UpdatesTaken)?;
+        let updates = ServiceUpdateStream {
+            registration: self.registration.clone(),
+            updates: client_state.updates_rx.take().ok_or(Error::UpdatesTaken)?,
+        };
         let deserialized_updates = updates.map(|update| deserialize(&update).unwrap());
         Ok(Box::new(deserialized_updates))
     }
 
     pub fn request(&self, request: T::Request) -> Box<Future<Item = T::Response, Error = Error>> {
         fn perform_request<T: server::Service>(
-            connection: &Weak<RefCell<ConnectionState>>,
-            id: ServiceId,
+            registration: &Rc<ServiceRegistration>,
             request: T::Request,
         ) -> Result<Box<Future<Item = T::Response, Error = Error>>, Error> {
-            let connection = connection.upgrade().ok_or(Error::ConnectionDropped)?;
+            let connection = registration.connection()?;
             let mut connection = connection.borrow_mut();
 
             let request_id = connection.next_request_id;
@@ -76,7 +87,7 @@ impl<T: server::Service> Service<T> {
             let (response_tx, response_rx) = unsync::oneshot::channel();
             connection
                 .client_states
-                .get_mut(&id)
+                .get_mut(&registration.service_id)
                 .ok_or(Error::ServiceDropped)?
                 .pending_requests
                 .insert(request_id, response_tx);
@@ -86,7 +97,7 @@ impl<T: server::Service> Service<T> {
 
             let request = MessageToServer::Request {
                 request_id,
-                service_id: id,
+                service_id: registration.service_id,
                 payload: serialize(&request).unwrap(),
             };
             connection.outgoing_tx.unbounded_send(request).unwrap();
@@ -94,14 +105,14 @@ impl<T: server::Service> Service<T> {
             Ok(Box::new(response_future))
         }
 
-        match perform_request::<T>(&self.connection, self.id, request) {
+        match perform_request::<T>(&self.registration, request) {
             Ok(future) => future,
             Err(error) => Box::new(future::err(error)),
         }
     }
 
-    pub fn get_service<S: server::Service>(&self, id: ServiceId) -> Result<Service<S>, Error> {
-        let connection = self.connection.upgrade().ok_or(Error::ConnectionDropped)?;
+    pub fn take_service<S: server::Service>(&self, id: ServiceId) -> Result<Service<S>, Error> {
+        let connection = self.registration.connection()?;
         Ok(Connection::service(&connection, id)?)
     }
 }
@@ -142,15 +153,12 @@ where
         })
     }
 
-    pub fn request(
-        &self,
-        request: S::Request,
-    ) -> Box<Future<Item = S::Response, Error = Error>> {
+    pub fn request(&self, request: S::Request) -> Box<Future<Item = S::Response, Error = Error>> {
         self.service.request(request)
     }
 
-    pub fn get_service<S2: server::Service>(&self, id: ServiceId) -> Result<Service<S2>, Error> {
-        self.service.get_service(id)
+    pub fn take_service<S2: server::Service>(&self, id: ServiceId) -> Result<Service<S2>, Error> {
+        self.service.take_service(id)
     }
 }
 
@@ -195,8 +203,10 @@ impl Connection {
         } else {
             service_state.has_client = true;
             Ok(Service {
-                id,
-                connection: Rc::downgrade(&connection),
+                registration: Rc::new(ServiceRegistration {
+                    service_id: id,
+                    connection: Rc::downgrade(connection),
+                }),
                 _marker: PhantomData,
             })
         }
@@ -318,5 +328,31 @@ impl Stream for Connection {
         }
 
         Ok(Async::NotReady)
+    }
+}
+
+impl ServiceRegistration {
+    fn connection(&self) -> Result<Rc<RefCell<ConnectionState>>, Error> {
+        self.connection.upgrade().ok_or(Error::ConnectionDropped)
+    }
+}
+
+impl Drop for ServiceRegistration {
+    fn drop(&mut self) {
+        if let Ok(connection) = self.connection() {
+            let _ = connection
+                .borrow_mut()
+                .outgoing_tx
+                .unbounded_send(MessageToServer::DroppedService(self.service_id));
+        }
+    }
+}
+
+impl Stream for ServiceUpdateStream {
+    type Item = Vec<u8>;
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        self.updates.poll()
     }
 }
