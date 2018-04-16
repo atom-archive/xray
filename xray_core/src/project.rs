@@ -46,7 +46,6 @@ pub struct RemoteProject {
 pub struct ProjectService {
     project: Rc<RefCell<LocalProject>>,
     tree_services: HashMap<TreeId, rpc::server::ServiceHandle>,
-    buffer_services: Rc<RefCell<Vec<rpc::server::ServiceHandle>>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -284,7 +283,6 @@ impl ProjectService {
         Self {
             project,
             tree_services: HashMap::new(),
-            buffer_services: Rc::new(RefCell::new(Vec::new())),
         }
     }
 }
@@ -326,18 +324,15 @@ impl rpc::server::Service for ProjectService {
                 relative_path,
             } => {
                 let connection = connection.clone();
-                let buffer_services = self.buffer_services.clone();
                 Some(Box::new(
                     self.project
                         .borrow()
                         .open_buffer(tree_id, &relative_path)
                         .then(move |result| {
                             Ok(RpcResponse::OpenedBuffer(result.map(|buffer| {
-                                let service_handle =
-                                    connection.add_service(buffer::rpc::Service::new(buffer));
-                                let service_id = service_handle.service_id();
-                                buffer_services.borrow_mut().push(service_handle);
-                                service_id
+                                connection
+                                    .add_service(buffer::rpc::Service::new(buffer))
+                                    .service_id()
                             })))
                         }),
                 ))
