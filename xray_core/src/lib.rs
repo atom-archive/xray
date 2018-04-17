@@ -33,6 +33,7 @@ mod tree;
 
 pub use app::{App, WindowId};
 use futures::future::{Executor, Future};
+pub use never::Never;
 use std::cell::RefCell;
 use std::rc::Rc;
 pub use window::{ViewId, WindowUpdate};

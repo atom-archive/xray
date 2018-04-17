@@ -1,6 +1,7 @@
 use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
 use super::{server, Error};
 use bincode::{deserialize, serialize};
+use bytes::Bytes;
 use futures::{self, future, stream, unsync, Async, Future, Poll, Stream};
 use serde::{Deserialize, Serialize};
 use std::cell::{Ref, RefCell};
@@ -16,7 +17,7 @@ pub struct Service<T: server::Service> {
 
 pub struct ServiceUpdateStream {
     _registration: Rc<ServiceRegistration>,
-    updates: unsync::mpsc::UnboundedReceiver<Vec<u8>>,
+    updates: unsync::mpsc::UnboundedReceiver<Bytes>,
 }
 
 pub struct ServiceRegistration {
@@ -31,10 +32,10 @@ pub struct FullUpdateService<T: server::Service> {
 
 struct ServiceState {
     has_client: bool,
-    state: Vec<u8>,
-    updates_rx: Option<unsync::mpsc::UnboundedReceiver<Vec<u8>>>,
-    updates_tx: unsync::mpsc::UnboundedSender<Vec<u8>>,
-    pending_requests: HashMap<RequestId, unsync::oneshot::Sender<Result<Vec<u8>, Error>>>,
+    state: Bytes,
+    updates_rx: Option<unsync::mpsc::UnboundedReceiver<Bytes>>,
+    updates_tx: unsync::mpsc::UnboundedSender<Bytes>,
+    pending_requests: HashMap<RequestId, unsync::oneshot::Sender<Result<Bytes, Error>>>,
 }
 
 pub struct Connection(Rc<RefCell<ConnectionState>>);
@@ -42,7 +43,7 @@ pub struct Connection(Rc<RefCell<ConnectionState>>);
 struct ConnectionState {
     next_request_id: RequestId,
     client_states: HashMap<ServiceId, ServiceState>,
-    incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>,
+    incoming: Box<Stream<Item = Bytes, Error = io::Error>>,
     outgoing_tx: unsync::mpsc::UnboundedSender<MessageToServer>,
     outgoing_rx: unsync::mpsc::UnboundedReceiver<MessageToServer>,
 }
@@ -98,7 +99,7 @@ impl<T: server::Service> Service<T> {
             let request = MessageToServer::Request {
                 request_id,
                 service_id: registration.service_id,
-                payload: serialize(&request).unwrap(),
+                payload: serialize(&request).unwrap().into(),
             };
             connection.outgoing_tx.unbounded_send(request).unwrap();
 
@@ -165,7 +166,7 @@ where
 impl Connection {
     pub fn new<S, B>(incoming: S) -> Box<Future<Item = (Self, Service<B>), Error = String>>
     where
-        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
+        S: 'static + Stream<Item = Bytes, Error = io::Error>,
         B: 'static + server::Service,
     {
         Box::new(incoming.into_future().then(|result| match result {
@@ -230,7 +231,7 @@ impl Connection {
         }
     }
 
-    fn process_insertions(&self, insertions: HashMap<ServiceId, Vec<u8>>) {
+    fn process_insertions(&self, insertions: HashMap<ServiceId, Bytes>) {
         let mut connection = self.0.borrow_mut();
         for (id, state) in insertions {
             let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
@@ -247,7 +248,7 @@ impl Connection {
         }
     }
 
-    fn process_updates(&self, updates: HashMap<ServiceId, Vec<Vec<u8>>>) {
+    fn process_updates(&self, updates: HashMap<ServiceId, Vec<Bytes>>) {
         let mut connection = self.0.borrow_mut();
         for (service_id, updates) in updates {
             connection
@@ -293,7 +294,7 @@ impl Connection {
 }
 
 impl Stream for Connection {
-    type Item = Vec<u8>;
+    type Item = Bytes;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
@@ -317,7 +318,7 @@ impl Stream for Connection {
 
         match self.0.borrow_mut().outgoing_rx.poll() {
             Ok(Async::Ready(Some(message))) => {
-                return Ok(Async::Ready(Some(serialize(&message).unwrap())))
+                return Ok(Async::Ready(Some(serialize(&message).unwrap().into())))
             }
             Ok(Async::Ready(None)) => unreachable!(),
             Ok(Async::NotReady) => {}
@@ -349,7 +350,7 @@ impl Drop for ServiceRegistration {
 }
 
 impl Stream for ServiceUpdateStream {
-    type Item = Vec<u8>;
+    type Item = Bytes;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {

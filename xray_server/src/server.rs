@@ -1,17 +1,19 @@
+use bytes::Bytes;
 use fs;
-use futures::{stream, Future, Sink, Stream};
+use futures::{future, stream, Future, IntoFuture, Sink, Stream};
 use futures_cpupool::CpuPool;
 use messages::{IncomingMessage, OutgoingMessage};
 use std::cell::RefCell;
+use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
 use tokio_core::net::{TcpListener, TcpStream};
 use tokio_core::reactor;
-use tokio_io::AsyncRead;
+use tokio_io::{codec};
 use xray_core::app::Command;
-use xray_core::{self, App, WindowId};
+use xray_core::{self, App, Never, WindowId};
 
 #[derive(Clone)]
 pub struct Server {
@@ -70,7 +72,7 @@ impl Server {
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
         if self.app.borrow().headless() {
-            self.send_responses(
+            self.send_outgoing(
                 outgoing,
                 stream::once(Ok(OutgoingMessage::Error {
                     description: "This is a headless application instance".into(),
@@ -79,17 +81,17 @@ impl Server {
         } else {
             if let Some(commands) = self.app.borrow_mut().commands() {
                 let server = self.clone();
-                let responses = commands
-                    .map(|update| match update {
-                        Command::OpenWindow(window_id) => OutgoingMessage::OpenWindow { window_id },
-                    })
-                    .select(report_input_errors(
-                        incoming.map(move |message| server.handle_app_message(message)),
-                    ));
-
-                self.send_responses(outgoing, responses);
+                let outgoing_commands = commands.map(|update| match update {
+                    Command::OpenWindow(window_id) => OutgoingMessage::OpenWindow { window_id },
+                });
+                let outgoing_responses = report_input_errors(incoming.and_then(move |message| {
+                    server
+                        .handle_app_message(message)
+                        .map_err(|_| unreachable!())
+                }));
+                self.send_outgoing(outgoing, outgoing_commands.select(outgoing_responses));
             } else {
-                self.send_responses(
+                self.send_outgoing(
                     outgoing,
                     stream::once(Ok(OutgoingMessage::Error {
                         description: "An application client is already registered".into(),
@@ -106,12 +108,12 @@ impl Server {
     {
         match (self.app.borrow().headless(), headless) {
             (true, false) => {
-                return self.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                return self.send_outgoing(outgoing, stream::once(Ok(OutgoingMessage::Error {
                     description: "Since Xray was initially started with --headless, all subsequent commands must be --headless".into()
                 })));
             }
             (false, true) => {
-                return self.send_responses(outgoing, stream::once(Ok(OutgoingMessage::Error {
+                return self.send_outgoing(outgoing, stream::once(Ok(OutgoingMessage::Error {
                     description: "Since Xray was initially started without --headless, no subsequent commands may be --headless".into()
                 })));
             }
@@ -119,10 +121,13 @@ impl Server {
         }
 
         let server = self.clone();
-        let responses = stream::once(Ok(OutgoingMessage::Ok)).chain(report_input_errors(
-            incoming.map(move |message| server.handle_app_message(message)),
-        ));
-        self.send_responses(outgoing, responses);
+        let outgoing_ack = stream::once(Ok(OutgoingMessage::Ok));
+        let outgoing_responses = report_input_errors(incoming.and_then(move |message| {
+            server
+                .handle_app_message(message)
+                .map_err(|_| unreachable!())
+        }));
+        self.send_outgoing(outgoing, outgoing_ack.chain(outgoing_responses));
     }
 
     pub fn start_window<O, I>(&self, outgoing: O, incoming: I, window_id: WindowId, height: f64)
@@ -141,13 +146,13 @@ impl Server {
 
         match self.app.borrow_mut().start_window(&window_id, height) {
             Ok(updates) => {
-                self.send_responses(
+                self.send_outgoing(
                     outgoing,
                     updates.map(|update| OutgoingMessage::UpdateWindow(update)),
                 );
             }
             Err(_) => {
-                self.send_responses(
+                self.send_outgoing(
                     outgoing,
                     stream::once(Ok(OutgoingMessage::Error {
                         description: format!("No window exists for id {}", window_id),
@@ -157,18 +162,23 @@ impl Server {
         }
     }
 
-    fn handle_app_message(&self, message: IncomingMessage) -> OutgoingMessage {
+    fn handle_app_message(
+        &self,
+        message: IncomingMessage,
+    ) -> Box<Future<Item = OutgoingMessage, Error = Never>> {
         let result = match message {
-            IncomingMessage::OpenWorkspace { paths } => self.open_workspace(paths),
-            IncomingMessage::Listen { port } => self.listen(port),
-            IncomingMessage::ConnectToWorkspace { address } => self.connect_to_workspace(address),
-            _ => Err(format!("Unexpected message {:?}", message)),
+            IncomingMessage::OpenWorkspace { paths } => {
+                Box::new(self.open_workspace(paths).into_future())
+            }
+            IncomingMessage::Listen { port } => Box::new(self.listen(port).into_future()),
+            IncomingMessage::ConnectToPeer { address } => self.connect_to_peer(address),
+            _ => Box::new(future::err(format!("Unexpected message {:?}", message))),
         };
 
-        match result {
-            Ok(_) => OutgoingMessage::Ok,
-            Err(description) => OutgoingMessage::Error { description },
-        }
+        Box::new(result.then(|result| match result {
+            Ok(_) => Ok(OutgoingMessage::Ok),
+            Err(description) => Ok(OutgoingMessage::Error { description }),
+        }))
     }
 
     fn handle_window_message(&self, window_id: WindowId, message: IncomingMessage) {
@@ -212,16 +222,35 @@ impl Server {
         Ok(())
     }
 
-    fn connect_to_workspace(&self, address: SocketAddr) -> Result<(), String> {
-        let stream = TcpStream::connect(&address, &self.reactor)
-            .wait()
-            .map_err(|_| "Could not connect to address")?;
-        stream.set_nodelay(true).unwrap();
-        let (rx, tx) = stream.split();
-        Ok(())
+    fn connect_to_peer(&self, address: SocketAddr) -> Box<Future<Item = (), Error = String>> {
+        let reactor = self.reactor.clone();
+        let app = self.app.clone();
+        Box::new(
+            TcpStream::connect(&address, &self.reactor)
+                .map_err(move |error| {
+                    format!(
+                        "Could not connect to address {}, {}",
+                        address,
+                        error.description(),
+                    )
+                })
+                .and_then(move |socket| {
+                    socket.set_nodelay(true).unwrap();
+                    let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
+                    let (tx, rx) = transport.split();
+                    let app = app.borrow();
+                    app.connect_to_server(rx.map(|frame| frame.into()))
+                        .and_then(move |connection| {
+                            reactor.spawn(tx.send_all(
+                                connection.map_err(|_| -> io::Error { unreachable!() }),
+                            ).then(|_| Ok(())));
+                            Ok(())
+                        })
+                }),
+        )
     }
 
-    fn send_responses<O, I>(&self, outgoing: O, responses: I)
+    fn send_outgoing<O, I>(&self, outgoing: O, responses: I)
     where
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = OutgoingMessage, Error = ()>,

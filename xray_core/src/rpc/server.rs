@@ -1,6 +1,7 @@
 use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
 use super::Error;
 use bincode::{deserialize, serialize};
+use bytes::Bytes;
 use futures::stream::FuturesUnordered;
 use futures::task::{self, Task};
 use futures::{future, Async, Future, Poll, Stream};
@@ -30,13 +31,13 @@ pub trait Service {
 }
 
 trait RawBytesService {
-    fn init(&mut self, connection: &mut Connection) -> Vec<u8>;
-    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Vec<u8>>>;
+    fn init(&mut self, connection: &mut Connection) -> Bytes;
+    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Bytes>>;
     fn request(
         &mut self,
-        request: Vec<u8>,
+        request: Bytes,
         connection: &mut Connection,
-    ) -> Option<Box<Future<Item = Vec<u8>, Error = Never>>>;
+    ) -> Option<Box<Future<Item = Bytes, Error = Never>>>;
 }
 
 #[derive(Clone)]
@@ -48,7 +49,7 @@ struct ConnectionState {
     client_service_handles: HashMap<ServiceId, ServiceHandle>,
     inserted: HashSet<ServiceId>,
     removed: HashSet<ServiceId>,
-    incoming: Box<Stream<Item = Vec<u8>, Error = io::Error>>,
+    incoming: Box<Stream<Item = Bytes, Error = io::Error>>,
     pending_responses:
         Rc<RefCell<FuturesUnordered<Box<Future<Item = ResponseEnvelope, Error = Never>>>>>,
     pending_task: Option<Task>,
@@ -71,7 +72,7 @@ struct ResponseEnvelope {
 impl Connection {
     pub fn new<S, T>(incoming: S, root_service: T) -> Self
     where
-        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
+        S: 'static + Stream<Item = Bytes, Error = io::Error>,
         T: 'static + Service,
     {
         let connection = Connection(Rc::new(RefCell::new(ConnectionState {
@@ -162,7 +163,7 @@ impl Connection {
         }
     }
 
-    fn poll_outgoing(&mut self) -> Poll<Option<Vec<u8>>, ()> {
+    fn poll_outgoing(&mut self) -> Poll<Option<Bytes>, ()> {
         let existing_service_ids = {
             let state = self.0.borrow();
             state
@@ -173,7 +174,7 @@ impl Connection {
                 .collect::<Vec<ServiceId>>()
         };
 
-        let mut updates: HashMap<ServiceId, Vec<Vec<u8>>> = HashMap::new();
+        let mut updates: HashMap<ServiceId, Vec<Bytes>> = HashMap::new();
         for id in existing_service_ids {
             if let Some(service) = self.take_service(id) {
                 while let Async::Ready(Some(update)) = service.borrow_mut().poll_update(self) {
@@ -220,7 +221,7 @@ impl Connection {
                 updates,
                 removals,
                 responses,
-            }).unwrap();
+            }).unwrap().into();
             Ok(Async::Ready(Some(message)))
         } else {
             self.0.borrow_mut().pending_task = Some(task::current());
@@ -234,7 +235,7 @@ impl Connection {
 }
 
 impl Stream for Connection {
-    type Item = Vec<u8>;
+    type Item = Bytes;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
@@ -244,7 +245,7 @@ impl Stream for Connection {
             Err(error) => {
                 let description = format!("{}", error);
                 let message = serialize(&MessageToClient::Err(description)).unwrap();
-                return Ok(Async::Ready(Some(message)));
+                return Ok(Async::Ready(Some(message.into())));
             }
         }
 
@@ -273,23 +274,23 @@ impl<T> RawBytesService for T
 where
     T: Service,
 {
-    fn init(&mut self, connection: &mut Connection) -> Vec<u8> {
-        serialize(&T::init(self, connection)).unwrap()
+    fn init(&mut self, connection: &mut Connection) -> Bytes {
+        serialize(&T::init(self, connection)).unwrap().into()
     }
 
-    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Vec<u8>>> {
+    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Bytes>> {
         T::poll_update(self, connection)
-            .map(|option| option.map(|update| serialize(&update).unwrap()))
+            .map(|option| option.map(|update| serialize(&update).unwrap().into()))
     }
 
     fn request(
         &mut self,
-        request: Vec<u8>,
+        request: Bytes,
         connection: &mut Connection,
-    ) -> Option<Box<Future<Item = Vec<u8>, Error = Never>>> {
+    ) -> Option<Box<Future<Item = Bytes, Error = Never>>> {
         T::request(self, deserialize(&request).unwrap(), connection).map(|future| {
-            Box::new(future.map(|item| serialize(&item).unwrap()))
-                as Box<Future<Item = Vec<u8>, Error = Never>>
+            Box::new(future.map(|item| serialize(&item).unwrap().into()))
+                as Box<Future<Item = Bytes, Error = Never>>
         })
     }
 }

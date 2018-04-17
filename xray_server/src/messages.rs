@@ -18,7 +18,7 @@ pub enum IncomingMessage {
     OpenWorkspace {
         paths: Vec<PathBuf>,
     },
-    ConnectToWorkspace {
+    ConnectToPeer {
         address: SocketAddr,
     },
     Action {

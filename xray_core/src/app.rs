@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use fs;
 use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::{Async, Future, Stream};
@@ -17,8 +18,8 @@ use ForegroundExecutor;
 use IntoShared;
 
 pub type WindowId = usize;
-pub type PeerName = String;
 type WorkspaceId = usize;
+type PeerId = usize;
 
 pub struct App {
     headless: bool,
@@ -40,13 +41,13 @@ pub enum Command {
 
 pub struct PeerList {
     foreground: ForegroundExecutor,
-    peers: HashMap<PeerName, client::FullUpdateService<AppService>>,
+    next_peer_id: PeerId,
+    peers: HashMap<PeerId, client::FullUpdateService<AppService>>,
     updates: NotifyCell<()>,
 }
 
 #[derive(Debug, PartialEq)]
 struct PeerState {
-    name: String,
     workspaces: Vec<WorkspaceDescriptor>,
 }
 
@@ -155,20 +156,19 @@ impl App {
 
     pub fn connect_to_client<S>(app: Rc<RefCell<App>>, incoming: S) -> server::Connection
     where
-        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
+        S: 'static + Stream<Item = Bytes, Error = io::Error>,
     {
         server::Connection::new(incoming, AppService::new(app.clone()))
     }
 
     pub fn connect_to_server<S>(
         &self,
-        name: PeerName,
         incoming: S,
     ) -> Box<Future<Item = client::Connection, Error = String>>
     where
-        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
+        S: 'static + Stream<Item = Bytes, Error = io::Error>,
     {
-        PeerList::connect_to_server(self.peer_list.clone(), name, incoming)
+        PeerList::connect_to_server(self.peer_list.clone(), incoming)
     }
 
     #[cfg(test)]
@@ -181,6 +181,7 @@ impl PeerList {
     fn new(foreground: ForegroundExecutor) -> Self {
         PeerList {
             foreground,
+            next_peer_id: 0,
             peers: HashMap::new(),
             updates: NotifyCell::new(()),
         }
@@ -190,9 +191,8 @@ impl PeerList {
     fn state(&self) -> Vec<PeerState> {
         self.peers
             .iter()
-            .filter_map(|(name, peer)| {
+            .filter_map(|(_, peer)| {
                 peer.latest_state().ok().map(|state| PeerState {
-                    name: name.clone(),
                     workspaces: state
                         .workspace_ids
                         .iter()
@@ -210,17 +210,19 @@ impl PeerList {
 
     fn connect_to_server<S>(
         peer_list: Rc<RefCell<PeerList>>,
-        name: PeerName,
         incoming: S,
     ) -> Box<Future<Item = client::Connection, Error = String>>
     where
-        S: 'static + Stream<Item = Vec<u8>, Error = io::Error>,
+        S: 'static + Stream<Item = Bytes, Error = io::Error>,
     {
         Box::new(
             client::Connection::new(incoming).map(move |(connection, peer)| {
                 let peer = client::FullUpdateService::new(peer);
 
                 let mut peer_list = peer_list.borrow_mut();
+                let peer_id = peer_list.next_peer_id;
+                peer_list.next_peer_id += 1;
+
                 let updates = peer_list.updates.clone();
                 peer_list
                     .foreground
@@ -229,7 +231,7 @@ impl PeerList {
                         Ok(())
                     })))
                     .unwrap();
-                peer_list.peers.insert(name, peer);
+                peer_list.peers.insert(peer_id, peer);
                 peer_list.updates.set(());
                 connection
             }),
@@ -298,14 +300,11 @@ mod tests {
         let mut peer_list_updates = client.peer_list().updates();
         assert_eq!(client.peer_list().state(), vec![]);
 
-        connect("server", &mut reactor, server.clone(), &mut client);
+        connect(&mut reactor, server.clone(), &mut client);
         peer_list_updates.wait_next(&mut reactor);
         assert_eq!(
             client.peer_list().state(),
-            vec![PeerState {
-                name: String::from("server"),
-                workspaces: vec![],
-            }]
+            vec![PeerState { workspaces: vec![] }]
         );
 
         server.borrow_mut().open_workspace(Vec::<TestTree>::new());
@@ -313,18 +312,12 @@ mod tests {
         assert_eq!(
             client.peer_list().state(),
             vec![PeerState {
-                name: String::from("server"),
                 workspaces: vec![WorkspaceDescriptor { id: 0 }],
             }]
         );
     }
 
-    fn connect(
-        name: &str,
-        reactor: &mut reactor::Core,
-        server: Rc<RefCell<App>>,
-        client: &mut App,
-    ) {
+    fn connect(reactor: &mut reactor::Core, server: Rc<RefCell<App>>, client: &mut App) {
         let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
         let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
@@ -337,7 +330,7 @@ mod tests {
                 .then(|_| Ok(())),
         );
 
-        let client_future = client.connect_to_server(name.to_string(), server_to_client_rx);
+        let client_future = client.connect_to_server(server_to_client_rx);
         let client_outgoing = reactor.run(client_future).unwrap();
         reactor.handle().spawn(
             client_to_server_tx

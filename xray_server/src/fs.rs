@@ -1,14 +1,12 @@
-use futures::{self, future, Future, Stream};
+use futures::{Future, Stream};
 use ignore::WalkBuilder;
 use std::ffi::OsString;
-use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use xray_core::fs;
 use xray_core::notify_cell::NotifyCell;
-use xray_core::BackgroundExecutor;
 
 pub struct Tree {
     path: PathBuf,

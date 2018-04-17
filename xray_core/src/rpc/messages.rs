@@ -1,4 +1,5 @@
 use super::Error;
+use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 
 pub type RequestId = usize;
@@ -7,22 +8,22 @@ pub type ServiceId = usize;
 #[derive(Serialize, Deserialize)]
 pub enum MessageToClient {
     Update {
-        insertions: HashMap<ServiceId, Vec<u8>>,
-        updates: HashMap<ServiceId, Vec<Vec<u8>>>,
+        insertions: HashMap<ServiceId, Bytes>,
+        updates: HashMap<ServiceId, Vec<Bytes>>,
         removals: HashSet<ServiceId>,
         responses: HashMap<ServiceId, Vec<(RequestId, Response)>>,
     },
     Err(String),
 }
 
-pub type Response = Result<Vec<u8>, Error>;
+pub type Response = Result<Bytes, Error>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MessageToServer {
     Request {
         service_id: ServiceId,
         request_id: RequestId,
-        payload: Vec<u8>,
+        payload: Bytes,
     },
     DroppedService(ServiceId),
 }

@@ -34,7 +34,7 @@ type PortNumber = u16;
 enum ServerRequest {
     StartCli { headless: bool },
     OpenWorkspace { paths: Vec<PathBuf> },
-    ConnectToWorkspace { address: SocketAddr },
+    ConnectToPeer { address: SocketAddr },
     Listen { port: PortNumber },
 }
 
@@ -105,7 +105,7 @@ fn launch() -> Result<(), String> {
     send_message(&mut socket, ServerRequest::StartCli { headless })?;
 
     if let Some(address) = args.flag_connect {
-        send_message(&mut socket, ServerRequest::ConnectToWorkspace { address })?;
+        send_message(&mut socket, ServerRequest::ConnectToPeer { address })?;
     } else if args.arg_path.len() > 0 {
         let mut paths = Vec::new();
         for path in args.arg_path {
