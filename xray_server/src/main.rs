@@ -7,6 +7,7 @@ extern crate bytes;
 extern crate futures;
 extern crate futures_cpupool;
 extern crate ignore;
+extern crate parking_lot;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;

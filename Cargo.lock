@@ -769,6 +769,7 @@ dependencies = [
  "futures 0.1.21 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-cpupool 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "ignore 0.4.1 (git+https://github.com/atom/ripgrep?branch=include_ignored)",
+ "parking_lot 0.5.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.34 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_derive 1.0.34 (registry+https://github.com/rust-lang/crates.io-index)",
