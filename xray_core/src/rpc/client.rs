@@ -15,7 +15,7 @@ pub struct Service<T: server::Service> {
 }
 
 pub struct ServiceUpdateStream {
-    registration: Rc<ServiceRegistration>,
+    _registration: Rc<ServiceRegistration>,
     updates: unsync::mpsc::UnboundedReceiver<Vec<u8>>,
 }
 
@@ -66,7 +66,7 @@ impl<T: server::Service> Service<T> {
             .get_mut(&self.registration.service_id)
             .ok_or(Error::ServiceDropped)?;
         let updates = ServiceUpdateStream {
-            registration: self.registration.clone(),
+            _registration: self.registration.clone(),
             updates: client_state.updates_rx.take().ok_or(Error::UpdatesTaken)?,
         };
         let deserialized_updates = updates.map(|update| deserialize(&update).unwrap());

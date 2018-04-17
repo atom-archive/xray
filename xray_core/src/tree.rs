@@ -73,6 +73,12 @@ impl<'a, T: Item> Tree<T> {
         Self::from_children(vec![])
     }
 
+    pub fn from_item(item: T) -> Self {
+        let mut tree = Self::new();
+        tree.push(item);
+        tree
+    }
+
     fn from_children(children: Vec<Self>) -> Self {
         let summary = Self::summarize_children(&children);
         let rightmost_leaf = children

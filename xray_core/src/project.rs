@@ -40,6 +40,7 @@ pub struct LocalProject {
 }
 
 pub struct RemoteProject {
+    foreground: ForegroundExecutor,
     service: Rc<RefCell<rpc::client::Service<ProjectService>>>,
     trees: HashMap<TreeId, Box<fs::Tree>>,
 }
@@ -167,7 +168,7 @@ impl Project for LocalProject {
                                     .entry(file.id())
                                     .or_insert_with(|| {
                                         let mut buffer = Buffer::new();
-                                        buffer.splice(0..0, content.as_str());
+                                        buffer.edit(0..0, content.as_str());
                                         buffer.into_shared()
                                     })
                                     .clone())
@@ -225,6 +226,7 @@ impl RemoteProject {
             trees.insert(*tree_id, Box::new(remote_tree) as Box<fs::Tree>);
         }
         Ok(Self {
+            foreground,
             service: service.into_shared(),
             trees,
         })
@@ -238,6 +240,7 @@ impl Project for RemoteProject {
         relative_path: &Path,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
         let relative_path = relative_path.to_owned();
+        let foreground = self.foreground.clone();
         let service = self.service.clone();
 
         Box::new(
@@ -257,9 +260,8 @@ impl Project for RemoteProject {
                                     .take_service(service_id)
                                     .map_err(|error| error.into())
                                     .and_then(|buffer_service| {
-                                        Buffer::remote(buffer_service)
+                                        Buffer::remote(foreground, buffer_service)
                                             .map_err(|error| error.into())
-                                            .map(|buffer| buffer.into_shared())
                                     })
                             }),
                         })
