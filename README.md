@@ -6,11 +6,12 @@ Xray is an experimental Electron-based text editor informed by what we've learne
 
 ## Updates
 
+* [April 16, 2018](./docs/updates/2018_04_16.md)
+* [April 9, 2018](./docs/updates/2018_04_09.md)
 * [April 2, 2018](./docs/updates/2018_04_02.md)
 * [March 26, 2018](./docs/updates/2018_03_26.md)
 * [March 19, 2018](./docs/updates/2018_03_19.md)
-* [March 12, 2018](./docs/updates/2018_03_12.md)
-* [March 5, 2018](./docs/updates/2018_03_05.md)
+* [Archives](./docs/updates/)
 
 ## Foundational priorities
 
@@ -46,7 +47,7 @@ We expose convenient and powerful APIs to enable users to add non-trivial functi
 
 *Editing on GitHub feels like editing in Xray.*
 
-We provide a feature-rich editor component that can be used on the web and within other Electron applications. This will ultimately help us provide a more unified experience between GitHub.com and this editor and give us a stronger base of stakeholders in the core editing technology. If this forces serious performance compromises we may potentially drop this objective, but we don't think that it will.
+We want to provide a full-featured editor experience that can be used from within a browser. This will ultimately help us provide a more unified experience between GitHub.com and Xray and give us a stronger base of stakeholders in the core editing technology.
 
 ## Architecture
 
@@ -127,7 +128,9 @@ CSS is a widely-known and well-supported tool for styling user interfaces, which
 
 In Atom, the vast majority of computation of any given frame is spent manipulating the DOM, recalculating styles, and performing layout. To achieve good text rendering performance, it is critical that we bypass this overhead and take direct control over rendering. Like Alacritty and Xi, we plan to employ OpenGL to position quads that are mapped to glyph bitmaps in a texture atlas.
 
-We plan to use HarfBuzz to determine an accurate mapping between character sequences and glyphs, since one character does not always correspond to one glyph. Once we identify clusters of characters corresponding to glyphs, we'll rasterize glyphs via an HTML 5 canvas to ensure we use the appropriate text rasterization method for the current platform, then upload them to the texture atlas on the GPU to be referenced in shaders.
+There isn't always a 1:1 relationship between code units inside a JavaScript string and glyphs on screen. Characters (code points) can be expressed as two 16-bit units, but this situation is simple to detect by examining the numeric ranges of the code units. In other cases, the correspondence between code units and glyphs is less straightforward to determine. If the current font and/or locale depends on ligatures or contextual alternates to render correctly, determining the correspondence between code points and glyphs requires support for complex text shaping that references metadata embedded in the font. Bi-directional text complicates the situation further.
+
+For now, our plan is to detect the presence of characters that may require such complex text shaping and fall back to rendering with HTML on the specific lines that require these features. This will enable us to support scripts such as Arabic and Devanagari. For fonts like FiraCode, which include ligatures for common character sequences used in programming, we'll need a different approach. One idea would be to perform a limited subset of text-shaping that just handles ligatures, so as to keep performance high. Another approach that would only work on the desktop would be to use the platform text-shaping and rasterization APIs in this environment.
 
 Bypassing the DOM means that we'll need to implement styling and text layout ourselves. That is a high price to pay, but we think it will be worth it to bypass the performance overhead imposed by the DOM.
 
@@ -160,7 +163,7 @@ By May 1, we'd like it to be possible for multiple Xray clients to connect to a 
 * [x] High-performance text rendering
 * [x] Cursors, selections, and editing
 * [x] Client/server architecture
-* [ ] File finder
+* [x] File finder
 * [ ] Load and save buffers
 * [ ] Key bindings system
 * [ ] Remote headless workspace
