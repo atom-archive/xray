@@ -239,15 +239,24 @@ pub mod rpc {
     }
 
     pub struct Service {
-        outgoing_ops: unsync::mpsc::UnboundedReceiver<Arc<Operation>>,
+        replica_id: ReplicaId,
+        outgoing_ops: Box<Stream<Item = Arc<Operation>, Error = ()>>,
         buffer: Rc<RefCell<Buffer>>,
     }
 
     impl Service {
         pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
-            let outgoing_ops = buffer.borrow_mut().outgoing_ops();
+            let replica_id = buffer
+                .borrow_mut()
+                .next_replica_id()
+                .expect("Cannot replicate a remote buffer");
+            let outgoing_ops = buffer
+                .borrow_mut()
+                .outgoing_ops()
+                .filter(move |op| op.replica_id() != replica_id);
             Self {
-                outgoing_ops,
+                replica_id,
+                outgoing_ops: Box::new(outgoing_ops),
                 buffer,
             }
         }
@@ -260,11 +269,9 @@ pub mod rpc {
         type Response = ();
 
         fn init(&mut self, _: &rpc::server::Connection) -> Self::State {
-            let mut buffer = self.buffer.borrow_mut();
+            let buffer = self.buffer.borrow_mut();
             let mut state = State {
-                replica_id: buffer
-                    .next_replica_id()
-                    .expect("Cannot replicate a remote buffer"),
+                replica_id: self.replica_id,
                 fragments: Vec::new(),
                 insertions: HashMap::new(),
                 insertion_splits: HashMap::new(),
@@ -308,7 +315,11 @@ pub mod rpc {
             _connection: &rpc::server::Connection,
         ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
             match request {
-                Request::Operation(op) => self.buffer.borrow_mut().integrate_op(&op),
+                Request::Operation(op) => {
+                    let mut buffer = self.buffer.borrow_mut();
+                    buffer.broadcast_op(&op);
+                    buffer.integrate_op(op);
+                }
             };
 
             None
@@ -420,7 +431,7 @@ impl Buffer {
         let buffer_clone = buffer.clone();
         foreground
             .execute(Box::new(incoming_ops.for_each(move |update| {
-                buffer_clone.borrow_mut().integrate_op(&update.0);
+                buffer_clone.borrow_mut().integrate_op(update.0);
                 Ok(())
             })))
             .unwrap();
@@ -513,9 +524,9 @@ impl Buffer {
         }
     }
 
-    fn integrate_op(&mut self, op: &Operation) -> Result<(), Error> {
-        match op {
-            Operation::Edit {
+    fn integrate_op(&mut self, op: Arc<Operation>) -> Result<(), Error> {
+        match op.as_ref() {
+            &Operation::Edit {
                 ref id,
                 ref start_id,
                 ref start_offset,
@@ -1612,6 +1623,14 @@ impl AddAssign for InsertionOffset {
     }
 }
 
+impl Operation {
+    fn replica_id(&self) -> ReplicaId {
+        match *self {
+            Operation::Edit { ref id, .. } => id.replica_id,
+        }
+    }
+}
+
 fn find_insertion_index<T: Ord>(v: &Vec<T>, x: &T) -> usize {
     match v.binary_search(x) {
         Ok(index) => index,
@@ -2027,7 +2046,7 @@ mod tests {
                     }
                 } else if !queues[replica_index].is_empty() {
                     buffer
-                        .integrate_op(&queues[replica_index].remove(0))
+                        .integrate_op(queues[replica_index].remove(0))
                         .unwrap();
                 }
 
@@ -2050,25 +2069,33 @@ mod tests {
 
         let mut reactor = reactor::Core::new().unwrap();
         let foreground = Rc::new(reactor.handle());
-        let client =
+        let client_1 =
             rpc::tests::connect(&mut reactor, super::rpc::Service::new(local_buffer.clone()));
-        let remote_buffer = Buffer::remote(foreground, client).unwrap();
+        let remote_buffer_1 = Buffer::remote(foreground.clone(), client_1).unwrap();
+        let client_2 =
+            rpc::tests::connect(&mut reactor, super::rpc::Service::new(local_buffer.clone()));
+        let remote_buffer_2 = Buffer::remote(foreground, client_2).unwrap();
         assert_eq!(
-            remote_buffer.borrow().to_string(),
+            remote_buffer_1.borrow().to_string(),
+            local_buffer.borrow().to_string()
+        );
+        assert_eq!(
+            remote_buffer_2.borrow().to_string(),
             local_buffer.borrow().to_string()
         );
 
         local_buffer.borrow_mut().edit(3..6, "jk");
-        remote_buffer.borrow_mut().edit(7..7, "lmn");
-        assert_ne!(
-            remote_buffer.borrow().to_string(),
-            local_buffer.borrow().to_string()
-        );
+        remote_buffer_1.borrow_mut().edit(7..7, "lmn");
 
         let mut remaining_tries = 10;
-        while remote_buffer.borrow().to_string() != local_buffer.borrow().to_string() {
+        while remote_buffer_1.borrow().to_string() != local_buffer.borrow().to_string()
+            || remote_buffer_2.borrow().to_string() != local_buffer.borrow().to_string()
+        {
             remaining_tries -= 1;
-            assert!(remaining_tries > 0, "Ran out of patience waiting for buffers to converge");
+            assert!(
+                remaining_tries > 0,
+                "Ran out of patience waiting for buffers to converge"
+            );
             reactor.turn(Some(Duration::from_millis(0)));
         }
     }
