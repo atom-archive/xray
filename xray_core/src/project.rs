@@ -212,7 +212,7 @@ impl Project for LocalProject {
 }
 
 impl RemoteProject {
-    fn new(
+    pub fn new(
         foreground: ForegroundExecutor,
         service: rpc::client::Service<ProjectService>,
     ) -> Result<Self, rpc::Error> {
@@ -299,7 +299,7 @@ impl Project for RemoteProject {
 }
 
 impl ProjectService {
-    fn new(project: Rc<RefCell<LocalProject>>) -> Self {
+    pub fn new(project: Rc<RefCell<LocalProject>>) -> Self {
         Self {
             project,
             tree_services: HashMap::new(),

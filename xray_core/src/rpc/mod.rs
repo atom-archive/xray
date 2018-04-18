@@ -32,7 +32,7 @@ impl error::Error for Error {
     fn description(&self) -> &str {
         match *self {
             Error::ConnectionDropped => "connection dropped",
-            Error::IoError(ref description) => "io error",
+            Error::IoError(_) => "io error",
             Error::ServiceDropped => "service dropped",
             Error::ServiceNotFound => "service not found",
             Error::ServiceTaken => "service taken",

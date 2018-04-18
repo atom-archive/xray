@@ -20,7 +20,11 @@ pub trait Service {
     type Response: 'static + Serialize + for<'a> Deserialize<'a>;
 
     fn init(&mut self, connection: &Connection) -> Self::State;
-    fn poll_update(&mut self, connection: &Connection) -> Async<Option<Self::Update>>;
+
+    fn poll_update(&mut self, _connection: &Connection) -> Async<Option<Self::Update>> {
+        Async::NotReady
+    }
+
     fn request(
         &mut self,
         _request: Self::Request,

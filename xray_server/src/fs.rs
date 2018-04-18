@@ -14,7 +14,8 @@ use xray_core::notify_cell::NotifyCell;
 pub struct Tree {
     path: PathBuf,
     root: xray_fs::Entry,
-    updates: Arc<NotifyCell<()>>,
+    updates: NotifyCell<()>,
+    populated: NotifyCell<bool>,
 }
 
 pub struct FileProvider;
@@ -29,16 +30,28 @@ impl Tree {
         let path = path.into();
         let file_name = OsString::from(path.file_name().ok_or("Path must have a filename")?);
         let root = xray_fs::Entry::dir(file_name, false, false);
-        let updates = Arc::new(NotifyCell::new(()));
-        Self::populate(path.clone(), root.clone(), updates.clone());
+        let updates = NotifyCell::new(());
+        let populated = NotifyCell::new(false);
+        Self::populate(
+            path.clone(),
+            root.clone(),
+            updates.clone(),
+            populated.clone(),
+        );
         Ok(Self {
             path,
             root,
             updates,
+            populated,
         })
     }
 
-    fn populate(path: PathBuf, root: xray_fs::Entry, updates: Arc<NotifyCell<()>>) {
+    fn populate(
+        path: PathBuf,
+        root: xray_fs::Entry,
+        updates: NotifyCell<()>,
+        populated: NotifyCell<bool>,
+    ) {
         thread::spawn(move || {
             let mut stack = vec![root];
 
@@ -73,6 +86,8 @@ impl Tree {
                 }
                 updates.set(());
             }
+
+            populated.set(true);
         });
     }
 }
@@ -93,7 +108,13 @@ impl xray_fs::LocalTree for Tree {
     }
 
     fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
-        unimplemented!()
+        Box::new(
+            self.populated
+                .observe()
+                .skip_while(|p| Ok(!p))
+                .into_future()
+                .then(|_| Ok(())),
+        )
     }
 
     fn as_tree(&self) -> &xray_fs::Tree {

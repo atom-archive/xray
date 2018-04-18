@@ -27,12 +27,7 @@ impl Server {
         let background = Rc::new(CpuPool::new_num_cpus());
         let file_provider = fs::FileProvider::new();
         Server {
-            app: Rc::new(RefCell::new(App::new(
-                headless,
-                foreground,
-                background,
-                file_provider,
-            ))),
+            app: App::new(headless, foreground, background, file_provider),
             reactor,
         }
     }
@@ -203,7 +198,7 @@ impl Server {
             .iter()
             .map(|path| fs::Tree::new(path).unwrap())
             .collect();
-        self.app.borrow_mut().open_workspace(roots);
+        self.app.borrow_mut().open_local_workspace(roots);
         Ok(())
     }
 
@@ -211,11 +206,20 @@ impl Server {
         let local_addr = SocketAddr::new("127.0.0.1".parse().unwrap(), port);
         let listener = TcpListener::bind(&local_addr, &self.reactor)
             .map_err(|_| "Error binding address".to_owned())?;
+        let app = self.app.clone();
+        let reactor = self.reactor.clone();
         let handle_incoming = listener
             .incoming()
             .map_err(|_| eprintln!("Error accepting incoming connection"))
             .for_each(move |(socket, _)| {
                 socket.set_nodelay(true).unwrap();
+                let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
+                let (tx, rx) = transport.split();
+                let connection = App::connect_to_client(app.clone(), rx.map(|frame| frame.into()));
+                reactor.spawn(
+                    tx.send_all(connection.map_err(|_| -> io::Error { unreachable!() }))
+                        .then(|_| Ok(())),
+                );
                 Ok(())
             });
         self.reactor.spawn(handle_incoming);

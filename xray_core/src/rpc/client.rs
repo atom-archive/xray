@@ -119,6 +119,16 @@ impl<T: server::Service> Service<T> {
     }
 }
 
+// Can't derive Clone because of https://github.com/rust-lang/rust/issues/26925
+impl<T: server::Service> Clone for Service<T> {
+    fn clone(&self) -> Self {
+        Self {
+            registration: self.registration.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<T, S> FullUpdateService<S>
 where
     T: 'static + Serialize + for<'a> Deserialize<'a>,
@@ -161,6 +171,16 @@ where
 
     pub fn take_service<S2: server::Service>(&self, id: ServiceId) -> Result<Service<S2>, Error> {
         self.service.take_service(id)
+    }
+}
+
+// Can't derive Clone because of https://github.com/rust-lang/rust/issues/26925
+impl<T: server::Service> Clone for FullUpdateService<T> {
+    fn clone(&self) -> Self {
+        Self {
+            latest_state: self.latest_state.clone(),
+            service: self.service.clone(),
+        }
     }
 }
 
