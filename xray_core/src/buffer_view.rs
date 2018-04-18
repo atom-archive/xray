@@ -1,18 +1,19 @@
+use buffer::{Anchor, Buffer, Point};
 use futures::{Poll, Stream};
-use std::rc::Rc;
+use movement;
+use notify_cell::NotifyCell;
+use serde_json;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::mem;
 use std::ops::Range;
-use serde_json;
-use notify_cell::NotifyCell;
-use buffer::{Anchor, Buffer, Point};
-use movement;
+use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
 
 pub struct BufferView {
     buffer: Rc<RefCell<Buffer>>,
-    updates: NotifyCell<()>,
+    updates_tx: NotifyCell<()>,
+    updates_rx: Box<Stream<Item = (), Error = ()>>,
     dropped: NotifyCell<bool>,
     selections: Vec<Selection>,
     height: Option<f64>,
@@ -53,18 +54,19 @@ impl BufferView {
 
         {
             let buffer = buffer.borrow();
-            selections = vec![
-                Selection {
-                    start: buffer.anchor_before_offset(0).unwrap(),
-                    end: buffer.anchor_before_offset(0).unwrap(),
-                    reversed: false,
-                    goal_column: None,
-                },
-            ];
+            selections = vec![Selection {
+                start: buffer.anchor_before_offset(0).unwrap(),
+                end: buffer.anchor_before_offset(0).unwrap(),
+                reversed: false,
+                goal_column: None,
+            }];
         }
 
+        let updates_tx = NotifyCell::new(());
+        let updates_rx = Box::new(updates_tx.observe().select(buffer.borrow().updates()));
         Self {
-            updates: NotifyCell::new(()),
+            updates_tx,
+            updates_rx,
             buffer,
             selections,
             dropped: NotifyCell::new(false),
@@ -503,7 +505,7 @@ impl BufferView {
     }
 
     fn updated(&mut self) {
-        self.updates.set(());
+        self.updates_tx.set(());
     }
 }
 
@@ -586,7 +588,7 @@ impl Stream for BufferView {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        self.updates.poll()
+        self.updates_rx.poll()
     }
 }
 
@@ -1001,10 +1003,7 @@ mod tests {
     fn test_edit() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
 
-        editor
-            .buffer
-            .borrow_mut()
-            .edit(0..0, "abcdefgh\nhijklmno");
+        editor.buffer.borrow_mut().edit(0..0, "abcdefgh\nhijklmno");
 
         // Three selections on the same line
         editor.select_right();
@@ -1056,7 +1055,7 @@ mod tests {
                 json!([
                     selection((1, 2), (3, 1)),
                     selection((3, 2), (4, 1)),
-                    selection((5, 2), (6, 0))
+                    selection((5, 2), (6, 0)),
                 ])
             );
         }

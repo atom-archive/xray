@@ -1,7 +1,7 @@
 use super::rpc::{client, Error as RpcError};
 use super::tree::{self, SeekBias, Tree};
 use futures::{unsync, Stream};
-use notify_cell::NotifyCell;
+use notify_cell::{NotifyCell, NotifyCellObserver};
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
 use std::cmp;
@@ -508,8 +508,8 @@ impl Buffer {
         }
     }
 
-    fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
-        Box::new(self.updates.observe())
+    pub fn updates(&self) -> NotifyCellObserver<()> {
+        self.updates.observe()
     }
 
     fn broadcast_op(&mut self, op: &Arc<Operation>) {
