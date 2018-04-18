@@ -287,7 +287,7 @@ impl Tree for RemoteTree {
 pub(crate) mod tests {
     use super::*;
     use bincode::{deserialize, serialize};
-    use futures::{future, stream, task, Async, IntoFuture, Poll};
+    use futures::{future, task, Async, IntoFuture, Poll};
     use never::Never;
     use notify_cell::NotifyCell;
     use rpc;

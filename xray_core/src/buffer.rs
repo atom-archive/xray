@@ -197,7 +197,7 @@ impl Version {
 pub mod rpc {
     use super::{Buffer, EditId, FragmentId, Insertion, InsertionSplit, Operation, ReplicaId,
                 Version};
-    use futures::{unsync, Async, Future, Stream};
+    use futures::{Async, Future, Stream};
     use never::Never;
     use rpc;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -318,7 +318,9 @@ pub mod rpc {
                 Request::Operation(op) => {
                     let mut buffer = self.buffer.borrow_mut();
                     buffer.broadcast_op(&op);
-                    buffer.integrate_op(op);
+                    if buffer.integrate_op(op).is_err() {
+                        unimplemented!("Invalid op: terminate the service and respond with error?");
+                    }
                 }
             };
 
@@ -431,7 +433,9 @@ impl Buffer {
         let buffer_clone = buffer.clone();
         foreground
             .execute(Box::new(incoming_ops.for_each(move |update| {
-                buffer_clone.borrow_mut().integrate_op(update.0);
+                if buffer_clone.borrow_mut().integrate_op(update.0).is_err() {
+                    unimplemented!("Invalid op");
+                }
                 Ok(())
             })))
             .unwrap();
@@ -1661,7 +1665,6 @@ mod tests {
     use rpc;
     use std::cmp::Ordering;
     use std::time::Duration;
-    use stream_ext::StreamExt;
     use tokio_core::reactor;
     use IntoShared;
 
@@ -2103,8 +2106,14 @@ mod tests {
         }
 
         assert_eq!(local_buffer.borrow().offset_for_anchor(&anchor).unwrap(), 7);
-        assert_eq!(remote_buffer_1.borrow().offset_for_anchor(&anchor).unwrap(), 7);
-        assert_eq!(remote_buffer_2.borrow().offset_for_anchor(&anchor).unwrap(), 7);
+        assert_eq!(
+            remote_buffer_1.borrow().offset_for_anchor(&anchor).unwrap(),
+            7
+        );
+        assert_eq!(
+            remote_buffer_2.borrow().offset_for_anchor(&anchor).unwrap(),
+            7
+        );
     }
 
     struct RandomCharIter<T: Rng>(T);

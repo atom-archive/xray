@@ -3,7 +3,6 @@ mod messages;
 pub mod server;
 
 pub use self::messages::{Response, ServiceId};
-use never::Never;
 use std::error;
 use std::fmt;
 
@@ -45,9 +44,8 @@ impl error::Error for Error {
 pub(crate) mod tests {
     use super::*;
     use futures::{future, unsync, Async, Future, Sink, Stream};
+    use never::Never;
     use notify_cell::{NotifyCell, NotifyCellObserver};
-    use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
     use stream_ext::StreamExt;
     use tokio_core::reactor;

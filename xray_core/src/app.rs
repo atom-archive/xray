@@ -4,10 +4,10 @@ use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::{future, Async, Future, IntoFuture, Stream};
 use never::Never;
 use notify_cell::{NotifyCell, NotifyCellObserver};
-use project::{LocalProject, ProjectService};
+use project::LocalProject;
 use rpc::{self, client, server};
 use serde_json;
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
@@ -466,7 +466,6 @@ mod tests {
     use futures::{unsync, Future, Sink};
     use stream_ext::StreamExt;
     use tokio_core::reactor;
-    use IntoShared;
 
     #[test]
     fn test_remote_workspaces() {
