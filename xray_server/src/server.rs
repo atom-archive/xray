@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use tokio_core::net::{TcpListener, TcpStream};
 use tokio_core::reactor;
-use tokio_io::{codec};
+use tokio_io::codec;
 use xray_core::app::Command;
 use xray_core::{self, App, Never, WindowId};
 
@@ -240,6 +240,7 @@ impl Server {
                     let (tx, rx) = transport.split();
                     let app = app.borrow();
                     app.connect_to_server(rx.map(|frame| frame.into()))
+                        .map_err(|error| format!("RPC error: {}", error))
                         .and_then(move |connection| {
                             reactor.spawn(tx.send_all(
                                 connection.map_err(|_| -> io::Error { unreachable!() }),

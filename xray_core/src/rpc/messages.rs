@@ -13,7 +13,6 @@ pub enum MessageToClient {
         removals: HashSet<ServiceId>,
         responses: HashMap<ServiceId, Vec<(RequestId, Response)>>,
     },
-    Err(String),
 }
 
 pub type Response = Result<Bytes, Error>;

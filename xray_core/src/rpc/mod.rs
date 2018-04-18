@@ -4,14 +4,41 @@ pub mod server;
 
 pub use self::messages::{Response, ServiceId};
 use never::Never;
+use std::error;
+use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Error {
     ConnectionDropped,
+    IoError(String),
     ServiceDropped,
     ServiceNotFound,
     ServiceTaken,
     UpdatesTaken,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Error::IoError(ref description) => {
+                write!(fmt, "{}: {}", error::Error::description(self), description)
+            }
+            _ => write!(fmt, "{}", error::Error::description(self)),
+        }
+    }
+}
+
+impl error::Error for Error {
+    fn description(&self) -> &str {
+        match *self {
+            Error::ConnectionDropped => "connection dropped",
+            Error::IoError(ref description) => "io error",
+            Error::ServiceDropped => "service dropped",
+            Error::ServiceNotFound => "service not found",
+            Error::ServiceTaken => "service taken",
+            Error::UpdatesTaken => "updates taken",
+        }
+    }
 }
 
 #[cfg(test)]

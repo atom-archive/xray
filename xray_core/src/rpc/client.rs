@@ -6,6 +6,7 @@ use futures::{self, future, stream, unsync, Async, Future, Poll, Stream};
 use serde::{Deserialize, Serialize};
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::error;
 use std::io;
 use std::marker::PhantomData;
 use std::rc::{Rc, Weak};
@@ -164,7 +165,7 @@ where
 }
 
 impl Connection {
-    pub fn new<S, B>(incoming: S) -> Box<Future<Item = (Self, Service<B>), Error = String>>
+    pub fn new<S, B>(incoming: S) -> Box<Future<Item = (Self, Service<B>), Error = Error>>
     where
         S: 'static + Stream<Item = Bytes, Error = io::Error>,
         B: 'static + server::Service,
@@ -179,13 +180,14 @@ impl Connection {
                     outgoing_tx,
                     outgoing_rx,
                 })));
-                connection.update(deserialize(&payload).unwrap()).map(|_| {
-                    let root_service = Self::service(&connection.0, 0).unwrap();
-                    (connection, root_service)
-                })
+
+                let message = deserialize::<Result<MessageToClient, Error>>(&payload).unwrap()?;
+                connection.update(message);
+                let root_service = Self::service(&connection.0, 0).unwrap();
+                Ok((connection, root_service))
             }
-            Ok((None, _)) => Err("Connection was interrupted during handshake".to_string()),
-            Err((error, _)) => Err(format!("{}", error)),
+            Ok((None, _)) => Err(Error::ConnectionDropped),
+            Err((error, _)) => Err(Error::IoError(format!("{}", error))),
         }))
     }
 
@@ -213,7 +215,7 @@ impl Connection {
         }
     }
 
-    fn update(&mut self, message: MessageToClient) -> Result<(), String> {
+    fn update(&mut self, message: MessageToClient) {
         match message {
             MessageToClient::Update {
                 insertions,
@@ -225,9 +227,7 @@ impl Connection {
                 self.process_updates(updates);
                 self.process_removals(removals);
                 self.process_responses(responses);
-                Ok(())
             }
-            MessageToClient::Err(description) => Err(description),
         }
     }
 
@@ -302,9 +302,13 @@ impl Stream for Connection {
             let incoming_message = self.0.borrow_mut().incoming.poll();
             match incoming_message {
                 Ok(Async::Ready(Some(payload))) => {
-                    match self.update(deserialize(&payload).unwrap()) {
-                        Ok(_) => continue,
-                        Err(description) => eprintln!("Error occurred on server: {}", description),
+                    let message: Result<MessageToClient, Error> = deserialize(&payload).unwrap();
+                    match message {
+                        Ok(message) => self.update(message),
+                        Err(error) => eprintln!(
+                            "Error occurred on server: {}",
+                            error::Error::description(&error)
+                        ),
                     }
                 }
                 Ok(Async::Ready(None)) => return Ok(Async::Ready(None)),

@@ -4,8 +4,7 @@ use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::{Async, Future, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use project::LocalProject;
-use rpc::client;
-use rpc::server;
+use rpc::{self, client, server};
 use serde_json;
 use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
@@ -42,8 +41,12 @@ pub enum Command {
 pub struct PeerList {
     foreground: ForegroundExecutor,
     next_peer_id: PeerId,
-    peers: HashMap<PeerId, client::FullUpdateService<AppService>>,
+    peers: HashMap<PeerId, Peer>,
     updates: NotifyCell<()>,
+}
+
+struct Peer {
+    service: client::FullUpdateService<AppService>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -164,7 +167,7 @@ impl App {
     pub fn connect_to_server<S>(
         &self,
         incoming: S,
-    ) -> Box<Future<Item = client::Connection, Error = String>>
+    ) -> Box<Future<Item = client::Connection, Error = rpc::Error>>
     where
         S: 'static + Stream<Item = Bytes, Error = io::Error>,
     {
@@ -211,31 +214,50 @@ impl PeerList {
     fn connect_to_server<S>(
         peer_list: Rc<RefCell<PeerList>>,
         incoming: S,
-    ) -> Box<Future<Item = client::Connection, Error = String>>
+    ) -> Box<Future<Item = client::Connection, Error = rpc::Error>>
     where
         S: 'static + Stream<Item = Bytes, Error = io::Error>,
     {
         Box::new(
-            client::Connection::new(incoming).map(move |(connection, peer)| {
-                let peer = client::FullUpdateService::new(peer);
+            client::Connection::new(incoming).and_then(move |(connection, peer_service)| {
+                let peer = Peer::new(peer_service);
+                let peer_updates = peer.updates()?;
 
                 let mut peer_list = peer_list.borrow_mut();
                 let peer_id = peer_list.next_peer_id;
                 peer_list.next_peer_id += 1;
 
-                let updates = peer_list.updates.clone();
+                let peer_list_updates = peer_list.updates.clone();
                 peer_list
                     .foreground
-                    .execute(Box::new(peer.updates().unwrap().for_each(move |_| {
-                        updates.set(());
+                    .execute(Box::new(peer_updates.for_each(move |_| {
+                        peer_list_updates.set(());
                         Ok(())
                     })))
                     .unwrap();
+
                 peer_list.peers.insert(peer_id, peer);
                 peer_list.updates.set(());
-                connection
+                Ok(connection)
             }),
         )
+    }
+}
+
+impl Peer {
+    fn new(service: client::Service<AppService>) -> Self {
+        Self {
+            service: client::FullUpdateService::new(service),
+        }
+    }
+
+    fn updates(&self) -> Result<Box<Stream<Item = (), Error = ()>>, rpc::Error> {
+        Ok(Box::new(self.service.updates()?.map(|_| ())))
+    }
+
+    #[cfg(test)]
+    fn latest_state(&self) -> Result<Ref<RemoteState>, rpc::Error> {
+        self.service.latest_state()
     }
 }
 

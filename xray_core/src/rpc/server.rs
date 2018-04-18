@@ -216,12 +216,14 @@ impl Connection {
         }
 
         if insertions.len() > 0 || updates.len() > 0 || removals.len() > 0 || responses.len() > 0 {
-            let message = serialize(&MessageToClient::Update {
-                insertions,
-                updates,
-                removals,
-                responses,
-            }).unwrap().into();
+            let message =
+                serialize::<Result<MessageToClient, Error>>(&Ok(MessageToClient::Update {
+                    insertions,
+                    updates,
+                    removals,
+                    responses,
+                })).unwrap()
+                    .into();
             Ok(Async::Ready(Some(message)))
         } else {
             self.0.borrow_mut().pending_task = Some(task::current());
@@ -243,8 +245,9 @@ impl Stream for Connection {
             Ok(true) => {}
             Ok(false) => return Ok(Async::Ready(None)),
             Err(error) => {
-                let description = format!("{}", error);
-                let message = serialize(&MessageToClient::Err(description)).unwrap();
+                let message = serialize::<Result<MessageToClient, Error>>(&Err(Error::IoError(
+                    format!("{}", error),
+                ))).unwrap();
                 return Ok(Async::Ready(Some(message.into())));
             }
         }
