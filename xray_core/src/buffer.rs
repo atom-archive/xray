@@ -546,6 +546,8 @@ impl Buffer {
                 *timestamp,
             )?,
         }
+        self.anchor_cache.borrow_mut().clear();
+        self.offset_cache.borrow_mut().clear();
         self.updates.set(());
         Ok(())
     }
@@ -2086,6 +2088,7 @@ mod tests {
 
         local_buffer.borrow_mut().edit(3..6, "jk");
         remote_buffer_1.borrow_mut().edit(7..7, "lmn");
+        let anchor = remote_buffer_1.borrow().anchor_before_offset(8).unwrap();
 
         let mut remaining_tries = 10;
         while remote_buffer_1.borrow().to_string() != local_buffer.borrow().to_string()
@@ -2098,6 +2101,10 @@ mod tests {
             );
             reactor.turn(Some(Duration::from_millis(0)));
         }
+
+        assert_eq!(local_buffer.borrow().offset_for_anchor(&anchor).unwrap(), 7);
+        assert_eq!(remote_buffer_1.borrow().offset_for_anchor(&anchor).unwrap(), 7);
+        assert_eq!(remote_buffer_2.borrow().offset_for_anchor(&anchor).unwrap(), 7);
     }
 
     struct RandomCharIter<T: Rng>(T);
