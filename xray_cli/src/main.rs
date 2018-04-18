@@ -86,12 +86,12 @@ fn launch() -> Result<(), String> {
 
             let server_bin_path;
             let node_env;
-            if cfg!(build = "release") {
-                server_bin_path = src_path.join("target/release/xray_server");
-                node_env = "production";
-            } else {
+            if cfg!(debug_assertions) {
                 server_bin_path = src_path.join("target/debug/xray_server");
                 node_env = "development";
+            } else {
+                server_bin_path = src_path.join("target/release/xray_server");
+                node_env = "production";
             }
 
             if headless {
