@@ -7,4 +7,8 @@ authors = ["Antonio Scandurra <as-cii@github.com>"]
 crate-type = ["cdylib"]
 
 [dependencies]
+futures = "0.1"
 wasm-bindgen = "0.2"
+
+[features]
+js-tests = []

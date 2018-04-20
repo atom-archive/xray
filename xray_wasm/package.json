@@ -1,7 +1,6 @@
 {
   "name": "xray_wasm",
   "description": "Xray server packaged for use in JavaScript",
-  "main": "dist/xray_wasm",
   "scripts": {
     "test": "mocha --ui=tdd test/**/*.test.js"
   },
@@ -11,6 +10,9 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "mocha": "^5.1.1"
+    "mocha": "^5.1.1",
+    "source-map-support": "^0.5.4",
+    "webpack": "^4.6.0",
+    "webpack-cli": "^2.0.14"
   }
 }
