@@ -3,4 +3,5 @@ members = [
     "xray_core",
     "xray_server",
     "xray_cli",
+    "xray_wasm",
 ]

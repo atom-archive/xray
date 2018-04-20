@@ -1,0 +1,16 @@
+{
+  "name": "xray_wasm",
+  "description": "Xray server packaged for use in JavaScript",
+  "main": "dist/xray_wasm",
+  "scripts": {
+    "test": "mocha --ui=tdd test/**/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atom/xray.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "mocha": "^5.1.1"
+  }
+}

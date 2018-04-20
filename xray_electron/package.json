@@ -16,7 +16,7 @@
     "styletron-react": "^4.0.3"
   },
   "devDependencies": {
-    "electron": "2.0.0-beta.3",
+    "electron": "2.0.0-beta.7",
     "electron-mocha": "^6.0.1",
     "enzyme": "^3.3.0",
     "enzyme-adapter-react-16": "^1.1.1",

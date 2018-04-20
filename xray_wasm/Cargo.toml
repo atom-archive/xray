@@ -1,0 +1,10 @@
+[package]
+name = "xray_wasm"
+version = "0.1.0"
+authors = ["Antonio Scandurra <as-cii@github.com>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
