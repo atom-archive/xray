@@ -10,7 +10,7 @@ pub enum TrySetError {
     ObserverDisconnected
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct NotifyCell<T: Clone> {
     observer: Option<NotifyCellObserver<T>>,
     inner: Arc<RwLock<Inner<T>>>
@@ -18,7 +18,7 @@ pub struct NotifyCell<T: Clone> {
 
 pub struct WeakNotifyCell<T: Clone>(Weak<RwLock<Inner<T>>>);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct NotifyCellObserver<T: Clone> {
     last_polled_at: Version,
     inner: Arc<RwLock<Inner<T>>>,

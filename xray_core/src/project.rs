@@ -1,18 +1,75 @@
+use buffer::{self, Buffer};
 use fs;
-use futures::{Async, Future, Poll};
+use futures::{future, Async, Future, Poll};
 use fuzzy;
+use never::Never;
 use notify_cell::{NotifyCell, NotifyCellObserver, WeakNotifyCell};
+use rpc;
+use std::cell::RefCell;
 use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
-use std::path::PathBuf;
+use std::error::Error;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
+use ForegroundExecutor;
+use IntoShared;
 
-pub struct Project {
-    pub trees: Vec<Box<fs::Tree>>,
+pub type TreeId = usize;
+
+pub trait Project {
+    fn open_buffer(
+        &self,
+        tree_id: TreeId,
+        relative_path: &Path,
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>>;
+    fn search_paths(
+        &self,
+        needle: &str,
+        max_results: usize,
+        include_ignored: bool,
+    ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
+}
+
+pub struct LocalProject {
+    file_provider: Rc<fs::FileProvider>,
+    next_tree_id: TreeId,
+    trees: HashMap<TreeId, Rc<fs::LocalTree>>,
+    buffers: Rc<RefCell<HashMap<fs::FileId, Rc<RefCell<Buffer>>>>>,
+}
+
+pub struct RemoteProject {
+    foreground: ForegroundExecutor,
+    service: Rc<RefCell<rpc::client::Service<ProjectService>>>,
+    trees: HashMap<TreeId, Box<fs::Tree>>,
+}
+
+pub struct ProjectService {
+    project: Rc<RefCell<LocalProject>>,
+    tree_services: HashMap<TreeId, rpc::server::ServiceHandle>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct RpcState {
+    trees: HashMap<TreeId, rpc::ServiceId>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub enum RpcRequest {
+    OpenBuffer {
+        tree_id: TreeId,
+        relative_path: PathBuf,
+    },
+}
+
+#[derive(Deserialize, Serialize)]
+pub enum RpcResponse {
+    OpenedBuffer(Result<rpc::ServiceId, OpenError>),
 }
 
 pub struct PathSearch {
-    root_paths: Vec<PathBuf>,
+    tree_ids: Vec<TreeId>,
     roots: Arc<Vec<fs::Entry>>,
     needle: Vec<char>,
     max_results: usize,
@@ -31,8 +88,9 @@ pub enum PathSearchStatus {
 pub struct PathSearchResult {
     pub score: fuzzy::Score,
     pub positions: Vec<usize>,
-    pub absolute_path: PathBuf,
-    pub relative_path: PathBuf
+    pub tree_id: TreeId,
+    pub relative_path: PathBuf,
+    pub display_path: PathBuf,
 }
 
 struct StackEntry {
@@ -47,21 +105,101 @@ enum MatchMarker {
     IsMatch,
 }
 
-impl Project {
-    pub fn new(trees: Vec<Box<fs::Tree>>) -> Self {
-        Project { trees }
+#[derive(Debug, Serialize, Deserialize)]
+pub enum OpenError {
+    TreeNotFound,
+    IoError(String),
+    RpcError(rpc::Error),
+}
+
+impl LocalProject {
+    pub fn new<T>(file_provider: Rc<fs::FileProvider>, trees: Vec<T>) -> Self
+    where
+        T: 'static + fs::LocalTree,
+    {
+        let mut project = LocalProject {
+            file_provider,
+            next_tree_id: 0,
+            trees: HashMap::new(),
+            buffers: Rc::new(RefCell::new(HashMap::new())),
+        };
+        for tree in trees {
+            project.add_tree(tree);
+        }
+        project
     }
 
-    pub fn search_paths(
+    fn add_tree<T: 'static + fs::LocalTree>(&mut self, tree: T) {
+        let id = self.next_tree_id;
+        self.next_tree_id += 1;
+        self.trees.insert(id, Rc::new(tree));
+    }
+
+    fn resolve_path(&self, tree_id: TreeId, relative_path: &Path) -> Option<PathBuf> {
+        self.trees.get(&tree_id).map(|tree| {
+            let mut absolute_path = tree.path().to_owned();
+            absolute_path.push(relative_path);
+            absolute_path
+        })
+    }
+}
+
+impl Project for LocalProject {
+    fn open_buffer(
+        &self,
+        tree_id: TreeId,
+        relative_path: &Path,
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+        if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
+            let buffers = self.buffers.clone();
+            Box::new(
+                self.file_provider
+                    .open(&absolute_path)
+                    .and_then(move |file| {
+                        // The borrow checker won't let us inline the following local variable:
+                        let buffer = buffers.borrow().get(&file.id()).cloned();
+                        if let Some(buffer) = buffer {
+                            Box::new(future::ok(buffer))
+                                as Box<Future<Item = Rc<RefCell<Buffer>>, Error = io::Error>>
+                        } else {
+                            Box::new(file.read().and_then(move |content| {
+                                let mut buffers = buffers.borrow_mut();
+                                Ok(buffers
+                                    .entry(file.id())
+                                    .or_insert_with(|| {
+                                        let mut buffer = Buffer::new();
+                                        buffer.edit(0..0, content.as_str());
+                                        buffer.into_shared()
+                                    })
+                                    .clone())
+                            }))
+                        }
+                    })
+                    .map_err(|error| error.into()),
+            )
+        } else {
+            Box::new(future::err(OpenError::TreeNotFound))
+        }
+    }
+
+    fn search_paths(
         &self,
         needle: &str,
         max_results: usize,
         include_ignored: bool,
     ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
         let (updates, updates_observer) = NotifyCell::weak(PathSearchStatus::Pending);
+
+        let mut tree_ids = Vec::new();
+        let mut roots = Vec::new();
+        for (id, tree) in &self.trees {
+            tree_ids.push(*id);
+            roots.push(tree.root().clone());
+        }
+
         let search = PathSearch {
-            root_paths: self.trees.iter().map(|tree| PathBuf::from(tree.path())).collect(),
-            roots: Arc::new(self.trees.iter().map(|tree| tree.root().clone()).collect()),
+            tree_ids,
+            roots: Arc::new(roots),
             needle: needle.chars().collect(),
             max_results,
             include_ignored,
@@ -73,19 +211,153 @@ impl Project {
     }
 }
 
-impl Future for PathSearch {
-    type Item = ();
-    type Error = ();
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        if self.needle.is_empty() {
-            let _ = self.updates.try_set(PathSearchStatus::Ready(Vec::new()));
-        } else {
-            let matches = self.find_matches()?;
-            let results = self.rank_matches(matches)?;
-            let _ = self.updates.try_set(PathSearchStatus::Ready(results));
+impl RemoteProject {
+    pub fn new(
+        foreground: ForegroundExecutor,
+        service: rpc::client::Service<ProjectService>,
+    ) -> Result<Self, rpc::Error> {
+        let state = service.state()?;
+        let mut trees = HashMap::new();
+        for (tree_id, service_id) in &state.trees {
+            let tree_service = service
+                .take_service(*service_id)
+                .expect("The server should create services for each tree in our project state.");
+            let remote_tree = fs::RemoteTree::new(foreground.clone(), tree_service);
+            trees.insert(*tree_id, Box::new(remote_tree) as Box<fs::Tree>);
         }
-        Ok(Async::Ready(()))
+        Ok(Self {
+            foreground,
+            service: service.into_shared(),
+            trees,
+        })
+    }
+}
+
+impl Project for RemoteProject {
+    fn open_buffer(
+        &self,
+        tree_id: TreeId,
+        relative_path: &Path,
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+        let relative_path = relative_path.to_owned();
+        let foreground = self.foreground.clone();
+        let service = self.service.clone();
+
+        Box::new(
+            self.service
+                .borrow()
+                .request(RpcRequest::OpenBuffer {
+                    tree_id,
+                    relative_path,
+                })
+                .then(move |response| {
+                    response
+                        .map_err(|error| error.into())
+                        .and_then(|response| match response {
+                            RpcResponse::OpenedBuffer(result) => result.and_then(|service_id| {
+                                service
+                                    .borrow()
+                                    .take_service(service_id)
+                                    .map_err(|error| error.into())
+                                    .and_then(|buffer_service| {
+                                        Buffer::remote(foreground, buffer_service)
+                                            .map_err(|error| error.into())
+                                    })
+                            }),
+                        })
+                }),
+        )
+    }
+
+    fn search_paths(
+        &self,
+        needle: &str,
+        max_results: usize,
+        include_ignored: bool,
+    ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>) {
+        let (updates, updates_observer) = NotifyCell::weak(PathSearchStatus::Pending);
+
+        let mut tree_ids = Vec::new();
+        let mut roots = Vec::new();
+        for (id, tree) in &self.trees {
+            tree_ids.push(*id);
+            roots.push(tree.root().clone());
+        }
+
+        let search = PathSearch {
+            tree_ids,
+            roots: Arc::new(roots),
+            needle: needle.chars().collect(),
+            max_results,
+            include_ignored,
+            stack: Vec::new(),
+            updates,
+        };
+
+        (search, updates_observer)
+    }
+}
+
+impl ProjectService {
+    pub fn new(project: Rc<RefCell<LocalProject>>) -> Self {
+        Self {
+            project,
+            tree_services: HashMap::new(),
+        }
+    }
+}
+
+impl rpc::server::Service for ProjectService {
+    type State = RpcState;
+    type Update = RpcState;
+    type Request = RpcRequest;
+    type Response = RpcResponse;
+
+    fn init(&mut self, connection: &rpc::server::Connection) -> Self::State {
+        let mut state = RpcState {
+            trees: HashMap::new(),
+        };
+        for (tree_id, tree) in &self.project.borrow().trees {
+            let handle = connection.add_service(fs::TreeService::new(tree.clone()));
+            state.trees.insert(*tree_id, handle.service_id());
+            self.tree_services.insert(*tree_id, handle);
+        }
+
+        state
+    }
+
+    fn poll_update(
+        &mut self,
+        _connection: &rpc::server::Connection,
+    ) -> Async<Option<Self::Update>> {
+        Async::NotReady
+    }
+
+    fn request(
+        &mut self,
+        request: Self::Request,
+        connection: &rpc::server::Connection,
+    ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
+        match request {
+            RpcRequest::OpenBuffer {
+                tree_id,
+                relative_path,
+            } => {
+                let connection = connection.clone();
+                Some(Box::new(
+                    self.project
+                        .borrow()
+                        .open_buffer(tree_id, &relative_path)
+                        .then(move |result| {
+                            Ok(RpcResponse::OpenedBuffer(result.map(|buffer| {
+                                connection
+                                    .add_service(buffer::rpc::Service::new(buffer))
+                                    .service_id()
+                            })))
+                        }),
+                ))
+            }
+        }
     }
 }
 
@@ -177,16 +449,29 @@ impl PathSearch {
                 if children[child_index].is_ignored() && !self.include_ignored {
                     child_index += 1;
                 } else if children[child_index].is_dir() {
-                    let descend = found_match || {
+                    let descend;
+                    let child_is_match;
+
+                    if found_match {
+                        child_is_match = true;
+                        descend = true;
+                    } else {
                         match matches.get(&children[child_index].id()) {
                             Some(&MatchMarker::IsMatch) => {
-                                found_match = true;
-                                true
+                                child_is_match = true;
+                                descend = true;
                             }
-                            Some(&MatchMarker::ContainsMatch) => true,
-                            None => false,
+                            Some(&MatchMarker::ContainsMatch) => {
+                                child_is_match = false;
+                                descend = true;
+                            }
+                            None => {
+                                child_is_match = false;
+                                descend = false;
+                            }
                         }
                     };
+
                     if descend {
                         scorer.push(children[child_index].name_chars(), None);
                         let next_children = children[child_index].children().unwrap();
@@ -195,6 +480,7 @@ impl PathSearch {
                             children,
                             found_match,
                         });
+                        found_match = child_is_match;
                         children = next_children;
                         child_index = 0;
                     } else {
@@ -208,32 +494,33 @@ impl PathSearch {
                         if results.len() < self.max_results
                             || score > results.peek().map(|r| r.score).unwrap()
                         {
-                            let mut absolute_path = if self.roots.len() == 1 {
-                                self.root_paths[0].to_path_buf()
+                            let tree_id = if self.roots.len() == 1 {
+                                self.tree_ids[0]
                             } else {
-                                let mut root_path = self.root_paths[stack[0].child_index].to_path_buf();
-                                root_path.pop();
-                                root_path
+                                self.tree_ids[stack[0].child_index]
                             };
 
                             let mut relative_path = PathBuf::new();
-                            for entry in stack {
+                            let mut display_path = PathBuf::new();
+                            for (i, entry) in stack.iter().enumerate() {
                                 let name = entry.children[entry.child_index].name();
-                                absolute_path.push(name);
-                                relative_path.push(name);
+                                if self.roots.len() == 1 || i != 0 {
+                                    relative_path.push(name);
+                                }
+                                display_path.push(name);
                             }
                             let file_name = children[child_index].name();
-                            absolute_path.push(file_name);
                             relative_path.push(file_name);
-
+                            display_path.push(file_name);
                             if results.len() == self.max_results {
                                 results.pop();
                             }
                             results.push(PathSearchResult {
                                 score,
-                                absolute_path,
+                                tree_id,
                                 relative_path,
-                                positions: positions.clone()
+                                display_path,
+                                positions: positions.clone(),
                             });
                         }
                     }
@@ -255,7 +542,11 @@ impl PathSearch {
     }
 
     #[inline(always)]
-    fn check_cancellation(&self, steps_since_last_check: &mut usize, steps_between_checks: usize) -> Result<(), ()> {
+    fn check_cancellation(
+        &self,
+        steps_since_last_check: &mut usize,
+        steps_between_checks: usize,
+    ) -> Result<(), ()> {
         *steps_since_last_check += 1;
         if *steps_since_last_check == steps_between_checks {
             if self.updates.has_observers() {
@@ -265,6 +556,22 @@ impl PathSearch {
             }
         }
         Ok(())
+    }
+}
+
+impl Future for PathSearch {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        if self.needle.is_empty() {
+            let _ = self.updates.try_set(PathSearchStatus::Ready(Vec::new()));
+        } else {
+            let matches = self.find_matches()?;
+            let results = self.rank_matches(matches)?;
+            let _ = self.updates.try_set(PathSearchStatus::Ready(results));
+        }
+        Ok(Async::Ready(()))
     }
 }
 
@@ -284,13 +591,42 @@ impl PartialOrd for PathSearchResult {
 
 impl Eq for PathSearchResult {}
 
+impl From<io::Error> for OpenError {
+    fn from(error: io::Error) -> Self {
+        OpenError::IoError(error.description().to_owned())
+    }
+}
+
+impl From<rpc::Error> for OpenError {
+    fn from(error: rpc::Error) -> Self {
+        OpenError::RpcError(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::Stream;
-    use serde_json;
-    use std::ffi::OsString;
-    use std::path::Path;
+    use fs::tests::{TestFileProvider, TestTree};
+    use tokio_core::reactor;
+    use IntoShared;
+
+    #[test]
+    fn test_open_same_path_concurrently() {
+        let file_provider = Rc::new(TestFileProvider::new());
+        let project = build_project(file_provider.clone());
+
+        let tree_id = 0;
+        let relative_path = PathBuf::from("subdir-a/subdir-1/bar");
+        file_provider.write_sync(
+            project.resolve_path(tree_id, &relative_path).unwrap(),
+            "abc",
+        );
+
+        let buffer_future_1 = project.open_buffer(tree_id, &relative_path);
+        let buffer_future_2 = project.open_buffer(tree_id, &relative_path);
+        let (buffer_1, buffer_2) = buffer_future_1.join(buffer_future_2).wait().unwrap();
+        assert!(Rc::ptr_eq(&buffer_1, &buffer_2));
+    }
 
     #[test]
     fn test_search_one_tree() {
@@ -312,22 +648,120 @@ mod tests {
                 }
             }),
         );
-        let project = Project::new(vec![Box::new(tree)]);
+        let project = LocalProject::new(Rc::new(TestFileProvider::new()), vec![tree]);
         let (mut search, observer) = project.search_paths("sub2", 10, true);
 
         assert_eq!(search.poll(), Ok(Async::Ready(())));
         assert_eq!(
             summarize_results(&observer.get()),
             Some(vec![
-                ("/Users/someone/tree/root-2/subdir-2/file-3", "root-2/subdir-2/file-3", vec![7, 8, 9, 14]),
-                ("/Users/someone/tree/root-2/subdir-2/file-4", "root-2/subdir-2/file-4", vec![7, 8, 9, 14]),
-                ("/Users/someone/tree/root-1/subdir-1/file-2", "root-1/subdir-1/file-2", vec![7, 8, 9, 21]),
+                (
+                    0,
+                    "root-2/subdir-2/file-3".to_string(),
+                    "root-2/subdir-2/file-3".to_string(),
+                    vec![7, 8, 9, 14],
+                ),
+                (
+                    0,
+                    "root-2/subdir-2/file-4".to_string(),
+                    "root-2/subdir-2/file-4".to_string(),
+                    vec![7, 8, 9, 14],
+                ),
+                (
+                    0,
+                    "root-1/subdir-1/file-2".to_string(),
+                    "root-1/subdir-1/file-2".to_string(),
+                    vec![7, 8, 9, 21],
+                ),
             ])
         );
     }
 
     #[test]
     fn test_search_many_trees() {
+        let project = build_project(Rc::new(TestFileProvider::new()));
+
+        let (mut search, observer) = project.search_paths("bar", 10, true);
+        assert_eq!(search.poll(), Ok(Async::Ready(())));
+        assert_eq!(
+            summarize_results(&observer.get()),
+            Some(vec![
+                (
+                    1,
+                    "subdir-b/subdir-2/foo".to_string(),
+                    "bar/subdir-b/subdir-2/foo".to_string(),
+                    vec![0, 1, 2],
+                ),
+                (
+                    0,
+                    "subdir-a/subdir-1/bar".to_string(),
+                    "foo/subdir-a/subdir-1/bar".to_string(),
+                    vec![22, 23, 24],
+                ),
+                (
+                    1,
+                    "subdir-b/subdir-2/file-3".to_string(),
+                    "bar/subdir-b/subdir-2/file-3".to_string(),
+                    vec![0, 1, 2],
+                ),
+                (
+                    0,
+                    "subdir-a/subdir-1/file-1".to_string(),
+                    "foo/subdir-a/subdir-1/file-1".to_string(),
+                    vec![6, 11, 18],
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_replication() {
+        let mut reactor = reactor::Core::new().unwrap();
+        let handle = Rc::new(reactor.handle());
+        let file_provider = Rc::new(TestFileProvider::new());
+
+        let local_project = build_project(file_provider.clone()).into_shared();
+        let remote_project = RemoteProject::new(
+            handle,
+            rpc::tests::connect(&mut reactor, ProjectService::new(local_project.clone())),
+        ).unwrap();
+
+        let (mut local_search, local_observer) =
+            local_project.borrow().search_paths("bar", 10, true);
+        let (mut remote_search, remote_observer) = remote_project.search_paths("bar", 10, true);
+        assert_eq!(local_search.poll(), Ok(Async::Ready(())));
+        assert_eq!(remote_search.poll(), Ok(Async::Ready(())));
+        assert_eq!(
+            summarize_results(&remote_observer.get()),
+            summarize_results(&local_observer.get())
+        );
+
+        let PathSearchResult {
+            tree_id,
+            ref relative_path,
+            ..
+        } = remote_observer.get().unwrap()[0];
+
+        let absolute_path = local_project
+            .borrow()
+            .resolve_path(tree_id, &relative_path)
+            .unwrap();
+        file_provider.write_sync(absolute_path, "abc");
+
+        let remote_buffer = reactor
+            .run(remote_project.open_buffer(tree_id, &relative_path))
+            .unwrap();
+        let local_buffer = reactor
+            .run(local_project.borrow().open_buffer(tree_id, &relative_path))
+            .unwrap();
+
+        assert_eq!(
+            remote_buffer.borrow().to_string(),
+            local_buffer.borrow().to_string()
+        );
+    }
+
+    fn build_project(file_provider: Rc<TestFileProvider>) -> LocalProject {
         let tree_1 = TestTree::from_json(
             "/Users/someone/foo",
             json!({
@@ -340,6 +774,8 @@ mod tests {
                 }
             }),
         );
+        tree_1.populated.set(true);
+
         let tree_2 = TestTree::from_json(
             "/Users/someone/bar",
             json!({
@@ -349,33 +785,27 @@ mod tests {
                         "foo": null,
                     }
                 }
-            })
+            }),
         );
-        let project = Project::new(vec![Box::new(tree_1), Box::new(tree_2)]);
+        tree_2.populated.set(true);
 
-        let (mut search, observer) = project.search_paths("bar", 10, true);
-        assert_eq!(search.poll(), Ok(Async::Ready(())));
-        assert_eq!(
-            summarize_results(&observer.get()),
-            Some(vec![
-                ("/Users/someone/bar/subdir-b/subdir-2/foo", "bar/subdir-b/subdir-2/foo", vec![0, 1, 2]),
-                ("/Users/someone/foo/subdir-a/subdir-1/bar", "foo/subdir-a/subdir-1/bar", vec![22, 23, 24]),
-                ("/Users/someone/bar/subdir-b/subdir-2/file-3", "bar/subdir-b/subdir-2/file-3", vec![0, 1, 2]),
-                ("/Users/someone/foo/subdir-a/subdir-1/file-1", "foo/subdir-a/subdir-1/file-1", vec![6, 11, 18]),
-            ])
-        );
+        LocalProject::new(file_provider, vec![tree_1, tree_2])
     }
 
-    fn summarize_results(results: &PathSearchStatus) -> Option<Vec<(&str, &str, Vec<usize>)>> {
+    fn summarize_results(
+        results: &PathSearchStatus,
+    ) -> Option<Vec<(TreeId, String, String, Vec<usize>)>> {
         match results {
             &PathSearchStatus::Pending => None,
             &PathSearchStatus::Ready(ref results) => {
                 let summary = results
                     .iter()
                     .map(|result| {
-                        let absolute_path = result.absolute_path.to_str().unwrap();
-                        let relative_path = result.relative_path.to_str().unwrap();
-                        (absolute_path, relative_path, result.positions.clone())
+                        let tree_id = result.tree_id;
+                        let relative_path = result.relative_path.to_str().unwrap().to_string();
+                        let display_path = result.display_path.to_str().unwrap().to_string();
+                        let positions = result.positions.clone();
+                        (tree_id, relative_path, display_path, positions)
                     })
                     .collect();
                 Some(summary)
@@ -383,45 +813,11 @@ mod tests {
         }
     }
 
-    struct TestTree {
-        root: fs::Entry,
-        path: PathBuf,
-    }
-
-    impl fs::Tree for TestTree {
-        fn root(&self) -> &fs::Entry {
-            &self.root
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-
-        fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
-            unimplemented!()
-        }
-    }
-
-    impl TestTree {
-        fn from_json<T: Into<PathBuf>>(path: T, json: serde_json::Value) -> Self {
-            fn build_entry(name: &str, json: &serde_json::Value) -> fs::Entry {
-                if json.is_object() {
-                    let object = json.as_object().unwrap();
-                    let dir = fs::Entry::dir(OsString::from(name), false, false);
-                    for (key, value) in object {
-                        let child_entry = build_entry(key, value);
-                        assert_eq!(dir.insert(child_entry), Ok(()));
-                    }
-                    dir
-                } else {
-                    fs::Entry::file(OsString::from(name), false, false)
-                }
-            }
-
-            let path = path.into();
-            Self {
-                root: build_entry(path.file_name().unwrap().to_str().unwrap(), &json),
-                path,
+    impl PathSearchStatus {
+        fn unwrap(self) -> Vec<PathSearchResult> {
+            match self {
+                PathSearchStatus::Ready(results) => results,
+                _ => panic!(),
             }
         }
     }

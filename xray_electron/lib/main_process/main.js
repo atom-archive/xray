@@ -4,11 +4,11 @@ const path = require('path');
 const url = require('url');
 const XrayClient = require('../shared/xray_client');
 
-const SERVER_BUILD_CONFIGURATION = process.env.NODE_ENV === 'development'
-  ? 'debug'
-  : 'release';
-
-const SERVER_PATH = path.join(__dirname, '..', '..', '..', 'target', SERVER_BUILD_CONFIGURATION, 'xray_server');
+const SERVER_PATH = process.env.XRAY_SERVER_PATH;
+if (!SERVER_PATH) {
+  console.error('Missing XRAY_SERVER_PATH environment variable');
+  process.exit(1);
+}
 
 const SOCKET_PATH = process.env.XRAY_SOCKET_PATH;
 if (!SOCKET_PATH) {

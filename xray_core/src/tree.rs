@@ -39,7 +39,6 @@ pub enum Node<T: Item> {
     },
 }
 
-#[cfg(test)]
 pub struct Iter<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
     did_start: bool,
@@ -74,6 +73,12 @@ impl<'a, T: Item> Tree<T> {
         Self::from_children(vec![])
     }
 
+    pub fn from_item(item: T) -> Self {
+        let mut tree = Self::new();
+        tree.push(item);
+        tree
+    }
+
     fn from_children(children: Vec<Self>) -> Self {
         let summary = Self::summarize_children(&children);
         let rightmost_leaf = children
@@ -97,7 +102,6 @@ impl<'a, T: Item> Tree<T> {
         summary
     }
 
-    #[cfg(test)]
     pub fn iter(&self) -> Iter<T> {
         Iter::new(self)
     }
@@ -331,7 +335,6 @@ impl<'a, T: Item> Tree<T> {
     }
 }
 
-#[cfg(test)]
 impl<'a, T: 'a + Item> Iter<'a, T> {
     fn new(tree: &'a Tree<T>) -> Self {
         Iter {
@@ -358,7 +361,6 @@ impl<'a, T: 'a + Item> Iter<'a, T> {
     }
 }
 
-#[cfg(test)]
 impl<'a, T: 'a + Item> Iterator for Iter<'a, T>
 where
     Self: 'a,

@@ -1,38 +1,51 @@
+use super::rpc::{client, Error as RpcError};
+use super::tree::{self, SeekBias, Tree};
+use futures::{unsync, Stream};
+use notify_cell::{NotifyCell, NotifyCellObserver};
+use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::iter;
+use std::marker;
 use std::ops::{Add, AddAssign, Range, Sub};
-use std::result;
+use std::rc::Rc;
 use std::sync::Arc;
-use super::tree::{self, SeekBias, Tree};
-use notify_cell::NotifyCell;
+use ForegroundExecutor;
+use IntoShared;
 
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
 type LamportTimestamp = usize;
-type Result<T> = result::Result<T, Error>;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Version(
+    #[serde(serialize_with = "serialize_arc", deserialize_with = "deserialize_arc")]
+    Arc<HashMap<ReplicaId, LocalTimestamp>>,
+);
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum Error {
     OffsetOutOfRange,
     InvalidAnchor,
+    InvalidOperation,
 }
 
-#[derive(Debug)]
 pub struct Buffer {
     replica_id: ReplicaId,
+    next_replica_id: Option<ReplicaId>,
     local_clock: LocalTimestamp,
     lamport_clock: LamportTimestamp,
     fragments: Tree<Fragment>,
-    insertions: HashMap<ChangeId, Tree<FragmentMapping>>,
+    insertion_splits: HashMap<EditId, Tree<InsertionSplit>>,
     anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
     offset_cache: RefCell<HashMap<Point, usize>>,
-    pub version: NotifyCell<Version>,
+    pub version: Version,
+    client: Option<client::Service<rpc::Service>>,
+    operation_txs: Vec<unsync::mpsc::UnboundedSender<Arc<Operation>>>,
+    updates: NotifyCell<()>,
 }
-
-#[derive(Clone, Copy, Debug)]
-pub struct Version(LocalTimestamp);
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
 pub struct Point {
@@ -48,7 +61,7 @@ enum AnchorInner {
     Start,
     End,
     Middle {
-        insertion_id: ChangeId,
+        insertion_id: EditId,
         offset: usize,
         bias: AnchorBias,
     },
@@ -65,38 +78,52 @@ pub struct Iter<'a> {
     fragment_offset: usize,
 }
 
-#[derive(Eq, PartialEq, Debug)]
-struct Insertion {
-    id: ChangeId,
-    parent_id: ChangeId,
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Insertion {
+    id: EditId,
+    parent_id: EditId,
     offset_in_parent: usize,
     replica_id: ReplicaId,
-    lamport_timestamp: LamportTimestamp,
-    text: Text,
+    #[serde(serialize_with = "serialize_arc", deserialize_with = "deserialize_arc")]
+    text: Arc<Text>,
+    timestamp: LamportTimestamp,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Serialize, Deserialize)]
+pub struct Deletion {
+    start_id: EditId,
+    start_offset: usize,
+    end_id: EditId,
+    end_offset: usize,
+    version_in_range: Version,
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Text {
     code_units: Vec<u16>,
     newline_offsets: Vec<usize>,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize)]
-struct ChangeId {
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct EditId {
     replica_id: ReplicaId,
-    local_timestamp: LocalTimestamp,
+    timestamp: LocalTimestamp,
 }
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
-struct FragmentId(Arc<Vec<u16>>);
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
+struct FragmentId(
+    #[serde(serialize_with = "serialize_arc")]
+    #[serde(deserialize_with = "deserialize_arc")]
+    Arc<Vec<u16>>,
+);
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct Fragment {
     id: FragmentId,
-    insertion: Arc<Insertion>,
+    insertion: Insertion,
     start_offset: usize,
     end_offset: usize,
-    deletions: HashSet<ChangeId>,
+    deletions: HashSet<EditId>,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -112,61 +139,321 @@ struct CharacterCount(usize);
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct NewlineCount(usize);
 
-#[derive(Eq, PartialEq, Clone, Debug)]
-struct FragmentMapping {
+#[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
+struct InsertionSplit {
     extent: usize,
     fragment_id: FragmentId,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
-struct FragmentMappingSummary {
+struct InsertionSplitSummary {
     extent: usize,
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct InsertionOffset(usize);
 
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Operation {
+    Edit {
+        id: EditId,
+        start_id: EditId,
+        start_offset: usize,
+        end_id: EditId,
+        end_offset: usize,
+        version_in_range: Version,
+        timestamp: LamportTimestamp,
+        #[serde(serialize_with = "serialize_option_arc")]
+        #[serde(deserialize_with = "deserialize_option_arc")]
+        new_text: Option<Arc<Text>>,
+    },
+}
+
+impl Version {
+    fn new() -> Self {
+        Version(Arc::new(HashMap::new()))
+    }
+
+    fn inc(&mut self, replica_id: ReplicaId) {
+        let map = Arc::make_mut(&mut self.0);
+        *map.entry(replica_id).or_insert(0) += 1;
+    }
+
+    fn include(&mut self, insertion: &Insertion) {
+        let map = Arc::make_mut(&mut self.0);
+        let value = map.entry(insertion.id.replica_id).or_insert(0);
+        *value = cmp::max(*value, insertion.id.timestamp);
+    }
+
+    fn includes(&self, insertion: &Insertion) -> bool {
+        if let Some(timestamp) = self.0.get(&insertion.id.replica_id) {
+            *timestamp >= insertion.id.timestamp
+        } else {
+            false
+        }
+    }
+}
+
+pub mod rpc {
+    use super::{Buffer, EditId, FragmentId, Insertion, InsertionSplit, Operation, ReplicaId,
+                Version};
+    use futures::{Async, Future, Stream};
+    use never::Never;
+    use rpc;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    #[derive(Serialize, Deserialize)]
+    pub struct State {
+        pub(super) replica_id: ReplicaId,
+        pub(super) fragments: Vec<Fragment>,
+        pub(super) insertions: HashMap<EditId, Insertion>,
+        pub(super) insertion_splits: HashMap<EditId, Vec<InsertionSplit>>,
+        pub(super) version: Version,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub enum Request {
+        Operation(
+            #[serde(serialize_with = "serialize_op", deserialize_with = "deserialize_op")]
+            Arc<Operation>,
+        ),
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct Update(
+        #[serde(serialize_with = "serialize_op", deserialize_with = "deserialize_op")]
+        pub(super)  Arc<Operation>,
+    );
+
+    #[derive(Serialize, Deserialize)]
+    pub(super) struct Fragment {
+        pub id: FragmentId,
+        pub insertion_id: EditId,
+        pub start_offset: usize,
+        pub end_offset: usize,
+        pub deletions: HashSet<EditId>,
+    }
+
+    pub struct Service {
+        replica_id: ReplicaId,
+        outgoing_ops: Box<Stream<Item = Arc<Operation>, Error = ()>>,
+        buffer: Rc<RefCell<Buffer>>,
+    }
+
+    impl Service {
+        pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
+            let replica_id = buffer
+                .borrow_mut()
+                .next_replica_id()
+                .expect("Cannot replicate a remote buffer");
+            let outgoing_ops = buffer
+                .borrow_mut()
+                .outgoing_ops()
+                .filter(move |op| op.replica_id() != replica_id);
+            Self {
+                replica_id,
+                outgoing_ops: Box::new(outgoing_ops),
+                buffer,
+            }
+        }
+    }
+
+    impl rpc::server::Service for Service {
+        type State = State;
+        type Update = Update;
+        type Request = Request;
+        type Response = ();
+
+        fn init(&mut self, _: &rpc::server::Connection) -> Self::State {
+            let buffer = self.buffer.borrow_mut();
+            let mut state = State {
+                replica_id: self.replica_id,
+                fragments: Vec::new(),
+                insertions: HashMap::new(),
+                insertion_splits: HashMap::new(),
+                version: buffer.version.clone(),
+            };
+
+            for fragment in buffer.fragments.iter() {
+                state
+                    .insertions
+                    .entry(fragment.insertion.id)
+                    .or_insert_with(|| fragment.insertion.clone());
+
+                state.fragments.push(Fragment {
+                    id: fragment.id.clone(),
+                    insertion_id: fragment.insertion.id,
+                    start_offset: fragment.start_offset,
+                    end_offset: fragment.end_offset,
+                    deletions: fragment.deletions.clone(),
+                });
+            }
+
+            for (insertion_id, splits) in &buffer.insertion_splits {
+                state
+                    .insertion_splits
+                    .insert(*insertion_id, splits.iter().cloned().collect());
+            }
+
+            state
+        }
+
+        fn poll_update(&mut self, _: &rpc::server::Connection) -> Async<Option<Self::Update>> {
+            self.outgoing_ops
+                .poll()
+                .expect("Receiving on a channel cannot produce an error")
+                .map(|option| option.map(|op| Update(op)))
+        }
+
+        fn request(
+            &mut self,
+            request: Self::Request,
+            _connection: &rpc::server::Connection,
+        ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
+            match request {
+                Request::Operation(op) => {
+                    let mut buffer = self.buffer.borrow_mut();
+                    buffer.broadcast_op(&op);
+                    if buffer.integrate_op(op).is_err() {
+                        unimplemented!("Invalid op: terminate the service and respond with error?");
+                    }
+                }
+            };
+
+            None
+        }
+    }
+
+    fn serialize_op<S: Serializer>(op: &Arc<Operation>, serializer: S) -> Result<S::Ok, S::Error> {
+        op.serialize(serializer)
+    }
+
+    fn deserialize_op<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Arc<Operation>, D::Error> {
+        Ok(Arc::new(Operation::deserialize(deserializer)?))
+    }
+}
+
 impl Buffer {
-    pub fn new(replica_id: ReplicaId) -> Self {
-        assert!(replica_id > 0);
-        let mut fragments = Tree::<Fragment>::new();
+    pub fn new() -> Self {
+        let mut fragments = Tree::new();
 
         // Push start sentinel.
+        let sentinel_id = EditId {
+            replica_id: 0,
+            timestamp: 0,
+        };
         fragments.push(Fragment::new(
             FragmentId::min_value(),
             Insertion {
-                id: ChangeId {
+                id: sentinel_id,
+                parent_id: EditId {
                     replica_id: 0,
-                    local_timestamp: 0,
-                },
-                parent_id: ChangeId {
-                    replica_id: 0,
-                    local_timestamp: 0,
+                    timestamp: 0,
                 },
                 offset_in_parent: 0,
                 replica_id: 0,
-                lamport_timestamp: 0,
-                text: Text::new(vec![]),
+                text: Arc::new(Text::new(vec![])),
+                timestamp: 0,
             },
         ));
+        let mut insertion_splits = HashMap::new();
+        insertion_splits.insert(
+            sentinel_id,
+            Tree::from_item(InsertionSplit {
+                fragment_id: FragmentId::min_value(),
+                extent: 0,
+            }),
+        );
 
-        Buffer {
-            replica_id,
+        Self {
+            replica_id: 1,
+            next_replica_id: Some(2),
             local_clock: 0,
             lamport_clock: 0,
             fragments,
-            insertions: HashMap::new(),
+            insertion_splits,
             anchor_cache: RefCell::new(HashMap::new()),
             offset_cache: RefCell::new(HashMap::new()),
-            version: NotifyCell::new(Version(0)),
+            version: Version::new(),
+            client: None,
+            operation_txs: Vec::new(),
+            updates: NotifyCell::new(()),
         }
+    }
+
+    pub fn remote(
+        foreground: ForegroundExecutor,
+        client: client::Service<rpc::Service>,
+    ) -> Result<Rc<RefCell<Buffer>>, RpcError> {
+        let state = client.state()?;
+        let incoming_ops = client.updates()?;
+
+        let mut insertions = HashMap::new();
+        for (edit_id, insertion) in state.insertions {
+            insertions.insert(edit_id, insertion);
+        }
+
+        let mut fragments = Tree::new();
+        fragments.extend(state.fragments.into_iter().map(|fragment| Fragment {
+            id: fragment.id,
+            insertion: insertions.get(&fragment.insertion_id).unwrap().clone(),
+            start_offset: fragment.start_offset,
+            end_offset: fragment.end_offset,
+            deletions: fragment.deletions,
+        }));
+
+        let mut insertion_splits = HashMap::new();
+        for (insertion_id, splits) in state.insertion_splits {
+            let mut split_tree = Tree::new();
+            split_tree.extend(splits);
+            insertion_splits.insert(insertion_id, split_tree);
+        }
+
+        let buffer = Buffer {
+            replica_id: state.replica_id,
+            next_replica_id: None,
+            local_clock: 0,
+            lamport_clock: 0,
+            fragments,
+            insertion_splits,
+            anchor_cache: RefCell::new(HashMap::new()),
+            offset_cache: RefCell::new(HashMap::new()),
+            version: state.version,
+            client: Some(client),
+            operation_txs: Vec::new(),
+            updates: NotifyCell::new(()),
+        }.into_shared();
+
+        let buffer_clone = buffer.clone();
+        foreground
+            .execute(Box::new(incoming_ops.for_each(move |update| {
+                if buffer_clone.borrow_mut().integrate_op(update.0).is_err() {
+                    unimplemented!("Invalid op");
+                }
+                Ok(())
+            })))
+            .unwrap();
+
+        Ok(buffer)
+    }
+
+    pub fn next_replica_id(&mut self) -> Result<ReplicaId, ()> {
+        let replica_id = self.next_replica_id.ok_or(())?;
+        self.next_replica_id = Some(replica_id + 1);
+        Ok(replica_id)
     }
 
     pub fn len(&self) -> usize {
         self.fragments.len::<CharacterCount>().0
     }
 
-    pub fn len_for_row(&self, row: u32) -> Result<u32> {
+    pub fn len_for_row(&self, row: u32) -> Result<u32, Error> {
         let row_start_offset = self.offset_for_point(Point::new(row, 0))?;
         let row_end_offset = if row >= self.max_point().row {
             self.len()
@@ -200,193 +487,423 @@ impl Buffer {
         Iter::starting_at_row(self, row)
     }
 
-    pub fn splice<T: Into<Text>>(&mut self, old_range: Range<usize>, new_text: T) {
+    pub fn edit<T: Into<Text>>(
+        &mut self,
+        old_range: Range<usize>,
+        new_text: T,
+    ) -> Option<Arc<Operation>> {
         let new_text = new_text.into();
         let new_text = if new_text.len() > 0 {
-            Some(new_text)
+            Some(Arc::new(new_text))
         } else {
             None
         };
+
         if new_text.is_some() || old_range.end > old_range.start {
-            self.local_clock += 1;
-            self.lamport_clock += 1;
-            let change_id = ChangeId {
-                replica_id: self.replica_id,
-                local_timestamp: self.local_clock,
-            };
-            self.splice_fragments(change_id, old_range, new_text);
+            let op = Arc::new(self.splice_fragments(old_range, new_text));
             self.anchor_cache.borrow_mut().clear();
             self.offset_cache.borrow_mut().clear();
-            self.version.set(Version(self.local_clock));
+            self.version.inc(self.replica_id);
+            self.broadcast_op(&op);
+            self.updates.set(());
+            Some(op)
+        } else {
+            None
         }
+    }
+
+    pub fn updates(&self) -> NotifyCellObserver<()> {
+        self.updates.observe()
+    }
+
+    fn broadcast_op(&mut self, op: &Arc<Operation>) {
+        for i in (0..self.operation_txs.len()).rev() {
+            if self.operation_txs[i].unbounded_send(op.clone()).is_err() {
+                self.operation_txs.swap_remove(i);
+            }
+        }
+
+        if let Some(ref client) = self.client {
+            client.request(rpc::Request::Operation(op.clone()));
+        }
+    }
+
+    fn integrate_op(&mut self, op: Arc<Operation>) -> Result<(), Error> {
+        match op.as_ref() {
+            &Operation::Edit {
+                ref id,
+                ref start_id,
+                ref start_offset,
+                ref end_id,
+                ref end_offset,
+                ref new_text,
+                ref version_in_range,
+                ref timestamp,
+            } => self.integrate_edit(
+                *id,
+                *start_id,
+                *start_offset,
+                *end_id,
+                *end_offset,
+                new_text.as_ref().cloned(),
+                version_in_range,
+                *timestamp,
+            )?,
+        }
+        self.anchor_cache.borrow_mut().clear();
+        self.offset_cache.borrow_mut().clear();
+        self.updates.set(());
+        Ok(())
+    }
+
+    fn integrate_edit(
+        &mut self,
+        id: EditId,
+        start_id: EditId,
+        start_offset: usize,
+        end_id: EditId,
+        end_offset: usize,
+        new_text: Option<Arc<Text>>,
+        version_in_range: &Version,
+        timestamp: LamportTimestamp,
+    ) -> Result<(), Error> {
+        let mut new_text = new_text.as_ref().cloned();
+        let start_fragment_id = self.resolve_fragment_id(start_id, start_offset)?;
+        let end_fragment_id = self.resolve_fragment_id(end_id, end_offset)?;
+
+        let old_fragments = self.fragments.clone();
+        let mut cursor = old_fragments.cursor();
+        let mut new_fragments = cursor.build_prefix(&start_fragment_id, SeekBias::Left);
+
+        if start_offset == cursor.item().unwrap().end_offset {
+            new_fragments.push(cursor.item().unwrap().clone());
+            cursor.next();
+        }
+
+        while cursor.item().is_some() {
+            let fragment = cursor.item().unwrap();
+
+            if new_text.is_none() && fragment.id > end_fragment_id {
+                break;
+            }
+
+            if fragment.id == start_fragment_id || fragment.id == end_fragment_id {
+                let split_start = if start_fragment_id == fragment.id {
+                    start_offset
+                } else {
+                    fragment.start_offset
+                };
+                let split_end = if end_fragment_id == fragment.id {
+                    end_offset
+                } else {
+                    fragment.end_offset
+                };
+                let (before_range, within_range, after_range) = self.split_fragment(
+                    cursor.prev_item().unwrap(),
+                    fragment,
+                    split_start..split_end,
+                );
+                let insertion = new_text.take().map(|new_text| {
+                    self.build_fragment_to_insert(
+                        id,
+                        before_range.as_ref().or(cursor.prev_item()).unwrap(),
+                        within_range.as_ref().or(after_range.as_ref()),
+                        new_text,
+                        timestamp,
+                    )
+                });
+                if let Some(fragment) = before_range {
+                    new_fragments.push(fragment);
+                }
+                if let Some(fragment) = insertion {
+                    new_fragments.push(fragment);
+                }
+                if let Some(mut fragment) = within_range {
+                    if version_in_range.includes(&fragment.insertion) {
+                        fragment.deletions.insert(id);
+                    }
+                    new_fragments.push(fragment);
+                }
+                if let Some(fragment) = after_range {
+                    new_fragments.push(fragment);
+                }
+            } else {
+                if new_text.is_some()
+                    && should_insert_before(&fragment.insertion, timestamp, id.replica_id)
+                {
+                    new_fragments.push(self.build_fragment_to_insert(
+                        id,
+                        cursor.prev_item().unwrap(),
+                        Some(fragment),
+                        new_text.take().unwrap(),
+                        timestamp,
+                    ));
+                }
+
+                let mut fragment = fragment.clone();
+                if version_in_range.includes(&fragment.insertion) {
+                    fragment.deletions.insert(id);
+                }
+                new_fragments.push(fragment);
+            }
+
+            cursor.next();
+        }
+
+        if let Some(new_text) = new_text {
+            new_fragments.push(self.build_fragment_to_insert(
+                id,
+                cursor.prev_item().unwrap(),
+                None,
+                new_text,
+                timestamp,
+            ));
+        }
+
+        new_fragments.push_tree(cursor.build_suffix());
+        self.fragments = new_fragments;
+        self.lamport_clock = cmp::max(self.lamport_clock, timestamp) + 1;
+        Ok(())
+    }
+
+    fn resolve_fragment_id(&self, edit_id: EditId, offset: usize) -> Result<FragmentId, Error> {
+        let split_tree = self.insertion_splits
+            .get(&edit_id)
+            .ok_or(Error::InvalidOperation)?;
+        let mut cursor = split_tree.cursor();
+        cursor.seek(&InsertionOffset(offset), SeekBias::Left);
+        Ok(cursor
+            .item()
+            .ok_or(Error::InvalidOperation)?
+            .fragment_id
+            .clone())
+    }
+
+    fn outgoing_ops(&mut self) -> unsync::mpsc::UnboundedReceiver<Arc<Operation>> {
+        let (tx, rx) = unsync::mpsc::unbounded();
+        self.operation_txs.push(tx);
+        rx
     }
 
     fn splice_fragments(
         &mut self,
-        change_id: ChangeId,
         old_range: Range<usize>,
-        mut new_text: Option<Text>,
-    ) {
+        new_text: Option<Arc<Text>>,
+    ) -> Operation {
+        self.local_clock += 1;
+        self.lamport_clock += 1;
+        let lamport_timestamp = self.lamport_clock;
+
+        let edit_id = EditId {
+            replica_id: self.replica_id,
+            timestamp: self.local_clock,
+        };
+
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
-        let mut updated_fragments =
+        let mut new_fragments =
             cursor.build_prefix(&CharacterCount(old_range.start), SeekBias::Right);
-        let mut inserted_fragments = Vec::new();
 
-        if cursor.prev_item().is_none() {
-            inserted_fragments.push(cursor.item().unwrap().clone());
-            cursor.next();
-        }
+        let mut start_id = None;
+        let mut start_offset = None;
+        let mut end_id = None;
+        let mut end_offset = None;
+        let mut version_in_range = Version::new();
 
-        let prev_fragment = cursor.prev_item().unwrap();
-        if let Some(cur_fragment) = cursor.item() {
-            let (before_range, within_range, after_range) = self.split_fragment(
-                prev_fragment,
-                cur_fragment,
-                cursor.start::<CharacterCount>().0,
-                &old_range,
-            );
-            let insertion = new_text.take().map(|new_text| {
-                self.build_insertion(
-                    change_id.clone(),
-                    before_range.as_ref().unwrap_or(prev_fragment),
-                    within_range.as_ref().or(after_range.as_ref()),
-                    new_text,
-                )
-            });
-
-            before_range.map(|fragment| inserted_fragments.push(fragment));
-            insertion.map(|fragment| inserted_fragments.push(fragment));
-            within_range.map(|mut fragment| {
-                fragment.deletions.insert(change_id.clone());
-                inserted_fragments.push(fragment);
-            });
-            after_range.map(|fragment| inserted_fragments.push(fragment));
-            cursor.next();
-        } else {
-            new_text.take().map(|new_text| {
-                inserted_fragments.push(self.build_insertion(
-                    change_id,
+        if cursor.item().is_none() {
+            let prev_fragment = cursor.prev_item().unwrap();
+            start_id = Some(prev_fragment.insertion.id);
+            start_offset = Some(prev_fragment.end_offset);
+            end_id = start_id.clone();
+            end_offset = start_offset.clone();
+            if let Some(new_text) = new_text.clone() {
+                new_fragments.push(self.build_fragment_to_insert(
+                    edit_id,
                     prev_fragment,
                     None,
                     new_text,
+                    lamport_timestamp,
                 ));
-            });
-        }
-
-        loop {
-            let fragment_start = cursor.start::<CharacterCount>().0;
-
-            if fragment_start >= old_range.end {
-                break;
             }
+        } else {
+            let mut fragment_start = cursor.start::<CharacterCount>().0;
+            while cursor.item().is_some() && fragment_start <= old_range.end {
+                let fragment = cursor.item().unwrap();
+                let fragment_end = fragment_start + fragment.len();
 
-            let prev_fragment = cursor.prev_item().unwrap();
-            let cur_fragment = cursor.item().unwrap();
-            let fragment_end = fragment_start + cur_fragment.len();
+                let split_start = if old_range.start > fragment_start {
+                    fragment.start_offset + (old_range.start - fragment_start)
+                } else {
+                    fragment.start_offset
+                };
+                let split_end = if old_range.end < fragment_end {
+                    fragment.start_offset + (old_range.end - fragment_start)
+                } else {
+                    fragment.end_offset
+                };
 
-            if old_range.end < fragment_end {
-                let (_, within_range, after_range) =
-                    self.split_fragment(prev_fragment, cur_fragment, fragment_start, &old_range);
-                let mut within_range = within_range.unwrap();
-                within_range.deletions.insert(change_id.clone());
-                inserted_fragments.push(within_range);
-                inserted_fragments.push(after_range.unwrap());
-            } else {
-                let mut fragment = cur_fragment.clone();
-                if fragment.is_visible() {
-                    fragment.deletions.insert(change_id.clone());
+                if old_range.start == fragment_start {
+                    let prev_fragment = cursor.prev_item().unwrap();
+                    start_id = Some(prev_fragment.insertion.id);
+                    start_offset = Some(prev_fragment.end_offset);
+                } else if old_range.start > fragment_start {
+                    start_id = Some(fragment.insertion.id);
+                    start_offset = Some(split_start);
                 }
-                inserted_fragments.push(fragment)
-            }
 
-            cursor.next();
+                if old_range.end == fragment_start {
+                    let prev_fragment = cursor.prev_item().unwrap();
+                    end_id = Some(prev_fragment.insertion.id);
+                    end_offset = Some(prev_fragment.end_offset);
+                } else if old_range.end <= fragment_end {
+                    end_id = Some(fragment.insertion.id);
+                    end_offset = Some(split_end);
+                }
+
+                let (before_range, within_range, after_range) = self.split_fragment(
+                    cursor.prev_item().unwrap(),
+                    fragment,
+                    split_start..split_end,
+                );
+                let insertion = if new_text.is_some() && old_range.start >= fragment_start {
+                    Some(self.build_fragment_to_insert(
+                        edit_id,
+                        before_range.as_ref().or(cursor.prev_item()).unwrap(),
+                        within_range.as_ref().or(after_range.as_ref()),
+                        new_text.clone().unwrap(),
+                        lamport_timestamp,
+                    ))
+                } else {
+                    None
+                };
+                if let Some(fragment) = before_range {
+                    new_fragments.push(fragment);
+                }
+                if let Some(fragment) = insertion {
+                    new_fragments.push(fragment);
+                }
+                if let Some(mut fragment) = within_range {
+                    if fragment.is_visible() {
+                        fragment.deletions.insert(edit_id.clone());
+                        version_in_range.include(&fragment.insertion);
+                    }
+                    new_fragments.push(fragment);
+                }
+                if let Some(fragment) = after_range {
+                    new_fragments.push(fragment);
+                }
+
+                fragment_start = fragment_end;
+                cursor.next();
+            }
         }
 
-        updated_fragments.extend(inserted_fragments);
-        updated_fragments.push_tree(cursor.build_suffix());
-        self.fragments = updated_fragments;
+        new_fragments.push_tree(cursor.build_suffix());
+        self.fragments = new_fragments;
+
+        Operation::Edit {
+            id: edit_id,
+            start_id: start_id.unwrap(),
+            start_offset: start_offset.unwrap(),
+            end_id: end_id.unwrap(),
+            end_offset: end_offset.unwrap(),
+            new_text,
+            version_in_range,
+            timestamp: self.lamport_clock,
+        }
     }
 
     fn split_fragment(
         &mut self,
         prev_fragment: &Fragment,
         fragment: &Fragment,
-        fragment_start: usize,
-        range: &Range<usize>,
+        range: Range<usize>,
     ) -> (Option<Fragment>, Option<Fragment>, Option<Fragment>) {
-        let fragment_end = fragment_start + fragment.len();
-        let mut prefix = fragment.clone();
-        let mut before_range = None;
-        let mut within_range = None;
-        let mut after_range = None;
+        debug_assert!(range.start >= fragment.start_offset);
+        debug_assert!(range.start <= fragment.end_offset);
+        debug_assert!(range.end <= fragment.end_offset);
+        debug_assert!(range.end >= fragment.start_offset);
 
-        if range.end < fragment_end {
-            let mut suffix = prefix.clone();
-            suffix.start_offset = prefix.start_offset + range.end - fragment_start;
-            prefix.end_offset = suffix.start_offset;
-            prefix.id = FragmentId::between(&prev_fragment.id, &suffix.id);
-            after_range = Some(suffix);
-        }
+        if range.end == fragment.start_offset {
+            (None, None, Some(fragment.clone()))
+        } else if range.start == fragment.end_offset {
+            (Some(fragment.clone()), None, None)
+        } else if range.start == fragment.start_offset && range.end == fragment.end_offset {
+            (None, Some(fragment.clone()), None)
+        } else {
+            let mut prefix = fragment.clone();
 
-        if range.start < range.end {
-            let mut suffix = prefix.clone();
-            suffix.start_offset =
-                prefix.start_offset + cmp::max(range.start, fragment_start) - fragment_start;
-            prefix.end_offset = suffix.start_offset;
-            prefix.id = FragmentId::between(&prev_fragment.id, &suffix.id);
-            within_range = Some(suffix);
-        }
+            let after_range = if range.end < fragment.end_offset {
+                let mut suffix = prefix.clone();
+                suffix.start_offset = range.end;
+                prefix.end_offset = range.end;
+                prefix.id = FragmentId::between(&prev_fragment.id, &suffix.id);
+                Some(suffix)
+            } else {
+                None
+            };
 
-        if range.start > fragment_start {
-            before_range = Some(prefix);
-        }
+            let within_range = if range.start != range.end {
+                let mut suffix = prefix.clone();
+                suffix.start_offset = range.start;
+                prefix.end_offset = range.start;
+                prefix.id = FragmentId::between(&prev_fragment.id, &suffix.id);
+                Some(suffix)
+            } else {
+                None
+            };
 
-        if within_range.is_some() || after_range.is_some() {
-            let mut updated_split_tree;
-            {
-                let split_tree = self.insertions.get(&fragment.insertion.id).unwrap();
-                let mut cursor = split_tree.cursor();
-                updated_split_tree =
-                    cursor.build_prefix(&InsertionOffset(fragment.start_offset), SeekBias::Right);
+            let before_range = if range.start > fragment.start_offset {
+                Some(prefix)
+            } else {
+                None
+            };
 
-                if let Some(ref fragment) = before_range {
-                    updated_split_tree.push(FragmentMapping {
-                        extent: range.start - fragment_start,
-                        fragment_id: fragment.id.clone(),
-                    })
-                }
+            let old_split_tree = self.insertion_splits
+                .remove(&fragment.insertion.id)
+                .unwrap();
+            let mut cursor = old_split_tree.cursor();
+            let mut new_split_tree =
+                cursor.build_prefix(&InsertionOffset(fragment.start_offset), SeekBias::Right);
 
-                if let Some(ref fragment) = within_range {
-                    updated_split_tree.push(FragmentMapping {
-                        extent: range.end - range.start,
-                        fragment_id: fragment.id.clone(),
-                    })
-                }
-                if let Some(ref fragment) = after_range {
-                    updated_split_tree.push(FragmentMapping {
-                        extent: fragment_end - range.end,
-                        fragment_id: fragment.id.clone(),
-                    })
-                }
-
-                cursor.next();
-                updated_split_tree.push_tree(cursor.build_suffix());
+            if let Some(ref fragment) = before_range {
+                new_split_tree.push(InsertionSplit {
+                    extent: range.start - fragment.start_offset,
+                    fragment_id: fragment.id.clone(),
+                })
             }
 
-            self.insertions
-                .insert(fragment.insertion.id, updated_split_tree);
-        }
+            if let Some(ref fragment) = within_range {
+                new_split_tree.push(InsertionSplit {
+                    extent: range.end - range.start,
+                    fragment_id: fragment.id.clone(),
+                })
+            }
 
-        (before_range, within_range, after_range)
+            if let Some(ref fragment) = after_range {
+                new_split_tree.push(InsertionSplit {
+                    extent: fragment.end_offset - range.end,
+                    fragment_id: fragment.id.clone(),
+                })
+            }
+
+            cursor.next();
+            new_split_tree.push_tree(cursor.build_suffix());
+
+            self.insertion_splits
+                .insert(fragment.insertion.id, new_split_tree);
+
+            (before_range, within_range, after_range)
+        }
     }
 
-    fn build_insertion(
+    fn build_fragment_to_insert(
         &mut self,
-        change_id: ChangeId,
+        edit_id: EditId,
         prev_fragment: &Fragment,
         next_fragment: Option<&Fragment>,
-        text: Text,
+        text: Arc<Text>,
+        timestamp: LamportTimestamp,
     ) -> Fragment {
         let new_fragment_id = FragmentId::between(
             &prev_fragment.id,
@@ -396,34 +913,34 @@ impl Buffer {
         );
 
         let mut split_tree = Tree::new();
-        split_tree.push(FragmentMapping {
+        split_tree.push(InsertionSplit {
             extent: text.len(),
             fragment_id: new_fragment_id.clone(),
         });
-        self.insertions.insert(change_id, split_tree);
+        self.insertion_splits.insert(edit_id, split_tree);
 
         Fragment::new(
             new_fragment_id,
             Insertion {
-                id: change_id,
+                id: edit_id,
                 parent_id: prev_fragment.insertion.id,
                 offset_in_parent: prev_fragment.end_offset,
                 replica_id: self.replica_id,
-                lamport_timestamp: self.lamport_clock,
                 text,
+                timestamp,
             },
         )
     }
 
-    pub fn anchor_before_offset(&self, offset: usize) -> Result<Anchor> {
+    pub fn anchor_before_offset(&self, offset: usize) -> Result<Anchor, Error> {
         self.anchor_for_offset(offset, AnchorBias::Left)
     }
 
-    pub fn anchor_after_offset(&self, offset: usize) -> Result<Anchor> {
+    pub fn anchor_after_offset(&self, offset: usize) -> Result<Anchor, Error> {
         self.anchor_for_offset(offset, AnchorBias::Right)
     }
 
-    fn anchor_for_offset(&self, offset: usize, bias: AnchorBias) -> Result<Anchor> {
+    fn anchor_for_offset(&self, offset: usize, bias: AnchorBias) -> Result<Anchor, Error> {
         let max_offset = self.len();
         if offset > max_offset {
             return Err(Error::OffsetOutOfRange);
@@ -462,15 +979,15 @@ impl Buffer {
         Ok(anchor)
     }
 
-    pub fn anchor_before_point(&self, point: Point) -> Result<Anchor> {
+    pub fn anchor_before_point(&self, point: Point) -> Result<Anchor, Error> {
         self.anchor_for_point(point, AnchorBias::Left)
     }
 
-    pub fn anchor_after_point(&self, point: Point) -> Result<Anchor> {
+    pub fn anchor_after_point(&self, point: Point) -> Result<Anchor, Error> {
         self.anchor_for_point(point, AnchorBias::Right)
     }
 
-    fn anchor_for_point(&self, point: Point, bias: AnchorBias) -> Result<Anchor> {
+    fn anchor_for_point(&self, point: Point, bias: AnchorBias) -> Result<Anchor, Error> {
         let max_point = self.max_point();
         if point > max_point {
             return Err(Error::OffsetOutOfRange);
@@ -509,15 +1026,15 @@ impl Buffer {
         Ok(anchor)
     }
 
-    pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<usize> {
+    pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<usize, Error> {
         Ok(self.position_for_anchor(anchor)?.0)
     }
 
-    pub fn point_for_anchor(&self, anchor: &Anchor) -> Result<Point> {
+    pub fn point_for_anchor(&self, anchor: &Anchor) -> Result<Point, Error> {
         Ok(self.position_for_anchor(anchor)?.1)
     }
 
-    fn position_for_anchor(&self, anchor: &Anchor) -> Result<(usize, Point)> {
+    fn position_for_anchor(&self, anchor: &Anchor) -> Result<(usize, Point), Error> {
         match &anchor.0 {
             &AnchorInner::Start => Ok((0, Point { row: 0, column: 0 })),
             &AnchorInner::End => Ok((self.len(), self.fragments.len::<Point>())),
@@ -541,7 +1058,7 @@ impl Buffer {
                         &AnchorBias::Right => SeekBias::Right,
                     };
 
-                    let splits = self.insertions
+                    let splits = self.insertion_splits
                         .get(&insertion_id)
                         .ok_or(Error::InvalidAnchor)?;
                     let mut splits_cursor = splits.cursor();
@@ -574,7 +1091,7 @@ impl Buffer {
         }
     }
 
-    fn offset_for_point(&self, point: Point) -> Result<usize> {
+    fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
         let cached_offset = {
             let offset_cache = self.offset_cache.try_borrow().ok();
             offset_cache
@@ -601,7 +1118,7 @@ impl Buffer {
         }
     }
 
-    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<cmp::Ordering> {
+    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<cmp::Ordering, Error> {
         let a_offset = self.offset_for_anchor(a)?;
         let b_offset = self.offset_for_anchor(b)?;
         Ok(a_offset.cmp(&b_offset))
@@ -776,7 +1293,7 @@ impl Text {
         self.code_units.len()
     }
 
-    fn point_for_offset(&self, offset: usize) -> Result<Point> {
+    fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
         if offset > self.len() {
             Err(Error::OffsetOutOfRange)
         } else {
@@ -794,7 +1311,7 @@ impl Text {
         }
     }
 
-    fn offset_for_point(&self, point: Point) -> Result<usize> {
+    fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
         let row_start_offset = if point.row == 0 {
             0
         } else {
@@ -889,12 +1406,73 @@ impl AddAssign for FragmentId {
     }
 }
 
+fn serialize_option_arc<T, S>(option: &Option<Arc<T>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    T: Serialize,
+    S: Serializer,
+{
+    if let &Some(ref arc) = option {
+        serializer.serialize_some(arc.as_ref())
+    } else {
+        serializer.serialize_none()
+    }
+}
+
+fn deserialize_option_arc<'de, T, D>(deserializer: D) -> Result<Option<Arc<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    struct OptionArcVisitor<T>(marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for OptionArcVisitor<T> {
+        type Value = Option<Arc<T>>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            write!(formatter, "an Option<Arc<T>>")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            Ok(Some(Arc::new(T::deserialize(deserializer)?)))
+        }
+    }
+
+    let visitor = OptionArcVisitor(marker::PhantomData);
+    deserializer.deserialize_option(visitor)
+}
+
+fn serialize_arc<T, S>(arc: &Arc<T>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    T: Serialize,
+    S: Serializer,
+{
+    arc.serialize(serializer)
+}
+
+fn deserialize_arc<'de, T, D>(deserializer: D) -> Result<Arc<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Ok(Arc::new(T::deserialize(deserializer)?))
+}
+
 impl Fragment {
-    fn new(id: FragmentId, ins: Insertion) -> Self {
-        let end_offset = ins.text.len();
+    fn new(id: FragmentId, insertion: Insertion) -> Self {
+        let end_offset = insertion.text.len();
         Self {
             id,
-            insertion: Arc::new(ins),
+            insertion,
             start_offset: 0,
             end_offset,
             deletions: HashSet::new(),
@@ -921,7 +1499,7 @@ impl Fragment {
         self.deletions.is_empty()
     }
 
-    fn point_for_offset(&self, offset: usize) -> Result<Point> {
+    fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
         let text = &self.insertion.text;
         let offset_in_insertion = self.start_offset + offset;
         Ok(
@@ -930,7 +1508,7 @@ impl Fragment {
         )
     }
 
-    fn offset_for_point(&self, point: Point) -> Result<usize> {
+    fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
         let text = &self.insertion.text;
         let point_in_insertion = text.point_for_offset(self.start_offset)? + &point;
         Ok(text.offset_for_point(point_in_insertion)? - self.start_offset)
@@ -1007,30 +1585,30 @@ impl AddAssign for CharacterCount {
     }
 }
 
-impl tree::Item for FragmentMapping {
-    type Summary = FragmentMappingSummary;
+impl tree::Item for InsertionSplit {
+    type Summary = InsertionSplitSummary;
 
     fn summarize(&self) -> Self::Summary {
-        FragmentMappingSummary {
+        InsertionSplitSummary {
             extent: self.extent,
         }
     }
 }
 
-impl<'a> AddAssign<&'a FragmentMappingSummary> for FragmentMappingSummary {
+impl<'a> AddAssign<&'a InsertionSplitSummary> for InsertionSplitSummary {
     fn add_assign(&mut self, other: &Self) {
         self.extent += other.extent;
     }
 }
 
-impl Default for FragmentMappingSummary {
+impl Default for InsertionSplitSummary {
     fn default() -> Self {
-        FragmentMappingSummary { extent: 0 }
+        InsertionSplitSummary { extent: 0 }
     }
 }
 
 impl tree::Dimension for InsertionOffset {
-    type Summary = FragmentMappingSummary;
+    type Summary = InsertionSplitSummary;
 
     fn from_summary(summary: &Self::Summary) -> Self {
         InsertionOffset(summary.extent)
@@ -1051,6 +1629,14 @@ impl AddAssign for InsertionOffset {
     }
 }
 
+impl Operation {
+    fn replica_id(&self) -> ReplicaId {
+        match *self {
+            Operation::Edit { ref id, .. } => id.replica_id,
+        }
+    }
+}
+
 fn find_insertion_index<T: Ord>(v: &Vec<T>, x: &T) -> usize {
     match v.binary_search(x) {
         Ok(index) => index,
@@ -1058,39 +1644,54 @@ fn find_insertion_index<T: Ord>(v: &Vec<T>, x: &T) -> usize {
     }
 }
 
+fn should_insert_before(
+    insertion: &Insertion,
+    other_timestamp: LamportTimestamp,
+    other_replica_id: ReplicaId,
+) -> bool {
+    match insertion.timestamp.cmp(&other_timestamp) {
+        cmp::Ordering::Less => true,
+        cmp::Ordering::Equal => insertion.id.replica_id < other_replica_id,
+        cmp::Ordering::Greater => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate rand;
 
+    use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
+    use rpc;
     use std::cmp::Ordering;
+    use std::time::Duration;
+    use tokio_core::reactor;
+    use IntoShared;
 
     #[test]
-    fn splice() {
-        let mut buffer = Buffer::new(1);
-        buffer.splice(0..0, "abc");
+    fn test_edit() {
+        let mut buffer = Buffer::new();
+        buffer.edit(0..0, "abc");
         assert_eq!(buffer.to_string(), "abc");
-        buffer.splice(3..3, "def");
+        buffer.edit(3..3, "def");
         assert_eq!(buffer.to_string(), "abcdef");
-        buffer.splice(0..0, "ghi");
+        buffer.edit(0..0, "ghi");
         assert_eq!(buffer.to_string(), "ghiabcdef");
-        buffer.splice(5..5, "jkl");
+        buffer.edit(5..5, "jkl");
         assert_eq!(buffer.to_string(), "ghiabjklcdef");
-        buffer.splice(6..7, "");
+        buffer.edit(6..7, "");
         assert_eq!(buffer.to_string(), "ghiabjlcdef");
-        buffer.splice(4..9, "mno");
+        buffer.edit(4..9, "mno");
         assert_eq!(buffer.to_string(), "ghiamnoef");
     }
 
     #[test]
-    fn random_splice() {
-        use self::rand::{Rng, SeedableRng, StdRng};
-
+    fn test_random_edits() {
         for seed in 0..100 {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new(1);
+            let mut buffer = Buffer::new();
             let mut reference_string = String::new();
 
             for _i in 0..30 {
@@ -1100,7 +1701,7 @@ mod tests {
                     .take(rng.gen_range(0, 10))
                     .collect::<String>();
 
-                buffer.splice(start..end, new_text.as_str());
+                buffer.edit(start..end, new_text.as_str());
                 reference_string = [
                     &reference_string[0..start],
                     new_text.as_str(),
@@ -1109,24 +1710,15 @@ mod tests {
                 assert_eq!(buffer.to_string(), reference_string);
             }
         }
-
-        struct RandomCharIter<T: Rng>(T);
-        impl<T: Rng> Iterator for RandomCharIter<T> {
-            type Item = char;
-
-            fn next(&mut self) -> Option<Self::Item> {
-                Some(self.0.gen_range(b'a', b'z' + 1).into())
-            }
-        }
     }
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new(1);
-        buffer.splice(0..0, "abcd\nefg\nhij");
-        buffer.splice(12..12, "kl\nmno");
-        buffer.splice(18..18, "\npqrs\n");
-        buffer.splice(18..21, "\nPQ");
+        let mut buffer = Buffer::new();
+        buffer.edit(0..0, "abcd\nefg\nhij");
+        buffer.edit(12..12, "kl\nmno");
+        buffer.edit(18..18, "\npqrs\n");
+        buffer.edit(18..21, "\nPQ");
 
         assert_eq!(buffer.len_for_row(0), Ok(4));
         assert_eq!(buffer.len_for_row(1), Ok(3));
@@ -1139,11 +1731,11 @@ mod tests {
 
     #[test]
     fn iter_starting_at_row() {
-        let mut buffer = Buffer::new(1);
-        buffer.splice(0..0, "abcd\nefgh\nij");
-        buffer.splice(12..12, "kl\nmno");
-        buffer.splice(18..18, "\npqrs");
-        buffer.splice(18..21, "\nPQ");
+        let mut buffer = Buffer::new();
+        buffer.edit(0..0, "abcd\nefgh\nij");
+        buffer.edit(12..12, "kl\nmno");
+        buffer.edit(18..18, "\npqrs");
+        buffer.edit(18..21, "\nPQ");
 
         let iter = buffer.iter_starting_at_row(0);
         assert_eq!(
@@ -1258,12 +1850,12 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new(1);
-        buffer.splice(0..0, "abc");
+        let mut buffer = Buffer::new();
+        buffer.edit(0..0, "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
 
-        buffer.splice(1..1, "def\n");
+        buffer.edit(1..1, "def\n");
         assert_eq!(buffer.to_string(), "adef\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
@@ -1276,7 +1868,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.splice(2..3, "");
+        buffer.edit(2..3, "");
         assert_eq!(buffer.to_string(), "adf\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
@@ -1289,7 +1881,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.splice(5..5, "ghi\n");
+        buffer.edit(5..5, "ghi\n");
         assert_eq!(buffer.to_string(), "adf\nbghi\nc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 9);
@@ -1302,7 +1894,7 @@ mod tests {
             Point { row: 2, column: 0 }
         );
 
-        buffer.splice(7..9, "");
+        buffer.edit(7..9, "");
         assert_eq!(buffer.to_string(), "adf\nbghc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
@@ -1400,11 +1992,11 @@ mod tests {
 
     #[test]
     fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new(1);
+        let mut buffer = Buffer::new();
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
-        buffer.splice(0..0, "abc");
+        buffer.edit(0..0, "abc");
         assert_eq!(buffer.to_string(), "abc");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 3);
@@ -1412,12 +2004,125 @@ mod tests {
         let after_start_anchor = buffer.anchor_after_offset(0).unwrap();
         let before_end_anchor = buffer.anchor_before_offset(3).unwrap();
 
-        buffer.splice(3..3, "def");
-        buffer.splice(0..0, "ghi");
+        buffer.edit(3..3, "def");
+        buffer.edit(0..0, "ghi");
         assert_eq!(buffer.to_string(), "ghiabcdef");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
         assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_random_concurrent_edits() {
+        for seed in 0..100 {
+            println!("{:?}", seed);
+            let mut rng = StdRng::from_seed(&[seed]);
+
+            let site_range = 0..5;
+            let mut buffers = Vec::new();
+            let mut queues = Vec::new();
+            for i in site_range.clone() {
+                let mut buffer = Buffer::new();
+                buffer.replica_id = i + 1;
+                buffers.push(buffer);
+                queues.push(Vec::new());
+            }
+
+            let mut edit_count = 10;
+            loop {
+                let replica_index = rng.gen_range::<usize>(site_range.start, site_range.end);
+                let buffer = &mut buffers[replica_index];
+                if edit_count > 0 && rng.gen() {
+                    let end = rng.gen_range::<usize>(0, buffer.len() + 1);
+                    let start = rng.gen_range::<usize>(0, end + 1);
+                    let new_text = RandomCharIter(rng)
+                        .take(rng.gen_range(0, 10))
+                        .collect::<String>();
+
+                    if let Some(op) = buffer.edit(start..end, new_text.as_str()) {
+                        for (index, queue) in queues.iter_mut().enumerate() {
+                            if index != replica_index {
+                                queue.push(op.clone());
+                            }
+                        }
+
+                        edit_count -= 1;
+                    }
+                } else if !queues[replica_index].is_empty() {
+                    buffer
+                        .integrate_op(queues[replica_index].remove(0))
+                        .unwrap();
+                }
+
+                if edit_count == 0 && queues.iter().all(|q| q.is_empty()) {
+                    break;
+                }
+            }
+
+            for buffer in &buffers[1..] {
+                assert_eq!(buffer.to_string(), buffers[0].to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn test_replication() {
+        let local_buffer = Buffer::new().into_shared();
+        local_buffer.borrow_mut().edit(0..0, "abcdef");
+        local_buffer.borrow_mut().edit(2..4, "ghi");
+
+        let mut reactor = reactor::Core::new().unwrap();
+        let foreground = Rc::new(reactor.handle());
+        let client_1 =
+            rpc::tests::connect(&mut reactor, super::rpc::Service::new(local_buffer.clone()));
+        let remote_buffer_1 = Buffer::remote(foreground.clone(), client_1).unwrap();
+        let client_2 =
+            rpc::tests::connect(&mut reactor, super::rpc::Service::new(local_buffer.clone()));
+        let remote_buffer_2 = Buffer::remote(foreground, client_2).unwrap();
+        assert_eq!(
+            remote_buffer_1.borrow().to_string(),
+            local_buffer.borrow().to_string()
+        );
+        assert_eq!(
+            remote_buffer_2.borrow().to_string(),
+            local_buffer.borrow().to_string()
+        );
+
+        local_buffer.borrow_mut().edit(3..6, "jk");
+        remote_buffer_1.borrow_mut().edit(7..7, "lmn");
+        let anchor = remote_buffer_1.borrow().anchor_before_offset(8).unwrap();
+
+        let mut remaining_tries = 10;
+        while remote_buffer_1.borrow().to_string() != local_buffer.borrow().to_string()
+            || remote_buffer_2.borrow().to_string() != local_buffer.borrow().to_string()
+        {
+            remaining_tries -= 1;
+            assert!(
+                remaining_tries > 0,
+                "Ran out of patience waiting for buffers to converge"
+            );
+            reactor.turn(Some(Duration::from_millis(0)));
+        }
+
+        assert_eq!(local_buffer.borrow().offset_for_anchor(&anchor).unwrap(), 7);
+        assert_eq!(
+            remote_buffer_1.borrow().offset_for_anchor(&anchor).unwrap(),
+            7
+        );
+        assert_eq!(
+            remote_buffer_2.borrow().offset_for_anchor(&anchor).unwrap(),
+            7
+        );
+    }
+
+    struct RandomCharIter<T: Rng>(T);
+
+    impl<T: Rng> Iterator for RandomCharIter<T> {
+        type Item = char;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            Some(self.0.gen_range(b'a', b'z' + 1).into())
+        }
     }
 }

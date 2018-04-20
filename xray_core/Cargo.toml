@@ -5,6 +5,8 @@ authors = ["Nathan Sobo <nathan@github.com>"]
 license = "MIT"
 
 [dependencies]
+bincode = "1.0"
+bytes = { version ="0.4", features = ["serde"] }
 futures = "0.1"
 lazy_static = "1.0"
 parking_lot = "0.5"

@@ -1,25 +1,29 @@
+use futures::task::{self, Task};
+use futures::{Async, Future, Poll, Stream};
 use serde_json;
 use std::boxed::Box;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
-use futures::{Async, Future, Poll, Stream};
-use futures::task::{self, Task};
-use futures::future;
-
-type BoxedSendableFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
-type BoxedExecutor = Box<future::Executor<BoxedSendableFuture>>;
+use BackgroundExecutor;
 
 pub type ViewId = usize;
 
 pub trait View: Stream<Item = (), Error = ()> {
     fn component_name(&self) -> &'static str;
-    fn will_mount(&mut self, &mut Window, WeakViewHandle<Self>) where Self: Sized {}
+    fn will_mount(&mut self, &mut Window, WeakViewHandle<Self>)
+    where
+        Self: Sized,
+    {
+    }
     fn render(&self) -> serde_json::Value;
     fn dispatch_action(&mut self, serde_json::Value, &mut Window) {}
 }
 
-pub struct Window(Rc<RefCell<Inner>>, Option<ViewHandle>);
+pub struct Window(Rc<RefCell<Inner>>);
+
+pub struct WeakWindowHandle(Weak<RefCell<Inner>>);
+
 pub struct WindowUpdateStream {
     counter: usize,
     polled_once: bool,
@@ -27,6 +31,8 @@ pub struct WindowUpdateStream {
 }
 
 pub struct Inner {
+    background: Option<BackgroundExecutor>,
+    root_view: Option<ViewHandle>,
     next_view_id: ViewId,
     views: HashMap<ViewId, Rc<RefCell<View<Item = (), Error = ()>>>>,
     inserted: HashSet<ViewId>,
@@ -35,7 +41,6 @@ pub struct Inner {
     height: f64,
     update_stream_counter: usize,
     update_stream_task: Option<Task>,
-    executor: Option<BoxedExecutor>
 }
 
 pub struct ViewHandle {
@@ -49,7 +54,7 @@ pub struct WeakViewHandle<T>(Weak<RefCell<T>>);
 pub struct WindowUpdate {
     updated: Vec<ViewUpdate>,
     removed: Vec<ViewId>,
-    focused: Option<ViewId>
+    focused: Option<ViewId>,
 }
 
 #[derive(Serialize, Debug)]
@@ -60,21 +65,19 @@ pub struct ViewUpdate {
 }
 
 impl Window {
-    pub fn new(executor: Option<BoxedExecutor>, height: f64) -> Self {
-        Window(
-            Rc::new(RefCell::new(Inner {
-                next_view_id: 0,
-                views: HashMap::new(),
-                inserted: HashSet::new(),
-                removed: HashSet::new(),
-                focused: None,
-                height: height,
-                update_stream_counter: 0,
-                update_stream_task: None,
-                executor
-            })),
-            None,
-        )
+    pub fn new(background: Option<BackgroundExecutor>, height: f64) -> Self {
+        Window(Rc::new(RefCell::new(Inner {
+            background,
+            root_view: None,
+            next_view_id: 0,
+            views: HashMap::new(),
+            inserted: HashSet::new(),
+            removed: HashSet::new(),
+            focused: None,
+            height: height,
+            update_stream_counter: 0,
+            update_stream_task: None,
+        })))
     }
 
     pub fn dispatch_action(&mut self, view_id: ViewId, action: serde_json::Value) {
@@ -97,7 +100,7 @@ impl Window {
     }
 
     pub fn set_root_view(&mut self, root_view: ViewHandle) {
-        self.1 = Some(root_view);
+        self.0.borrow_mut().root_view = Some(root_view);
     }
 
     pub fn height(&self) -> f64 {
@@ -113,7 +116,9 @@ impl Window {
 
         let view_rc = Rc::new(RefCell::new(view));
         let weak_view = Rc::downgrade(&view_rc);
-        view_rc.borrow_mut().will_mount(self, WeakViewHandle(weak_view));
+        view_rc
+            .borrow_mut()
+            .will_mount(self, WeakViewHandle(weak_view));
 
         let mut inner = self.0.borrow_mut();
         inner.views.insert(view_id, view_rc);
@@ -126,7 +131,27 @@ impl Window {
     }
 
     pub fn spawn<F: Future<Item = (), Error = ()> + Send + 'static>(&self, future: F) {
-        self.0.borrow().executor.as_ref().map(|executor| executor.execute(Box::new(future)));
+        self.0
+            .borrow()
+            .background
+            .as_ref()
+            .map(|background| background.execute(Box::new(future)));
+    }
+
+    pub fn handle(&self) -> WeakWindowHandle {
+        WeakWindowHandle(Rc::downgrade(&self.0))
+    }
+}
+
+impl WeakWindowHandle {
+    pub fn map<F, T>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce(&mut Window) -> T,
+    {
+        self.0.upgrade().map(|inner| {
+            let mut window = Window(inner);
+            f(&mut window)
+        })
     }
 }
 
@@ -152,7 +177,7 @@ impl Stream for WindowUpdateStream {
                 window_update = WindowUpdate {
                     updated: Vec::new(),
                     removed: inner.removed.iter().cloned().collect(),
-                    focused: inner.focused.take()
+                    focused: inner.focused.take(),
                 };
 
                 for id in inner.inserted.iter() {
@@ -184,7 +209,7 @@ impl Stream for WindowUpdateStream {
                 window_update = WindowUpdate {
                     updated: Vec::new(),
                     removed: Vec::new(),
-                    focused: inner.focused.take()
+                    focused: inner.focused.take(),
                 };
 
                 for (id, ref view) in inner.views.iter() {
@@ -254,7 +279,7 @@ impl Drop for ViewHandle {
 impl<T> WeakViewHandle<T> {
     pub fn map<F, R>(&self, f: F) -> Option<R>
     where
-        F: FnOnce(&mut T) -> R
+        F: FnOnce(&mut T) -> R,
     {
         self.0.upgrade().map(|view| f(&mut *view.borrow_mut()))
     }
