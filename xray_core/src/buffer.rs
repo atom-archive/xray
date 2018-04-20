@@ -1411,7 +1411,7 @@ where
     T: Serialize,
     S: Serializer,
 {
-    if let Some(ref arc) = option {
+    if let &Some(ref arc) = option {
         serializer.serialize_some(arc.as_ref())
     } else {
         serializer.serialize_none()
