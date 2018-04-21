@@ -4,5 +4,5 @@ rm -rf dist
 mkdir -p dist
 cargo build --target wasm32-unknown-unknown --features js-tests
 wasm-bindgen ../target/wasm32-unknown-unknown/debug/xray_wasm.wasm --out-dir dist
-node_modules/.bin/webpack --target=node --mode=development --devtool="source-map" test/server.test.js
+node_modules/.bin/webpack --target=node --mode=development --devtool="source-map" test/tests.js
 node_modules/.bin/mocha --require source-map-support/register --ui=tdd dist/main.js

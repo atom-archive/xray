@@ -3,15 +3,34 @@
 extern crate futures;
 extern crate wasm_bindgen;
 
-use futures::executor::Spawn;
-use futures::future::{self, Executor};
+use futures::executor::{self, Notify, Spawn};
+use futures::future;
 use futures::unsync::mpsc;
-use futures::{executor, Async, Future, Poll, Stream};
+use futures::{Async, AsyncSink, Future, Poll, Sink, Stream};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
+
+#[derive(Clone)]
+pub struct Executor(Rc<RefCell<ExecutorState>>);
+
+struct ExecutorState {
+    next_spawn_id: usize,
+    futures: HashMap<usize, Rc<RefCell<Spawn<Future<Item = (), Error = ()>>>>>,
+    notify_handle: Option<Arc<NotifyHandle>>,
+}
+
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct NotifyHandle(Weak<RefCell<ExecutorState>>);
+
+#[wasm_bindgen]
+pub struct Channel {
+    sender: Option<Sender>,
+    receiver: Option<Receiver>,
+}
 
 #[wasm_bindgen]
 #[derive(Clone)]
@@ -21,53 +40,133 @@ pub struct Sender(Option<mpsc::UnboundedSender<String>>);
 pub struct Receiver(mpsc::UnboundedReceiver<String>);
 
 #[wasm_bindgen]
-pub struct ChannelPair {
-    tx: Option<Sender>,
-    rx: Option<Receiver>,
-}
-
-pub struct ForegroundExecutor(Rc<RefCell<ExecutorState>>);
-
-struct ExecutorState {
-    next_future_id: usize,
-    futures: HashMap<usize, Rc<RefCell<Spawn<Future<Item = (), Error = ()>>>>>,
-}
-
-#[wasm_bindgen]
-#[derive(Clone)]
-pub struct Notify(Weak<RefCell<ExecutorState>>);
-
-#[wasm_bindgen]
 pub struct Server;
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = console)]
-    fn log(s: &str);
-}
 
 #[wasm_bindgen(module = "../lib/support")]
 extern "C" {
     #[wasm_bindgen(js_name = notifyOnNextTick)]
-    fn notify_on_next_tick(notify: Notify, id: usize);
+    fn notify_on_next_tick(notify: NotifyHandle, id: usize);
 
-    pub type JsSender;
-
-    #[wasm_bindgen(constructor)]
-    fn new() -> JsSender;
+    pub type JsSink;
 
     #[wasm_bindgen(method)]
-    fn send(this: &JsSender, message: &str);
+    fn send(this: &JsSink, message: String);
 
     #[wasm_bindgen(method)]
-    fn finish(this: &JsSender);
+    fn close(this: &JsSink);
+}
+
+// #[wasm_bindgen]
+// extern "C" {
+//     #[wasm_bindgen(js_namespace = console)]
+//     fn log(s: &str);
+// }
+
+impl Executor {
+    fn new() -> Self {
+        let state = Rc::new(RefCell::new(ExecutorState {
+            next_spawn_id: 0,
+            futures: HashMap::new(),
+            notify_handle: None,
+        }));
+        state.borrow_mut().notify_handle = Some(Arc::new(NotifyHandle(Rc::downgrade(&state))));
+        Executor(state)
+    }
+}
+
+impl<F: 'static + Future<Item = (), Error = ()>> future::Executor<F> for Executor {
+    fn execute(&self, future: F) -> Result<(), future::ExecuteError<F>> {
+        let id;
+        let notify_handle;
+
+        // Drop the dynamic borrow of state before polling the future for the first time,
+        // because polling might cause a reentrant call to this method.
+        {
+            let mut state = self.0.borrow_mut();
+            id = state.next_spawn_id;
+            state.next_spawn_id += 1;
+            notify_handle = state.notify_handle.as_ref().unwrap().clone();
+        }
+
+        let mut spawn = executor::spawn(future);
+        match spawn.poll_future_notify(&notify_handle, id) {
+            Ok(Async::NotReady) => {
+                self.0
+                    .borrow_mut()
+                    .futures
+                    .insert(id, Rc::new(RefCell::new(spawn)));
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
+
+#[wasm_bindgen]
+impl NotifyHandle {
+    pub fn notify_from_js_on_next_tick(&self, id: usize) {
+        if let Some(state) = self.0.upgrade() {
+            let spawn;
+            let notify_handle;
+            {
+                let state = state.borrow();
+                spawn = state.futures.get(&id).cloned();
+                notify_handle = state.notify_handle.as_ref().unwrap().clone();
+            }
+
+            if let Some(spawn) = spawn {
+                if let Ok(mut spawn) = spawn.try_borrow_mut() {
+                    match spawn.poll_future_notify(&notify_handle, id) {
+                        Ok(Async::NotReady) => {}
+                        _ => {
+                            state.borrow_mut().futures.remove(&id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Notify for NotifyHandle {
+    fn notify(&self, id: usize) {
+        notify_on_next_tick(self.clone(), id);
+    }
+}
+
+// The only convenient way of calling poll_future_notify is to wrap our notify handle in an Arc,
+// which requires Notify to be Send and Sync. However, because we are integrating with JavaScript,
+// we know that all of this code will be run in a single thread.
+unsafe impl Send for NotifyHandle {}
+unsafe impl Sync for NotifyHandle {}
+
+#[wasm_bindgen]
+impl Channel {
+    pub fn new() -> Channel {
+        let (tx, rx) = mpsc::unbounded();
+        Self {
+            sender: Some(Sender(Some(tx))),
+            receiver: Some(Receiver(rx)),
+        }
+    }
+
+    pub fn take_sender(&mut self) -> Sender {
+        self.sender.take().unwrap()
+    }
+
+    pub fn take_receiver(&mut self) -> Receiver {
+        self.receiver.take().unwrap()
+    }
 }
 
 #[wasm_bindgen]
 impl Sender {
-    pub fn send(&mut self, message: String) {
+    pub fn send(&mut self, message: String) -> bool {
         if let Some(ref mut tx) = self.0 {
-            tx.unbounded_send(message);
+            tx.unbounded_send(message).is_ok()
+        } else {
+            false
         }
     }
 
@@ -86,95 +185,40 @@ impl Stream for Receiver {
 }
 
 #[wasm_bindgen]
-impl ChannelPair {
-    pub fn new() -> ChannelPair {
-        let (tx, rx) = mpsc::unbounded();
-        Self {
-            tx: Some(Sender(Some(tx))),
-            rx: Some(Receiver(rx)),
-        }
-    }
-
-    pub fn tx(&mut self) -> Sender {
-        self.tx.take().unwrap()
-    }
-
-    pub fn rx(&mut self) -> Receiver {
-        self.rx.take().unwrap()
-    }
-}
-
-impl ForegroundExecutor {
-    fn new() -> Self {
-        ForegroundExecutor(Rc::new(RefCell::new(ExecutorState {
-            next_future_id: 0,
-            futures: HashMap::new(),
-        })))
-    }
-}
-
-impl<F: 'static + Future<Item = (), Error = ()>> Executor<F> for ForegroundExecutor {
-    fn execute(&self, future: F) -> Result<(), future::ExecuteError<F>> {
-        let mut state = self.0.borrow_mut();
-        let id = state.next_future_id;
-        state.next_future_id += 1;
-        state
-            .futures
-            .insert(id, Rc::new(RefCell::new(executor::spawn(future))));
-
-        state
-            .futures
-            .get_mut(&id)
-            .unwrap()
-            .borrow_mut()
-            .poll_future_notify(&Arc::new(Notify(Rc::downgrade(&self.0))), id);
-
-        Ok(())
-    }
-}
-
-#[wasm_bindgen]
-impl Notify {
-    pub fn notify_on_next_tick(&self, id: usize) {
-        if let Some(state) = self.0.upgrade() {
-            let spawn = state.borrow_mut().futures.get(&id).cloned();
-            if let Some(spawn) = spawn {
-                if let Ok(mut spawn) = spawn.try_borrow_mut() {
-                    let result = spawn.poll_future_notify(&Arc::new(self.clone()), id);
-                    if let Ok(Async::Ready(_)) = result {
-                        state.borrow_mut().futures.remove(&id);
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl executor::Notify for Notify {
-    fn notify(&self, id: usize) {
-        notify_on_next_tick(Notify(self.0.clone()), id);
-    }
-}
-
-// The only convenient way of calling poll_future_notify is to wrap our notify handle in an Arc,
-// which requires Notify to be Send and Sync. However, because we are integrating with JavaScript,
-// we know that all of this code will be run in a single thread.
-unsafe impl Send for Notify {}
-unsafe impl Sync for Notify {}
-
-#[wasm_bindgen]
 impl Server {
     pub fn new() -> Self {
         Server
     }
 
-    pub fn connect_to_peer(receiver: Receiver) {}
+    pub fn connect_to_peer(_receiver: Receiver) {}
+}
+
+impl Sink for JsSink {
+    type SinkItem = String;
+    type SinkError = ();
+
+    fn start_send(
+        &mut self,
+        item: Self::SinkItem,
+    ) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
+        JsSink::send(self, item);
+        Ok(AsyncSink::Ready)
+    }
+
+    fn poll_complete(&mut self) -> Result<Async<()>, Self::SinkError> {
+        Ok(Async::Ready(()))
+    }
+
+    fn close(&mut self) -> Result<Async<()>, Self::SinkError> {
+        JsSink::close(self);
+        Ok(Async::Ready(()))
+    }
 }
 
 #[wasm_bindgen]
 #[cfg(feature = "js-tests")]
 pub struct Test {
-    executor: ForegroundExecutor,
+    executor: Executor,
 }
 
 #[wasm_bindgen]
@@ -182,25 +226,14 @@ pub struct Test {
 impl Test {
     pub fn new() -> Self {
         Self {
-            executor: ForegroundExecutor::new(),
+            executor: Executor::new(),
         }
     }
 
-    pub fn echo_stream(&mut self, outgoing: JsSender, incoming: Receiver) {
-        let outgoing = Rc::new(outgoing);
-        let outgoing_clone = outgoing.clone();
+    pub fn echo_stream(&self, stream: Receiver, sink: JsSink) {
+        use futures::future::Executor;
         self.executor
-            .execute(Box::new(
-                incoming
-                    .for_each(move |message| {
-                        outgoing.send(&message);
-                        Ok(())
-                    })
-                    .and_then(move |_| {
-                        outgoing_clone.finish();
-                        Ok(())
-                    }),
-            ))
+            .execute(Box::new(sink.send_all(stream).then(|_| Ok(()))))
             .unwrap();
     }
 }
