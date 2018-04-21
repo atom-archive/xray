@@ -1,12 +1,13 @@
 # Shared workspaces
 
-## MVP
+## Current features
 
-We want to host one or more workspaces on a remote server via a headless instance of Xray. Then we want to connect to the server from a client Xray instance and open one of these remote workspaces in a new window. Once open, we should be able to use the file finder to open buffers. A second client opening the same buffer should be able to make concurrent edits.
+An instance of `xray_server` can host one or more shared workspaces, which can be accessed by other `xray_server` instances over the network. Currently, when connecting to a remote peer, we automatically open its first shared workspace in a window on the client. The client can use the file finder to locate and open any file in the shared workspace's project. When multiple participants open a buffer for the same file, their edits are replicated to other collaborators in real time.
 
 ### Server
 
-* `xray --headless foo/ bar/ --listen 8888` starts the Xray server listening on port 8888.
+* `xray foo/ bar/ --listen 8888` starts the Xray server listening on port 8888.
+* The `--headless` flag can be passed to create a server that only hosts workspaces for other clients and does not present its own UI.
 
 ### Basic client experience
 
@@ -22,29 +23,27 @@ We want to host one or more workspaces on a remote server via a headless instanc
 
 ## RPC System
 
-**This description is currently aspirational and describes work in progress.**
-
 We implement shared workspaces on top of an RPC system that allows objects on the client to derive their state and behavior from objects that live on the server.
 
 ### Goals
 
 #### Support replicated objects
 
-The primary goal of the system is to support a the construction of a replicated object-oriented domain model. In addition to supporting remote procedure calls, we also want the system to explicitly support long-lived, stateful objects that change over time.
+The primary goal of the system is to support the construction of a replicated object-oriented domain model. In addition to supporting remote procedure calls, we also want the system to explicitly support long-lived, stateful objects that change over time.
 
 Replication support should be fairly additive, meaning that the domain model on the server side should be designed pretty much as if it weren't replicated. On the client side, interacting with representations of remote objects should be explicit but convenient.
 
 #### Capabilities-based security
 
-Secure ECMA Script and Cap'N Proto introduced me to the concept of capabilities-based security, and our system adopts the same philosophy. Objects on the server can be thought of as "capabilities" that grant access to a narrow slice of functionality that is dynamically defined. Starting from a single root capability, remote users are granted increasing access by being provided with additional capabilities.
+Secure ECMA Script and Cap'N Proto introduced me to the concept of capabilities-based security, and our system adopts the same philosophy. Objects on the server are exposed via *services*, which can be thought of as "capabilities" that grant access to a narrow slice of functionality that is dynamically defined. Starting from a single root service, remote users are granted increasing access by being provided with additional capabilities.
 
 #### Dynamic resource management
 
-Ownership of the replication infrastructure on the server side should trace back to a client that depends on it. When a client discards a service, we should discard its supporting infrastructure on the server automatically.
+Server-side services only need to live as long as they are referenced by a client. Server-side code can elect to retain a reference to a service. Otherwise, ownership is maintained by clients over the wire. If both the server and the client drop their reference-counted handle to a service, we should drop the service on the server side automatically.
 
 #### Binary messages
 
-We want to move data efficiently between the server and client, so a binary encoding scheme for messages is important. For now, we're using bincode for convenience, but we should eventually switch to Protobuf, Flatbuffers, Cap'N Proto, to support interaction between peers speaking different versions of the protocol.
+We want to move data efficiently between the server and client, so a binary encoding scheme for messages is important. For now, we're using bincode for convenience, but we should eventually switch to Protocol Buffers to support graceful evolution of the protocol.
 
 ### Design
 
@@ -52,16 +51,16 @@ We want to move data efficiently between the server and client, so a binary enco
 
 **Services** are the fundamental abstraction of the system.
 
-In `rpc::server`, `Service` is a *trait* which can be implemented by domain objects (or custom service wrappers for domain objects) to make them accessible to remote clients. A `Service` exposes a static snapshot of the object's initial state, a stream of updates, and the ability to handle requests. The `Service` trait has various associated types for `Request`, `Response`, `Update`, and `State`.
+In `rpc::server`, `Service` is a *trait* that can be implemented by a custom service wrapper for each domain object that makes the object accessible to remote clients. A `Service` exposes a static snapshot of the object's initial state, a stream of updates, and the ability to handle requests. The `Service` trait has various associated types for `Request`, `Response`, `Update`, and `State`.
 
-When server side code accepts connections, it creates an `rpc::server::Connection` object for each client that takes ownership of the `Stream` of that client's incoming messages. `Connection`s must be created with a *root service*, which is always sent to the client when they initially connect. The `Connection` is itself a `Stream` of outgoing messages to be sent to the `Sink` of its client.
+When server-side code accepts connections, it creates an `rpc::server::Connection` object for each client that takes ownership of the `Stream` of that client's incoming messages. `Connection`s must be created with a *root service*, which is sent to the client immediately. The `Connection` is itself a `Stream` of outgoing messages to be sent to the connected client.
 
-On the client side, we create a connection by passing the `Stream` of incoming messages to `rpc::client::Connection::new`, which returns a *future* for a tuple containing two objects. The first object is a `rpc::client::Service` representing the *root service* that was automatically sent from the server. The second is an instance of `client::Connection`, which is a `Stream` of outgoing messages to send to the `Sink` of the server.
+On the client side, we create a connection by passing the `Stream` of incoming messages to `rpc::client::Connection::new`, which returns a *future* for a tuple containing two objects. The first object is a `rpc::client::Service` representing the *root service* that was sent from the server. The second is an instance of `client::Connection`, which is a `Stream` of outgoing messages to send to the server.
 
-Using the root service, the client can make requests to gain access to additional services. In Xray, the root service is currently `App`, which includes a list of shared workspaces in its replicated state. We store the remote service handle in a `PeerList` object that is owned by the local `App` instance, which is the backing model for a `PeerList` view that lists all the connected peers along with descriptions of the workspaces they are currently sharing.
+Using the root service, the client can make requests to gain access to additional services. In Xray, the root service is currently `app::AppService`, which includes a list of shared workspaces in its replicated state. After a client connects to a server, it stores a handle to its root service in a `PeerList` object. We will eventually build a `PeerListView` based on the state of the `PeerList`, which allows the user to open a remote workspace on any connected peer. For now, we automatically open the first workspace when connecting to a remote peer.
 
-When the user selects a workspace, we request a `Workspace` service from the server via its id. When handling the request on the server, we call `add_service` on the connection with the requested workspace, which returns us a `ServiceId` integer. We send that id to the client in the response. When handling the response on the client, we call `take_service` on root service with the id to take ownership of the remote service's handle.
+When we connect to a remote workspace, we send an `app::ServiceRequest::OpenWorkspace` message to the remote `AppService`. When handling this request in the `AppService` on the server, we call `add_service` on the connection with a `WorkspaceService` for the requested workspace, which returns us a `ServiceId` integer. We send that id to the client in the response. When handling the response on the client, we call `take_service` on root service with the id to take ownership of a handle to the remote service.
 
-We can then create a `RemoteWorkspace` and pass it ownership of the handle to the remote workspace. `RemoteWorkspace` and `LocalWorkspace` both implement the `Workspace` trait, which allows a `RemoteWorkspace` to be used in the system in all of the same ways that a `LocalWorkspace` can.
+We can then create a `RemoteWorkspace` and pass it ownership of the service handle to the remote workspace. `RemoteWorkspace` and `LocalWorkspace` both implement the `Workspace` trait, which allows a `RemoteWorkspace` to be used in the system in all of the same ways that a `LocalWorkspace` can.
 
-We create the illusion that remote domain objects are really local through a combination of state replication and remote procedure calls. Fuzzy finding on the project file trees is addressed through replication, since the data size is typically small and the task is latency sensitive. Project-wide search is implemented via RPC, since replicating the contents of the entire remote file system would be costly, especially for the in-browser use case.
+We create the illusion that remote domain objects are really local through a combination of state replication and remote procedure calls. Fuzzy finding on the project file trees is addressed through replication, since the data size is typically small and the task is latency sensitive. Project-wide search is implemented via RPC, since replicating the contents of the entire remote file system would be costly, especially for the in-browser use case. Buffer replication is implemented by relaying conflict-free representations of individual edit operations, which can be correctly integrated on remote replicas due to our use of a CRDT in Xray's underlying buffer implementation.
