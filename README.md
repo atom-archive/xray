@@ -63,7 +63,7 @@ The fundamental question is whether we can gain the web's benefits for extensibi
 
 ### Core application logic is written in Rust
 
-While the UI will be web-based, the core of the application is implemented in a server process written in Rust. We place as much logic as possible in a library crate located in `/xray_core`, then expose this logic as a server when running Xray on on the desktop (`/xray_server`) and a web-assembly library running on a worker thread when running Xray in the browser (`/xray_wasm`). We communicate between the UI and the back end process via JSON RPC.
+While the UI will be web-based, the core of the application is implemented in a server process written in Rust. We place as much logic as possible in a library crate located in `/xray_core`, then expose this logic as a server when running Xray on the desktop (`/xray_server`) and a web-assembly library running on a worker thread when running Xray in the browser (`/xray_wasm`). We communicate between the UI and the back end process via JSON RPC.
 
 All of the core application code other than the view logic should be written in Rust. This will ensure that it has a minimal footprint to load and execute, and Rust's robust type system will help us maintain it more efficiently than dynamically typed code. A language that is fundamentally designed for multi-threading will also make it easier to exploit parallelism whenever the need arises, whereas JavaScript's single-threaded nature makes parallelism awkward and challenging.
 
