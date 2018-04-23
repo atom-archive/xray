@@ -142,7 +142,7 @@ At this phase, this code is focused on learning. Whatever code we write should b
 
 ### Documentation-driven development
 
-Before coding, we ask ourselves whether the code we're writing can be motivated by something that's written in the guide. The right approach here will always be a judgment call, but lets err on the side of transparency and see what happens.
+Before coding, we ask ourselves whether the code we're writing can be motivated by something that's written in the guide. The right approach here will always be a judgment call, but let's err on the side of transparency and see what happens.
 
 ### Disciplined monorepo
 
