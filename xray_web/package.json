@@ -1,5 +1,6 @@
 {
   "name": "xray_web",
+  "main": "lib/index.js",
   "license": "MIT",
   "scripts": {
     "test": "electron-mocha --ui=tdd --renderer test/**/*.test.js",

@@ -1,14 +1,10 @@
 process.env.NODE_ENV = "production";
 
-const App = require("xray_web/lib/app");
-const FileFinder = require("xray_web/lib/file_finder");
+const { App, buildViewRegistry } = require("xray_web");
+const XrayClient = require("../shared/xray_client");
 const QueryString = require("querystring");
 const React = require("react");
 const ReactDOM = require("react-dom");
-const ViewRegistry = require("xray_web/lib/view_registry");
-const Workspace = require("xray_web/lib/workspace");
-const TextEditorView = require("xray_web/lib/text_editor/text_editor");
-const XrayClient = require("../shared/xray_client");
 const $ = React.createElement;
 
 async function start() {
@@ -42,19 +38,6 @@ async function start() {
     window_id: Number(windowId),
     height: window.innerHeight
   });
-}
-
-function buildViewRegistry(client) {
-  const viewRegistry = new ViewRegistry({
-    onAction: action => {
-      action.type = "Action";
-      client.sendMessage(action);
-    }
-  });
-  viewRegistry.addComponent("Workspace", Workspace);
-  viewRegistry.addComponent("FileFinder", FileFinder);
-  viewRegistry.addComponent("BufferView", TextEditorView);
-  return viewRegistry;
 }
 
 start();
