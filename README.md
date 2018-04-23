@@ -150,7 +150,7 @@ All code related to Xray should live in this repository, but intra-repository de
 
 ### Community SLA
 
-Well-formulated PRs and issues will receive some form of response by the end of the next business day. If this interferes with our ability to learn, we revisit.
+Well-formulated PRs and issues will receive some form of response by the end of the next business day. If this interferes with our ability to learn, we'll revisit.
 
 ## Contributing
 
