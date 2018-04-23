@@ -23,7 +23,7 @@ Usage:
 Options:
   -h --help               Show this screen.
   -H --headless           Start Xray in headless mode.
-  -l --listen=<port>      Listen on the specified port.
+  -l --listen=<port>      Listen for TCP connections on the specified port.
   -c --connect=<address>  Connect to the specified address.
 ";
 
@@ -35,7 +35,7 @@ enum ServerRequest {
     StartCli { headless: bool },
     OpenWorkspace { paths: Vec<PathBuf> },
     ConnectToPeer { address: SocketAddr },
-    Listen { port: PortNumber },
+    TcpListen { port: PortNumber },
 }
 
 #[derive(Deserialize)]
@@ -116,7 +116,7 @@ fn launch() -> Result<(), String> {
     }
 
     if let Some(port) = args.flag_listen {
-        send_message(&mut socket, ServerRequest::Listen { port })?;
+        send_message(&mut socket, ServerRequest::TcpListen { port })?;
     }
 
     Ok(())

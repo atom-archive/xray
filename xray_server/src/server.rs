@@ -165,7 +165,7 @@ impl Server {
             IncomingMessage::OpenWorkspace { paths } => {
                 Box::new(self.open_workspace(paths).into_future())
             }
-            IncomingMessage::Listen { port } => Box::new(self.listen(port).into_future()),
+            IncomingMessage::TcpListen { port } => Box::new(self.tcp_listen(port).into_future()),
             IncomingMessage::ConnectToPeer { address } => self.connect_to_peer(address),
             _ => Box::new(future::err(format!("Unexpected message {:?}", message))),
         };
@@ -202,7 +202,7 @@ impl Server {
         Ok(())
     }
 
-    fn listen(&self, port: u16) -> Result<(), String> {
+    fn tcp_listen(&self, port: u16) -> Result<(), String> {
         let local_addr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
         let listener = TcpListener::bind(&local_addr, &self.reactor)
             .map_err(|_| "Error binding address".to_owned())?;
