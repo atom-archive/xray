@@ -17,13 +17,14 @@ const USAGE: &'static str = "
 Xray
 
 Usage:
-  xray [--socket-path=<path>] [--headless] [--listen=<port>] [--connect=<address>] [<path>...]
+  xray [--socket-path=<path>] [--headless] [--listen=<port>] [--websocket=<port>] [--connect=<address>] [<path>...]
   xray (-h | --help)
 
 Options:
   -h --help               Show this screen.
   -H --headless           Start Xray in headless mode.
   -l --listen=<port>      Listen for TCP connections on the specified port.
+  -w --websocket=<port>   Listen for Websocket connections on the specified port.
   -c --connect=<address>  Connect to the specified address.
 ";
 
@@ -36,6 +37,7 @@ enum ServerRequest {
     OpenWorkspace { paths: Vec<PathBuf> },
     ConnectToPeer { address: SocketAddr },
     TcpListen { port: PortNumber },
+    WebsocketListen { port: PortNumber },
 }
 
 #[derive(Deserialize)]
@@ -50,6 +52,7 @@ struct Args {
     flag_socket_path: Option<String>,
     flag_headless: Option<bool>,
     flag_listen: Option<PortNumber>,
+    flag_websocket: Option<PortNumber>,
     flag_connect: Option<SocketAddr>,
     arg_path: Vec<PathBuf>,
 }
@@ -117,6 +120,10 @@ fn launch() -> Result<(), String> {
 
     if let Some(port) = args.flag_listen {
         send_message(&mut socket, ServerRequest::TcpListen { port })?;
+    }
+
+    if let Some(port) = args.flag_websocket {
+        send_message(&mut socket, ServerRequest::WebsocketListen { port })?;
     }
 
     Ok(())

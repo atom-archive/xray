@@ -1,15 +1,20 @@
+use serde_json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use serde_json;
-use xray_core::{WindowId, ViewId, WindowUpdate};
+use xray_core::{ViewId, WindowId, WindowUpdate};
 
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum IncomingMessage {
     StartApp,
-    StartCli { headless: bool },
+    StartCli {
+        headless: bool,
+    },
     TcpListen {
-        port: u16
+        port: u16,
+    },
+    WebsocketListen {
+        port: u16,
     },
     StartWindow {
         window_id: WindowId,
