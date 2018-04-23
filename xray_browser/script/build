@@ -7,3 +7,4 @@ mkdir -p dist
 cd node_modules/xray_wasm && script/build && cd -
 node_modules/.bin/webpack --target=web --mode=development lib/ui.js --output-filename=ui.js
 node_modules/.bin/webpack --target=webworker --mode=development lib/server.js --output-filename=server.js
+cp index.html dist/index.html

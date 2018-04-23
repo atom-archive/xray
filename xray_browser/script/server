@@ -1,0 +1,8 @@
+#!/usr/bin/env node
+
+const PORT = 3000;
+
+const express = require("express");
+const app = express();
+app.use("/", express.static("dist"));
+app.listen(PORT, () => console.log("Listening to port " + PORT));
