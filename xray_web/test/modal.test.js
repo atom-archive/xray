@@ -2,7 +2,7 @@ const assert = require("assert");
 const { mount } = require("./helpers/component_helpers");
 const React = require("react");
 const $ = React.createElement;
-const Modal = require("../../lib/render_process/modal");
+const Modal = require("../lib/modal");
 
 suite("Modal", () => {
   let attachedElements;

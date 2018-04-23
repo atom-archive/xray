@@ -1,5 +1,5 @@
 const assert = require("assert");
-const ViewRegistry = require("../../lib/render_process/view_registry");
+const ViewRegistry = require("../lib/view_registry");
 
 suite("ViewRegistry", () => {
   test("props", () => {

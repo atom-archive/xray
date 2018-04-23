@@ -1,6 +1,6 @@
 const assert = require("assert");
 const {mount, setProps} = require("./helpers/component_helpers");
-const FileFinder = require("../../lib/render_process/file_finder");
+const FileFinder = require("../lib/file_finder");
 const $ = require("react").createElement;
 
 suite("FileFinderView", () => {
