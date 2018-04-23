@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
+const path = require("path");
 const PORT = 3000;
 
 const express = require("express");
 const app = express();
-app.use("/", express.static("dist"));
+app.use("/", express.static(path.join(__dirname, "../dist")));
 app.listen(PORT, () => console.log("Listening to port " + PORT));
