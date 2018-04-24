@@ -5,11 +5,15 @@ extern crate futures;
 extern crate wasm_bindgen;
 #[macro_use]
 extern crate xray_core;
+extern crate serde;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde_json;
 
 use bytes::Bytes;
 use futures::executor::{self, Notify, Spawn};
-use futures::future;
 use futures::unsync::mpsc;
+use futures::{future, stream};
 use futures::{Async, AsyncSink, Future, Poll, Sink, Stream};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,7 +21,25 @@ use std::io;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
-use xray_core::{cross_platform, App};
+use xray_core::app::Command;
+use xray_core::{cross_platform, App, ViewId, WindowId, WindowUpdate};
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "type")]
+enum OutgoingMessage {
+    OpenWindow { window_id: WindowId },
+    UpdateWindow(WindowUpdate),
+    Error { description: String },
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type")]
+enum IncomingMessage {
+    Action {
+        view_id: ViewId,
+        action: serde_json::Value,
+    },
+}
 
 #[derive(Clone)]
 pub struct Executor(Rc<RefCell<ExecutorState>>);
@@ -228,18 +250,81 @@ impl Server {
         }
     }
 
-    pub fn connect_to_peer(&mut self, stream: Receiver, sink: JsSink) {
+    pub fn start_app(&mut self, outgoing: JsSink) {
+        use futures::future::Executor;
+
+        let executor = self.executor.clone();
+
+        if let Some(commands) = self.app.borrow_mut().commands() {
+            let outgoing_commands = commands
+                .map(|command| match command {
+                    Command::OpenWindow(window_id) => OutgoingMessage::OpenWindow { window_id },
+                })
+                .map(|command| serde_json::to_vec(&command).unwrap())
+                .map_err(|_| unreachable!());
+            executor
+                .execute(Box::new(outgoing.send_all(outgoing_commands)).then(|_| Ok(())))
+                .unwrap();
+        } else {
+            eprintln!("connect_app can only be called once")
+        }
+    }
+
+    pub fn start_window(&mut self, window_id: WindowId, incoming: Receiver, outgoing: JsSink) {
+        use futures::future::Executor;
+
+        let app = self.app.clone();
+
+        let receive_incoming = incoming
+            .map(|message| serde_json::from_slice(&message).unwrap())
+            .for_each(move |message| {
+                match message {
+                    IncomingMessage::Action { view_id, action } => {
+                        app.borrow_mut().dispatch_action(window_id, view_id, action);
+                    }
+                }
+                Ok(())
+            })
+            .then(|_| Ok(()));
+
+        self.executor.execute(Box::new(receive_incoming)).unwrap();
+
+        match self.app.borrow_mut().start_window(&window_id, 0_f64) {
+            Ok(updates) => {
+                let serialized_updates = updates.map(|update| {
+                    serde_json::to_vec(&OutgoingMessage::UpdateWindow(update)).unwrap()
+                });
+                self.executor
+                    .execute(
+                        outgoing
+                            .send_all(serialized_updates.map_err(|_| unreachable!()))
+                            .then(|_| Ok(())),
+                    )
+                    .unwrap();
+            }
+            Err(_) => {
+                let error = stream::once(Ok(OutgoingMessage::Error {
+                    description: format!("No window exists for id {}", window_id),
+                })).map(|message| serde_json::to_vec(&message).unwrap());
+                self.executor
+                    .execute(Box::new(outgoing.send_all(error).then(|_| Ok(()))))
+                    .unwrap();
+            }
+        };
+    }
+
+    pub fn connect_to_peer(&mut self, incoming: Receiver, outgoing: JsSink) {
         use futures::future::Executor;
 
         let executor = self.executor.clone();
         let connect_future = self.app
             .borrow_mut()
-            .connect_to_server(stream.map_err(|_| unreachable!()))
+            .connect_to_server(incoming.map_err(|_| unreachable!()))
             .map_err(|error| eprintln!("RPC error: {}", error))
             .and_then(move |connection| {
                 executor
                     .execute(Box::new(
-                        sink.send_all(
+                        outgoing.send_all(
                             connection
                                 // TODO: go back to using Vec<u8> for outgoing messages in xray_core.
                                 .map(|bytes| bytes.to_vec())
@@ -277,11 +362,11 @@ impl Test {
         }
     }
 
-    pub fn echo_stream(&self, stream: Receiver, sink: JsSink) {
+    pub fn echo_stream(&self, incoming: Receiver, outgoing: JsSink) {
         use futures::future::Executor;
         self.executor
             .execute(Box::new(
-                sink.send_all(stream.map(|bytes| bytes.to_vec()))
+                outgoing.send_all(incoming.map(|bytes| bytes.to_vec()))
                     .then(|_| Ok(())),
             ))
             .unwrap();

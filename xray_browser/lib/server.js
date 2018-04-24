@@ -2,24 +2,43 @@ import { xray as xrayPromise, JsSink } from "xray_wasm";
 
 const serverPromise = xrayPromise.then(xray => new Server(xray));
 
-global.addEventListener("message", handleMessage);
-
-async function handleMessage(event) {
+global.addEventListener("message", async (event) => {
   const message = event.data;
   const server = await serverPromise;
-  switch (message.type) {
-    case "ConnectToWebsocket":
-      server.connectToWebsocket(message.url);
-      break;
-    default:
-      console.log("Received unknown message", message);
-  }
-}
+  server.handleMessage(message);
+});
 
 class Server {
   constructor(xray) {
     this.xray = xray;
     this.xrayServer = xray.Server.new();
+
+    this.xrayServer.start_app(
+      new JsSink({
+        send: buffer => {
+          const message = decodeToJSON(buffer);
+          if (message.type === "OpenWindow") {
+            this.startWindow(message.window_id);
+          } else {
+            throw new Error("Expected first message type to be OpenWindow");
+          }
+        }
+      })
+    );
+  }
+
+  startWindow(windowId) {
+    const channel = this.xray.Channel.new();
+    this.windowSender = channel.take_sender();
+    this.xrayServer.start_window(
+      windowId,
+      channel.take_receiver(),
+      new JsSink({
+        send(buffer) {
+          global.postMessage(decodeToJSON(buffer));
+        }
+      })
+    );
   }
 
   connectToWebsocket(url) {
@@ -27,23 +46,34 @@ class Server {
     socket.binaryType = "arraybuffer";
     const channel = this.xray.Channel.new();
     const sender = channel.take_sender();
-    const receiver = channel.take_receiver();
 
-    console.log("connect", url);
-
-    socket.addEventListener('message', function (event) {
+    socket.addEventListener("message", function(event) {
       const data = new Uint8Array(event.data);
-      console.log("receive message", data);
       sender.send(data);
     });
 
-    const sink = new JsSink({
-      send(message) {
-        console.log("send message", message);
-        socket.send(message);
-      },
-    })
-
-    this.xrayServer.connect_to_peer(receiver, sink)
+    this.xrayServer.connect_to_peer(
+      channel.take_receiver(),
+      new JsSink({
+        send(message) {
+          socket.send(message);
+        }
+      })
+    );
   }
+
+  handleMessage(message) {
+    switch (message.type) {
+      case "ConnectToWebsocket":
+        this.connectToWebsocket(message.url);
+        break;
+      default:
+        console.error("Received unknown message", message);
+    }
+  }
+}
+
+const decoder = new TextDecoder("utf-8");
+function decodeToJSON(buffer) {
+  return JSON.parse(decoder.decode(buffer));
 }
