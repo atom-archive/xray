@@ -15,6 +15,9 @@ serde_derive = "1.0"
 serde_json = "1.0"
 smallvec = "0.6.0"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
 [dev-dependencies]
 rand = "0.3"
 futures-cpupool = "0.1"
