@@ -197,6 +197,7 @@ impl FileFinderViewDelegate for WorkspaceView {
                             }
                         }
                         Err(error) => {
+                            eprintln!("Error opening buffer {:?}", error);
                             unimplemented!("Error handling for open_buffer: {:?}", error);
                         }
                     });
