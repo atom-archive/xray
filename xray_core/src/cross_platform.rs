@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+#[cfg(unix)]
 use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
 use std::path::PathBuf;
 
 pub const UNIX_MAIN_SEPARATOR: u8 = b'/';
@@ -69,6 +71,7 @@ impl Path {
     #[cfg(unix)]
     pub fn to_path_buf(&self) -> PathBuf {
         use std::os::unix::ffi::OsStrExt;
+
         if let Some(ref path) = self.0 {
             match path {
                 &PathState::Unix(ref chars) => OsStr::from_bytes(chars).into(),

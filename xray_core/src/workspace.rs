@@ -73,6 +73,9 @@ impl RemoteWorkspace {
     ) -> Result<Self, rpc::Error> {
         let state = service.state()?;
         let project = RemoteProject::new(foreground, service.take_service(state.project)?)?;
+
+        eprintln!("created remote workspace");
+
         Ok(Self {
             project: project.into_shared(),
         })

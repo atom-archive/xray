@@ -3,6 +3,8 @@
 extern crate bytes;
 extern crate futures;
 extern crate wasm_bindgen;
+#[macro_use]
+extern crate xray_core;
 
 use bytes::Bytes;
 use futures::executor::{self, Notify, Spawn};
@@ -11,9 +13,11 @@ use futures::unsync::mpsc;
 use futures::{Async, AsyncSink, Future, Poll, Sink, Stream};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
+use xray_core::{cross_platform, App};
 
 #[derive(Clone)]
 pub struct Executor(Rc<RefCell<ExecutorState>>);
@@ -42,7 +46,12 @@ pub struct Sender(Option<mpsc::UnboundedSender<Bytes>>);
 pub struct Receiver(mpsc::UnboundedReceiver<Bytes>);
 
 #[wasm_bindgen]
-pub struct Server;
+pub struct Server {
+    executor: Executor,
+    app: Rc<RefCell<App>>,
+}
+
+struct FileProvider;
 
 #[wasm_bindgen(module = "../lib/support")]
 extern "C" {
@@ -57,12 +66,6 @@ extern "C" {
     #[wasm_bindgen(method)]
     fn close(this: &JsSink);
 }
-
-// #[wasm_bindgen]
-// extern "C" {
-//     #[wasm_bindgen(js_namespace = console)]
-//     fn log(s: &str);
-// }
 
 impl Executor {
     fn new() -> Self {
@@ -186,15 +189,6 @@ impl Stream for Receiver {
     }
 }
 
-#[wasm_bindgen]
-impl Server {
-    pub fn new() -> Self {
-        Server
-    }
-
-    pub fn connect_to_peer(_receiver: Receiver) {}
-}
-
 impl Sink for JsSink {
     type SinkItem = Vec<u8>;
     type SinkError = ();
@@ -214,6 +208,57 @@ impl Sink for JsSink {
     fn close(&mut self) -> Result<Async<()>, Self::SinkError> {
         JsSink::close(self);
         Ok(Async::Ready(()))
+    }
+}
+
+#[wasm_bindgen]
+impl Server {
+    pub fn new() -> Self {
+        let foreground_executor = Rc::new(Executor::new());
+        // TODO: use a requestIdleCallback-based executor here instead.
+        let background_executor = foreground_executor.clone();
+        Server {
+            app: App::new(
+                false,
+                foreground_executor.clone(),
+                background_executor.clone(),
+                FileProvider,
+            ),
+            executor: Executor::new(),
+        }
+    }
+
+    pub fn connect_to_peer(&mut self, stream: Receiver, sink: JsSink) {
+        use futures::future::Executor;
+
+        let executor = self.executor.clone();
+        let connect_future = self.app
+            .borrow_mut()
+            .connect_to_server(stream.map_err(|_| unreachable!()))
+            .map_err(|error| eprintln!("RPC error: {}", error))
+            .and_then(move |connection| {
+                executor
+                    .execute(Box::new(
+                        sink.send_all(
+                            connection
+                                // TODO: go back to using Vec<u8> for outgoing messages in xray_core.
+                                .map(|bytes| bytes.to_vec())
+                                .map_err(|_| unreachable!()),
+                        ).then(|_| Ok(())),
+                    ))
+                    .unwrap();
+                Ok(())
+            });
+        self.executor.execute(Box::new(connect_future)).unwrap();
+    }
+}
+
+impl xray_core::fs::FileProvider for FileProvider {
+    fn open(
+        &self,
+        _: &cross_platform::Path,
+    ) -> Box<Future<Item = Box<xray_core::fs::File>, Error = io::Error>> {
+        unimplemented!()
     }
 }
 

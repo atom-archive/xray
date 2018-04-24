@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 bytes = "0.4"
 futures = "0.1"
 wasm-bindgen = "0.2"
+xray_core = { path = "../xray_core" }
 
 [features]
 js-tests = []

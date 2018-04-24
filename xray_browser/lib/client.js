@@ -10,6 +10,6 @@ export default class XrayClient {
   }
 
   sendMessage(message) {
-    this.worker.postMessage(JSON.stringify(message));
+    this.worker.postMessage(message);
   }
 }

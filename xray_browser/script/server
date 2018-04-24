@@ -4,6 +4,7 @@ const path = require("path");
 const PORT = 3000;
 
 const express = require("express");
+express.static.mime.types["wasm"] = "application/wasm";
 const app = express();
 app.use("/", express.static(path.join(__dirname, "../dist")));
 app.listen(PORT, () => console.log("Listening to port " + PORT));
