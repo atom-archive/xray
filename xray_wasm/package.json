@@ -1,8 +1,9 @@
 {
   "name": "xray_wasm",
   "description": "Xray server packaged for use in JavaScript",
+  "main": "lib/main.js",
   "scripts": {
-    "test": "mocha --ui=tdd test/**/*.test.js"
+    "test": "script/test"
   },
   "repository": {
     "type": "git",

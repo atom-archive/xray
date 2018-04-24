@@ -1,6 +1,5 @@
 import assert from "assert";
-import xrayPromise from "../lib/main";
-import { JsSink } from "../lib/support";
+import { xray as xrayPromise, JsSink } from "../lib/main";
 
 suite("Server", () => {
   let xray;
