@@ -1,5 +1,8 @@
 #!/bin/bash
 
-cargo build "$@" &&
-cd xray_electron &&
-npm install
+set -e
+
+cd xray_server; cargo build "$@"; cd -
+cd xray_cli; cargo build "$@"; cd -
+cd xray_wasm; script/build; cd -
+cd xray_electron; npm install; cd -
