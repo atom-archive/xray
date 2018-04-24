@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -e
+
 rm -rf dist
 mkdir -p dist
 cargo build --target wasm32-unknown-unknown --features js-tests
