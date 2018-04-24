@@ -17,3 +17,5 @@ exports.buildViewRegistry = function buildViewRegistry(client) {
 };
 
 exports.App = require("./app");
+exports.React = require("react");
+exports.ReactDOM = require("react-dom");

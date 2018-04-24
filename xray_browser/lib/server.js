@@ -1,5 +1,7 @@
 import { xray as xrayPromise, JsSink } from "xray_wasm";
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8");
 const serverPromise = xrayPromise.then(xray => new Server(xray));
 
 global.addEventListener("message", async (event) => {
@@ -16,7 +18,7 @@ class Server {
     this.xrayServer.start_app(
       new JsSink({
         send: buffer => {
-          const message = decodeToJSON(buffer);
+          const message = JSON.parse(decoder.decode(buffer));
           if (message.type === "OpenWindow") {
             this.startWindow(message.window_id);
           } else {
@@ -35,7 +37,7 @@ class Server {
       channel.take_receiver(),
       new JsSink({
         send(buffer) {
-          global.postMessage(decodeToJSON(buffer));
+          global.postMessage(JSON.parse(decoder.decode(buffer)));
         }
       })
     );
@@ -67,13 +69,11 @@ class Server {
       case "ConnectToWebsocket":
         this.connectToWebsocket(message.url);
         break;
+      case "Action":
+        this.windowSender.send(encoder.encode(JSON.stringify(message)));
+        break;
       default:
         console.error("Received unknown message", message);
     }
   }
-}
-
-const decoder = new TextDecoder("utf-8");
-function decodeToJSON(buffer) {
-  return JSON.parse(decoder.decode(buffer));
 }

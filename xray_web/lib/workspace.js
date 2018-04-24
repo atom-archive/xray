@@ -46,7 +46,7 @@ module.exports = class Workspace extends React.Component {
   }
 
   didKeyDown(event) {
-    if (event.metaKey) {
+    if (event.metaKey || event.ctrlKey) {
       if (event.key === 't') {
         this.props.dispatch({type: 'ToggleFileFinder'})
       }
