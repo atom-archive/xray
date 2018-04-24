@@ -5,14 +5,15 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
+use xray_core::cross_platform;
 use xray_core::fs as xray_fs;
 use xray_core::notify_cell::NotifyCell;
 
 pub struct Tree {
-    path: PathBuf,
+    path: cross_platform::Path,
     root: xray_fs::Entry,
     updates: NotifyCell<()>,
     populated: NotifyCell<bool>,
@@ -39,7 +40,7 @@ impl Tree {
             populated.clone(),
         );
         Ok(Self {
-            path,
+            path: cross_platform::Path::from(path.into_os_string()),
             root,
             updates,
             populated,
@@ -103,7 +104,7 @@ impl xray_fs::Tree for Tree {
 }
 
 impl xray_fs::LocalTree for Tree {
-    fn path(&self) -> &Path {
+    fn path(&self) -> &cross_platform::Path {
         &self.path
     }
 
@@ -129,8 +130,11 @@ impl FileProvider {
 }
 
 impl xray_fs::FileProvider for FileProvider {
-    fn open(&self, path: &Path) -> Box<Future<Item = Box<xray_fs::File>, Error = io::Error>> {
-        let path = path.to_owned();
+    fn open(
+        &self,
+        path: &cross_platform::Path,
+    ) -> Box<Future<Item = Box<xray_fs::File>, Error = io::Error>> {
+        let path = path.to_path_buf();
         let (tx, rx) = futures::sync::oneshot::channel();
 
         thread::spawn(|| {

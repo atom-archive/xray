@@ -9,7 +9,6 @@ use serde_json;
 use std::cell::RefCell;
 use std::io;
 use std::iter::Iterator;
-use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use ForegroundExecutor;
@@ -23,13 +22,14 @@ pub trait Tree {
 }
 
 pub trait LocalTree: Tree {
-    fn path(&self) -> &Path;
+    fn path(&self) -> &cross_platform::Path;
     fn populated(&self) -> Box<Future<Item = (), Error = ()>>;
     fn as_tree(&self) -> &Tree;
 }
 
 pub trait FileProvider {
-    fn open(&self, path: &Path) -> Box<Future<Item = Box<File>, Error = io::Error>>;
+    fn open(&self, path: &cross_platform::Path)
+        -> Box<Future<Item = Box<File>, Error = io::Error>>;
 }
 
 pub trait File {
@@ -294,6 +294,7 @@ pub(crate) mod tests {
     use notify_cell::NotifyCell;
     use rpc;
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use stream_ext::StreamExt;
     use tokio_core::reactor;
@@ -374,7 +375,7 @@ pub(crate) mod tests {
     }
 
     pub struct TestTree {
-        path: PathBuf,
+        path: cross_platform::Path,
         root: Entry,
         pub populated: NotifyCell<bool>,
     }
@@ -397,9 +398,9 @@ pub(crate) mod tests {
     struct NextTick(bool);
 
     impl TestTree {
-        pub fn new<T: Into<PathBuf>>(path: T, root: Entry) -> Self {
+        pub fn new<T: Into<OsString>>(path: T, root: Entry) -> Self {
             Self {
-                path: path.into(),
+                path: cross_platform::Path::from(path.into()),
                 root,
                 populated: NotifyCell::new(false),
             }
@@ -423,7 +424,7 @@ pub(crate) mod tests {
     }
 
     impl LocalTree for TestTree {
-        fn path(&self) -> &Path {
+        fn path(&self) -> &cross_platform::Path {
             &self.path
         }
 
@@ -491,14 +492,14 @@ pub(crate) mod tests {
             })))
         }
 
-        pub fn write_sync<P: Into<PathBuf>, S: Into<String>>(&self, path: P, content: S) {
+        pub fn write_sync<S: Into<String>>(&self, path: cross_platform::Path, content: S) {
             let mut state = self.0.borrow_mut();
 
             let file_id = state.next_file_id;
             state.next_file_id += 1;
 
             state.files.insert(
-                path.into(),
+                path.to_path_buf(),
                 TestFile(Rc::new(RefCell::new(TestFileState {
                     id: file_id,
                     content: content.into(),
@@ -508,8 +509,11 @@ pub(crate) mod tests {
     }
 
     impl FileProvider for TestFileProvider {
-        fn open(&self, path: &Path) -> Box<Future<Item = Box<File>, Error = io::Error>> {
-            let path = path.to_owned();
+        fn open(
+            &self,
+            path: &cross_platform::Path,
+        ) -> Box<Future<Item = Box<File>, Error = io::Error>> {
+            let path = path.to_path_buf();
             let state = self.0.clone();
             Box::new(NextTick::new().then(move |_| {
                 let state = state.borrow();

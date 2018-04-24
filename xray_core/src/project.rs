@@ -11,7 +11,6 @@ use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
 use std::error::Error;
 use std::io;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use ForegroundExecutor;
@@ -140,10 +139,10 @@ impl LocalProject {
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
-    ) -> Option<PathBuf> {
+    ) -> Option<cross_platform::Path> {
         self.trees.get(&tree_id).map(|tree| {
-            let mut absolute_path = tree.path().to_owned();
-            absolute_path.push(relative_path.to_path_buf());
+            let mut absolute_path = tree.path().clone();
+            absolute_path.push_path(relative_path);
             absolute_path
         })
     }

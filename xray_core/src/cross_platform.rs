@@ -48,6 +48,24 @@ impl Path {
         }
     }
 
+    pub fn push_path(&mut self, other: &Self) {
+        if let Some(ref mut path) = self.0 {
+            match path {
+                &mut PathState::Unix(ref mut path_chars) => {
+                    if let Some(ref other) = other.0 {
+                        let &PathState::Unix(ref component_chars) = other;
+                        if path_chars.len() != 0 {
+                            path_chars.push(UNIX_MAIN_SEPARATOR);
+                        }
+                        path_chars.extend(component_chars);
+                    }
+                }
+            }
+        } else {
+            *self = other.clone();
+        }
+    }
+
     #[cfg(unix)]
     pub fn to_path_buf(&self) -> PathBuf {
         use std::os::unix::ffi::OsStrExt;
@@ -72,16 +90,24 @@ impl Path {
     }
 }
 
+#[cfg(unix)]
+impl From<OsString> for Path {
+    fn from(path: OsString) -> Self {
+        use std::os::unix::ffi::OsStringExt;
+        Path(Some(PathState::Unix(path.into_vec())))
+    }
+}
+
+#[cfg(unix)]
 impl From<OsString> for PathComponent {
-    #[cfg(unix)]
     fn from(string: OsString) -> Self {
         use std::os::unix::ffi::OsStringExt;
         PathComponent::Unix(string.into_vec())
     }
 }
 
+#[cfg(unix)]
 impl<'a> From<&'a OsStr> for PathComponent {
-    #[cfg(unix)]
     fn from(string: &'a OsStr) -> Self {
         use std::os::unix::ffi::OsStrExt;
         PathComponent::Unix(string.as_bytes().to_owned())

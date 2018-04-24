@@ -16,13 +16,13 @@ extern crate tokio_core;
 pub mod app;
 pub mod buffer;
 pub mod buffer_view;
+pub mod cross_platform;
 pub mod fs;
 pub mod notify_cell;
 pub mod rpc;
 pub mod window;
 pub mod workspace;
 
-mod cross_platform;
 mod file_finder;
 mod fuzzy;
 mod movement;
