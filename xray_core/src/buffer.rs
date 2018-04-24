@@ -1275,7 +1275,7 @@ impl Text {
             .iter()
             .enumerate()
             .filter_map(|(offset, c)| {
-                if *c == (b'\n' as u16) {
+                if *c == u16::from(b'\n') {
                     Some(offset)
                 } else {
                     None

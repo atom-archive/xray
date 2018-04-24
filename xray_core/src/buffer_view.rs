@@ -521,7 +521,7 @@ impl View for BufferView {
     fn render(&self) -> serde_json::Value {
         let buffer = self.buffer.borrow();
 
-        let max_scroll_top = buffer.max_point().row as f64 * self.line_height;
+        let max_scroll_top = f64::from(buffer.max_point().row) * self.line_height;
         let scroll_top = self.scroll_top.min(max_scroll_top);
         let scroll_bottom = scroll_top + self.height.unwrap_or(0.0);
         let start = Point::new((scroll_top / self.line_height).floor() as u32, 0);
@@ -531,7 +531,7 @@ impl View for BufferView {
         let mut cur_line = Vec::new();
         let mut cur_row = start.row;
         for c in buffer.iter_starting_at_row(start.row) {
-            if c == (b'\n' as u16) {
+            if c == u16::from(b'\n') {
                 lines.push(String::from_utf16_lossy(&cur_line));
                 cur_line = Vec::new();
                 cur_row += 1;
