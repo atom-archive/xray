@@ -7,6 +7,7 @@ authors = ["Antonio Scandurra <as-cii@github.com>"]
 crate-type = ["cdylib"]
 
 [dependencies]
+bytes = "0.4"
 futures = "0.1"
 wasm-bindgen = "0.2"
 

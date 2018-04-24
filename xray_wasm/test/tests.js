@@ -14,7 +14,8 @@ suite("Server", () => {
     const messages = [];
     const sink = new JsSink({
       send(message) {
-        messages.push(message);
+        assert.equal(message.length, 1);
+        messages.push(message[0]);
       },
 
       close() {
@@ -33,7 +34,7 @@ suite("Server", () => {
         sender.dispose();
         clearInterval(intervalId);
       }
-      sender.send((i++).toString());
+      sender.send([i++]);
     }, 1);
   });
 });

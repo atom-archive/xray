@@ -1,8 +1,10 @@
 #![feature(proc_macro, wasm_custom_section, wasm_import_module)]
 
+extern crate bytes;
 extern crate futures;
 extern crate wasm_bindgen;
 
+use bytes::Bytes;
 use futures::executor::{self, Notify, Spawn};
 use futures::future;
 use futures::unsync::mpsc;
@@ -34,10 +36,10 @@ pub struct Channel {
 
 #[wasm_bindgen]
 #[derive(Clone)]
-pub struct Sender(Option<mpsc::UnboundedSender<String>>);
+pub struct Sender(Option<mpsc::UnboundedSender<Bytes>>);
 
 #[wasm_bindgen]
-pub struct Receiver(mpsc::UnboundedReceiver<String>);
+pub struct Receiver(mpsc::UnboundedReceiver<Bytes>);
 
 #[wasm_bindgen]
 pub struct Server;
@@ -50,7 +52,7 @@ extern "C" {
     pub type JsSink;
 
     #[wasm_bindgen(method)]
-    fn send(this: &JsSink, message: String);
+    fn send(this: &JsSink, message: Vec<u8>);
 
     #[wasm_bindgen(method)]
     fn close(this: &JsSink);
@@ -162,9 +164,9 @@ impl Channel {
 
 #[wasm_bindgen]
 impl Sender {
-    pub fn send(&mut self, message: String) -> bool {
+    pub fn send(&mut self, message: Vec<u8>) -> bool {
         if let Some(ref mut tx) = self.0 {
-            tx.unbounded_send(message).is_ok()
+            tx.unbounded_send(Bytes::from(message)).is_ok()
         } else {
             false
         }
@@ -176,7 +178,7 @@ impl Sender {
 }
 
 impl Stream for Receiver {
-    type Item = String;
+    type Item = Bytes;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
@@ -194,7 +196,7 @@ impl Server {
 }
 
 impl Sink for JsSink {
-    type SinkItem = String;
+    type SinkItem = Vec<u8>;
     type SinkError = ();
 
     fn start_send(
@@ -233,7 +235,10 @@ impl Test {
     pub fn echo_stream(&self, stream: Receiver, sink: JsSink) {
         use futures::future::Executor;
         self.executor
-            .execute(Box::new(sink.send_all(stream).then(|_| Ok(()))))
+            .execute(Box::new(
+                sink.send_all(stream.map(|bytes| bytes.to_vec()))
+                    .then(|_| Ok(())),
+            ))
             .unwrap();
     }
 }
