@@ -29,7 +29,7 @@ impl Tree {
     pub fn new<T: Into<PathBuf>>(path: T) -> Result<Self, &'static str> {
         let path = path.into();
         let file_name = OsString::from(path.file_name().ok_or("Path must have a filename")?);
-        let root = xray_fs::Entry::dir(file_name, false, false);
+        let root = xray_fs::Entry::dir(file_name.into(), false, false);
         let updates = NotifyCell::new(());
         let populated = NotifyCell::new(false);
         Self::populate(
@@ -70,7 +70,7 @@ impl Tree {
 
                 if file_type.is_dir() {
                     let dir = xray_fs::Entry::dir(
-                        OsString::from(file_name),
+                        file_name.into(),
                         file_type.is_symlink(),
                         entry.ignored(),
                     );
@@ -78,7 +78,7 @@ impl Tree {
                     stack.push(dir);
                 } else if file_type.is_file() {
                     let file = xray_fs::Entry::file(
-                        OsString::from(file_name),
+                        file_name.into(),
                         file_type.is_symlink(),
                         entry.ignored(),
                     );

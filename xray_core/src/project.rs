@@ -1,4 +1,5 @@
 use buffer::{self, Buffer};
+use cross_platform;
 use fs;
 use futures::{future, Async, Future, Poll};
 use fuzzy;
@@ -10,7 +11,7 @@ use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
 use std::error::Error;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use ForegroundExecutor;
@@ -22,7 +23,7 @@ pub trait Project {
     fn open_buffer(
         &self,
         tree_id: TreeId,
-        relative_path: &Path,
+        relative_path: &cross_platform::Path,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>>;
     fn search_paths(
         &self,
@@ -59,7 +60,7 @@ pub struct RpcState {
 pub enum RpcRequest {
     OpenBuffer {
         tree_id: TreeId,
-        relative_path: PathBuf,
+        relative_path: cross_platform::Path,
     },
 }
 
@@ -89,8 +90,8 @@ pub struct PathSearchResult {
     pub score: fuzzy::Score,
     pub positions: Vec<usize>,
     pub tree_id: TreeId,
-    pub relative_path: PathBuf,
-    pub display_path: PathBuf,
+    pub relative_path: cross_platform::Path,
+    pub display_path: String,
 }
 
 struct StackEntry {
@@ -135,10 +136,14 @@ impl LocalProject {
         self.trees.insert(id, Rc::new(tree));
     }
 
-    fn resolve_path(&self, tree_id: TreeId, relative_path: &Path) -> Option<PathBuf> {
+    fn resolve_path(
+        &self,
+        tree_id: TreeId,
+        relative_path: &cross_platform::Path,
+    ) -> Option<PathBuf> {
         self.trees.get(&tree_id).map(|tree| {
             let mut absolute_path = tree.path().to_owned();
-            absolute_path.push(relative_path);
+            absolute_path.push(relative_path.to_path_buf());
             absolute_path
         })
     }
@@ -148,7 +153,7 @@ impl Project for LocalProject {
     fn open_buffer(
         &self,
         tree_id: TreeId,
-        relative_path: &Path,
+        relative_path: &cross_platform::Path,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
         if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
             let buffers = self.buffers.clone();
@@ -237,9 +242,8 @@ impl Project for RemoteProject {
     fn open_buffer(
         &self,
         tree_id: TreeId,
-        relative_path: &Path,
+        relative_path: &cross_platform::Path,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
-        let relative_path = relative_path.to_owned();
         let foreground = self.foreground.clone();
         let service = self.service.clone();
 
@@ -248,7 +252,7 @@ impl Project for RemoteProject {
                 .borrow()
                 .request(RpcRequest::OpenBuffer {
                     tree_id,
-                    relative_path,
+                    relative_path: relative_path.clone(),
                 })
                 .then(move |response| {
                     response
@@ -500,18 +504,18 @@ impl PathSearch {
                                 self.tree_ids[stack[0].child_index]
                             };
 
-                            let mut relative_path = PathBuf::new();
-                            let mut display_path = PathBuf::new();
+                            let mut relative_path = cross_platform::Path::new();
+                            let mut display_path = String::new();
                             for (i, entry) in stack.iter().enumerate() {
-                                let name = entry.children[entry.child_index].name();
+                                let child = &entry.children[entry.child_index];
                                 if self.roots.len() == 1 || i != 0 {
-                                    relative_path.push(name);
+                                    relative_path.push(child.name());
                                 }
-                                display_path.push(name);
+                                display_path.extend(child.name_chars());
                             }
-                            let file_name = children[child_index].name();
-                            relative_path.push(file_name);
-                            display_path.push(file_name);
+                            let child = &children[child_index];
+                            relative_path.push(child.name());
+                            display_path.extend(child.name_chars());
                             if results.len() == self.max_results {
                                 results.pop();
                             }
@@ -616,7 +620,7 @@ mod tests {
         let project = build_project(file_provider.clone());
 
         let tree_id = 0;
-        let relative_path = PathBuf::from("subdir-a/subdir-1/bar");
+        let relative_path = cross_platform::Path::from("subdir-a/subdir-1/bar");
         file_provider.write_sync(
             project.resolve_path(tree_id, &relative_path).unwrap(),
             "abc",
@@ -744,7 +748,7 @@ mod tests {
 
         let absolute_path = local_project
             .borrow()
-            .resolve_path(tree_id, &relative_path)
+            .resolve_path(tree_id, relative_path)
             .unwrap();
         file_provider.write_sync(absolute_path, "abc");
 
@@ -802,8 +806,8 @@ mod tests {
                     .iter()
                     .map(|result| {
                         let tree_id = result.tree_id;
-                        let relative_path = result.relative_path.to_str().unwrap().to_string();
-                        let display_path = result.display_path.to_str().unwrap().to_string();
+                        let relative_path = result.relative_path.to_string_lossy();
+                        let display_path = result.display_path.clone();
                         let positions = result.positions.clone();
                         (tree_id, relative_path, display_path, positions)
                     })

@@ -78,21 +78,21 @@ module.exports = class FileFinder extends React.Component {
     );
   }
 
-  renderSearchResult({positions, relative_path}, isSelected) {
+  renderSearchResult({positions, display_path}, isSelected) {
     let pathIndex = 0;
     let queryIndex = 0;
     const children = [];
     while (true) {
       if (pathIndex === positions[queryIndex]) {
-        children.push($('b', null, relative_path[pathIndex]));
+        children.push($('b', null, display_path[pathIndex]));
         pathIndex++;
         queryIndex++;
       } else if (queryIndex < positions.length) {
         const nextPathIndex = positions[queryIndex];
-        children.push(relative_path.slice(pathIndex, nextPathIndex));
+        children.push(display_path.slice(pathIndex, nextPathIndex));
         pathIndex = nextPathIndex;
       } else {
-        children.push(relative_path.slice(pathIndex));
+        children.push(display_path.slice(pathIndex));
         break;
       }
     }

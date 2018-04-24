@@ -1,4 +1,5 @@
 use buffer_view::BufferView;
+use cross_platform;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
 use futures::{Future, Poll, Stream};
 use never::Never;
@@ -10,7 +11,6 @@ use rpc::{self, client, server};
 use serde_json;
 use std::cell::Ref;
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
 use window::{View, ViewHandle, WeakViewHandle, Window};
 use ForegroundExecutor;
@@ -173,7 +173,7 @@ impl FileFinderViewDelegate for WorkspaceView {
         self.updates.set(());
     }
 
-    fn did_confirm(&mut self, tree_id: TreeId, path: &Path, window: &mut Window) {
+    fn did_confirm(&mut self, tree_id: TreeId, path: &cross_platform::Path, window: &mut Window) {
         let window_handle = window.handle();
         let workspace = self.workspace.borrow();
         let project = workspace.project();

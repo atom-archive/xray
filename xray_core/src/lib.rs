@@ -22,6 +22,7 @@ pub mod rpc;
 pub mod window;
 pub mod workspace;
 
+mod cross_platform;
 mod file_finder;
 mod fuzzy;
 mod movement;
