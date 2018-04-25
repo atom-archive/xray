@@ -19,14 +19,15 @@ extern crate tokio_timer;
 #[cfg(target_arch = "wasm32")]
 extern crate wasm_bindgen;
 
+#[cfg(target_arch = "wasm32")]
+#[macro_use]
+pub mod wasm_logging;
+
 pub mod app;
 pub mod buffer;
 pub mod buffer_view;
 pub mod cross_platform;
 pub mod fs;
-#[cfg(target_arch = "wasm32")]
-#[macro_use]
-pub mod wasm_logging;
 pub mod notify_cell;
 pub mod rpc;
 pub mod window;
