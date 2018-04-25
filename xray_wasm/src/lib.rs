@@ -18,6 +18,7 @@ use futures::{Async, AsyncSink, Future, Poll, Sink, Stream};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
+use std::mem;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
@@ -47,6 +48,7 @@ pub struct Executor(Rc<RefCell<ExecutorState>>);
 struct ExecutorState {
     next_spawn_id: usize,
     futures: HashMap<usize, Rc<RefCell<Spawn<Future<Item = (), Error = ()>>>>>,
+    pending: HashMap<usize, Rc<RefCell<Spawn<Future<Item = (), Error = ()>>>>>,
     notify_handle: Option<Arc<NotifyHandle>>,
 }
 
@@ -78,7 +80,7 @@ struct FileProvider;
 #[wasm_bindgen(module = "../lib/support")]
 extern "C" {
     #[wasm_bindgen(js_name = notifyOnNextTick)]
-    fn notify_on_next_tick(notify: NotifyHandle, id: usize);
+    fn notify_on_next_tick(notify: NotifyHandle);
 
     pub type JsSink;
 
@@ -94,6 +96,7 @@ impl Executor {
         let state = Rc::new(RefCell::new(ExecutorState {
             next_spawn_id: 0,
             futures: HashMap::new(),
+            pending: HashMap::new(),
             notify_handle: None,
         }));
         state.borrow_mut().notify_handle = Some(Arc::new(NotifyHandle(Rc::downgrade(&state))));
@@ -132,19 +135,19 @@ impl<F: 'static + Future<Item = (), Error = ()>> future::Executor<F> for Executo
 
 #[wasm_bindgen]
 impl NotifyHandle {
-    pub fn notify_from_js_on_next_tick(&self, id: usize) {
+    pub fn notify_from_js_on_next_tick(&self) {
         if let Some(state) = self.0.upgrade() {
-            let spawn;
             let notify_handle;
+            let mut pending = HashMap::new();
             {
-                let state = state.borrow();
-                spawn = state.futures.get(&id).cloned();
+                let mut state = state.borrow_mut();
                 notify_handle = state.notify_handle.as_ref().unwrap().clone();
+                mem::swap(&mut state.pending, &mut pending);
             }
 
-            if let Some(spawn) = spawn {
-                if let Ok(mut spawn) = spawn.try_borrow_mut() {
-                    match spawn.poll_future_notify(&notify_handle, id) {
+            for (id, task) in pending {
+                if let Ok(mut task) = task.try_borrow_mut() {
+                    match task.poll_future_notify(&notify_handle, id) {
                         Ok(Async::NotReady) => {}
                         _ => {
                             state.borrow_mut().futures.remove(&id);
@@ -158,7 +161,17 @@ impl NotifyHandle {
 
 impl Notify for NotifyHandle {
     fn notify(&self, id: usize) {
-        notify_on_next_tick(self.clone(), id);
+        if let Some(state) = self.0.upgrade() {
+            let mut state = state.borrow_mut();
+            if !state.pending.contains_key(&id) {
+                if let Some(task) = state.futures.get(&id).cloned() {
+                    state.pending.insert(id, task);
+                    if state.pending.len() == 1 {
+                        notify_on_next_tick(self.clone());
+                    }
+                }
+            }
+        }
     }
 }
 

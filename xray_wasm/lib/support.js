@@ -5,15 +5,15 @@ export class JsSink {
   }
 
   send(message) {
-    if (this._send) this._send(message)
+    if (this._send) this._send(message);
   }
 
   close() {
-    if (this._close) this._close()
+    if (this._close) this._close();
   }
 }
 
-let promise = Promise.resolve();
-export function notifyOnNextTick(notifyHandle, id) {
-  promise.then(() => notifyHandle.notify_from_js_on_next_tick(id));
+const promise = Promise.resolve();
+export function notifyOnNextTick(notifyHandle) {
+  promise.then(() => notifyHandle.notify_from_js_on_next_tick());
 }
