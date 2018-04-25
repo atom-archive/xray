@@ -72,9 +72,13 @@ module.exports = TextPlane;
 const shaders = require("./shaders");
 const UNIT_QUAD_VERTICES = new Float32Array([1, 1, 1, 0, 0, 0, 0, 1]);
 const UNIT_QUAD_ELEMENT_INDICES = new Uint8Array([0, 1, 3, 1, 2, 3]);
-const MAX_GLYPH_INSTANCES = 1 << 16;
-const GLYPH_INSTANCE_SIZE_IN_BYTES = 12 * Float32Array.BYTES_PER_ELEMENT;
-const SOLID_INSTANCE_SIZE_IN_BYTES = 8 * Float32Array.BYTES_PER_ELEMENT;
+const MAX_INSTANCES = 1 << 16;
+const GLYPH_INSTANCE_SIZE = 12;
+const GLYPH_INSTANCE_SIZE_IN_BYTES =
+  GLYPH_INSTANCE_SIZE * Float32Array.BYTES_PER_ELEMENT;
+const SOLID_INSTANCE_SIZE = 8;
+const SOLID_INSTANCE_SIZE_IN_BYTES =
+  SOLID_INSTANCE_SIZE * Float32Array.BYTES_PER_ELEMENT;
 const SUBPIXEL_DIVISOR = 4;
 
 class Renderer {
@@ -156,11 +160,17 @@ class Renderer {
       this.gl.STATIC_DRAW
     );
 
-    this.glyphInstances = new Float32Array(MAX_GLYPH_INSTANCES);
+    this.glyphInstances = new Float32Array(
+      MAX_INSTANCES * GLYPH_INSTANCE_SIZE
+    );
     this.glyphInstancesBuffer = this.gl.createBuffer();
 
-    this.selectionSolidInstances = new Float32Array(MAX_GLYPH_INSTANCES);
-    this.cursorSolidInstances = new Float32Array(MAX_GLYPH_INSTANCES);
+    this.selectionSolidInstances = new Float32Array(
+      MAX_INSTANCES * SOLID_INSTANCE_SIZE
+    );
+    this.cursorSolidInstances = new Float32Array(
+      MAX_INSTANCES * SOLID_INSTANCE_SIZE
+    );
     this.solidInstancesBuffer = this.gl.createBuffer();
   }
 
@@ -466,6 +476,10 @@ class Renderer {
       y += Math.round(this.style.computedLineHeight * this.style.dpiScale);
     }
 
+    if (glyphCount > MAX_INSTANCES) {
+      console.error(`glyphCount of ${glyphCount} exceeds MAX_INSTANCES of ${MAX_INSTANCES}`);
+    }
+
     return glyphCount
   }
 
@@ -566,6 +580,13 @@ class Renderer {
 
     function yForRow(row) {
       return Math.round((row * computedLineHeight - scrollTop) * dpiScale);
+    }
+
+    if (selectionSolidCount > MAX_INSTANCES) {
+      console.error(`selectionSolidCount of ${selectionSolidCount} exceeds MAX_INSTANCES of ${MAX_INSTANCES}`)
+    }
+    if (cursorSolidCount > MAX_INSTANCES) {
+      console.error(`cursorSolidCount of ${cursorSolidCount} exceeds MAX_INSTANCES of ${MAX_INSTANCES}`)
     }
 
     return {selectionSolidCount, cursorSolidCount}
