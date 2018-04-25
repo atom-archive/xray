@@ -1,10 +1,35 @@
 #!/usr/bin/env node
 
-const path = require("path");
-const PORT = 3000;
-
 const express = require("express");
+const path = require("path");
+const webpack = require("webpack");
+const webpackDev = require("webpack-dev-middleware");
 express.static.mime.types["wasm"] = "application/wasm";
+
+const PORT = 3000;
 const app = express();
-app.use("/", express.static(path.join(__dirname, "../dist")));
+
+const compiler = webpack([
+  {
+    mode: "development",
+    entry: path.join(__dirname, "../src/ui.js"),
+    output: {
+      filename: "ui.js",
+      path: path.join(__dirname, "dist")
+    }
+  },
+  {
+    mode: "development",
+    target: "webworker",
+    entry: path.join(__dirname, "../src/worker.js"),
+    output: {
+      filename: "worker.js",
+      path: path.join(__dirname, "dist")
+    }
+  }
+]);
+
+app.use(webpackDev(compiler, { publicPath: "/" }));
+app.use("/", express.static(path.join(__dirname, "../static")));
+// app.use("/", express.static(path.join(__dirname, "../dist")));
 app.listen(PORT, () => console.log("Listening to port " + PORT));

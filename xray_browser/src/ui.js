@@ -2,7 +2,7 @@ import { React, ReactDOM, App, buildViewRegistry } from "xray_web"
 import XrayClient from "./client";
 const $ = React.createElement;
 
-const client = new XrayClient(new Worker("server.js"));
+const client = new XrayClient(new Worker("worker.js"));
 const websocketURL = "ws://127.0.0.1:9999";
 client.sendMessage({ type: "ConnectToWebsocket", url: websocketURL });
 
