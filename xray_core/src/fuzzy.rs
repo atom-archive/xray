@@ -220,7 +220,7 @@ impl fmt::Debug for Matrix<f64> {
             for col in 0..self.cols {
                 write!(f, "{:.2} ", self[(row, col)])?;
             }
-            writeln!(f, "")?;
+            writeln!(f)?;
         }
 
         Ok(())
