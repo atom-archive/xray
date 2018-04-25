@@ -118,6 +118,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_creating_service_in_async_response() {
+        let mut reactor = reactor::Core::new().unwrap();
+        let service = TestService::new(Rc::new(TestModel::new(42)));
+        // Throttle connection to ensure both the response *and* the new service are sent together.
+        let client = connect_throttled(&mut reactor, service, Some(100));
+        let request_future = client.request(TestRequest::CreateServiceAsync);
+        let response = reactor.run(request_future).unwrap();
+        match response {
+            TestServiceResponse::ServiceCreated(id) => {
+                client
+                    .take_service::<TestService>(id)
+                    .expect("Service to exist by the time we receive a response");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
     fn test_add_service_on_init_or_update() {
         struct NoopService {
             init_called: bool,
@@ -236,19 +254,35 @@ pub(crate) mod tests {
         reactor: &mut reactor::Core,
         service: S,
     ) -> client::Service<S> {
+        connect_throttled(reactor, service, None)
+    }
+
+    fn connect_throttled<S: 'static + server::Service>(
+        reactor: &mut reactor::Core,
+        service: S,
+        delay: Option<u64>,
+    ) -> client::Service<S> {
         let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
         let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
 
-        let server = server::Connection::new(client_to_server_rx, service);
+        let server = if let Some(delay) = delay {
+            server::Connection::new(client_to_server_rx.throttle(delay), service)
+        } else {
+            server::Connection::new(client_to_server_rx, service)
+        };
         reactor.handle().spawn(
             server_to_client_tx
                 .send_all(server.map_err(|_| unreachable!()))
                 .then(|_| Ok(())),
         );
 
-        let client_future = client::Connection::new(server_to_client_rx);
+        let client_future = if let Some(delay) = delay {
+            client::Connection::new(server_to_client_rx.throttle(delay))
+        } else {
+            client::Connection::new(server_to_client_rx)
+        };
         let (client, service_client) = reactor.run(client_future).unwrap();
         reactor.handle().spawn(
             client_to_server_tx
@@ -276,6 +310,7 @@ pub(crate) mod tests {
         Increment(usize),
         CreateService,
         DropService,
+        CreateServiceAsync,
     }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -332,6 +367,27 @@ pub(crate) mod tests {
                 TestRequest::DropService => {
                     self.child_service.take();
                     Some(Box::new(future::ok(TestServiceResponse::Ack)))
+                }
+                TestRequest::CreateServiceAsync => {
+                    use futures;
+                    use std::thread;
+
+                    let (tx, rx) = futures::sync::oneshot::channel();
+
+                    thread::spawn(|| {
+                        tx.send(()).unwrap();
+                    });
+
+                    let connection = connection.clone();
+                    Some(Box::new(rx.map_err(|_| unreachable!()).and_then(
+                        move |_| {
+                            let service_handle = connection
+                                .add_service(TestService::new(Rc::new(TestModel::new(0))));
+                            Ok(TestServiceResponse::ServiceCreated(
+                                service_handle.service_id(),
+                            ))
+                        },
+                    )))
                 }
             }
         }

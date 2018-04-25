@@ -14,6 +14,8 @@ extern crate serde_json;
 extern crate smallvec;
 #[cfg(test)]
 extern crate tokio_core;
+#[cfg(test)]
+extern crate tokio_timer;
 #[cfg(target_arch = "wasm32")]
 extern crate wasm_bindgen;
 
