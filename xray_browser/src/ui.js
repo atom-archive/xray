@@ -1,4 +1,4 @@
-import { React, ReactDOM, App, buildViewRegistry } from "xray_web"
+import { React, ReactDOM, App, buildViewRegistry } from "xray_ui"
 import XrayClient from "./client";
 const $ = React.createElement;
 

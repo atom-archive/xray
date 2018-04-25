@@ -3,7 +3,7 @@
   "license": "MIT",
   "dependencies": {
     "xray_wasm": "../xray_wasm",
-    "xray_web": "../xray_web"
+    "xray_ui": "../xray_ui"
   },
   "devDependencies": {
     "express": "^4.16.3",

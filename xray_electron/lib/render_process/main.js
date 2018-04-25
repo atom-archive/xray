@@ -1,6 +1,6 @@
 process.env.NODE_ENV = "production";
 
-const { React, ReactDOM, App, buildViewRegistry } = require("xray_web");
+const { React, ReactDOM, App, buildViewRegistry } = require("xray_ui");
 const XrayClient = require("../shared/xray_client");
 const QueryString = require("querystring");
 const $ = React.createElement;

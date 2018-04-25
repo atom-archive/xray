@@ -1,5 +1,5 @@
 {
-  "name": "xray_web",
+  "name": "xray_ui",
   "main": "lib/index.js",
   "license": "MIT",
   "scripts": {

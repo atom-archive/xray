@@ -9,7 +9,7 @@
     "itest": "electron-mocha --ui=tdd --renderer --interactive test/**/*.test.js"
   },
   "dependencies": {
-    "xray_web": "../xray_web"
+    "xray_ui": "../xray_ui"
   },
   "devDependencies": {
     "electron": "2.0.0-beta.7"
