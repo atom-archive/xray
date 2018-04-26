@@ -118,19 +118,27 @@ class TextEditor extends React.Component {
     switch (event.key) {
       case 'ArrowUp':
         this.pauseCursorBlinking();
-        this.props.dispatch({type: 'MoveUp'});
+        this.props.dispatch({
+          type: event.shiftKey ? 'SelectUp' : 'MoveUp'
+        });
         break;
       case 'ArrowDown':
         this.pauseCursorBlinking();
-        this.props.dispatch({type: 'MoveDown'});
+        this.props.dispatch({
+          type: event.shiftKey ? 'SelectDown' : 'MoveDown'
+        });
         break;
       case 'ArrowLeft':
         this.pauseCursorBlinking();
-        this.props.dispatch({type: 'MoveLeft'});
+        this.props.dispatch({
+          type: event.shiftKey ? 'SelectLeft' : 'MoveLeft'
+        });
         break;
       case 'ArrowRight':
         this.pauseCursorBlinking();
-        this.props.dispatch({type: 'MoveRight'});
+        this.props.dispatch({
+          type: event.shiftKey ? 'SelectRight' : 'MoveRight'
+        });
         break;
     }
   }
