@@ -4,7 +4,7 @@ set -e
 
 rm -rf dist
 mkdir -p dist
-cd node_modules/xray_wasm && script/build && cd -
+cd ../xray_wasm && script/build && cd -
 yarn install
 node_modules/.bin/webpack --target=web --mode=development src/ui.js --output-filename=ui.js
 node_modules/.bin/webpack --target=webworker --mode=development src/worker.js --output-filename=worker.js
