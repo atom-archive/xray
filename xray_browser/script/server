@@ -60,7 +60,11 @@ websocketServer.on("connection", async ws => {
       }
 
       if (incomingMessage && remainingBytes === 0) {
-        ws.send(incomingMessage);
+        try {
+          ws.send(incomingMessage);
+        } catch (error) {
+          console.error("Error sending to web socket:", error);
+        }
         incomingMessage = null;
       }
     }
