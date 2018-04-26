@@ -1,10 +1,11 @@
-import { React, ReactDOM, App, buildViewRegistry } from "xray_ui"
+import { React, ReactDOM, App, buildViewRegistry } from "xray_ui";
 import XrayClient from "./client";
 const $ = React.createElement;
 
 const client = new XrayClient(new Worker("worker.js"));
-const websocketURL = "ws://127.0.0.1:9999";
-client.sendMessage({ type: "ConnectToWebsocket", url: websocketURL });
+const websocketURL = new URL("/ws", window.location.href);
+websocketURL.protocol = "ws";
+client.sendMessage({ type: "ConnectToWebsocket", url: websocketURL.href });
 
 const viewRegistry = buildViewRegistry(client);
 

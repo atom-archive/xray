@@ -4,7 +4,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8");
 const serverPromise = xrayPromise.then(xray => new Server(xray));
 
-global.addEventListener("message", async (event) => {
+global.addEventListener("message", async event => {
   const message = event.data;
   const server = await serverPromise;
   server.handleMessage(message);

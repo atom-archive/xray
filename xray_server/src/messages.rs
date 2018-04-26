@@ -13,9 +13,6 @@ pub enum IncomingMessage {
     TcpListen {
         port: u16,
     },
-    WebsocketListen {
-        port: u16,
-    },
     StartWindow {
         window_id: WindowId,
         height: f64,

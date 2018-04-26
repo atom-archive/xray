@@ -9,6 +9,7 @@
     "express": "^4.16.3",
     "webpack": "^4.6.0",
     "webpack-cli": "^2.0.15",
-    "webpack-dev-middleware": "^3.1.2"
+    "webpack-dev-middleware": "^3.1.2",
+    "ws": "^5.1.1"
   }
 }

@@ -12,7 +12,6 @@ use std::rc::Rc;
 use tokio_core::net::{TcpListener, TcpStream};
 use tokio_core::reactor;
 use tokio_io::codec;
-use websocket;
 use xray_core::app::Command;
 use xray_core::{self, App, Never, WindowId};
 
@@ -167,9 +166,6 @@ impl Server {
                 Box::new(self.open_workspace(paths).into_future())
             }
             IncomingMessage::TcpListen { port } => Box::new(self.tcp_listen(port).into_future()),
-            IncomingMessage::WebsocketListen { port } => {
-                Box::new(self.websocket_listen(port).into_future())
-            }
             IncomingMessage::ConnectToPeer { address } => self.connect_to_peer(address),
             _ => Box::new(future::err(format!("Unexpected message {:?}", message))),
         };
@@ -225,54 +221,6 @@ impl Server {
                         .then(|_| Ok(())),
                 );
                 Ok(())
-            });
-        self.reactor.spawn(handle_incoming);
-        Ok(())
-    }
-
-    fn websocket_listen(&self, port: u16) -> Result<(), String> {
-        let local_addr = SocketAddr::new("127.0.0.1".parse().unwrap(), port);
-        let listener = websocket::async::Server::bind(local_addr, &self.reactor)
-            .map_err(|_| "Error binding address".to_owned())?;
-        let app = self.app.clone();
-        let reactor = self.reactor.clone();
-        let handle_incoming = listener
-            .incoming()
-            .map_err(|_| eprintln!("Error accepting incoming connection"))
-            .for_each(move |(upgrade, _)| {
-                let app = app.clone();
-                let reactor = reactor.clone();
-                upgrade
-                    .accept()
-                    .map_err(|_| eprintln!("Error during websocket handshake"))
-                    .and_then(move |(transport, _headers)| {
-                        let (tx, rx) = transport.split();
-                        let rx = rx.filter_map(|message| match message {
-                            websocket::message::OwnedMessage::Binary(bytes) => {
-                                Some(Bytes::from(bytes))
-                            }
-                            message @ _ => {
-                                eprintln!("Received unknown message: {:?}", message);
-                                None
-                            }
-                        }).map_err(|error| match error {
-                            websocket::result::WebSocketError::IoError(error) => error,
-                            error @ _ => io::Error::new(io::ErrorKind::Other, error.description()),
-                        });
-                        let connection = App::connect_to_client(app.clone(), rx);
-                        reactor.spawn(
-                            tx.send_all(
-                                connection
-                                    .map(|message| {
-                                        // TODO: consider going back to Vec<u8> to represent
-                                        // messages on the way out to avoid this allocation.
-                                        websocket::message::OwnedMessage::Binary(message.to_vec())
-                                    })
-                                    .map_err(|_| -> io::Error { unreachable!() }),
-                            ).then(|_| Ok(())),
-                        );
-                        Ok(())
-                    })
             });
         self.reactor.spawn(handle_incoming);
         Ok(())

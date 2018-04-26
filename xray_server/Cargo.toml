@@ -17,5 +17,4 @@ tokio-io = "0.1"
 tokio-core = "0.1"
 tokio-process = "0.1"
 tokio-uds = "0.1"
-websocket = "0.20"
 xray_core = {path = "../xray_core"}

@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
+const assert = require("assert");
+const http = require("http");
 const express = require("express");
+const ws = require("ws");
+const { Socket } = require("net");
 const path = require("path");
 const webpack = require("webpack");
 const webpackDev = require("webpack-dev-middleware");
@@ -8,6 +12,7 @@ express.static.mime.types["wasm"] = "application/wasm";
 
 const PORT = 3000;
 const app = express();
+const server = http.createServer(app);
 
 const compiler = webpack([
   {
@@ -29,7 +34,47 @@ const compiler = webpack([
   }
 ]);
 
+const websocketServer = new ws.Server({ server, path: "/ws" });
+websocketServer.on("connection", async ws => {
+  const connection = new Socket();
+
+  let incomingMessage = null;
+  let remainingBytes = 0;
+  connection.on("data", data => {
+    let offset = 0;
+    while (offset < data.length) {
+      if (incomingMessage) {
+        assert(remainingBytes !== 0, "remainingBytes should not be 0");
+        const copiedBytes = data.copy(
+          incomingMessage,
+          incomingMessage.length - remainingBytes,
+          offset,
+          offset + remainingBytes
+        );
+        remainingBytes -= copiedBytes;
+        offset += copiedBytes;
+      } else {
+        remainingBytes = data.readUInt32BE(offset);
+        incomingMessage = Buffer.alloc(remainingBytes);
+        offset += 4;
+      }
+
+      if (incomingMessage && remainingBytes === 0) {
+        ws.send(incomingMessage);
+        incomingMessage = null;
+      }
+    }
+  });
+
+  await new Promise(resolve => connection.connect(8080, resolve));
+  ws.on("message", message => {
+    const bufferLengthHeader = Buffer.alloc(4);
+    bufferLengthHeader.writeUInt32BE(message.length, 0);
+    connection.write(Buffer.concat([bufferLengthHeader, message]));
+  });
+});
+
 app.use(webpackDev(compiler, { publicPath: "/" }));
 app.use("/", express.static(path.join(__dirname, "../static")));
 // app.use("/", express.static(path.join(__dirname, "../dist")));
-app.listen(PORT, () => console.log("Listening to port " + PORT));
+server.listen(PORT, () => console.log("Listening to port " + PORT));
