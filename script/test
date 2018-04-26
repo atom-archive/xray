@@ -4,4 +4,4 @@ set -e
 
 cd xray_core; cargo test; cd -
 cd xray_wasm; script/test; cd -
-cd xray_ui; npm test; cd -
+cd xray_ui; yarn test; cd -

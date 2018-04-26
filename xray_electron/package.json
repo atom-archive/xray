@@ -1,6 +1,6 @@
 {
   "name": "Xray",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "main": "./lib/main_process/main.js",
   "license": "MIT",
   "scripts": {

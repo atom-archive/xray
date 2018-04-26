@@ -5,5 +5,5 @@ set -e
 cd xray_server; cargo build "$@"; cd -
 cd xray_cli; cargo build "$@"; cd -
 cd xray_wasm; script/build; cd -
-cd xray_electron; npm install; cd -
+cd xray_electron; yarn install; cd -
 cd xray_browser; script/build; cd -

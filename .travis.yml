@@ -18,8 +18,7 @@ script:
 
 cache:
   cargo: true
-  directories:
-  - xray_electron/node_modules
+  yarn: true
 
 branches:
   only:

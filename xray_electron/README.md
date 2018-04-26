@@ -11,8 +11,8 @@ This assumes `xray_electron` is cloned as part of the Xray repository and that a
 cd xray_electron
 
 # Install and build dependencies:
-npm install
+yarn install
 
 # Launch Electron:
-npm start
+yarn start
 ```

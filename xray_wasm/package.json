@@ -1,5 +1,6 @@
 {
   "name": "xray_wasm",
+  "version": "0.0.0",
   "description": "Xray server packaged for use in JavaScript",
   "main": "lib/main.js",
   "scripts": {

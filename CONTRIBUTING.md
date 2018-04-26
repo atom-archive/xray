@@ -28,6 +28,10 @@ Later versions may work, but you should ideally run the build with the same vers
 
 You can install Rust via [`rustup`](https://www.rustup.rs/). We currently require building on the nightly channel in order to use `wasm_bindgen` for browser support.
 
+#### Install Yarn
+
+Follow the [installation instructions](https://yarnpkg.com/en/docs/install) on the Yarn site.
+
 ### Run the build script
 
 This repository contains several components in top-level folders prefixed with `xray_*`. To build all of the components, simply run this in the root of the repository:
@@ -60,5 +64,5 @@ XRAY_SRC_PATH=. script/xray_debug .
 
 * All tests: `script/test`
 * Rust tests: `cargo test` in the root of the repository or a Rust subfolder.
-* Front-end tests: `cd xray_electron && npm test`
+* Front-end tests: `cd xray_ui && yarn test`
 * Benchmarks: `cargo bench`

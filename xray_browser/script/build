@@ -5,7 +5,7 @@ set -e
 rm -rf dist
 mkdir -p dist
 cd node_modules/xray_wasm && script/build && cd -
-npm install
+yarn install
 node_modules/.bin/webpack --target=web --mode=development src/ui.js --output-filename=ui.js
 node_modules/.bin/webpack --target=webworker --mode=development src/worker.js --output-filename=worker.js
 cp static/index.html dist/index.html
