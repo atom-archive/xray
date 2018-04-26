@@ -203,7 +203,7 @@ impl Server {
     }
 
     fn listen(&self, port: u16) -> Result<(), String> {
-        let local_addr = SocketAddr::new("127.0.0.1".parse().unwrap(), port);
+        let local_addr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
         let listener = TcpListener::bind(&local_addr, &self.reactor)
             .map_err(|_| "Error binding address".to_owned())?;
         let app = self.app.clone();
