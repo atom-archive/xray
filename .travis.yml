@@ -9,7 +9,7 @@ before_install:
 - rustup target add wasm32-unknown-unknown
 - curl -o- https://raw.githubusercontent.com/creationix/nvm/v0.33.8/install.sh | bash
 - nvm install v8.9.3
-- cargo install wasm-bindgen-cli
+- wasm-bindgen -V || cargo install wasm-bindgen-cli
 
 # Create a virtual display for electron
 - export DISPLAY=':99.0'
