@@ -50,6 +50,8 @@ enum BufferViewAction {
     SelectDown,
     SelectLeft,
     SelectRight,
+    AddSelectionAbove,
+    AddSelectionBelow,
 }
 
 impl BufferView {
@@ -586,6 +588,8 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectDown) => self.select_down(),
             Ok(BufferViewAction::SelectLeft) => self.select_left(),
             Ok(BufferViewAction::SelectRight) => self.select_right(),
+            Ok(BufferViewAction::AddSelectionAbove) => self.add_selection_above(),
+            Ok(BufferViewAction::AddSelectionBelow) => self.add_selection_below(),
             action @ _ => eprintln!("Unrecognized action {:?}", action),
         }
     }
