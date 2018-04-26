@@ -26,7 +26,7 @@ Later versions may work, but you should ideally run the build with the same vers
 
 #### Install Rust
 
-You can install Rust via [`rustup`](https://www.rustup.rs/). We currently build correctly on Rust 1.24.1, but frequently build on the nightly channel in development to enable formatting of generated bindings. The nightly channel should not be *required* however, and if it is, that's a bug.
+You can install Rust via [`rustup`](https://www.rustup.rs/). We currently require building on the nightly channel in order to use `wasm_bindgen` for browser support.
 
 ### Run the build script
 
