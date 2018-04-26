@@ -208,20 +208,27 @@ impl Server {
             .map_err(|_| "Error binding address".to_owned())?;
         let app = self.app.clone();
         let reactor = self.reactor.clone();
-        let handle_incoming = listener
-            .incoming()
-            .map_err(|_| eprintln!("Error accepting incoming connection"))
-            .for_each(move |(socket, _)| {
-                socket.set_nodelay(true).unwrap();
-                let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
-                let (tx, rx) = transport.split();
-                let connection = App::connect_to_client(app.clone(), rx.map(|frame| frame.into()));
-                reactor.spawn(
-                    tx.send_all(connection.map_err(|_| -> io::Error { unreachable!() }))
-                        .then(|_| Ok(())),
-                );
-                Ok(())
-            });
+        let handle_incoming =
+            listener
+                .incoming()
+                .map_err(|_| eprintln!("Error accepting incoming connection"))
+                .for_each(move |(socket, _)| {
+                    socket.set_nodelay(true).unwrap();
+                    let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
+                    let (tx, rx) = transport.split();
+                    let connection =
+                        App::connect_to_client(app.clone(), rx.map(|frame| frame.into()));
+                    reactor.spawn(tx.send_all(
+                        connection.map_err(|_| -> io::Error { unreachable!() }),
+                    ).then(|result| {
+                        if let Err(error) = result {
+                            eprintln!("Error sending message to client on TCP socket: {}", error);
+                        }
+
+                        Ok(())
+                    }));
+                    Ok(())
+                });
         self.reactor.spawn(handle_incoming);
         Ok(())
     }
@@ -251,7 +258,16 @@ impl Server {
                                     connection
                                         .map(|bytes| bytes.into())
                                         .map_err(|_| -> io::Error { unreachable!() }),
-                                ).then(|_| Ok(())),
+                                ).then(|result| {
+                                    if let Err(error) = result {
+                                        eprintln!(
+                                            "Error sending message to server on TCP socket: {}",
+                                            error
+                                        );
+                                    }
+
+                                    Ok(())
+                                }),
                             );
                             Ok(())
                         })
