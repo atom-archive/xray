@@ -1,0 +1,7 @@
+#!/bin/bash
+
+set -e
+
+script/build
+script/test
+script/bench
