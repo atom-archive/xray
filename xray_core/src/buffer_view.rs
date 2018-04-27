@@ -1,9 +1,9 @@
-use buffer::{Anchor, Buffer, Point};
+use buffer::{Anchor, Buffer, Point, Selection, SelectionSet};
 use futures::{Poll, Stream};
 use movement;
 use notify_cell::NotifyCell;
 use serde_json;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::cmp::{self, Ordering};
 use std::mem;
 use std::ops::Range;
@@ -15,18 +15,11 @@ pub struct BufferView {
     updates_tx: NotifyCell<()>,
     updates_rx: Box<Stream<Item = (), Error = ()>>,
     dropped: NotifyCell<bool>,
-    selections: Vec<Selection>,
+    selections: Rc<RefCell<SelectionSet>>,
     height: Option<f64>,
     width: Option<f64>,
     line_height: f64,
     scroll_top: f64,
-}
-
-struct Selection {
-    start: Anchor,
-    end: Anchor,
-    reversed: bool,
-    goal_column: Option<u32>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -58,17 +51,17 @@ enum BufferViewAction {
 
 impl BufferView {
     pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
-        let selections;
-
-        {
+        let selections = {
+            let set = Buffer::add_local_selection_set(&buffer);
             let buffer = buffer.borrow();
-            selections = vec![Selection {
+            **set.borrow_mut() = vec![Selection {
                 start: buffer.anchor_before_offset(0).unwrap(),
                 end: buffer.anchor_before_offset(0).unwrap(),
                 reversed: false,
                 goal_column: None,
             }];
-        }
+            set
+        };
 
         let updates_tx = NotifyCell::new(());
         let updates_rx = Box::new(updates_tx.observe().select(buffer.borrow().updates()));
@@ -114,7 +107,7 @@ impl BufferView {
             let mut buffer = self.buffer.borrow_mut();
             let mut offset_ranges = Vec::new();
 
-            for selection in &self.selections {
+            for selection in self.selections.borrow().iter() {
                 let start = buffer.offset_for_anchor(&selection.start).unwrap();
                 let end = buffer.offset_for_anchor(&selection.end).unwrap();
                 offset_ranges.push((start, end));
@@ -125,7 +118,7 @@ impl BufferView {
             }
 
             let mut delta = 0_isize;
-            self.selections = offset_ranges
+            **self.selections.borrow_mut() = offset_ranges
                 .into_iter()
                 .map(|(start, end)| {
                     let start = start as isize;
@@ -165,6 +158,7 @@ impl BufferView {
     fn all_selections_are_empty(&self) -> bool {
         let buffer = self.buffer.borrow();
         self.selections
+            .borrow()
             .iter()
             .all(|selection| selection.is_empty(&buffer))
     }
@@ -178,13 +172,15 @@ impl BufferView {
             // TODO: Clip points or return a result.
             let start_anchor = buffer.anchor_before_point(start).unwrap();
             let end_anchor = buffer.anchor_before_point(end).unwrap();
-            let index = match self.selections
+            let mut selections = self.selections.borrow_mut();
+
+            let index = match selections
                 .binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start_anchor).unwrap())
             {
                 Ok(index) => index,
                 Err(index) => index,
             };
-            self.selections.insert(
+            selections.insert(
                 index,
                 Selection {
                     start: start_anchor,
@@ -202,9 +198,10 @@ impl BufferView {
     pub fn add_selection_above(&mut self) {
         {
             let buffer = self.buffer.borrow();
+            let mut selections = self.selections.borrow_mut();
 
             let mut new_selections = Vec::new();
-            for selection in &self.selections {
+            for selection in selections.iter() {
                 let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
                 let selection_end = buffer.point_for_anchor(&selection.end).unwrap();
                 if selection_start.row != selection_end.row {
@@ -247,13 +244,13 @@ impl BufferView {
             }
 
             for selection in new_selections {
-                let index = match self.selections.binary_search_by(|probe| {
+                let index = match selections.binary_search_by(|probe| {
                     buffer.cmp_anchors(&probe.start, &selection.start).unwrap()
                 }) {
                     Ok(index) => index,
                     Err(index) => index,
                 };
-                self.selections.insert(index, selection);
+                selections.insert(index, selection);
             }
         }
 
@@ -264,10 +261,11 @@ impl BufferView {
     pub fn add_selection_below(&mut self) {
         {
             let buffer = self.buffer.borrow();
+            let mut selections = self.selections.borrow_mut();
             let max_row = buffer.max_point().row;
 
             let mut new_selections = Vec::new();
-            for selection in &self.selections {
+            for selection in selections.iter() {
                 let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
                 let selection_end = buffer.point_for_anchor(&selection.end).unwrap();
                 if selection_start.row != selection_end.row {
@@ -310,13 +308,13 @@ impl BufferView {
             }
 
             for selection in new_selections {
-                let index = match self.selections.binary_search_by(|probe| {
+                let index = match selections.binary_search_by(|probe| {
                     buffer.cmp_anchors(&probe.start, &selection.start).unwrap()
                 }) {
                     Ok(index) => index,
                     Err(index) => index,
                 };
-                self.selections.insert(index, selection);
+                selections.insert(index, selection);
             }
         }
 
@@ -327,7 +325,8 @@ impl BufferView {
     pub fn move_left(&mut self) {
         {
             let buffer = self.buffer.borrow();
-            for selection in &mut self.selections {
+            let mut selections = self.selections.borrow_mut();
+            for selection in selections.iter_mut() {
                 let start = buffer.point_for_anchor(&selection.start).unwrap();
                 let end = buffer.point_for_anchor(&selection.end).unwrap();
 
@@ -351,7 +350,8 @@ impl BufferView {
     pub fn select_left(&mut self) {
         {
             let buffer = self.buffer.borrow();
-            for selection in &mut self.selections {
+            let mut selections = self.selections.borrow_mut();
+            for selection in selections.iter_mut() {
                 let head = buffer.point_for_anchor(selection.head()).unwrap();
                 let cursor = buffer
                     .anchor_before_point(movement::left(&buffer, head))
@@ -367,7 +367,8 @@ impl BufferView {
     pub fn move_right(&mut self) {
         {
             let buffer = self.buffer.borrow();
-            for selection in &mut self.selections {
+            let mut selections = self.selections.borrow_mut();
+            for selection in selections.iter_mut() {
                 let start = buffer.point_for_anchor(&selection.start).unwrap();
                 let end = buffer.point_for_anchor(&selection.end).unwrap();
 
@@ -391,7 +392,8 @@ impl BufferView {
     pub fn select_right(&mut self) {
         {
             let buffer = self.buffer.borrow();
-            for selection in &mut self.selections {
+            let mut selections = self.selections.borrow_mut();
+            for selection in selections.iter_mut() {
                 let head = buffer.point_for_anchor(selection.head()).unwrap();
                 let cursor = buffer
                     .anchor_before_point(movement::right(&buffer, head))
@@ -407,7 +409,8 @@ impl BufferView {
     pub fn move_up(&mut self) {
         {
             let buffer = self.buffer.borrow();
-            for selection in &mut self.selections {
+            let mut selections = self.selections.borrow_mut();
+            for selection in selections.iter_mut() {
                 let start = buffer.point_for_anchor(&selection.start).unwrap();
                 let end = buffer.point_for_anchor(&selection.end).unwrap();
                 if start != end {
@@ -429,7 +432,8 @@ impl BufferView {
     pub fn select_up(&mut self) {
         {
             let buffer = self.buffer.borrow();
-            for selection in &mut self.selections {
+            let mut selections = self.selections.borrow_mut();
+            for selection in selections.iter_mut() {
                 let head = buffer.point_for_anchor(selection.head()).unwrap();
                 let (head, goal_column) = movement::up(&buffer, head, selection.goal_column);
                 selection.set_head(&buffer, buffer.anchor_before_point(head).unwrap());
@@ -443,7 +447,8 @@ impl BufferView {
     pub fn move_down(&mut self) {
         {
             let buffer = self.buffer.borrow();
-            for selection in &mut self.selections {
+            let mut selections = self.selections.borrow_mut();
+            for selection in selections.iter_mut() {
                 let start = buffer.point_for_anchor(&selection.start).unwrap();
                 let end = buffer.point_for_anchor(&selection.end).unwrap();
                 if start != end {
@@ -465,7 +470,8 @@ impl BufferView {
     pub fn select_down(&mut self) {
         {
             let buffer = self.buffer.borrow();
-            for selection in &mut self.selections {
+            let mut selections = self.selections.borrow_mut();
+            for selection in selections.iter_mut() {
                 let head = buffer.point_for_anchor(selection.head()).unwrap();
                 let (head, goal_column) = movement::down(&buffer, head, selection.goal_column);
                 selection.set_head(&buffer, buffer.anchor_before_point(head).unwrap());
@@ -478,18 +484,20 @@ impl BufferView {
 
     fn merge_selections(&mut self) {
         let buffer = self.buffer.borrow();
+        let mut selections = self.selections.borrow_mut();
+
         let mut i = 1;
-        while i < self.selections.len() {
+        while i < selections.len() {
             if buffer
-                .cmp_anchors(&self.selections[i - 1].end, &self.selections[i].start)
+                .cmp_anchors(&selections[i - 1].end, &selections[i].start)
                 .unwrap() >= Ordering::Equal
             {
-                let removed = self.selections.remove(i);
+                let removed = selections.remove(i);
                 if buffer
-                    .cmp_anchors(&removed.end, &self.selections[i - 1].end)
+                    .cmp_anchors(&removed.end, &selections[i - 1].end)
                     .unwrap() > Ordering::Equal
                 {
-                    self.selections[i - 1].end = removed.end;
+                    selections[i - 1].end = removed.end;
                 }
             } else {
                 i += 1;
@@ -497,18 +505,19 @@ impl BufferView {
         }
     }
 
-    fn query_selections(&self, range: Range<Point>) -> &[Selection] {
+    fn query_selections(&self, range: Range<Point>) -> Ref<[Selection]> {
         let buffer = self.buffer.borrow();
+        let selections = self.selections.borrow();
 
         let start = buffer.anchor_before_point(range.start).unwrap();
-        let start_index = match self.selections
+        let start_index = match selections
             .binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start).unwrap())
         {
             Ok(index) => index,
             Err(index) => {
                 if index > 0
                     && buffer
-                        .cmp_anchors(&self.selections[index - 1].end, &start)
+                        .cmp_anchors(&selections[index - 1].end, &start)
                         .unwrap() == Ordering::Greater
                 {
                     index - 1
@@ -519,17 +528,17 @@ impl BufferView {
         };
 
         if range.end > buffer.max_point() {
-            &self.selections[start_index..]
+            Ref::map(selections, |selections| &selections[start_index..])
         } else {
             let end = buffer.anchor_after_point(range.end).unwrap();
-            let end_index = match self.selections
+            let end_index = match selections
                 .binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &end).unwrap())
             {
                 Ok(index) => index,
                 Err(index) => index,
             };
 
-            &self.selections[start_index..end_index]
+            Ref::map(selections, |selections| &selections[start_index..end_index])
         }
     }
 
@@ -1195,6 +1204,7 @@ mod tests {
     fn render_selections(editor: &BufferView) -> Vec<SelectionProps> {
         editor
             .selections
+            .borrow()
             .iter()
             .map(|s| s.render(&editor.buffer.borrow()))
             .collect()

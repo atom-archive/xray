@@ -9,8 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::iter;
 use std::marker;
-use std::ops::{Add, AddAssign, Range, Sub};
+use std::ops::{Add, AddAssign, Deref, DerefMut, Range, Sub};
 use std::rc::Rc;
+use std::rc::Weak;
 use std::sync::Arc;
 use ForegroundExecutor;
 use IntoShared;
@@ -18,6 +19,7 @@ use IntoShared;
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
 type LamportTimestamp = usize;
+type SelectionSetId = usize;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Version(
@@ -45,6 +47,8 @@ pub struct Buffer {
     client: Option<client::Service<rpc::Service>>,
     operation_txs: Vec<unsync::mpsc::UnboundedSender<Arc<Operation>>>,
     updates: NotifyCell<()>,
+    local_selections: HashMap<SelectionSetId, Weak<RefCell<SelectionSet>>>,
+    next_local_selection_set_id: SelectionSetId,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
@@ -71,6 +75,19 @@ enum AnchorInner {
 enum AnchorBias {
     Left,
     Right,
+}
+
+pub struct Selection {
+    pub start: Anchor,
+    pub end: Anchor,
+    pub reversed: bool,
+    pub goal_column: Option<u32>,
+}
+
+pub struct SelectionSet {
+    id: SelectionSetId,
+    selections: Vec<Selection>,
+    buffer: Weak<RefCell<Buffer>>,
 }
 
 pub struct Iter<'a> {
@@ -384,6 +401,8 @@ impl Buffer {
             client: None,
             operation_txs: Vec::new(),
             updates: NotifyCell::new(()),
+            local_selections: HashMap::new(),
+            next_local_selection_set_id: 0,
         }
     }
 
@@ -428,6 +447,8 @@ impl Buffer {
             client: Some(client),
             operation_txs: Vec::new(),
             updates: NotifyCell::new(()),
+            local_selections: HashMap::new(),
+            next_local_selection_set_id: 0,
         }.into_shared();
 
         let buffer_clone = buffer.clone();
@@ -510,6 +531,22 @@ impl Buffer {
         } else {
             None
         }
+    }
+
+    pub fn add_selection_set(buffer_rc: &Rc<RefCell<Buffer>>) -> Rc<RefCell<SelectionSet>> {
+        let mut buffer = buffer_rc.borrow_mut();
+
+        let id = buffer.next_local_selection_set_id;
+        buffer.next_local_selection_set_id += 1;
+
+        let set = Rc::new(RefCell::new(SelectionSet {
+            id,
+            selections: Vec::new(),
+            buffer: Rc::downgrade(&buffer_rc),
+        }));
+        buffer.local_selections.insert(id, Rc::downgrade(&set));
+
+        set
     }
 
     pub fn updates(&self) -> NotifyCellObserver<()> {
@@ -1210,10 +1247,11 @@ impl Ord for Point {
     fn cmp(&self, other: &Point) -> cmp::Ordering {
         match self.row.cmp(&other.row) {
             cmp::Ordering::Equal => self.column.cmp(&other.column),
-            comparison @ _ => comparison
+            comparison @ _ => comparison,
         }
     }
 }
+
 impl<'a> Iter<'a> {
     fn new(buffer: &'a Buffer) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
@@ -1275,6 +1313,28 @@ impl<'a> Iterator for Iter<'a> {
         }
 
         None
+    }
+}
+
+impl Deref for SelectionSet {
+    type Target = Vec<Selection>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.selections
+    }
+}
+
+impl<'a> DerefMut for SelectionSet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.selections
+    }
+}
+
+impl Drop for SelectionSet {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.upgrade() {
+            buffer.borrow_mut().local_selections.remove(&self.id);
+        }
     }
 }
 
@@ -2020,6 +2080,20 @@ mod tests {
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
         assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_selection_sets() {
+        let buffer = Buffer::new().into_shared();
+        buffer.borrow_mut().edit(0..0, "abcdef");
+        buffer.borrow_mut().edit(2..4, "ghi");
+
+        let set_1 = Buffer::add_selection_set(&buffer);
+        let set_2 = Buffer::add_selection_set(&buffer);
+        assert_eq!(buffer.borrow().local_selections.len(), 2);
+
+        drop(set_2);
+        assert_eq!(buffer.borrow().local_selections.len(), 1);
     }
 
     #[test]
