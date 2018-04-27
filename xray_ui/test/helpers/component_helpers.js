@@ -1,17 +1,15 @@
-const enzyme = require('enzyme');
-const Adapter = require('enzyme-adapter-react-16');
-const styletron = require("styletron-engine-atomic");
+const enzyme = require("enzyme");
+const Adapter = require("enzyme-adapter-react-16");
 
-const styletronClient = new styletron.Client();
 enzyme.configure({ adapter: new Adapter() });
 
 module.exports = {
   shallow(node, options) {
-    return enzyme.shallow(node, addStyletronOptions(options));
+    return enzyme.shallow(node, addStyletronToContext(options));
   },
 
   mount(node, options) {
-    return enzyme.mount(node, addStyletronOptions(options));
+    return enzyme.mount(node, addStyletronToContext(options));
   },
 
   setProps(wrapper, props) {
@@ -19,8 +17,14 @@ module.exports = {
   }
 };
 
-function addStyletronOptions(options = {}) {
-  options.context = Object.assign({ styletron: styletronClient }, options.context);
-  options.childContextTypes = Object.assign({ styletron: function() {} }, options.childContextTypes);
+function addStyletronToContext(options = {}) {
+  options.context = Object.assign(
+    { styletron: { renderStyle() {} } },
+    options.context
+  );
+  options.childContextTypes = Object.assign(
+    { styletron: function() {} },
+    options.childContextTypes
+  );
   return options;
 }
