@@ -10,7 +10,9 @@ const webpack = require("webpack");
 const webpackDev = require("webpack-dev-middleware");
 express.static.mime.types["wasm"] = "application/wasm";
 
-const PORT = 3000;
+const xrayServerAddress = process.env.XRAY_SERVER_ADDRESS || "127.0.0.1";
+const xrayServerPort = process.env.XRAY_SERVER_PORT || 8080;
+const webServerPort = process.env.PORT || 3000;
 const app = express();
 const server = http.createServer(app);
 
@@ -70,7 +72,12 @@ websocketServer.on("connection", async ws => {
     }
   });
 
-  await new Promise(resolve => connection.connect(8080, resolve));
+  await new Promise(resolve => {
+    connection.connect(
+      { host: xrayServerAddress, port: xrayServerPort },
+      resolve
+    );
+  });
   ws.on("message", message => {
     const bufferLengthHeader = Buffer.alloc(4);
     bufferLengthHeader.writeUInt32BE(message.length, 0);
@@ -82,4 +89,7 @@ websocketServer.on("connection", async ws => {
 app.use(webpackDev(compiler, { publicPath: "/" }));
 app.use("/", express.static(path.join(__dirname, "../static")));
 // app.use("/", express.static(path.join(__dirname, "../dist")));
-server.listen(PORT, () => console.log("Listening to port " + PORT));
+server.listen(webServerPort, () => {
+  console.log(`Using xray server: ${xrayServerAddress}:${xrayServerPort}`);
+  console.log("Listening for HTTP connections on port " + webServerPort);
+});
