@@ -178,6 +178,10 @@ function actionForKeyDownEvent (event) {
       return event.shiftKey ? "SelectLeft" : "MoveLeft";
     case "ArrowRight":
       return event.shiftKey ? "SelectRight" : "MoveRight";
+    case "Backspace":
+      return "Backspace";
+    case "Delete":
+      return "Delete";
   }
 }
 

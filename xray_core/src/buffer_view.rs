@@ -42,6 +42,8 @@ enum BufferViewAction {
     UpdateScrollTop { delta: f64 },
     SetDimensions { width: u64, height: u64 },
     Edit { text: String },
+    Backspace,
+    Delete,
     MoveUp,
     MoveDown,
     MoveLeft,
@@ -144,6 +146,27 @@ impl BufferView {
         }
 
         self.updated();
+    }
+
+    pub fn backspace(&mut self) {
+        if self.all_selections_are_empty() {
+            self.select_left();
+        }
+        self.edit("");
+    }
+
+    pub fn delete(&mut self) {
+        if self.all_selections_are_empty() {
+            self.select_right();
+        }
+        self.edit("");
+    }
+
+    fn all_selections_are_empty(&self) -> bool {
+        let buffer = self.buffer.borrow();
+        self.selections
+            .iter()
+            .all(|selection| selection.is_empty(&buffer))
     }
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
@@ -580,6 +603,8 @@ impl View for BufferView {
                 self.set_height(height as f64);
             }
             Ok(BufferViewAction::Edit { text }) => self.edit(text.as_str()),
+            Ok(BufferViewAction::Backspace) => self.backspace(),
+            Ok(BufferViewAction::Delete) => self.delete(),
             Ok(BufferViewAction::MoveUp) => self.move_up(),
             Ok(BufferViewAction::MoveDown) => self.move_down(),
             Ok(BufferViewAction::MoveLeft) => self.move_left(),
@@ -649,6 +674,10 @@ impl Selection {
             end: buffer.point_for_anchor(&self.end).unwrap(),
             reversed: self.reversed,
         }
+    }
+
+    fn is_empty(&self, buffer: &Buffer) -> bool {
+        buffer.cmp_anchors(&self.start, &self.end).unwrap() == cmp::Ordering::Equal
     }
 }
 
@@ -826,6 +855,30 @@ mod tests {
         editor.move_up();
         editor.move_up();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+    }
+
+    #[test]
+    fn test_backspace() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
+        editor.add_selection(Point::new(0, 3), Point::new(0, 4));
+        editor.add_selection(Point::new(0, 9), Point::new(0, 9));
+        editor.backspace();
+        assert_eq!(editor.buffer.borrow().to_string(), "abcefghi");
+        editor.backspace();
+        assert_eq!(editor.buffer.borrow().to_string(), "abefgh");
+    }
+
+    #[test]
+    fn test_delete() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
+        editor.add_selection(Point::new(0, 3), Point::new(0, 4));
+        editor.add_selection(Point::new(0, 9), Point::new(0, 9));
+        editor.delete();
+        assert_eq!(editor.buffer.borrow().to_string(), "abcefghi");
+        editor.delete();
+        assert_eq!(editor.buffer.borrow().to_string(), "bcfghi");
     }
 
     #[test]
