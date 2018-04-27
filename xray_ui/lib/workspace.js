@@ -45,7 +45,7 @@ class Workspace extends React.Component {
       Root,
       {
         tabIndex: -1,
-        onKeyDown: this.didKeyDown
+        onKeyDownCapture: this.didKeyDown
       },
       centerItem,
       modal
@@ -60,6 +60,7 @@ class Workspace extends React.Component {
     if (event.metaKey || event.ctrlKey) {
       if (event.key === "t") {
         this.props.dispatch({ type: "ToggleFileFinder" });
+        event.stopPropagation();
       }
     }
   }
