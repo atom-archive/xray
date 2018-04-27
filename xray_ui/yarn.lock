@@ -168,13 +168,6 @@ core-util-is@1.0.2, core-util-is@~1.0.0:
   version "1.0.2"
   resolved "https://registry.yarnpkg.com/core-util-is/-/core-util-is-1.0.2.tgz#b5fd54220aa2bc5ab57aab7140c940754503c1a7"
 
-create-react-context@^0.2.2:
-  version "0.2.2"
-  resolved "https://registry.yarnpkg.com/create-react-context/-/create-react-context-0.2.2.tgz#9836542f9aaa22868cd7d4a6f82667df38019dca"
-  dependencies:
-    fbjs "^0.8.0"
-    gud "^1.0.0"
-
 cryptiles@3.x.x:
   version "3.1.2"
   resolved "https://registry.yarnpkg.com/cryptiles/-/cryptiles-3.1.2.tgz#a89fbb220f5ce25ec56e8c4aa8a4fd7b5b0d29fe"
@@ -443,7 +436,7 @@ fast-json-stable-stringify@^2.0.0:
   version "2.0.0"
   resolved "https://registry.yarnpkg.com/fast-json-stable-stringify/-/fast-json-stable-stringify-2.0.0.tgz#d5142c0caee6b1189f87d3a76111064f86c8bbf2"
 
-fbjs@^0.8.0, fbjs@^0.8.16:
+fbjs@^0.8.16:
   version "0.8.16"
   resolved "https://registry.yarnpkg.com/fbjs/-/fbjs-0.8.16.tgz#5e67432f550dc41b572bf55847b8aca64e5337db"
   dependencies:
@@ -546,10 +539,6 @@ graceful-fs@^4.1.2, graceful-fs@^4.1.6, graceful-fs@^4.1.9:
 growl@1.10.3:
   version "1.10.3"
   resolved "https://registry.yarnpkg.com/growl/-/growl-1.10.3.tgz#1926ba90cf3edfe2adb4927f5880bc22c66c790f"
-
-gud@^1.0.0:
-  version "1.0.0"
-  resolved "https://registry.yarnpkg.com/gud/-/gud-1.0.0.tgz#a489581b17e6a70beca9abe3ae57de7a499852c0"
 
 har-schema@^2.0.0:
   version "2.0.0"
@@ -1388,26 +1377,25 @@ strip-json-comments@~2.0.1:
   version "2.0.1"
   resolved "https://registry.yarnpkg.com/strip-json-comments/-/strip-json-comments-2.0.1.tgz#3c531942e908c2697c0ec344858c286c7ca0a60a"
 
-styletron-engine-atomic@^1.0.4:
-  version "1.0.5"
-  resolved "https://registry.yarnpkg.com/styletron-engine-atomic/-/styletron-engine-atomic-1.0.5.tgz#55c46745857d8f330878b2a4cffe38911aba3362"
+styletron-engine-atomic@1.0.4:
+  version "1.0.4"
+  resolved "https://registry.yarnpkg.com/styletron-engine-atomic/-/styletron-engine-atomic-1.0.4.tgz#57ca6b77df05bdd90d28969a822d0c05e00dfcd2"
   dependencies:
     inline-style-prefixer "^4.0.0"
     styletron-standard "^1.0.3"
 
-styletron-react-core@^1.1.0:
-  version "1.1.0"
-  resolved "https://registry.yarnpkg.com/styletron-react-core/-/styletron-react-core-1.1.0.tgz#b2921fc5e610d495e5662cf211b7f55c479aed32"
+styletron-react-core@1.0.0, styletron-react-core@^1.0.0:
+  version "1.0.0"
+  resolved "https://registry.yarnpkg.com/styletron-react-core/-/styletron-react-core-1.0.0.tgz#1c361dbd7061b2e3e51ef4af0a96d40cbab93ca6"
   dependencies:
-    create-react-context "^0.2.2"
     prop-types "^15.6.0"
 
-styletron-react@^4.0.3:
-  version "4.1.0"
-  resolved "https://registry.yarnpkg.com/styletron-react/-/styletron-react-4.1.0.tgz#132f80bcc19e64452ad6c137306d27981377f6fe"
+styletron-react@4.0.3:
+  version "4.0.3"
+  resolved "https://registry.yarnpkg.com/styletron-react/-/styletron-react-4.0.3.tgz#af2f8a1c5cab222429a6cd9eb03c486c2b20e4d1"
   dependencies:
     prop-types "^15.6.0"
-    styletron-react-core "^1.1.0"
+    styletron-react-core "^1.0.0"
     styletron-standard "^1.0.3"
 
 styletron-standard@^1.0.3:

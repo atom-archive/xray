@@ -4243,26 +4243,26 @@ strip-json-comments@~2.0.1:
   version "2.0.1"
   resolved "https://registry.yarnpkg.com/strip-json-comments/-/strip-json-comments-2.0.1.tgz#3c531942e908c2697c0ec344858c286c7ca0a60a"
 
-styletron-engine-atomic@^1.0.4:
-  version "1.0.5"
-  resolved "https://registry.yarnpkg.com/styletron-engine-atomic/-/styletron-engine-atomic-1.0.5.tgz#55c46745857d8f330878b2a4cffe38911aba3362"
+styletron-engine-atomic@1.0.4:
+  version "1.0.4"
+  resolved "https://registry.yarnpkg.com/styletron-engine-atomic/-/styletron-engine-atomic-1.0.4.tgz#57ca6b77df05bdd90d28969a822d0c05e00dfcd2"
   dependencies:
     inline-style-prefixer "^4.0.0"
     styletron-standard "^1.0.3"
 
-styletron-react-core@^1.1.0:
+styletron-react-core@^1.0.0:
   version "1.1.0"
   resolved "https://registry.yarnpkg.com/styletron-react-core/-/styletron-react-core-1.1.0.tgz#b2921fc5e610d495e5662cf211b7f55c479aed32"
   dependencies:
     create-react-context "^0.2.2"
     prop-types "^15.6.0"
 
-styletron-react@^4.0.3:
-  version "4.1.0"
-  resolved "https://registry.yarnpkg.com/styletron-react/-/styletron-react-4.1.0.tgz#132f80bcc19e64452ad6c137306d27981377f6fe"
+styletron-react@4.0.3:
+  version "4.0.3"
+  resolved "https://registry.yarnpkg.com/styletron-react/-/styletron-react-4.0.3.tgz#af2f8a1c5cab222429a6cd9eb03c486c2b20e4d1"
   dependencies:
     prop-types "^15.6.0"
-    styletron-react-core "^1.1.0"
+    styletron-react-core "^1.0.0"
     styletron-standard "^1.0.3"
 
 styletron-standard@^1.0.3:
@@ -4730,8 +4730,8 @@ xray_ui@../xray_ui:
     prop-types "^15.6.0"
     react "^16.3.0"
     react-dom "^16.3.0"
-    styletron-engine-atomic "^1.0.4"
-    styletron-react "^4.0.3"
+    styletron-engine-atomic "1.0.4"
+    styletron-react "4.0.3"
 
 xray_wasm@../xray_wasm:
   version "0.0.0"
