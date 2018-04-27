@@ -77,7 +77,9 @@ pub struct Server {
 
 struct FileProvider;
 
-#[wasm_bindgen(module = "../lib/support")]
+// The leading ./ is redundant here, but it's needed due to a limitation in wasm_bindgen which
+// would otherwise interpret lib/support as an NPM module.
+#[wasm_bindgen(module = "./../lib/support")]
 extern "C" {
     #[wasm_bindgen(js_name = notifyOnNextTick)]
     fn notify_on_next_tick(notify: NotifyHandle);
