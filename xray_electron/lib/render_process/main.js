@@ -20,7 +20,7 @@ async function start() {
         viewRegistry.update(message);
         if (initialRender) {
           ReactDOM.render(
-            $(App, { viewRegistry }),
+            $(App, { inBrowser: false, viewRegistry }),
             document.getElementById("app")
           );
           initialRender = false;

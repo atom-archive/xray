@@ -4,7 +4,7 @@ const { Client: StyletronClient } = require("styletron-engine-atomic");
 const { Provider: StyletronProvider } = require("styletron-react");
 const TextEditor = require("./text_editor/text_editor");
 const ThemeProvider = require("./theme_provider");
-const View = require('./view')
+const View = require("./view");
 const ViewRegistry = require("./view_registry");
 const $ = React.createElement;
 
@@ -25,7 +25,10 @@ class App extends React.Component {
   }
 
   getChildContext() {
-    return { viewRegistry: this.props.viewRegistry };
+    return {
+      inBrowser: this.props.inBrowser,
+      viewRegistry: this.props.viewRegistry
+    };
   }
 
   render() {
@@ -38,6 +41,7 @@ class App extends React.Component {
 }
 
 App.childContextTypes = {
+  inBrowser: propTypes.bool,
   viewRegistry: propTypes.instanceOf(ViewRegistry)
 };
 

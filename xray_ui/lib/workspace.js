@@ -1,3 +1,4 @@
+const propTypes = require("prop-types");
 const React = require("react");
 const ReactDOM = require("react-dom");
 const { styled } = require("styletron-react");
@@ -13,10 +14,18 @@ const Root = styled("div", {
   margin: 0
 });
 
-module.exports = class Workspace extends React.Component {
+const BackgroundTip = styled("div", {
+  fontFamily: "sans-serif",
+  height: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center"
+});
+
+class Workspace extends React.Component {
   constructor() {
-    super()
-    this.didKeyDown = this.didKeyDown.bind(this)
+    super();
+    this.didKeyDown = this.didKeyDown.bind(this);
   }
 
   render() {
@@ -25,9 +34,11 @@ module.exports = class Workspace extends React.Component {
       modal = $(Modal, null, $(View, { id: this.props.modal }));
     }
 
-    let centerItem
+    let centerItem;
     if (this.props.center_pane) {
       centerItem = $(View, { id: this.props.center_pane });
+    } else if (this.context.inBrowser) {
+      centerItem = $(BackgroundTip, {}, "Press Ctrl-T to browse files");
     }
 
     return $(
@@ -42,14 +53,20 @@ module.exports = class Workspace extends React.Component {
   }
 
   componentDidMount() {
-    ReactDOM.findDOMNode(this).focus()
+    ReactDOM.findDOMNode(this).focus();
   }
 
   didKeyDown(event) {
     if (event.metaKey || event.ctrlKey) {
-      if (event.key === 't') {
-        this.props.dispatch({type: 'ToggleFileFinder'})
+      if (event.key === "t") {
+        this.props.dispatch({ type: "ToggleFileFinder" });
       }
     }
   }
+}
+
+Workspace.contextTypes = {
+  inBrowser: propTypes.bool
 };
+
+module.exports = Workspace;

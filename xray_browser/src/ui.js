@@ -16,7 +16,7 @@ client.onMessage(message => {
       viewRegistry.update(message);
       if (initialRender) {
         ReactDOM.render(
-          $(App, { viewRegistry }),
+          $(App, { inBrowser: true, viewRegistry }),
           document.getElementById("app")
         );
         initialRender = false;
