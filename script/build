@@ -2,7 +2,7 @@
 
 set -e
 
-cd xray_electron; yarn install; cd -
+cd xray_electron; yarn install --check-files; cd -
 cd xray_ui; yarn install; cd -
 cd xray_cli; cargo build "$@"; cd -
 cd xray_server; cargo build "$@"; cd -
