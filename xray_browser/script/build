@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -e
+
+rm -rf dist
+mkdir -p dist
+cd ../xray_wasm && script/build && cd -
+yarn install --check-files
+node_modules/.bin/webpack --target=web --mode=development src/ui.js --output-filename=ui.js
+node_modules/.bin/webpack --target=webworker --mode=development src/worker.js --output-filename=worker.js
+cp static/index.html dist/index.html

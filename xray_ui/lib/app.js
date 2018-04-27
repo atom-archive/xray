@@ -1,5 +1,3 @@
-const fs = require("fs");
-const path = require("path");
 const propTypes = require("prop-types");
 const React = require("react");
 const { Client: StyletronClient } = require("styletron-engine-atomic");

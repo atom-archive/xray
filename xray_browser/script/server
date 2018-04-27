@@ -1,0 +1,95 @@
+#!/usr/bin/env node
+
+const assert = require("assert");
+const http = require("http");
+const express = require("express");
+const ws = require("ws");
+const { Socket } = require("net");
+const path = require("path");
+const webpack = require("webpack");
+const webpackDev = require("webpack-dev-middleware");
+express.static.mime.types["wasm"] = "application/wasm";
+
+const xrayServerAddress = process.env.XRAY_SERVER_ADDRESS || "127.0.0.1";
+const xrayServerPort = process.env.XRAY_SERVER_PORT || 8080;
+const webServerPort = process.env.PORT || 3000;
+const app = express();
+const server = http.createServer(app);
+
+const compiler = webpack([
+  {
+    mode: "development",
+    entry: path.join(__dirname, "../src/ui.js"),
+    output: {
+      filename: "ui.js",
+      path: path.join(__dirname, "dist")
+    }
+  },
+  {
+    mode: "development",
+    target: "webworker",
+    entry: path.join(__dirname, "../src/worker.js"),
+    output: {
+      filename: "worker.js",
+      path: path.join(__dirname, "dist")
+    }
+  }
+]);
+
+const websocketServer = new ws.Server({ server, path: "/ws" });
+websocketServer.on("connection", async ws => {
+  const connection = new Socket();
+
+  let incomingMessage = null;
+  let remainingBytes = 0;
+  connection.on("data", data => {
+    let offset = 0;
+    while (offset < data.length) {
+      if (incomingMessage) {
+        assert(remainingBytes !== 0, "remainingBytes should not be 0");
+        const copiedBytes = data.copy(
+          incomingMessage,
+          incomingMessage.length - remainingBytes,
+          offset,
+          offset + remainingBytes
+        );
+        remainingBytes -= copiedBytes;
+        offset += copiedBytes;
+      } else {
+        remainingBytes = data.readUInt32BE(offset);
+        incomingMessage = Buffer.alloc(remainingBytes);
+        offset += 4;
+      }
+
+      if (incomingMessage && remainingBytes === 0) {
+        try {
+          ws.send(incomingMessage);
+        } catch (error) {
+          console.error("Error sending to web socket:", error);
+        }
+        incomingMessage = null;
+      }
+    }
+  });
+
+  await new Promise(resolve => {
+    connection.connect(
+      { host: xrayServerAddress, port: xrayServerPort },
+      resolve
+    );
+  });
+  ws.on("message", message => {
+    const bufferLengthHeader = Buffer.alloc(4);
+    bufferLengthHeader.writeUInt32BE(message.length, 0);
+    connection.write(Buffer.concat([bufferLengthHeader, message]));
+  });
+  ws.on("close", () => connection.destroy());
+});
+
+app.use(webpackDev(compiler, { publicPath: "/" }));
+app.use("/", express.static(path.join(__dirname, "../static")));
+// app.use("/", express.static(path.join(__dirname, "../dist")));
+server.listen(webServerPort, () => {
+  console.log(`Using xray server: ${xrayServerAddress}:${xrayServerPort}`);
+  console.log("Listening for HTTP connections on port " + webServerPort);
+});

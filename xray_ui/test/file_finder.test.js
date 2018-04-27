@@ -1,6 +1,6 @@
 const assert = require("assert");
 const {mount, setProps} = require("./helpers/component_helpers");
-const FileFinder = require("../../lib/render_process/file_finder");
+const FileFinder = require("../lib/file_finder");
 const $ = require("react").createElement;
 
 suite("FileFinderView", () => {
@@ -15,8 +15,8 @@ suite("FileFinderView", () => {
     await setProps(fileFinder, {
       query: 'ce',
       results: [
-        {relative_path: 'succeed', score: 3, positions: [3, 4]},
-        {relative_path: 'abcdef', score: 2, positions: [2, 4]},
+        {display_path: 'succeed', score: 3, positions: [3, 4]},
+        {display_path: 'abcdef', score: 2, positions: [2, 4]},
       ]
     });
 

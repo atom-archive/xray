@@ -1,0 +1,20 @@
+{
+  "name": "xray_wasm",
+  "version": "0.0.0",
+  "description": "Xray server packaged for use in JavaScript",
+  "main": "lib/main.js",
+  "scripts": {
+    "test": "script/test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atom/xray.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "mocha": "^5.1.1",
+    "source-map-support": "^0.5.4",
+    "webpack": "^4.6.0",
+    "webpack-cli": "^2.0.14"
+  }
+}

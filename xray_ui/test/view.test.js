@@ -2,8 +2,8 @@ const assert = require("assert");
 const React = require("react");
 const $ = require("react").createElement;
 const { mount, shallow } = require("./helpers/component_helpers");
-const View = require("../../lib/render_process/view");
-const ViewRegistry = require("../../lib/render_process/view_registry");
+const View = require("../lib/view");
+const ViewRegistry = require("../lib/view_registry");
 
 suite("View", () => {
   test("basic rendering", () => {

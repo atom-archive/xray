@@ -4,3 +4,5 @@
 **/.DS_Store
 Icon*
 .tags*
+xray_wasm/dist
+xray_browser/dist

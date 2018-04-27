@@ -1,3 +1,4 @@
+use cross_platform;
 use futures::{Async, Future, Stream};
 use notify_cell::NotifyCell;
 use parking_lot::RwLock;
@@ -6,10 +7,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(test)]
 use serde_json;
 use std::cell::RefCell;
-use std::ffi::{OsStr, OsString};
 use std::io;
 use std::iter::Iterator;
-use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use ForegroundExecutor;
@@ -23,13 +22,14 @@ pub trait Tree {
 }
 
 pub trait LocalTree: Tree {
-    fn path(&self) -> &Path;
+    fn path(&self) -> &cross_platform::Path;
     fn populated(&self) -> Box<Future<Item = (), Error = ()>>;
     fn as_tree(&self) -> &Tree;
 }
 
 pub trait FileProvider {
-    fn open(&self, path: &Path) -> Box<Future<Item = Box<File>, Error = io::Error>>;
+    fn open(&self, path: &cross_platform::Path)
+        -> Box<Future<Item = Box<File>, Error = io::Error>>;
 }
 
 pub trait File {
@@ -47,7 +47,7 @@ pub enum Entry {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DirInner {
-    name: OsString,
+    name: cross_platform::PathComponent,
     #[serde(skip_serializing, skip_deserializing)]
     name_chars: Vec<char>,
     #[serde(serialize_with = "serialize_dir_children")]
@@ -59,7 +59,8 @@ pub struct DirInner {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileInner {
-    name: OsString,
+    name: cross_platform::PathComponent,
+    #[serde(skip_serializing, skip_deserializing)]
     name_chars: Vec<char>,
     symlink: bool,
     ignored: bool,
@@ -78,7 +79,7 @@ struct RemoteTreeState {
 }
 
 impl Entry {
-    pub fn file(name: OsString, symlink: bool, ignored: bool) -> Self {
+    pub fn file(name: cross_platform::PathComponent, symlink: bool, ignored: bool) -> Self {
         Entry::File(Arc::new(FileInner {
             name_chars: name.to_string_lossy().chars().collect(),
             name,
@@ -87,7 +88,7 @@ impl Entry {
         }))
     }
 
-    pub fn dir(name: OsString, symlink: bool, ignored: bool) -> Self {
+    pub fn dir(name: cross_platform::PathComponent, symlink: bool, ignored: bool) -> Self {
         let mut name_chars: Vec<char> = name.to_string_lossy().chars().collect();
         name_chars.push('/');
         Entry::Dir(Arc::new(DirInner {
@@ -113,7 +114,7 @@ impl Entry {
         }
     }
 
-    pub fn name(&self) -> &OsStr {
+    pub fn name(&self) -> &cross_platform::PathComponent {
         match self {
             &Entry::Dir(ref inner) => &inner.name,
             &Entry::File(ref inner) => &inner.name,
@@ -287,32 +288,34 @@ impl Tree for RemoteTree {
 pub(crate) mod tests {
     use super::*;
     use bincode::{deserialize, serialize};
+    use cross_platform::PathComponent;
     use futures::{future, task, Async, IntoFuture, Poll};
     use never::Never;
     use notify_cell::NotifyCell;
     use rpc;
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use stream_ext::StreamExt;
     use tokio_core::reactor;
 
     #[test]
     fn test_insert() {
-        let root = Entry::dir(OsString::from("root"), false, false);
+        let root = Entry::dir(PathComponent::from("root"), false, false);
         assert_eq!(
-            root.insert(Entry::file(OsString::from("a"), false, false)),
+            root.insert(Entry::file(PathComponent::from("a"), false, false)),
             Ok(())
         );
         assert_eq!(
-            root.insert(Entry::file(OsString::from("c"), false, false)),
+            root.insert(Entry::file(PathComponent::from("c"), false, false)),
             Ok(())
         );
         assert_eq!(
-            root.insert(Entry::file(OsString::from("b"), false, false)),
+            root.insert(Entry::file(PathComponent::from("b"), false, false)),
             Ok(())
         );
         assert_eq!(
-            root.insert(Entry::file(OsString::from("a"), false, false)),
+            root.insert(Entry::file(PathComponent::from("a"), false, false)),
             Err(())
         );
         assert_eq!(root.child_names(), vec!["a", "b", "c"]);
@@ -372,7 +375,7 @@ pub(crate) mod tests {
     }
 
     pub struct TestTree {
-        path: PathBuf,
+        path: cross_platform::Path,
         root: Entry,
         pub populated: NotifyCell<bool>,
     }
@@ -395,9 +398,9 @@ pub(crate) mod tests {
     struct NextTick(bool);
 
     impl TestTree {
-        pub fn new<T: Into<PathBuf>>(path: T, root: Entry) -> Self {
+        pub fn new<T: Into<OsString>>(path: T, root: Entry) -> Self {
             Self {
-                path: path.into(),
+                path: cross_platform::Path::from(path.into()),
                 root,
                 populated: NotifyCell::new(false),
             }
@@ -405,7 +408,7 @@ pub(crate) mod tests {
 
         pub fn from_json<T: Into<PathBuf>>(path: T, json: serde_json::Value) -> Self {
             let path = path.into();
-            let root = Entry::from_json(path.file_name().unwrap(), &json);
+            let root = Entry::from_json(PathComponent::from(path.file_name().unwrap()), &json);
             Self::new(path, root)
         }
     }
@@ -421,7 +424,7 @@ pub(crate) mod tests {
     }
 
     impl LocalTree for TestTree {
-        fn path(&self) -> &Path {
+        fn path(&self) -> &cross_platform::Path {
             &self.path
         }
 
@@ -445,12 +448,12 @@ pub(crate) mod tests {
     }
 
     impl Entry {
-        fn from_json<T: Into<OsString>>(name: T, json: &serde_json::Value) -> Self {
+        fn from_json<T: Into<PathComponent>>(name: T, json: &serde_json::Value) -> Self {
             if json.is_object() {
                 let object = json.as_object().unwrap();
                 let dir = Entry::dir(name.into(), false, false);
                 for (key, value) in object {
-                    let child_entry = Self::from_json(key, value);
+                    let child_entry = Self::from_json(key.as_str(), value);
                     assert_eq!(dir.insert(child_entry), Ok(()));
                 }
                 dir
@@ -489,14 +492,14 @@ pub(crate) mod tests {
             })))
         }
 
-        pub fn write_sync<P: Into<PathBuf>, S: Into<String>>(&self, path: P, content: S) {
+        pub fn write_sync<S: Into<String>>(&self, path: cross_platform::Path, content: S) {
             let mut state = self.0.borrow_mut();
 
             let file_id = state.next_file_id;
             state.next_file_id += 1;
 
             state.files.insert(
-                path.into(),
+                path.to_path_buf(),
                 TestFile(Rc::new(RefCell::new(TestFileState {
                     id: file_id,
                     content: content.into(),
@@ -506,8 +509,11 @@ pub(crate) mod tests {
     }
 
     impl FileProvider for TestFileProvider {
-        fn open(&self, path: &Path) -> Box<Future<Item = Box<File>, Error = io::Error>> {
-            let path = path.to_owned();
+        fn open(
+            &self,
+            path: &cross_platform::Path,
+        ) -> Box<Future<Item = Box<File>, Error = io::Error>> {
+            let path = path.to_path_buf();
             let state = self.0.clone();
             Box::new(NextTick::new().then(move |_| {
                 let state = state.borrow();

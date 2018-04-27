@@ -1,0 +1,19 @@
+[package]
+name = "xray_wasm"
+version = "0.1.0"
+authors = ["Antonio Scandurra <as-cii@github.com>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bytes = "0.4"
+futures = "0.1"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
+wasm-bindgen = "0.2"
+xray_core = { path = "../xray_core" }
+
+[features]
+js-tests = []

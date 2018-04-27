@@ -1,8 +1,8 @@
+use cross_platform;
 use futures::{Async, Poll, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use project::{PathSearch, PathSearchResult, PathSearchStatus, TreeId};
 use serde_json;
-use std::path::Path;
 use window::{View, WeakViewHandle, Window};
 
 pub trait FileFinderViewDelegate {
@@ -13,7 +13,12 @@ pub trait FileFinderViewDelegate {
         include_ignored: bool,
     ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
     fn did_close(&mut self);
-    fn did_confirm(&mut self, tree_id: TreeId, relative_path: &Path, window: &mut Window);
+    fn did_confirm(
+        &mut self,
+        tree_id: TreeId,
+        relative_path: &cross_platform::Path,
+        window: &mut Window,
+    );
 }
 
 pub struct FileFinderView<T: FileFinderViewDelegate> {

@@ -1,3 +1,5 @@
+#![cfg_attr(target_arch = "wasm32", feature(proc_macro, wasm_custom_section, wasm_import_module))]
+
 extern crate bincode;
 extern crate bytes;
 #[macro_use]
@@ -12,10 +14,19 @@ extern crate serde_json;
 extern crate smallvec;
 #[cfg(test)]
 extern crate tokio_core;
+#[cfg(test)]
+extern crate tokio_timer;
+#[cfg(target_arch = "wasm32")]
+extern crate wasm_bindgen;
+
+#[cfg(target_arch = "wasm32")]
+#[macro_use]
+pub mod wasm_logging;
 
 pub mod app;
 pub mod buffer;
 pub mod buffer_view;
+pub mod cross_platform;
 pub mod fs;
 pub mod notify_cell;
 pub mod rpc;

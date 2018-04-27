@@ -1,0 +1,26 @@
+{
+  "name": "xray_ui",
+  "version": "0.0.0",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "scripts": {
+    "test": "electron-mocha --ui=tdd --renderer test/**/*.test.js",
+    "itest": "electron-mocha --ui=tdd --renderer --interactive test/**/*.test.js"
+  },
+  "dependencies": {
+    "prop-types": "^15.6.0",
+    "react": "^16.3.0",
+    "react-dom": "^16.3.0",
+    "styletron-engine-atomic": "1.0.4",
+    "styletron-react": "4.0.3"
+  },
+  "resolutions": {
+    "styletron-react/styletron-react-core": "1.0.0"
+  },
+  "devDependencies": {
+    "electron": "2.0.0-beta.7",
+    "electron-mocha": "^6.0.1",
+    "enzyme": "^3.3.0",
+    "enzyme-adapter-react-16": "^1.1.1"
+  }
+}

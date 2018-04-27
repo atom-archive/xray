@@ -9,7 +9,8 @@ const Root = styled("div", {
   left: 0,
   right: 0,
   width: "min-content",
-  margin: "auto"
+  margin: "auto",
+  outline: "none"
 });
 
 module.exports = class Modal extends React.Component {

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -e
+
+rm -rf dist
+mkdir -p dist
+cargo build --release --target wasm32-unknown-unknown --features js-tests
+wasm-bindgen ../target/wasm32-unknown-unknown/release/xray_wasm.wasm --out-dir dist
+yarn install
+node_modules/.bin/webpack --target=node --mode=development --devtool="source-map" test/tests.js
+node_modules/.bin/mocha --require source-map-support/register --ui=tdd dist/main.js

@@ -168,6 +168,21 @@ impl Connection {
     }
 
     fn poll_outgoing(&mut self) -> Poll<Option<Bytes>, ()> {
+        let pending_responses = self.0.borrow_mut().pending_responses.clone();
+        let mut responses = HashMap::new();
+        loop {
+            match pending_responses.borrow_mut().poll() {
+                Ok(Async::Ready(Some(envelope))) => {
+                    responses
+                        .entry(envelope.service_id)
+                        .or_insert(Vec::new())
+                        .push((envelope.request_id, envelope.response));
+                }
+                Ok(Async::Ready(None)) | Ok(Async::NotReady) => break,
+                Err(_) => unreachable!(),
+            }
+        }
+
         let existing_service_ids = {
             let state = self.0.borrow();
             state
@@ -203,21 +218,6 @@ impl Connection {
 
         let mut removals = HashSet::new();
         mem::swap(&mut removals, &mut self.0.borrow_mut().removed);
-
-        let pending_responses = self.0.borrow_mut().pending_responses.clone();
-        let mut responses = HashMap::new();
-        loop {
-            match pending_responses.borrow_mut().poll() {
-                Ok(Async::Ready(Some(envelope))) => {
-                    responses
-                        .entry(envelope.service_id)
-                        .or_insert(Vec::new())
-                        .push((envelope.request_id, envelope.response));
-                }
-                Ok(Async::Ready(None)) | Ok(Async::NotReady) => break,
-                Err(_) => unreachable!(),
-            }
-        }
 
         if insertions.len() > 0 || updates.len() > 0 || removals.len() > 0 || responses.len() > 0 {
             let message =

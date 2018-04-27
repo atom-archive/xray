@@ -165,7 +165,7 @@ impl Server {
             IncomingMessage::OpenWorkspace { paths } => {
                 Box::new(self.open_workspace(paths).into_future())
             }
-            IncomingMessage::Listen { port } => Box::new(self.listen(port).into_future()),
+            IncomingMessage::TcpListen { port } => Box::new(self.tcp_listen(port).into_future()),
             IncomingMessage::ConnectToPeer { address } => self.connect_to_peer(address),
             _ => Box::new(future::err(format!("Unexpected message {:?}", message))),
         };
@@ -202,26 +202,33 @@ impl Server {
         Ok(())
     }
 
-    fn listen(&self, port: u16) -> Result<(), String> {
+    fn tcp_listen(&self, port: u16) -> Result<(), String> {
         let local_addr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
         let listener = TcpListener::bind(&local_addr, &self.reactor)
             .map_err(|_| "Error binding address".to_owned())?;
         let app = self.app.clone();
         let reactor = self.reactor.clone();
-        let handle_incoming = listener
-            .incoming()
-            .map_err(|_| eprintln!("Error accepting incoming connection"))
-            .for_each(move |(socket, _)| {
-                socket.set_nodelay(true).unwrap();
-                let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
-                let (tx, rx) = transport.split();
-                let connection = App::connect_to_client(app.clone(), rx.map(|frame| frame.into()));
-                reactor.spawn(
-                    tx.send_all(connection.map_err(|_| -> io::Error { unreachable!() }))
-                        .then(|_| Ok(())),
-                );
-                Ok(())
-            });
+        let handle_incoming =
+            listener
+                .incoming()
+                .map_err(|_| eprintln!("Error accepting incoming connection"))
+                .for_each(move |(socket, _)| {
+                    socket.set_nodelay(true).unwrap();
+                    let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
+                    let (tx, rx) = transport.split();
+                    let connection =
+                        App::connect_to_client(app.clone(), rx.map(|frame| frame.into()));
+                    reactor.spawn(tx.send_all(
+                        connection.map_err(|_| -> io::Error { unreachable!() }),
+                    ).then(|result| {
+                        if let Err(error) = result {
+                            eprintln!("Error sending message to client on TCP socket: {}", error);
+                        }
+
+                        Ok(())
+                    }));
+                    Ok(())
+                });
         self.reactor.spawn(handle_incoming);
         Ok(())
     }
@@ -246,9 +253,22 @@ impl Server {
                     app.connect_to_server(rx.map(|frame| frame.into()))
                         .map_err(|error| format!("RPC error: {}", error))
                         .and_then(move |connection| {
-                            reactor.spawn(tx.send_all(
-                                connection.map_err(|_| -> io::Error { unreachable!() }),
-                            ).then(|_| Ok(())));
+                            reactor.spawn(
+                                tx.send_all(
+                                    connection
+                                        .map(|bytes| bytes.into())
+                                        .map_err(|_| -> io::Error { unreachable!() }),
+                                ).then(|result| {
+                                    if let Err(error) = result {
+                                        eprintln!(
+                                            "Error sending message to server on TCP socket: {}",
+                                            error
+                                        );
+                                    }
+
+                                    Ok(())
+                                }),
+                            );
                             Ok(())
                         })
                 }),
