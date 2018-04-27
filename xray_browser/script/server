@@ -76,6 +76,7 @@ websocketServer.on("connection", async ws => {
     bufferLengthHeader.writeUInt32BE(message.length, 0);
     connection.write(Buffer.concat([bufferLengthHeader, message]));
   });
+  ws.on("close", () => connection.destroy());
 });
 
 app.use(webpackDev(compiler, { publicPath: "/" }));
