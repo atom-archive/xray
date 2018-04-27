@@ -115,23 +115,10 @@ class TextEditor extends React.Component {
       return;
     }
 
-    switch (event.key) {
-      case 'ArrowUp':
-        this.pauseCursorBlinking();
-        this.props.dispatch({type: 'MoveUp'});
-        break;
-      case 'ArrowDown':
-        this.pauseCursorBlinking();
-        this.props.dispatch({type: 'MoveDown'});
-        break;
-      case 'ArrowLeft':
-        this.pauseCursorBlinking();
-        this.props.dispatch({type: 'MoveLeft'});
-        break;
-      case 'ArrowRight':
-        this.pauseCursorBlinking();
-        this.props.dispatch({type: 'MoveRight'});
-        break;
+    const action = actionForKeyDownEvent(event);
+    if (action) {
+      this.pauseCursorBlinking();
+      this.props.dispatch({type: action});
     }
   }
 
@@ -166,6 +153,31 @@ class TextEditor extends React.Component {
 
   focus() {
     this.element.focus();
+  }
+}
+
+function actionForKeyDownEvent (event) {
+  switch (event.key) {
+    case "ArrowUp":
+      if (event.ctrlKey && event.shiftKey) {
+        return "AddSelectionAbove"
+      } else if (event.shiftKey) {
+        return "SelectUp"
+      } else {
+        return "MoveUp"
+      }
+    case "ArrowDown":
+      if (event.ctrlKey && event.shiftKey) {
+        return "AddSelectionBelow"
+      } else if (event.shiftKey) {
+        return "SelectDown"
+      } else {
+        return "MoveDown"
+      }
+    case "ArrowLeft":
+      return event.shiftKey ? "SelectLeft" : "MoveLeft";
+    case "ArrowRight":
+      return event.shiftKey ? "SelectRight" : "MoveRight";
   }
 }
 
