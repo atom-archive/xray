@@ -48,7 +48,9 @@ pub struct Buffer {
     operation_txs: Vec<unsync::mpsc::UnboundedSender<Arc<Operation>>>,
     updates: NotifyCell<()>,
     local_selections: HashMap<SelectionSetId, Weak<RefCell<SelectionSet>>>,
+    remote_selections: HashMap<(ReplicaId, SelectionSetId), Rc<RefCell<SelectionSet>>>,
     next_local_selection_set_id: SelectionSetId,
+    updated_selections_txs: Vec<unsync::mpsc::UnboundedSender<(ReplicaId, SelectionSetId)>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
@@ -57,10 +59,10 @@ pub struct Point {
     pub column: u32,
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+#[derive(Clone, Eq, PartialEq, Debug, Hash, Serialize, Deserialize)]
 pub struct Anchor(AnchorInner);
 
-#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+#[derive(Clone, Eq, PartialEq, Debug, Hash, Serialize, Deserialize)]
 enum AnchorInner {
     Start,
     End,
@@ -71,12 +73,13 @@ enum AnchorInner {
     },
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+#[derive(Clone, Eq, PartialEq, Debug, Hash, Serialize, Deserialize)]
 enum AnchorBias {
     Left,
     Right,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Selection {
     pub start: Anchor,
     pub end: Anchor,
@@ -86,6 +89,7 @@ pub struct Selection {
 
 pub struct SelectionSet {
     id: SelectionSetId,
+    replica_id: ReplicaId,
     selections: Vec<Selection>,
     buffer: Weak<RefCell<Buffer>>,
 }
@@ -213,7 +217,7 @@ impl Version {
 
 pub mod rpc {
     use super::{Buffer, EditId, FragmentId, Insertion, InsertionSplit, Operation, ReplicaId,
-                Version};
+                Selection, SelectionSetId, Version};
     use futures::{Async, Future, Stream};
     use never::Never;
     use rpc;
@@ -230,6 +234,7 @@ pub mod rpc {
         pub(super) insertions: HashMap<EditId, Insertion>,
         pub(super) insertion_splits: HashMap<EditId, Vec<InsertionSplit>>,
         pub(super) version: Version,
+        pub(super) selections: HashMap<(ReplicaId, SelectionSetId), Vec<Selection>>,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -238,13 +243,21 @@ pub mod rpc {
             #[serde(serialize_with = "serialize_op", deserialize_with = "deserialize_op")]
             Arc<Operation>,
         ),
+        UpdateSelectionSet(SelectionSetId, Vec<Selection>),
+        RemoveSelectionSet(SelectionSetId),
     }
 
     #[derive(Serialize, Deserialize)]
-    pub struct Update(
-        #[serde(serialize_with = "serialize_op", deserialize_with = "deserialize_op")]
-        pub(super)  Arc<Operation>,
-    );
+    pub enum Update {
+        Operation(
+            #[serde(serialize_with = "serialize_op", deserialize_with = "deserialize_op")]
+            Arc<Operation>,
+        ),
+        Selections {
+            updated: HashMap<(ReplicaId, SelectionSetId), Vec<Selection>>,
+            removed: HashSet<(ReplicaId, SelectionSetId)>,
+        },
+    }
 
     #[derive(Serialize, Deserialize)]
     pub(super) struct Fragment {
@@ -258,6 +271,7 @@ pub mod rpc {
     pub struct Service {
         replica_id: ReplicaId,
         outgoing_ops: Box<Stream<Item = Arc<Operation>, Error = ()>>,
+        selection_updates: Box<Stream<Item = (ReplicaId, SelectionSetId), Error = ()>>,
         buffer: Rc<RefCell<Buffer>>,
     }
 
@@ -271,11 +285,64 @@ pub mod rpc {
                 .borrow_mut()
                 .outgoing_ops()
                 .filter(move |op| op.replica_id() != replica_id);
+            let selection_updates = buffer
+                .borrow_mut()
+                .selection_updates()
+                .filter(move |update| update.0 != replica_id);
             Self {
                 replica_id,
                 outgoing_ops: Box::new(outgoing_ops),
+                selection_updates: Box::new(selection_updates),
                 buffer,
             }
+        }
+
+        fn poll_outgoing_op(&mut self) -> Async<Option<Update>> {
+            self.outgoing_ops
+                .poll()
+                .expect("Receiving on a channel cannot produce an error")
+                .map(|option| option.map(|update| Update::Operation(update)))
+        }
+
+        fn poll_outgoing_selection(&mut self) -> Async<Option<Update>> {
+            let mut updated = HashMap::new();
+            let mut removed = HashSet::new();
+            loop {
+                match self.selection_updates
+                    .poll()
+                    .expect("Receiving on a channel cannot produce an error")
+                {
+                    Async::Ready(Some((replica_id, set_id))) => {
+                        let buffer = self.buffer.borrow();
+                        let selection_set = if buffer.replica_id == replica_id {
+                            buffer
+                                .local_selections
+                                .get(&set_id)
+                                .and_then(|set| set.upgrade())
+                        } else {
+                            buffer.remote_selections.get(&(replica_id, set_id)).cloned()
+                        };
+                        if let Some(selection_set) = selection_set {
+                            updated
+                                .entry((replica_id, set_id))
+                                .or_insert_with(|| selection_set.borrow().clone());
+                        } else {
+                            removed.insert((replica_id, set_id));
+                        }
+                    }
+                    Async::Ready(None) => if updated.is_empty() && removed.is_empty() {
+                        return Async::Ready(None);
+                    } else {
+                        break;
+                    },
+                    Async::NotReady => if updated.is_empty() && removed.is_empty() {
+                        return Async::NotReady;
+                    } else {
+                        break;
+                    },
+                }
+            }
+            Async::Ready(Some(Update::Selections { updated, removed }))
         }
     }
 
@@ -293,6 +360,7 @@ pub mod rpc {
                 insertions: HashMap::new(),
                 insertion_splits: HashMap::new(),
                 version: buffer.version.clone(),
+                selections: HashMap::new(),
             };
 
             for fragment in buffer.fragments.iter() {
@@ -316,14 +384,33 @@ pub mod rpc {
                     .insert(*insertion_id, splits.iter().cloned().collect());
             }
 
+            for (id, selection_set) in &buffer.local_selections {
+                if let Some(selection_set) = selection_set.upgrade() {
+                    state
+                        .selections
+                        .insert((buffer.replica_id, *id), selection_set.borrow().clone());
+                }
+            }
+            for (id, selection_set) in &buffer.remote_selections {
+                state.selections.insert(*id, selection_set.borrow().clone());
+            }
+
             state
         }
 
         fn poll_update(&mut self, _: &rpc::server::Connection) -> Async<Option<Self::Update>> {
-            self.outgoing_ops
-                .poll()
-                .expect("Receiving on a channel cannot produce an error")
-                .map(|option| option.map(|op| Update(op)))
+            match self.poll_outgoing_op() {
+                Async::Ready(Some(update)) => Async::Ready(Some(update)),
+                Async::Ready(None) => match self.poll_outgoing_selection() {
+                    Async::Ready(Some(update)) => Async::Ready(Some(update)),
+                    Async::Ready(None) => Async::Ready(None),
+                    Async::NotReady => Async::NotReady,
+                },
+                Async::NotReady => match self.poll_outgoing_selection() {
+                    Async::Ready(Some(update)) => Async::Ready(Some(update)),
+                    Async::Ready(None) | Async::NotReady => Async::NotReady,
+                },
+            }
         }
 
         fn request(
@@ -338,6 +425,17 @@ pub mod rpc {
                     if buffer.integrate_op(op).is_err() {
                         unimplemented!("Invalid op: terminate the service and respond with error?");
                     }
+                }
+                Request::UpdateSelectionSet(set_id, selections) => {
+                    Buffer::integrate_selections_update(
+                        &self.buffer,
+                        self.replica_id,
+                        set_id,
+                        selections,
+                    );
+                }
+                Request::RemoveSelectionSet(set_id) => {
+                    Buffer::integrate_selections_removal(&self.buffer, self.replica_id, set_id);
                 }
             };
 
@@ -402,7 +500,9 @@ impl Buffer {
             operation_txs: Vec::new(),
             updates: NotifyCell::new(()),
             local_selections: HashMap::new(),
+            remote_selections: HashMap::new(),
             next_local_selection_set_id: 0,
+            updated_selections_txs: Vec::new(),
         }
     }
 
@@ -411,7 +511,7 @@ impl Buffer {
         client: client::Service<rpc::Service>,
     ) -> Result<Rc<RefCell<Buffer>>, RpcError> {
         let state = client.state()?;
-        let incoming_ops = client.updates()?;
+        let incoming_updates = client.updates()?;
 
         let mut insertions = HashMap::new();
         for (edit_id, insertion) in state.insertions {
@@ -448,15 +548,41 @@ impl Buffer {
             operation_txs: Vec::new(),
             updates: NotifyCell::new(()),
             local_selections: HashMap::new(),
+            remote_selections: HashMap::new(),
             next_local_selection_set_id: 0,
+            updated_selections_txs: Vec::new(),
         }.into_shared();
+
+        for ((replica_id, set_id), selections) in state.selections {
+            let selection_set = Buffer::add_remote_selection_set(&buffer, replica_id, set_id);
+            **selection_set.borrow_mut() = selections;
+        }
 
         let buffer_clone = buffer.clone();
         foreground
-            .execute(Box::new(incoming_ops.for_each(move |update| {
-                if buffer_clone.borrow_mut().integrate_op(update.0).is_err() {
-                    unimplemented!("Invalid op");
+            .execute(Box::new(incoming_updates.for_each(move |update| {
+                match update {
+                    rpc::Update::Operation(operation) => {
+                        if buffer_clone.borrow_mut().integrate_op(operation).is_err() {
+                            unimplemented!("Invalid op");
+                        }
+                    }
+                    rpc::Update::Selections { updated, removed } => {
+                        for ((replica_id, set_id), selections) in updated {
+                            Buffer::integrate_selections_update(
+                                &buffer_clone,
+                                replica_id,
+                                set_id,
+                                selections,
+                            );
+                        }
+
+                        for (replica_id, set_id) in removed {
+                            Buffer::integrate_selections_removal(&buffer_clone, replica_id, set_id);
+                        }
+                    }
                 }
+
                 Ok(())
             })))
             .unwrap();
@@ -533,18 +659,50 @@ impl Buffer {
         }
     }
 
-    pub fn add_selection_set(buffer_rc: &Rc<RefCell<Buffer>>) -> Rc<RefCell<SelectionSet>> {
+    pub fn add_local_selection_set(buffer_rc: &Rc<RefCell<Buffer>>) -> Rc<RefCell<SelectionSet>> {
         let mut buffer = buffer_rc.borrow_mut();
+        let buffer = &mut *buffer;
 
         let id = buffer.next_local_selection_set_id;
         buffer.next_local_selection_set_id += 1;
 
         let set = Rc::new(RefCell::new(SelectionSet {
             id,
+            replica_id: buffer.replica_id,
             selections: Vec::new(),
             buffer: Rc::downgrade(&buffer_rc),
         }));
         buffer.local_selections.insert(id, Rc::downgrade(&set));
+
+        for updated_selections_tx in &buffer.updated_selections_txs {
+            let _ = updated_selections_tx.unbounded_send((buffer.replica_id, id));
+        }
+        buffer.updates.set(());
+
+        set
+    }
+
+    fn add_remote_selection_set(
+        buffer_rc: &Rc<RefCell<Buffer>>,
+        replica_id: ReplicaId,
+        set_id: SelectionSetId,
+    ) -> Rc<RefCell<SelectionSet>> {
+        let mut buffer = buffer_rc.borrow_mut();
+
+        let set = Rc::new(RefCell::new(SelectionSet {
+            id: set_id,
+            replica_id: replica_id,
+            selections: Vec::new(),
+            buffer: Rc::downgrade(&buffer_rc),
+        }));
+        buffer
+            .remote_selections
+            .insert((replica_id, set_id), set.clone());
+
+        for updated_selections_tx in &buffer.updated_selections_txs {
+            let _ = updated_selections_tx.unbounded_send((replica_id, set_id));
+        }
+        buffer.updates.set(());
 
         set
     }
@@ -703,6 +861,42 @@ impl Buffer {
         Ok(())
     }
 
+    fn integrate_selections_update(
+        buffer: &Rc<RefCell<Buffer>>,
+        replica_id: ReplicaId,
+        set_id: SelectionSetId,
+        selections: Vec<Selection>,
+    ) {
+        let selection_set = {
+            buffer
+                .borrow()
+                .remote_selections
+                .get(&(replica_id, set_id))
+                .cloned()
+        };
+        if let Some(selection_set) = selection_set {
+            let mut selection_set = selection_set.borrow_mut();
+            **selection_set = selections;
+            selection_set.updated();
+        } else {
+            let selection_set = Buffer::add_remote_selection_set(&buffer, replica_id, set_id);
+            **selection_set.borrow_mut() = selections;
+        }
+    }
+
+    fn integrate_selections_removal(
+        buffer: &Rc<RefCell<Buffer>>,
+        replica_id: ReplicaId,
+        set_id: SelectionSetId,
+    ) {
+        // Force the compiler to drop SelectionSet after dropping the mutable borrow to the buffer.
+        // This prevents a double borrow error caused by SelectionSet's Drop trait.
+        let _ = {
+            let mut buffer = buffer.borrow_mut();
+            buffer.remote_selections.remove(&(replica_id, set_id))
+        };
+    }
+
     fn resolve_fragment_id(&self, edit_id: EditId, offset: usize) -> Result<FragmentId, Error> {
         let split_tree = self.insertion_splits
             .get(&edit_id)
@@ -719,6 +913,14 @@ impl Buffer {
     fn outgoing_ops(&mut self) -> unsync::mpsc::UnboundedReceiver<Arc<Operation>> {
         let (tx, rx) = unsync::mpsc::unbounded();
         self.operation_txs.push(tx);
+        rx
+    }
+
+    fn selection_updates(
+        &mut self,
+    ) -> unsync::mpsc::UnboundedReceiver<(ReplicaId, SelectionSetId)> {
+        let (tx, rx) = unsync::mpsc::unbounded();
+        self.updated_selections_txs.push(tx);
         rx
     }
 
@@ -1316,6 +1518,26 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
+impl SelectionSet {
+    pub fn updated(&self) {
+        if let Some(buffer) = self.buffer.upgrade() {
+            let buffer = buffer.borrow();
+            for updated_selections_tx in &buffer.updated_selections_txs {
+                let _ = updated_selections_tx.unbounded_send((self.replica_id, self.id));
+            }
+
+            if let Some(ref client) = buffer.client {
+                client.request(rpc::Request::UpdateSelectionSet(
+                    self.id,
+                    self.selections.clone(),
+                ));
+            }
+
+            buffer.updates.set(());
+        }
+    }
+}
+
 impl Deref for SelectionSet {
     type Target = Vec<Selection>;
 
@@ -1333,7 +1555,22 @@ impl<'a> DerefMut for SelectionSet {
 impl Drop for SelectionSet {
     fn drop(&mut self) {
         if let Some(buffer) = self.buffer.upgrade() {
-            buffer.borrow_mut().local_selections.remove(&self.id);
+            let mut buffer = buffer.borrow_mut();
+            if buffer.replica_id == self.replica_id {
+                buffer.local_selections.remove(&self.id);
+            } else {
+                buffer.remote_selections.remove(&(self.replica_id, self.id));
+            }
+
+            for updated_selections_tx in &buffer.updated_selections_txs {
+                let _ = updated_selections_tx.unbounded_send((self.replica_id, self.id));
+            }
+
+            if let Some(ref client) = buffer.client {
+                client.request(rpc::Request::RemoveSelectionSet(self.id));
+            }
+
+            buffer.updates.set(());
         }
     }
 }
@@ -2088,8 +2325,8 @@ mod tests {
         buffer.borrow_mut().edit(0..0, "abcdef");
         buffer.borrow_mut().edit(2..4, "ghi");
 
-        let set_1 = Buffer::add_selection_set(&buffer);
-        let set_2 = Buffer::add_selection_set(&buffer);
+        let _set_1 = Buffer::add_local_selection_set(&buffer);
+        let set_2 = Buffer::add_local_selection_set(&buffer);
         assert_eq!(buffer.borrow().local_selections.len(), 2);
 
         drop(set_2);
@@ -2150,7 +2387,7 @@ mod tests {
     }
 
     #[test]
-    fn test_replication() {
+    fn test_edit_replication() {
         let local_buffer = Buffer::new().into_shared();
         local_buffer.borrow_mut().edit(0..0, "abcdef");
         local_buffer.borrow_mut().edit(2..4, "ghi");
@@ -2199,6 +2436,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_selection_replication() {
+        use stream_ext::StreamExt;
+
+        let buffer_1 = Buffer::new().into_shared();
+        buffer_1.borrow_mut().edit(0..0, "abcdef");
+        let buffer_1_selections_1 = Buffer::add_local_selection_set(&buffer_1);
+        **buffer_1_selections_1.borrow_mut() = vec![
+            empty_selection(&buffer_1.borrow(), 1),
+            empty_selection(&buffer_1.borrow(), 3),
+        ];
+        let buffer_1_selections_2 = Buffer::add_local_selection_set(&buffer_1);
+        **buffer_1_selections_2.borrow_mut() = vec![
+            empty_selection(&buffer_1.borrow(), 2),
+            empty_selection(&buffer_1.borrow(), 4),
+        ];
+
+        let mut reactor = reactor::Core::new().unwrap();
+        let foreground = Rc::new(reactor.handle());
+        let buffer_2 = Buffer::remote(
+            foreground.clone(),
+            rpc::tests::connect(&mut reactor, super::rpc::Service::new(buffer_1.clone())),
+        ).unwrap();
+        assert_eq!(
+            buffer_1.borrow().selections(),
+            buffer_2.borrow().selections(),
+        );
+
+        let buffer_3 = Buffer::remote(
+            foreground,
+            rpc::tests::connect(&mut reactor, super::rpc::Service::new(buffer_1.clone())),
+        ).unwrap();
+        assert_eq!(
+            buffer_1.borrow().selections(),
+            buffer_3.borrow().selections(),
+        );
+
+        let mut buffer_1_updates = buffer_1.borrow().updates();
+        let mut buffer_2_updates = buffer_2.borrow().updates();
+        let mut buffer_3_updates = buffer_3.borrow().updates();
+
+        drop(buffer_1_selections_2);
+        buffer_1_updates.wait_next(&mut reactor).unwrap();
+        buffer_2_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(
+            buffer_1.borrow().selections(),
+            buffer_2.borrow().selections(),
+        );
+        buffer_3_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(
+            buffer_1.borrow().selections(),
+            buffer_3.borrow().selections(),
+        );
+
+        let buffer_2_selections = Buffer::add_local_selection_set(&buffer_2);
+        buffer_2_selections
+            .borrow_mut()
+            .push(empty_selection(&buffer_2.borrow(), 1));
+        buffer_2_selections.borrow().updated();
+        buffer_1_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(
+            buffer_1.borrow().selections(),
+            buffer_2.borrow().selections(),
+        );
+        buffer_3_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(
+            buffer_1.borrow().selections(),
+            buffer_3.borrow().selections(),
+        );
+
+        drop(buffer_2_selections);
+        buffer_2_updates.wait_next(&mut reactor).unwrap();
+        buffer_1_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(
+            buffer_1.borrow().selections(),
+            buffer_2.borrow().selections(),
+        );
+        buffer_3_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(
+            buffer_1.borrow().selections(),
+            buffer_3.borrow().selections(),
+        );
+    }
+
     struct RandomCharIter<T: Rng>(T);
 
     impl<T: Rng> Iterator for RandomCharIter<T> {
@@ -2206,6 +2527,38 @@ mod tests {
 
         fn next(&mut self) -> Option<Self::Item> {
             Some(self.0.gen_range(b'a', b'z' + 1).into())
+        }
+    }
+
+    impl Buffer {
+        fn selections(&self) -> Vec<(ReplicaId, SelectionSetId, Selection)> {
+            let mut selections = Vec::new();
+            for (set_id, selection_set) in &self.local_selections {
+                let selection_set = selection_set.upgrade().unwrap();
+                for selection in selection_set.borrow().iter() {
+                    selections.push((self.replica_id, *set_id, selection.clone()));
+                }
+            }
+            for ((replica_id, set_id), selection_set) in &self.remote_selections {
+                for selection in selection_set.borrow().iter() {
+                    selections.push((*replica_id, *set_id, selection.clone()));
+                }
+            }
+            selections.sort_by(|a, b| match a.0.cmp(&b.0) {
+                cmp::Ordering::Equal => a.1.cmp(&b.1),
+                comparison @ _ => comparison,
+            });
+            selections
+        }
+    }
+
+    fn empty_selection(buffer: &Buffer, offset: usize) -> Selection {
+        let anchor = buffer.anchor_before_offset(offset).unwrap();
+        Selection {
+            start: anchor.clone(),
+            end: anchor,
+            reversed: false,
+            goal_column: None,
         }
     }
 }
