@@ -2459,19 +2459,13 @@ mod tests {
             foreground.clone(),
             rpc::tests::connect(&mut reactor, super::rpc::Service::new(buffer_1.clone())),
         ).unwrap();
-        assert_eq!(
-            buffer_1.borrow().selections(),
-            buffer_2.borrow().selections(),
-        );
+        assert_eq!(selections(&buffer_1), selections(&buffer_2));
 
         let buffer_3 = Buffer::remote(
             foreground,
             rpc::tests::connect(&mut reactor, super::rpc::Service::new(buffer_1.clone())),
         ).unwrap();
-        assert_eq!(
-            buffer_1.borrow().selections(),
-            buffer_3.borrow().selections(),
-        );
+        assert_eq!(selections(&buffer_1), selections(&buffer_3));
 
         let mut buffer_1_updates = buffer_1.borrow().updates();
         let mut buffer_2_updates = buffer_2.borrow().updates();
@@ -2479,45 +2473,31 @@ mod tests {
 
         drop(buffer_1_selections_2);
         buffer_1_updates.wait_next(&mut reactor).unwrap();
+
         buffer_2_updates.wait_next(&mut reactor).unwrap();
-        assert_eq!(
-            buffer_1.borrow().selections(),
-            buffer_2.borrow().selections(),
-        );
+        assert_eq!(selections(&buffer_1), selections(&buffer_2));
         buffer_3_updates.wait_next(&mut reactor).unwrap();
-        assert_eq!(
-            buffer_1.borrow().selections(),
-            buffer_3.borrow().selections(),
-        );
+        assert_eq!(selections(&buffer_1), selections(&buffer_3));
 
         let buffer_2_selections = Buffer::add_local_selection_set(&buffer_2);
         buffer_2_selections
             .borrow_mut()
             .push(empty_selection(&buffer_2.borrow(), 1));
         buffer_2_selections.borrow().updated();
+        buffer_2_updates.wait_next(&mut reactor).unwrap();
+
         buffer_1_updates.wait_next(&mut reactor).unwrap();
-        assert_eq!(
-            buffer_1.borrow().selections(),
-            buffer_2.borrow().selections(),
-        );
+        assert_eq!(selections(&buffer_1), selections(&buffer_2));
         buffer_3_updates.wait_next(&mut reactor).unwrap();
-        assert_eq!(
-            buffer_1.borrow().selections(),
-            buffer_3.borrow().selections(),
-        );
+        assert_eq!(selections(&buffer_1), selections(&buffer_3));
 
         drop(buffer_2_selections);
         buffer_2_updates.wait_next(&mut reactor).unwrap();
+
         buffer_1_updates.wait_next(&mut reactor).unwrap();
-        assert_eq!(
-            buffer_1.borrow().selections(),
-            buffer_2.borrow().selections(),
-        );
+        assert_eq!(selections(&buffer_1), selections(&buffer_2));
         buffer_3_updates.wait_next(&mut reactor).unwrap();
-        assert_eq!(
-            buffer_1.borrow().selections(),
-            buffer_3.borrow().selections(),
-        );
+        assert_eq!(selections(&buffer_1), selections(&buffer_3));
     }
 
     struct RandomCharIter<T: Rng>(T);
@@ -2530,26 +2510,27 @@ mod tests {
         }
     }
 
-    impl Buffer {
-        fn selections(&self) -> Vec<(ReplicaId, SelectionSetId, Selection)> {
-            let mut selections = Vec::new();
-            for (set_id, selection_set) in &self.local_selections {
-                let selection_set = selection_set.upgrade().unwrap();
-                for selection in selection_set.borrow().iter() {
-                    selections.push((self.replica_id, *set_id, selection.clone()));
-                }
+    fn selections(buffer: &Rc<RefCell<Buffer>>) -> Vec<(ReplicaId, SelectionSetId, Selection)> {
+        let buffer = buffer.borrow();
+
+        let mut selections = Vec::new();
+        for (set_id, selection_set) in &buffer.local_selections {
+            let selection_set = selection_set.upgrade().unwrap();
+            for selection in selection_set.borrow().iter() {
+                selections.push((buffer.replica_id, *set_id, selection.clone()));
             }
-            for ((replica_id, set_id), selection_set) in &self.remote_selections {
-                for selection in selection_set.borrow().iter() {
-                    selections.push((*replica_id, *set_id, selection.clone()));
-                }
-            }
-            selections.sort_by(|a, b| match a.0.cmp(&b.0) {
-                cmp::Ordering::Equal => a.1.cmp(&b.1),
-                comparison @ _ => comparison,
-            });
-            selections
         }
+        for ((replica_id, set_id), selection_set) in &buffer.remote_selections {
+            for selection in selection_set.borrow().iter() {
+                selections.push((*replica_id, *set_id, selection.clone()));
+            }
+        }
+        selections.sort_by(|a, b| match a.0.cmp(&b.0) {
+            cmp::Ordering::Equal => a.1.cmp(&b.1),
+            comparison @ _ => comparison,
+        });
+
+        selections
     }
 
     fn empty_selection(buffer: &Buffer, offset: usize) -> Selection {
