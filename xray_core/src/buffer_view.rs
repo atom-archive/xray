@@ -138,6 +138,7 @@ impl BufferView {
                 .collect();
         }
 
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -192,6 +193,7 @@ impl BufferView {
         }
 
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -255,6 +257,7 @@ impl BufferView {
         }
 
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -319,6 +322,7 @@ impl BufferView {
         }
 
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -344,6 +348,7 @@ impl BufferView {
             }
         }
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -361,6 +366,7 @@ impl BufferView {
             }
         }
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -386,6 +392,7 @@ impl BufferView {
             }
         }
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -403,6 +410,7 @@ impl BufferView {
             }
         }
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -426,6 +434,7 @@ impl BufferView {
             }
         }
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -441,6 +450,7 @@ impl BufferView {
             }
         }
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -464,6 +474,7 @@ impl BufferView {
             }
         }
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
@@ -479,6 +490,7 @@ impl BufferView {
             }
         }
         self.merge_selections();
+        self.selections.borrow().updated();
         self.updated();
     }
 
