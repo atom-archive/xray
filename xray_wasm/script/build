@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -e
+
 LOCAL_CRATE_PATH=./.cargo
 WASM_BINDGEN_BINARY=$LOCAL_CRATE_PATH/bin/wasm-bindgen
 WASM_BINDGEN_VERSION=0.2.6
