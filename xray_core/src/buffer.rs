@@ -1526,11 +1526,13 @@ impl SelectionSet {
                 let _ = updated_selections_tx.unbounded_send((self.replica_id, self.id));
             }
 
-            if let Some(ref client) = buffer.client {
-                client.request(rpc::Request::UpdateSelectionSet(
-                    self.id,
-                    self.selections.clone(),
-                ));
+            if self.replica_id == buffer.replica_id {
+                if let Some(ref client) = buffer.client {
+                    client.request(rpc::Request::UpdateSelectionSet(
+                        self.id,
+                        self.selections.clone(),
+                    ));
+                }
             }
 
             buffer.updates.set(());
@@ -1558,16 +1560,15 @@ impl Drop for SelectionSet {
             let mut buffer = buffer.borrow_mut();
             if buffer.replica_id == self.replica_id {
                 buffer.local_selections.remove(&self.id);
+                if let Some(ref client) = buffer.client {
+                    client.request(rpc::Request::RemoveSelectionSet(self.id));
+                }
             } else {
                 buffer.remote_selections.remove(&(self.replica_id, self.id));
             }
 
             for updated_selections_tx in &buffer.updated_selections_txs {
                 let _ = updated_selections_tx.unbounded_send((self.replica_id, self.id));
-            }
-
-            if let Some(ref client) = buffer.client {
-                client.request(rpc::Request::RemoveSelectionSet(self.id));
             }
 
             buffer.updates.set(());
