@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-set -e
-
 WASM_BINDGEN_VERSION=0.2.6
 
 setup_wasm_bindgen() {
