@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 
+LOCAL_CRATE_PATH=./.cargo
+WASM_BINDGEN_BINARY=$LOCAL_CRATE_PATH/bin/wasm-bindgen
+WASM_BINDGEN_VERSION=0.2.6
+
+rustup target add wasm32-unknown-unknown
+$WASM_BINDGEN_BINARY --version | grep $WASM_BINDGEN_VERSION > /dev/null || cargo install --force wasm-bindgen-cli --version $WASM_BINDGEN_VERSION --root $LOCAL_CRATE_PATH
+
 mkdir -p dist
 CARGO_INCREMENTAL=0 RUSTFLAGS="-C debuginfo=0 -C opt-level=s -C lto -C panic=abort" cargo +nightly build --release --target wasm32-unknown-unknown
-wasm-bindgen ../target/wasm32-unknown-unknown/release/xray_wasm.wasm --out-dir dist
+$WASM_BINDGEN_BINARY ../target/wasm32-unknown-unknown/release/xray_wasm.wasm --out-dir dist
