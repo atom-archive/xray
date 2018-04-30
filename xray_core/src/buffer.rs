@@ -3,12 +3,13 @@ use super::tree::{self, SeekBias, Tree};
 use futures::{unsync, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::iter;
 use std::marker;
+use std::mem;
 use std::ops::{Add, AddAssign, Deref, DerefMut, Range, Sub};
 use std::rc::Rc;
 use std::rc::Weak;
@@ -35,7 +36,7 @@ pub enum Error {
 }
 
 pub struct Buffer {
-    replica_id: ReplicaId,
+    pub replica_id: ReplicaId,
     next_replica_id: Option<ReplicaId>,
     local_clock: LocalTimestamp,
     lamport_clock: LamportTimestamp,
@@ -89,7 +90,7 @@ pub struct Selection {
 
 pub struct SelectionSet {
     id: SelectionSetId,
-    replica_id: ReplicaId,
+    pub replica_id: ReplicaId,
     selections: Vec<Selection>,
     buffer: Weak<RefCell<Buffer>>,
 }
@@ -705,6 +706,10 @@ impl Buffer {
         buffer.updates.set(());
 
         set
+    }
+
+    pub fn remote_selections(&self) -> impl Iterator<Item = Ref<SelectionSet>> {
+        self.remote_selections.values().map(|set| set.borrow())
     }
 
     pub fn updates(&self) -> NotifyCellObserver<()> {
@@ -1515,6 +1520,44 @@ impl<'a> Iterator for Iter<'a> {
         }
 
         None
+    }
+}
+
+impl Selection {
+    pub fn head(&self) -> &Anchor {
+        if self.reversed {
+            &self.start
+        } else {
+            &self.end
+        }
+    }
+
+    pub fn set_head(&mut self, buffer: &Buffer, cursor: Anchor) {
+        if buffer.cmp_anchors(&cursor, self.tail()).unwrap() < cmp::Ordering::Equal {
+            if !self.reversed {
+                mem::swap(&mut self.start, &mut self.end);
+                self.reversed = true;
+            }
+            self.start = cursor;
+        } else {
+            if self.reversed {
+                mem::swap(&mut self.start, &mut self.end);
+                self.reversed = false;
+            }
+            self.end = cursor;
+        }
+    }
+
+    pub fn tail(&self) -> &Anchor {
+        if self.reversed {
+            &self.end
+        } else {
+            &self.start
+        }
+    }
+
+    pub fn is_empty(&self, buffer: &Buffer) -> bool {
+        buffer.cmp_anchors(&self.start, &self.end).unwrap() == cmp::Ordering::Equal
     }
 }
 

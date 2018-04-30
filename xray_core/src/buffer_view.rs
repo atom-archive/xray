@@ -1,11 +1,10 @@
-use buffer::{Anchor, Buffer, Point, Selection, SelectionSet};
+use buffer::{Buffer, Point, ReplicaId, Selection, SelectionSet};
 use futures::{Poll, Stream};
 use movement;
 use notify_cell::NotifyCell;
 use serde_json;
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::cmp::{self, Ordering};
-use std::mem;
 use std::ops::Range;
 use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
@@ -24,6 +23,7 @@ pub struct BufferView {
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
 struct SelectionProps {
+    pub replica_id: ReplicaId,
     pub start: Point,
     pub end: Point,
     pub reversed: bool,
@@ -517,10 +517,39 @@ impl BufferView {
         }
     }
 
-    fn query_selections(&self, range: Range<Point>) -> Ref<[Selection]> {
+    fn render_selections(&self, range: Range<Point>) -> Vec<SelectionProps> {
         let buffer = self.buffer.borrow();
-        let selections = self.selections.borrow();
+        let mut rendered_selections = Vec::new();
 
+        for selection in self.query_selections(&self.selections.borrow(), &range) {
+            rendered_selections.push(SelectionProps {
+                replica_id: buffer.replica_id,
+                start: buffer.point_for_anchor(&selection.start).unwrap(),
+                end: buffer.point_for_anchor(&selection.end).unwrap(),
+                reversed: selection.reversed,
+            });
+        }
+
+        for selection_set in buffer.remote_selections() {
+            for selection in self.query_selections(&selection_set, &range) {
+                rendered_selections.push(SelectionProps {
+                    replica_id: selection_set.replica_id,
+                    start: buffer.point_for_anchor(&selection.start).unwrap(),
+                    end: buffer.point_for_anchor(&selection.end).unwrap(),
+                    reversed: selection.reversed,
+                });
+            }
+        }
+
+        rendered_selections
+    }
+
+    fn query_selections<'a>(
+        &self,
+        selections: &'a SelectionSet,
+        range: &Range<Point>,
+    ) -> &'a [Selection] {
+        let buffer = self.buffer.borrow();
         let start = buffer.anchor_before_point(range.start).unwrap();
         let start_index = match selections
             .binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start).unwrap())
@@ -540,7 +569,7 @@ impl BufferView {
         };
 
         if range.end > buffer.max_point() {
-            Ref::map(selections, |selections| &selections[start_index..])
+            &selections[start_index..]
         } else {
             let end = buffer.anchor_after_point(range.end).unwrap();
             let end_index = match selections
@@ -550,7 +579,7 @@ impl BufferView {
                 Err(index) => index,
             };
 
-            Ref::map(selections, |selections| &selections[start_index..end_index])
+            &selections[start_index..end_index]
         }
     }
 
@@ -596,7 +625,6 @@ impl View for BufferView {
             lines.push(String::from_utf16_lossy(&cur_line));
         }
 
-        let visible_selections = self.query_selections(start..end);
         json!({
             "first_visible_row": start.row,
             "lines": lines,
@@ -604,9 +632,7 @@ impl View for BufferView {
             "height": self.height,
             "width": self.width,
             "line_height": self.line_height,
-            "selections": visible_selections.iter()
-                .map(|selection| selection.render(&buffer))
-                .collect::<Vec<_>>()
+            "selections": self.render_selections(start..end)
         })
     }
 
@@ -653,52 +679,6 @@ impl Stream for BufferView {
 impl Drop for BufferView {
     fn drop(&mut self) {
         self.dropped.set(true);
-    }
-}
-
-impl Selection {
-    fn head(&self) -> &Anchor {
-        if self.reversed {
-            &self.start
-        } else {
-            &self.end
-        }
-    }
-
-    fn set_head(&mut self, buffer: &Buffer, cursor: Anchor) {
-        if buffer.cmp_anchors(&cursor, self.tail()).unwrap() < Ordering::Equal {
-            if !self.reversed {
-                mem::swap(&mut self.start, &mut self.end);
-                self.reversed = true;
-            }
-            self.start = cursor;
-        } else {
-            if self.reversed {
-                mem::swap(&mut self.start, &mut self.end);
-                self.reversed = false;
-            }
-            self.end = cursor;
-        }
-    }
-
-    fn tail(&self) -> &Anchor {
-        if self.reversed {
-            &self.end
-        } else {
-            &self.start
-        }
-    }
-
-    fn render(&self, buffer: &Buffer) -> SelectionProps {
-        SelectionProps {
-            start: buffer.point_for_anchor(&self.start).unwrap(),
-            end: buffer.point_for_anchor(&self.end).unwrap(),
-            reversed: self.reversed,
-        }
-    }
-
-    fn is_empty(&self, buffer: &Buffer) -> bool {
-        buffer.cmp_anchors(&self.start, &self.end).unwrap() == cmp::Ordering::Equal
     }
 }
 
@@ -1214,16 +1194,23 @@ mod tests {
     }
 
     fn render_selections(editor: &BufferView) -> Vec<SelectionProps> {
+        let buffer = editor.buffer.borrow();
         editor
             .selections
             .borrow()
             .iter()
-            .map(|s| s.render(&editor.buffer.borrow()))
+            .map(|s| SelectionProps {
+                replica_id: buffer.replica_id,
+                start: buffer.point_for_anchor(&s.start).unwrap(),
+                end: buffer.point_for_anchor(&s.end).unwrap(),
+                reversed: s.reversed,
+            })
             .collect()
     }
 
     fn empty_selection(row: u32, column: u32) -> SelectionProps {
         SelectionProps {
+            replica_id: 1,
             start: Point::new(row, column),
             end: Point::new(row, column),
             reversed: false,
@@ -1232,6 +1219,7 @@ mod tests {
 
     fn selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
         SelectionProps {
+            replica_id: 1,
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
             reversed: false,
@@ -1240,6 +1228,7 @@ mod tests {
 
     fn rev_selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
         SelectionProps {
+            replica_id: 1,
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
             reversed: true,
