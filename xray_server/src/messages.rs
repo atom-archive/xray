@@ -17,6 +17,9 @@ pub enum IncomingMessage {
         window_id: WindowId,
         height: f64,
     },
+    CloseWindow {
+        window_id: WindowId,
+    },
     OpenWorkspace {
         paths: Vec<PathBuf>,
     },

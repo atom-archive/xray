@@ -209,7 +209,7 @@ impl App {
         };
     }
     
-    pub fn remove_window(&mut self, window_id: WindowId) -> Result<(), ()> {
+    pub fn close_window(&mut self, window_id: WindowId) -> Result<(), ()> {
         self.windows.remove(&window_id).map(|_| ()).ok_or(())
     }
 

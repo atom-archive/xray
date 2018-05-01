@@ -130,17 +130,13 @@ impl Server {
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        let server_clone_1 = self.clone();
-        let server_clone_2 = self.clone();
+        let server = self.clone();
         let receive_incoming = incoming
             .for_each(move |message| {
-                server_clone_1.handle_window_message(window_id, message);
+                server.handle_window_message(window_id, message);
                 Ok(())
             })
-            .then(move |_| {
-                server_clone_2.remove_window(window_id);
-                Ok(())
-            });
+            .then(|_| Ok(()));
         self.reactor.spawn(receive_incoming);
 
         match self.app.borrow_mut().start_window(&window_id, height) {
@@ -171,6 +167,9 @@ impl Server {
             }
             IncomingMessage::TcpListen { port } => Box::new(self.tcp_listen(port).into_future()),
             IncomingMessage::ConnectToPeer { address } => self.connect_to_peer(address),
+            IncomingMessage::CloseWindow { window_id } => {
+                Box::new(self.close_window(window_id).into_future())
+            }
             _ => Box::new(future::err(format!("Unexpected message {:?}", message))),
         };
 
@@ -192,9 +191,12 @@ impl Server {
             }
         }
     }
-    
-    fn remove_window(&self, window_id: WindowId) {
-        self.app.borrow_mut().remove_window(window_id).unwrap();
+
+    fn close_window(&self, window_id: WindowId) -> Result<(), String> {
+        self.app
+            .borrow_mut()
+            .close_window(window_id)
+            .map_err(|_| "Window not found".to_owned())
     }
 
     fn open_workspace(&self, paths: Vec<PathBuf>) -> Result<(), String> {
