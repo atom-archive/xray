@@ -113,6 +113,9 @@ class TextEditor extends React.Component {
     if (event.key.length === 1 && !event.metaKey) {
       this.props.dispatch({type: 'Edit', text: event.key});
       return;
+    } else if (event.key === 'Enter') {
+      this.props.dispatch({type: 'Edit', text: '\n'});
+      return;      
     }
 
     const action = actionForKeyDownEvent(event);
