@@ -75,7 +75,7 @@ pub struct RemoteTree(Rc<RefCell<RemoteTreeState>>);
 
 struct RemoteTreeState {
     root: Entry,
-    service: client::Service<TreeService>,
+    _service: client::Service<TreeService>,
     updates: NotifyCell<()>,
 }
 
@@ -259,7 +259,7 @@ impl RemoteTree {
         let updates = service.updates().unwrap();
         let state = Rc::new(RefCell::new(RemoteTreeState {
             root: service.state().unwrap(),
-            service,
+            _service: service,
             updates: NotifyCell::new(()),
         }));
 
