@@ -5,7 +5,6 @@ use notify_cell::NotifyCell;
 use serde_json;
 use std::cell::Ref;
 use std::cell::RefCell;
-use std::cell::RefMut;
 use std::cmp::{self, Ordering};
 use std::ops::Range;
 use std::rc::Rc;
@@ -640,6 +639,7 @@ impl Stream for BufferView {
 
 impl Drop for BufferView {
     fn drop(&mut self) {
+        self.buffer.borrow_mut().remove_selection_set(self.selection_set_id).unwrap();
         self.dropped.set(true);
     }
 }
@@ -647,6 +647,7 @@ impl Drop for BufferView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use IntoShared;
 
     #[test]
     fn test_cursor_movement() {
@@ -1144,6 +1145,17 @@ mod tests {
         assert_eq!(frame["first_visible_row"], 2);
         assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi"]);
         assert_eq!(frame["selections"], json!([selection((2, 3), (2, 3))]));
+    }
+
+    #[test]
+    fn test_dropping_view_removes_selection_set() {
+        let buffer = Buffer::new().into_shared();
+        let editor = BufferView::new(buffer.clone());
+        let selection_set_id = editor.selection_set_id;
+        assert!(buffer.borrow_mut().selections(selection_set_id).is_ok());
+
+        drop(editor);
+        assert!(buffer.borrow_mut().selections(selection_set_id).is_err());
     }
 
     fn stringify_lines(lines: &serde_json::Value) -> Vec<String> {
