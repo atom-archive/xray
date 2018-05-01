@@ -130,13 +130,17 @@ impl Server {
         O: 'static + Sink<SinkItem = OutgoingMessage>,
         I: 'static + Stream<Item = IncomingMessage, Error = io::Error>,
     {
-        let server = self.clone();
+        let server_clone_1 = self.clone();
+        let server_clone_2 = self.clone();
         let receive_incoming = incoming
             .for_each(move |message| {
-                server.handle_window_message(window_id, message);
+                server_clone_1.handle_window_message(window_id, message);
                 Ok(())
             })
-            .then(|_| Ok(()));
+            .then(move |_| {
+                server_clone_2.remove_window(window_id);
+                Ok(())
+            });
         self.reactor.spawn(receive_incoming);
 
         match self.app.borrow_mut().start_window(&window_id, height) {
@@ -187,6 +191,10 @@ impl Server {
                 eprintln!("Unexpected message {:?}", message);
             }
         }
+    }
+    
+    fn remove_window(&self, window_id: WindowId) {
+        self.app.borrow_mut().remove_window(window_id).unwrap();
     }
 
     fn open_workspace(&self, paths: Vec<PathBuf>) -> Result<(), String> {
