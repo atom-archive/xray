@@ -427,7 +427,7 @@ pub mod rpc {
                     }
                 }
                 Request::UpdateSelectionSet(set_id, selections) => {
-                    self.buffer.borrow_mut().update_remote_selections(
+                    self.buffer.borrow_mut().update_remote_selection_set(
                         self.replica_id,
                         set_id,
                         selections,
@@ -436,11 +436,17 @@ pub mod rpc {
                 Request::RemoveSelectionSet(set_id) => {
                     self.buffer
                         .borrow_mut()
-                        .remove_remote_selections(self.replica_id, set_id);
+                        .remove_remote_selection_set(self.replica_id, set_id);
                 }
             };
 
             None
+        }
+    }
+
+    impl Drop for Service {
+        fn drop(&mut self) {
+            self.buffer.borrow_mut().remove_remote_selection_sets(self.replica_id);
         }
     }
 
@@ -561,23 +567,25 @@ impl Buffer {
             next_local_selection_set_id: 0,
         }.into_shared();
 
-        let buffer_clone = buffer.clone();
+        let buffer_weak = Rc::downgrade(&buffer);
         foreground
             .execute(Box::new(incoming_updates.for_each(move |update| {
-                let mut buffer = buffer_clone.borrow_mut();
-                match update {
-                    rpc::Update::Operation(operation) => {
-                        if buffer.integrate_op(operation).is_err() {
-                            unimplemented!("Invalid op");
+                if let Some(buffer) = buffer_weak.upgrade() {
+                    let mut buffer = buffer.borrow_mut();
+                    match update {
+                        rpc::Update::Operation(operation) => {
+                            if buffer.integrate_op(operation).is_err() {
+                                unimplemented!("Invalid op");
+                            }
                         }
-                    }
-                    rpc::Update::Selections { updated, removed } => {
-                        for ((replica_id, set_id), selections) in updated {
-                            buffer.update_remote_selections(replica_id, set_id, selections);
-                        }
+                        rpc::Update::Selections { updated, removed } => {
+                            for ((replica_id, set_id), selections) in updated {
+                                buffer.update_remote_selection_set(replica_id, set_id, selections);
+                            }
 
-                        for (replica_id, set_id) in removed {
-                            buffer.remove_remote_selections(replica_id, set_id);
+                            for (replica_id, set_id) in removed {
+                                buffer.remove_remote_selection_set(replica_id, set_id);
+                            }
                         }
                     }
                 }
@@ -899,7 +907,7 @@ impl Buffer {
         Ok(())
     }
 
-    fn update_remote_selections(
+    fn update_remote_selection_set(
         &mut self,
         replica_id: ReplicaId,
         set_id: SelectionSetId,
@@ -916,8 +924,13 @@ impl Buffer {
         self.updates.set(());
     }
 
-    fn remove_remote_selections(&mut self, replica_id: ReplicaId, set_id: SelectionSetId) {
+    fn remove_remote_selection_set(&mut self, replica_id: ReplicaId, set_id: SelectionSetId) {
         self.selections.remove(&(replica_id, set_id));
+        self.updates.set(());
+    }
+
+    fn remove_remote_selection_sets(&mut self, id: ReplicaId) {
+        self.selections.retain(|(replica_id, _), _| *replica_id != id);
         self.updates.set(());
     }
 
@@ -2508,6 +2521,12 @@ mod tests {
         assert_eq!(selections(&buffer_1), selections(&buffer_2));
         buffer_3_updates.wait_next(&mut reactor).unwrap();
         assert_eq!(selections(&buffer_1), selections(&buffer_3));
+
+        drop(buffer_3);
+        buffer_1_updates.wait_next(&mut reactor).unwrap();
+        for (replica_id, _, _) in selections(&buffer_1) {
+            assert_eq!(buffer_1.borrow().replica_id, replica_id);
+        }
     }
 
     struct RandomCharIter<T: Rng>(T);
@@ -2524,9 +2543,9 @@ mod tests {
         let buffer = buffer.borrow();
 
         let mut selections = Vec::new();
-        for ((replica_id, buffer_1_set_id), selection_set) in &buffer.selections {
+        for ((replica_id, set_id), selection_set) in &buffer.selections {
             for selection in selection_set.selections.iter() {
-                selections.push((*replica_id, *buffer_1_set_id, selection.clone()));
+                selections.push((*replica_id, *set_id, selection.clone()));
             }
         }
         selections.sort_by(|a, b| match a.0.cmp(&b.0) {
