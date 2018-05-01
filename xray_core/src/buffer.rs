@@ -285,11 +285,14 @@ pub mod rpc {
                 .outgoing_ops()
                 .filter(move |op| op.replica_id() != replica_id);
             let buffer_updates = buffer.borrow().updates();
+            let selection_set_versions = buffer.borrow().selections.iter().map(|(key, set)|
+                (*key, set.version)
+            ).collect();
             Self {
                 replica_id,
                 buffer_updates,
                 outgoing_ops: Box::new(outgoing_ops),
-                selection_set_versions: HashMap::new(),
+                selection_set_versions,
                 buffer,
             }
         }
@@ -318,6 +321,7 @@ pub mod rpc {
                             .retain(|id, last_polled_version| {
                                 if let Some(selection_set) = buffer.selections.get(id) {
                                     if selection_set.version > *last_polled_version {
+                                        *last_polled_version = selection_set.version;
                                         updated.insert(*id, selection_set.selections.clone());
                                     }
                                     true
@@ -537,7 +541,7 @@ impl Buffer {
             );
         }
 
-        let mut buffer = Buffer {
+        let buffer = Buffer {
             replica_id: state.replica_id,
             next_replica_id: None,
             local_clock: 0,
@@ -653,6 +657,11 @@ impl Buffer {
 
     pub fn add_selection_set(&mut self, selections: Vec<Selection>) -> SelectionSetId {
         let id = self.next_local_selection_set_id;
+
+        if let Some(ref client) = self.client {
+            client.request(rpc::Request::UpdateSelectionSet(id, selections.clone()));
+        }
+
         self.next_local_selection_set_id += 1;
         self.selections.insert(
             (self.replica_id, id),
@@ -665,8 +674,14 @@ impl Buffer {
         id
     }
 
-    pub fn remove_selection_set(&mut self, id: SelectionSetId) {
-        self.selections.remove(&(self.replica_id, id));
+    pub fn remove_selection_set(&mut self, id: SelectionSetId) -> Result<(), ()> {
+        if let Some(ref client) = self.client {
+            client.request(rpc::Request::RemoveSelectionSet(id));
+        }
+
+        self.selections.remove(&(self.replica_id, id)).ok_or(())?;
+        self.updates.set(());
+        Ok(())
     }
 
     pub fn selections(&self, set_id: SelectionSetId) -> Result<&[Selection], ()> {
@@ -881,7 +896,7 @@ impl Buffer {
         set_id: SelectionSetId,
         selections: Vec<Selection>,
     ) {
-        let mut set = self.selections
+        let set = self.selections
             .entry((replica_id, set_id))
             .or_insert(SelectionSet {
                 version: 0,
