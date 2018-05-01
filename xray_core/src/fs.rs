@@ -75,6 +75,7 @@ pub struct RemoteTree(Rc<RefCell<RemoteTreeState>>);
 
 struct RemoteTreeState {
     root: Entry,
+    service: client::Service<TreeService>,
     updates: NotifyCell<()>,
 }
 
@@ -254,15 +255,17 @@ impl server::Service for TreeService {
 }
 
 impl RemoteTree {
-    pub fn new(foreground: ForegroundExecutor, client: client::Service<TreeService>) -> Self {
+    pub fn new(foreground: ForegroundExecutor, service: client::Service<TreeService>) -> Self {
+        let updates = service.updates().unwrap();
         let state = Rc::new(RefCell::new(RemoteTreeState {
-            root: client.state().unwrap(),
+            root: service.state().unwrap(),
+            service,
             updates: NotifyCell::new(()),
         }));
 
         let state_clone = state.clone();
         foreground
-            .execute(Box::new(client.updates().unwrap().for_each(move |root| {
+            .execute(Box::new(updates.for_each(move |root| {
                 let mut state = state_clone.borrow_mut();
                 state.root = root;
                 state.updates.set(());
