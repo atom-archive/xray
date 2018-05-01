@@ -593,7 +593,8 @@ impl View for BufferView {
             "height": self.height,
             "width": self.width,
             "line_height": self.line_height,
-            "selections": self.render_selections(start..end)
+            "selections": self.render_selections(start..end),
+            "local_replica_id": buffer.replica_id,
         })
     }
 

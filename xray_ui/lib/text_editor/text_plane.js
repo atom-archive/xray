@@ -57,7 +57,8 @@ class TextPlane extends React.Component {
       firstVisibleRow: this.props.firstVisibleRow,
       lines: this.props.lines,
       selections: this.props.selections,
-      showCursors: this.props.showCursors,
+      showLocalCursors: this.props.showLocalCursors,
+      localReplicaId: this.props.localReplicaId,
       computedLineHeight
     });
   }
@@ -317,7 +318,8 @@ class Renderer {
     firstVisibleRow,
     lines,
     selections,
-    showCursors
+    showLocalCursors,
+    localReplicaId
   }) {
     const { dpiScale } = this.style;
     const viewportScaleX = 2 / canvasWidth;
@@ -354,7 +356,9 @@ class Renderer {
       xPositions,
       selectionColor,
       cursorColor,
-      cursorWidth
+      cursorWidth,
+      showLocalCursors,
+      localReplicaId
     );
     this.atlas.uploadTexture();
 
@@ -364,9 +368,7 @@ class Renderer {
 
     this.drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY);
     this.drawText(glyphCount, viewportScaleX, viewportScaleY);
-    if (showCursors) {
-      this.drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY);
-    }
+    this.drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY);
   }
 
   drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY) {
@@ -555,7 +557,9 @@ class Renderer {
     xPositions,
     selectionColor,
     cursorColor,
-    cursorWidth
+    cursorWidth,
+    showLocalCursors,
+    localReplicaId
   ) {
     const { dpiScale, computedLineHeight } = this.style;
 
@@ -615,16 +619,21 @@ class Renderer {
             selectionColor
           );
         }
-      } else {
-        const startX = xPositions.get(keyForPoint(selection.start));
+      }
+
+      if (showLocalCursors || localReplicaId !== selection.replica_id) {
+        const cursorPoint = selection.reversed
+          ? selection.start
+          : selection.end;
+        const startX = xPositions.get(keyForPoint(cursorPoint));
         const endX = startX + cursorWidth;
         this.updateSolidInstance(
           this.cursorSolidInstances,
           cursorSolidCount++,
           Math.round(startX),
-          yForRow(selection.start.row),
+          yForRow(cursorPoint.row),
           Math.round(endX - startX),
-          yForRow(selection.start.row + 1) - yForRow(selection.start.row),
+          yForRow(cursorPoint.row + 1) - yForRow(cursorPoint.row),
           cursorColor
         );
       }

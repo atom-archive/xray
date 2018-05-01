@@ -43,7 +43,7 @@ class TextEditor extends React.Component {
       CURSOR_BLINK_RESUME_DELAY
     );
 
-    this.state = {showCursors: true};
+    this.state = {showLocalCursors: true};
   }
 
   componentDidMount() {
@@ -93,7 +93,8 @@ class TextEditor extends React.Component {
         }
       },
       $(TextPlane, {
-        showCursors: this.state.showCursors,
+        showLocalCursors: this.state.showLocalCursors,
+        localReplicaId: this.props.local_replica_id,
         lineHeight: this.props.line_height,
         scrollTop: this.props.scroll_top,
         height: this.props.height,
@@ -135,7 +136,7 @@ class TextEditor extends React.Component {
       window.clearInterval(this.cursorBlinkIntervalHandle)
       this.cursorBlinkIntervalHandle = null
       this.setState({
-        showCursors: true,
+        showLocalCursors: true,
         cursorsBlinking: false
       });
     }
@@ -144,12 +145,12 @@ class TextEditor extends React.Component {
   startCursorBlinking () {
     if (!this.state.cursorsBlinking) {
       this.cursorBlinkIntervalHandle = window.setInterval(() => {
-        this.setState({ showCursors: !this.state.showCursors });
+        this.setState({ showLocalCursors: !this.state.showLocalCursors });
       }, CURSOR_BLINK_PERIOD / 2);
 
       this.setState({
         cursorsBlinking: true,
-        showCursors: false
+        showLocalCursors: false
       });
     }
   }
