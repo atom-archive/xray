@@ -140,7 +140,7 @@ impl BufferView {
                         }
                     })
                     .collect();
-            });
+            }).unwrap();
         }
 
         self.updated();
