@@ -285,9 +285,12 @@ pub mod rpc {
                 .outgoing_ops()
                 .filter(move |op| op.replica_id() != replica_id);
             let buffer_updates = buffer.borrow().updates();
-            let selection_set_versions = buffer.borrow().selections.iter().map(|(key, set)|
-                (*key, set.version)
-            ).collect();
+            let selection_set_versions = buffer
+                .borrow()
+                .selections
+                .iter()
+                .map(|(key, set)| (*key, set.version))
+                .collect();
             Self {
                 replica_id,
                 buffer_updates,
@@ -696,11 +699,17 @@ impl Buffer {
         F: FnOnce(&Buffer, &mut Vec<Selection>),
     {
         let id = (self.replica_id, set_id);
-        let mut selections_set = self.selections.remove(&id).ok_or(())?;
-        f(self, &mut selections_set.selections);
-        self.merge_selections(&mut selections_set.selections);
-        selections_set.version += 1;
-        self.selections.insert(id, selections_set);
+        let mut set = self.selections.remove(&id).ok_or(())?;
+        f(self, &mut set.selections);
+        self.merge_selections(&mut set.selections);
+        set.version += 1;
+        if let Some(ref client) = self.client {
+            client.request(rpc::Request::UpdateSelectionSet(
+                id.1,
+                set.selections.clone(),
+            ));
+        }
+        self.selections.insert(id, set);
         self.updates.set(());
         Ok(())
     }
@@ -2416,17 +2425,10 @@ mod tests {
 
         let mut buffer_1 = Buffer::new();
         buffer_1.edit(0..0, "abcdef");
-
-        let selections_1 = vec![
-            empty_selection(&buffer_1, 1),
-            empty_selection(&buffer_1, 3),
-        ];
-        let buffer_1_selections_id_1 = buffer_1.add_selection_set(selections_1);
-        let selections_2 = vec![
-            empty_selection(&buffer_1, 2),
-            empty_selection(&buffer_1, 4),
-        ];
-        let buffer_1_selections_id_2 = buffer_1.add_selection_set(selections_2);
+        let sels = vec![empty_selection(&buffer_1, 1), empty_selection(&buffer_1, 3)];
+        buffer_1.add_selection_set(sels);
+        let sels = vec![empty_selection(&buffer_1, 2), empty_selection(&buffer_1, 4)];
+        let buffer_1_set_id = buffer_1.add_selection_set(sels);
         let buffer_1 = buffer_1.into_shared();
 
         let mut reactor = reactor::Core::new().unwrap();
@@ -2447,28 +2449,59 @@ mod tests {
         let mut buffer_2_updates = buffer_2.borrow().updates();
         let mut buffer_3_updates = buffer_3.borrow().updates();
 
-        buffer_1.borrow_mut().remove_selection_set(buffer_1_selections_id_2).unwrap();
-        buffer_1_updates.wait_next(&mut reactor).unwrap();
-
-        buffer_2_updates.wait_next(&mut reactor).unwrap();
-        assert_eq!(selections(&buffer_1), selections(&buffer_2));
-        buffer_3_updates.wait_next(&mut reactor).unwrap();
-        assert_eq!(selections(&buffer_1), selections(&buffer_3));
-
-        let selections_3 = vec![empty_selection(&buffer_2.borrow(), 1)];
-        let buffer_2_selections_id = buffer_2
+        buffer_1
             .borrow_mut()
-            .add_selection_set(selections_3);
+            .mutate_selections(buffer_1_set_id, |buffer, selections| {
+                for selection in selections {
+                    selection.start = buffer
+                        .anchor_before_offset(
+                            buffer.offset_for_anchor(&selection.start).unwrap() + 1,
+                        )
+                        .unwrap();
+                }
+            })
+            .unwrap();
+        buffer_2_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(selections(&buffer_1), selections(&buffer_3));
+        buffer_3_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(selections(&buffer_1), selections(&buffer_3));
+
+        buffer_1.borrow_mut().remove_selection_set(buffer_1_set_id).unwrap();
+        buffer_1_updates.wait_next(&mut reactor).unwrap();
+
+        buffer_2_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(selections(&buffer_1), selections(&buffer_2));
+        buffer_3_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(selections(&buffer_1), selections(&buffer_3));
+
+        let sels = vec![empty_selection(&buffer_2.borrow(), 1)];
+        let buffer_2_set_id = buffer_2.borrow_mut().add_selection_set(sels);
         buffer_2_updates.wait_next(&mut reactor).unwrap();
 
         buffer_1_updates.wait_next(&mut reactor).unwrap();
         assert_eq!(selections(&buffer_1), selections(&buffer_2));
         buffer_3_updates.wait_next(&mut reactor).unwrap();
         assert_eq!(selections(&buffer_1), selections(&buffer_3));
+
+        buffer_2.borrow_mut().mutate_selections(buffer_2_set_id, |buffer, selections| {
+            for selection in selections {
+                selection.start = buffer
+                    .anchor_before_offset(
+                        buffer.offset_for_anchor(&selection.start).unwrap() + 1,
+                    )
+                    .unwrap();
+            }
+        }).unwrap();
+
+        buffer_1_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(selections(&buffer_2), selections(&buffer_1));
+        buffer_3_updates.wait_next(&mut reactor).unwrap();
+        assert_eq!(selections(&buffer_2), selections(&buffer_3));
 
         buffer_2
             .borrow_mut()
-            .remove_selection_set(buffer_2_selections_id).unwrap();
+            .remove_selection_set(buffer_2_set_id)
+            .unwrap();
         buffer_2_updates.wait_next(&mut reactor).unwrap();
 
         buffer_1_updates.wait_next(&mut reactor).unwrap();
@@ -2491,9 +2524,9 @@ mod tests {
         let buffer = buffer.borrow();
 
         let mut selections = Vec::new();
-        for ((replica_id, set_id), selection_set) in &buffer.selections {
+        for ((replica_id, buffer_1_set_id), selection_set) in &buffer.selections {
             for selection in selection_set.selections.iter() {
-                selections.push((*replica_id, *set_id, selection.clone()));
+                selections.push((*replica_id, *buffer_1_set_id, selection.clone()));
             }
         }
         selections.sort_by(|a, b| match a.0.cmp(&b.0) {
