@@ -476,17 +476,6 @@ impl BufferView {
         let buffer = self.buffer.borrow();
         let mut rendered_selections = Vec::new();
 
-        for selection in
-            self.query_selections(&buffer.selections(self.selection_set_id).unwrap(), &range)
-        {
-            rendered_selections.push(SelectionProps {
-                replica_id: buffer.replica_id,
-                start: buffer.point_for_anchor(&selection.start).unwrap(),
-                end: buffer.point_for_anchor(&selection.end).unwrap(),
-                reversed: selection.reversed,
-            });
-        }
-
         for (replica_id, selections) in buffer.remote_selections() {
             for selection in self.query_selections(selections, &range) {
                 rendered_selections.push(SelectionProps {
@@ -496,6 +485,17 @@ impl BufferView {
                     reversed: selection.reversed,
                 });
             }
+        }
+
+        for selection in
+            self.query_selections(&buffer.selections(self.selection_set_id).unwrap(), &range)
+        {
+            rendered_selections.push(SelectionProps {
+                replica_id: buffer.replica_id,
+                start: buffer.point_for_anchor(&selection.start).unwrap(),
+                end: buffer.point_for_anchor(&selection.end).unwrap(),
+                reversed: selection.reversed,
+            });
         }
 
         rendered_selections
