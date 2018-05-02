@@ -21,6 +21,7 @@ type LocalTimestamp = usize;
 type LamportTimestamp = usize;
 pub type SelectionSetId = usize;
 type SelectionSetVersion = usize;
+pub type BufferId = usize;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Version(
@@ -36,6 +37,7 @@ pub enum Error {
 }
 
 pub struct Buffer {
+    id: BufferId,
     pub replica_id: ReplicaId,
     next_replica_id: Option<ReplicaId>,
     local_clock: LocalTimestamp,
@@ -213,8 +215,8 @@ impl Version {
 }
 
 pub mod rpc {
-    use super::{Buffer, EditId, FragmentId, Insertion, InsertionSplit, Operation, ReplicaId,
-                Selection, SelectionSetId, SelectionSetVersion, Version};
+    use super::{Buffer, BufferId, EditId, FragmentId, Insertion, InsertionSplit, Operation,
+                ReplicaId, Selection, SelectionSetId, SelectionSetVersion, Version};
     use futures::{Async, Future, Stream};
     use never::Never;
     use notify_cell::NotifyCellObserver;
@@ -227,6 +229,7 @@ pub mod rpc {
 
     #[derive(Serialize, Deserialize)]
     pub struct State {
+        pub(super) id: BufferId,
         pub(super) replica_id: ReplicaId,
         pub(super) fragments: Vec<Fragment>,
         pub(super) insertions: HashMap<EditId, Insertion>,
@@ -359,6 +362,7 @@ pub mod rpc {
         fn init(&mut self, _: &rpc::server::Connection) -> Self::State {
             let buffer = self.buffer.borrow_mut();
             let mut state = State {
+                id: buffer.id,
                 replica_id: self.replica_id,
                 fragments: Vec::new(),
                 insertions: HashMap::new(),
@@ -464,7 +468,7 @@ pub mod rpc {
 }
 
 impl Buffer {
-    pub fn new() -> Self {
+    pub fn new(id: BufferId) -> Self {
         let mut fragments = Tree::new();
 
         // Push start sentinel.
@@ -496,6 +500,7 @@ impl Buffer {
         );
 
         Self {
+            id,
             replica_id: 1,
             next_replica_id: Some(2),
             local_clock: 0,
@@ -553,6 +558,7 @@ impl Buffer {
         }
 
         let buffer = Buffer {
+            id: state.id,
             replica_id: state.replica_id,
             next_replica_id: None,
             local_clock: 0,
@@ -597,6 +603,10 @@ impl Buffer {
             .unwrap();
 
         Ok(buffer)
+    }
+
+    pub fn id(&self) -> BufferId {
+        self.id
     }
 
     pub fn next_replica_id(&mut self) -> Result<ReplicaId, ()> {
@@ -1586,6 +1596,10 @@ impl Selection {
     pub fn is_empty(&self, buffer: &Buffer) -> bool {
         buffer.cmp_anchors(&self.start, &self.end).unwrap() == cmp::Ordering::Equal
     }
+
+    pub fn anchor_range(&self) -> Range<Anchor> {
+        self.start.clone()..self.end.clone()
+    }
 }
 
 impl Text {
@@ -1989,7 +2003,7 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         buffer.edit(0..0, "abc");
         assert_eq!(buffer.to_string(), "abc");
         buffer.edit(3..3, "def");
@@ -2010,7 +2024,7 @@ mod tests {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new();
+            let mut buffer = Buffer::new(0);
             let mut reference_string = String::new();
 
             for _i in 0..30 {
@@ -2033,7 +2047,7 @@ mod tests {
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         buffer.edit(0..0, "abcd\nefg\nhij");
         buffer.edit(12..12, "kl\nmno");
         buffer.edit(18..18, "\npqrs\n");
@@ -2050,7 +2064,7 @@ mod tests {
 
     #[test]
     fn iter_starting_at_row() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         buffer.edit(0..0, "abcd\nefgh\nij");
         buffer.edit(12..12, "kl\nmno");
         buffer.edit(18..18, "\npqrs");
@@ -2169,7 +2183,7 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         buffer.edit(0..0, "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
@@ -2311,7 +2325,7 @@ mod tests {
 
     #[test]
     fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
@@ -2342,7 +2356,7 @@ mod tests {
             let mut buffers = Vec::new();
             let mut queues = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new();
+                let mut buffer = Buffer::new(0);
                 buffer.replica_id = i + 1;
                 buffers.push(buffer);
                 queues.push(Vec::new());
@@ -2387,7 +2401,7 @@ mod tests {
 
     #[test]
     fn test_edit_replication() {
-        let local_buffer = Buffer::new().into_shared();
+        let local_buffer = Buffer::new(0).into_shared();
         local_buffer.borrow_mut().edit(0..0, "abcdef");
         local_buffer.borrow_mut().edit(2..4, "ghi");
 
@@ -2439,7 +2453,7 @@ mod tests {
     fn test_selection_replication() {
         use stream_ext::StreamExt;
 
-        let mut buffer_1 = Buffer::new();
+        let mut buffer_1 = Buffer::new(0);
         buffer_1.edit(0..0, "abcdef");
         let sels = vec![empty_selection(&buffer_1, 1), empty_selection(&buffer_1, 3)];
         buffer_1.add_selection_set(sels);

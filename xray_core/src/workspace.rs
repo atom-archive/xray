@@ -1,4 +1,5 @@
-use buffer_view::{BufferViewDelegate, BufferView};
+use buffer::{self, BufferId};
+use buffer_view::{BufferView, BufferViewDelegate};
 use cross_platform;
 use discussion::{Discussion, DiscussionService, DiscussionView, DiscussionViewDelegate};
 use file_finder::{FileFinderView, FileFinderViewDelegate};
@@ -6,12 +7,12 @@ use futures::{Future, Poll, Stream};
 use never::Never;
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
-use project::{self, LocalProject, PathSearch, PathSearchStatus, Project, ProjectService, RemoteProject,
-              TreeId};
+use project::{LocalProject, PathSearch, PathSearchStatus, Project, ProjectService,
+              RemoteProject, TreeId};
 use rpc::{self, client, server};
 use serde_json;
-use std::cell::Ref;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell, RefMut};
+use std::ops::Range;
 use std::rc::Rc;
 use window::{View, ViewHandle, WeakViewHandle, Window};
 use ForegroundExecutor;
@@ -21,6 +22,7 @@ pub type UserId = usize;
 
 pub trait Workspace {
     fn project(&self) -> Ref<Project>;
+    fn project_mut(&self) -> RefMut<Project>;
     fn discussion(&self) -> &Rc<RefCell<Discussion>>;
 }
 
@@ -49,11 +51,18 @@ pub struct ServiceState {
 pub struct WorkspaceView {
     foreground: ForegroundExecutor,
     workspace: Rc<RefCell<Workspace>>,
-    modal_panel: Option<ViewHandle>,
+    active_buffer_view: Option<WeakViewHandle<BufferView<WorkspaceView>>>,
     center_pane: Option<ViewHandle>,
+    modal: Option<ViewHandle>,
     left_panel: Option<ViewHandle>,
     updates: NotifyCell<()>,
     self_handle: Option<WeakViewHandle<WorkspaceView>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Anchor {
+    buffer_id: BufferId,
+    range: Range<buffer::Anchor>,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +84,10 @@ impl LocalWorkspace {
 impl Workspace for LocalWorkspace {
     fn project(&self) -> Ref<Project> {
         self.project.borrow()
+    }
+
+    fn project_mut(&self) -> RefMut<Project> {
+        self.project.borrow_mut()
     }
 
     fn discussion(&self) -> &Rc<RefCell<Discussion>> {
@@ -105,6 +118,10 @@ impl RemoteWorkspace {
 impl Workspace for RemoteWorkspace {
     fn project(&self) -> Ref<Project> {
         self.project.borrow()
+    }
+
+    fn project_mut(&self) -> RefMut<Project> {
+        self.project.borrow_mut()
     }
 
     fn discussion(&self) -> &Rc<RefCell<Discussion>> {
@@ -148,8 +165,9 @@ impl WorkspaceView {
         WorkspaceView {
             workspace,
             foreground,
-            modal_panel: None,
+            active_buffer_view: None,
             center_pane: None,
+            modal: None,
             left_panel: None,
             updates: NotifyCell::new(()),
             self_handle: None,
@@ -157,13 +175,13 @@ impl WorkspaceView {
     }
 
     fn toggle_file_finder(&mut self, window: &mut Window) {
-        if self.modal_panel.is_some() {
-            self.modal_panel = None;
+        if self.modal.is_some() {
+            self.modal = None;
         } else {
             let delegate = self.self_handle.as_ref().cloned().unwrap();
             let view = window.add_view(FileFinderView::new(delegate));
             view.focus().unwrap();
-            self.modal_panel = Some(view);
+            self.modal = Some(view);
         }
         self.updates.set(());
     }
@@ -176,8 +194,8 @@ impl View for WorkspaceView {
 
     fn render(&self) -> serde_json::Value {
         json!({
-            "modal": self.modal_panel.as_ref().map(|view_handle| view_handle.view_id),
             "center_pane": self.center_pane.as_ref().map(|view_handle| view_handle.view_id),
+            "modal": self.modal.as_ref().map(|view_handle| view_handle.view_id),
             "left_panel": self.left_panel.as_ref().map(|view_handle| view_handle.view_id)
         })
     }
@@ -199,17 +217,22 @@ impl View for WorkspaceView {
 }
 
 impl BufferViewDelegate for WorkspaceView {
-    fn set_active_buffer_view(&mut self, buffer_view: WeakViewHandle<BufferView<Self>>) {
-
+    fn set_active_buffer_view(&mut self, handle: WeakViewHandle<BufferView<Self>>) {
+        self.active_buffer_view = Some(handle);
     }
 }
 
 impl DiscussionViewDelegate for WorkspaceView {
-    fn anchor(&self) -> Option<project::Anchor> {
-        unimplemented!()
+    fn anchor(&self) -> Option<Anchor> {
+        self.active_buffer_view.as_ref().and_then(|handle| {
+            handle.map(|buffer_view| Anchor {
+                buffer_id: buffer_view.buffer_id(),
+                range: buffer_view.selections().last().unwrap().anchor_range(),
+            })
+        })
     }
 
-    fn jump(&self, anchor: &project::Anchor) -> Option<project::Anchor> {
+    fn jump(&self, anchor: &Anchor) {
         unimplemented!()
     }
 }
@@ -227,14 +250,14 @@ impl FileFinderViewDelegate for WorkspaceView {
     }
 
     fn did_close(&mut self) {
-        self.modal_panel = None;
+        self.modal = None;
         self.updates.set(());
     }
 
     fn did_confirm(&mut self, tree_id: TreeId, path: &cross_platform::Path, window: &mut Window) {
         let window_handle = window.handle();
         let workspace = self.workspace.borrow();
-        let project = workspace.project();
+        let project = workspace.project_mut();
         let view_handle = self.self_handle.clone();
         self.foreground
             .execute(Box::new(project.open_buffer(tree_id, path).then(
@@ -242,13 +265,14 @@ impl FileFinderViewDelegate for WorkspaceView {
                     window_handle.map(|window| match result {
                         Ok(buffer) => {
                             if let Some(view_handle) = view_handle {
-                                let mut buffer_view = BufferView::new(buffer, Some(view_handle.clone()));
+                                let mut buffer_view =
+                                    BufferView::new(buffer, Some(view_handle.clone()));
                                 buffer_view.set_line_height(20.0);
                                 let buffer_view = window.add_view(buffer_view);
                                 buffer_view.focus().unwrap();
                                 view_handle.map(|view| {
                                     view.center_pane = Some(buffer_view);
-                                    view.modal_panel = None;
+                                    view.modal = None;
                                     view.updates.set(());
                                 });
                             }

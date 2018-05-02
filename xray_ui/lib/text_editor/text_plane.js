@@ -56,6 +56,7 @@ class TextPlane extends React.Component {
       canvasWidth: this.props.width * window.devicePixelRatio,
       canvasHeight: this.props.height * window.devicePixelRatio,
       scrollTop: this.props.scrollTop,
+      paddingLeft: this.props.paddingLeft || 0,
       firstVisibleRow: this.props.firstVisibleRow,
       lines: this.props.lines,
       selections: this.props.selections,
@@ -319,6 +320,7 @@ class Renderer {
     canvasHeight,
     canvasWidth,
     scrollTop,
+    paddingLeft,
     firstVisibleRow,
     lines,
     selections,
@@ -344,6 +346,7 @@ class Renderer {
     const glyphCount = this.populateGlyphInstances(
       scrollTop,
       firstVisibleRow,
+      paddingLeft,
       lines,
       selections,
       textColor,
@@ -482,6 +485,7 @@ class Renderer {
   populateGlyphInstances(
     scrollTop,
     firstVisibleRow,
+    paddingLeft,
     lines,
     selections,
     textColor,
@@ -496,7 +500,7 @@ class Renderer {
 
     for (var i = 0; i < lines.length; i++) {
       position.row = firstVisibleRow + i;
-      let x = 0;
+      let x = 5;
       const line = lines[i];
 
       for (

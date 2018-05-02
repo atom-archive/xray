@@ -1,4 +1,4 @@
-use buffer::{Buffer, Point, ReplicaId, Selection, SelectionSetId};
+use buffer::{Buffer, BufferId, Point, ReplicaId, Selection, SelectionSetId};
 use futures::{Poll, Stream};
 use movement;
 use notify_cell::NotifyCell;
@@ -480,6 +480,16 @@ impl<T: BufferViewDelegate> BufferView<T> {
             .unwrap();
     }
 
+    pub fn selections(&self) -> Ref<[Selection]> {
+        Ref::map(self.buffer.borrow(), |buffer| {
+            buffer.selections(self.selection_set_id).unwrap()
+        })
+    }
+
+    pub fn buffer_id(&self) -> BufferId {
+        self.buffer.borrow().id()
+    }
+
     fn render_selections(&self, range: Range<Point>) -> Vec<SelectionProps> {
         let buffer = self.buffer.borrow();
         let mut rendered_selections = Vec::new();
@@ -546,12 +556,6 @@ impl<T: BufferViewDelegate> BufferView<T> {
 
             &selections[start_index..end_index]
         }
-    }
-
-    fn selections(&self) -> Ref<[Selection]> {
-        Ref::map(self.buffer.borrow(), |buffer| {
-            buffer.selections(self.selection_set_id).unwrap()
-        })
     }
 
     fn updated(&mut self) {
@@ -665,10 +669,11 @@ impl<T: BufferViewDelegate> Drop for BufferView<T> {
 mod tests {
     use super::*;
     use IntoShared;
+    use workspace::WorkspaceView;
 
     #[test]
     fn test_cursor_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
         editor.buffer.borrow_mut().edit(0..0, "abc");
         editor.buffer.borrow_mut().edit(3..3, "\n");
         editor.buffer.borrow_mut().edit(4..4, "\ndef");
@@ -749,7 +754,7 @@ mod tests {
 
     #[test]
     fn test_selection_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
         editor.buffer.borrow_mut().edit(0..0, "abc");
         editor.buffer.borrow_mut().edit(3..3, "\n");
         editor.buffer.borrow_mut().edit(4..4, "\ndef");
@@ -840,7 +845,7 @@ mod tests {
 
     #[test]
     fn test_backspace() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
         editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
@@ -852,7 +857,7 @@ mod tests {
 
     #[test]
     fn test_delete() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
         editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
@@ -864,7 +869,7 @@ mod tests {
 
     #[test]
     fn test_add_selection() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
         editor
             .buffer
             .borrow_mut()
@@ -918,7 +923,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_above() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
         editor.buffer.borrow_mut().edit(
             0..0,
             "\
@@ -987,7 +992,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_below() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
         editor.buffer.borrow_mut().edit(
             0..0,
             "\
@@ -1047,7 +1052,7 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
 
         editor.buffer.borrow_mut().edit(0..0, "abcdefgh\nhijklmno");
 
@@ -1070,14 +1075,14 @@ mod tests {
 
     #[test]
     fn test_render() {
-        let buffer = Rc::new(RefCell::new(Buffer::new()));
+        let buffer = Rc::new(RefCell::new(Buffer::new(0)));
         buffer
             .borrow_mut()
             .edit(0..0, "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
         let line_height = 6.0;
 
         {
-            let mut editor = BufferView::new(buffer.clone());
+            let mut editor = BufferView::<WorkspaceView>::new(buffer.clone(), None);
             editor
                 .set_height(3.0 * line_height)
                 .set_line_height(line_height)
@@ -1108,7 +1113,7 @@ mod tests {
 
         // Selection starting at the end of buffer
         {
-            let mut editor = BufferView::new(buffer.clone());
+            let mut editor = BufferView::<WorkspaceView>::new(buffer.clone(), None);
             editor
                 .set_height(8.0 * line_height)
                 .set_line_height(line_height)
@@ -1126,7 +1131,7 @@ mod tests {
 
         // Selection ending exactly at first visible row
         {
-            let mut editor = BufferView::new(buffer.clone());
+            let mut editor = BufferView::<WorkspaceView>::new(buffer.clone(), None);
             editor
                 .set_height(3.0 * line_height)
                 .set_line_height(line_height)
@@ -1143,7 +1148,7 @@ mod tests {
     #[test]
     fn test_render_past_last_line() {
         let line_height = 4.0;
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
 
         editor
             .set_height(3.0 * line_height)
@@ -1166,8 +1171,8 @@ mod tests {
 
     #[test]
     fn test_dropping_view_removes_selection_set() {
-        let buffer = Buffer::new().into_shared();
-        let editor = BufferView::new(buffer.clone());
+        let buffer = Buffer::new(0).into_shared();
+        let editor = BufferView::<WorkspaceView>::new(buffer.clone(), None);
         let selection_set_id = editor.selection_set_id;
         assert!(buffer.borrow_mut().selections(selection_set_id).is_ok());
 
@@ -1184,7 +1189,7 @@ mod tests {
             .collect()
     }
 
-    fn render_selections(editor: &BufferView) -> Vec<SelectionProps> {
+    fn render_selections(editor: &BufferView<WorkspaceView>) -> Vec<SelectionProps> {
         let buffer = editor.buffer.borrow();
         editor
             .selections()

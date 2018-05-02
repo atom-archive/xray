@@ -102,6 +102,7 @@ class TextEditor extends React.Component {
         localReplicaId: this.props.local_replica_id,
         lineHeight: this.props.line_height,
         scrollTop: this.props.scroll_top,
+        paddingLeft: 5,
         height: this.props.height,
         width: this.props.width,
         selections: this.props.selections,

@@ -1,19 +1,18 @@
 use futures::{unsync, Async, Future, Poll, Stream};
 use never::Never;
 use notify_cell::NotifyCell;
-use project;
 use rpc::{self, client, server};
 use serde_json;
 use std::cell::RefCell;
 use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
-use workspace::UserId;
+use workspace::{self, UserId};
 use ForegroundExecutor;
 use IntoShared;
 
 pub trait DiscussionViewDelegate {
-    fn anchor(&self) -> Option<project::Anchor>;
-    fn jump(&self, anchor: &project::Anchor) -> Option<project::Anchor>;
+    fn anchor(&self) -> Option<workspace::Anchor>;
+    fn jump(&self, anchor: &workspace::Anchor);
 }
 
 pub struct Discussion {
@@ -27,7 +26,7 @@ pub struct Discussion {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Message {
     text: String,
-    anchor: Option<project::Anchor>,
+    anchor: Option<workspace::Anchor>,
     user_id: UserId,
 }
 
@@ -53,7 +52,7 @@ pub struct DiscussionService {
 #[derive(Serialize, Deserialize)]
 pub struct ServiceRequest {
     text: String,
-    anchor: Option<project::Anchor>,
+    anchor: Option<workspace::Anchor>,
 }
 
 impl Discussion {
@@ -82,13 +81,14 @@ impl Discussion {
         }.into_shared();
 
         let discussion_weak = Rc::downgrade(&discussion);
-        executor.execute(Box::new(client_updates.for_each(move |message| {
-            if let Some(discussion) = discussion_weak.upgrade() {
-                discussion.borrow_mut().push_message(message);
-            }
-
-            Ok(())
-        })));
+        executor
+            .execute(Box::new(client_updates.for_each(move |message| {
+                if let Some(discussion) = discussion_weak.upgrade() {
+                    discussion.borrow_mut().push_message(message);
+                }
+                Ok(())
+            })))
+            .unwrap();
         Ok(discussion)
     }
 
@@ -102,7 +102,7 @@ impl Discussion {
         rx.map_err(|_| unreachable!())
     }
 
-    fn send(&mut self, text: String, anchor: Option<project::Anchor>) {
+    fn send(&mut self, text: String, anchor: Option<workspace::Anchor>) {
         if let Some(ref client) = self.client {
             client.request(ServiceRequest { text, anchor });
         } else {

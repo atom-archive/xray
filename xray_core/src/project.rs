@@ -1,4 +1,4 @@
-use buffer::{self, Buffer};
+use buffer::{self, Buffer, BufferId};
 use cross_platform;
 use fs;
 use futures::{future, Async, Future, Poll};
@@ -6,12 +6,11 @@ use fuzzy;
 use never::Never;
 use notify_cell::{NotifyCell, NotifyCellObserver, WeakNotifyCell};
 use rpc;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
 use std::error::Error;
 use std::io;
-use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 use ForegroundExecutor;
@@ -36,21 +35,16 @@ pub trait Project {
 pub struct LocalProject {
     file_provider: Rc<fs::FileProvider>,
     next_tree_id: TreeId,
+    next_buffer_id: Rc<Cell<BufferId>>,
     trees: HashMap<TreeId, Rc<fs::LocalTree>>,
-    buffers: Rc<RefCell<HashMap<fs::FileId, Rc<RefCell<Buffer>>>>>,
+    buffers: Rc<RefCell<HashMap<BufferId, Rc<RefCell<Buffer>>>>>,
+    buffers_by_file: Rc<RefCell<HashMap<fs::FileId, Rc<RefCell<Buffer>>>>>,
 }
 
 pub struct RemoteProject {
     foreground: ForegroundExecutor,
     service: Rc<RefCell<rpc::client::Service<ProjectService>>>,
     trees: HashMap<TreeId, Box<fs::Tree>>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Anchor {
-    tree_id: TreeId,
-    relative_path: cross_platform::Path,
-    range: Range<buffer::Anchor>,
 }
 
 pub struct ProjectService {
@@ -128,8 +122,10 @@ impl LocalProject {
         let mut project = LocalProject {
             file_provider,
             next_tree_id: 0,
+            next_buffer_id: Rc::new(Cell::new(0)),
             trees: HashMap::new(),
             buffers: Rc::new(RefCell::new(HashMap::new())),
+            buffers_by_file: Rc::new(RefCell::new(HashMap::new())),
         };
         for tree in trees {
             project.add_tree(tree);
@@ -163,23 +159,25 @@ impl Project for LocalProject {
         relative_path: &cross_platform::Path,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
         if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
-            let buffers = self.buffers.clone();
+            let next_buffer_id_cell = self.next_buffer_id.clone();
+            let buffers_by_file = self.buffers_by_file.clone();
             Box::new(
                 self.file_provider
                     .open(&absolute_path)
                     .and_then(move |file| {
-                        // The borrow checker won't let us inline the following local variable:
-                        let buffer = buffers.borrow().get(&file.id()).cloned();
+                        let buffer = buffers_by_file.borrow().get(&file.id()).cloned();
                         if let Some(buffer) = buffer {
                             Box::new(future::ok(buffer))
                                 as Box<Future<Item = Rc<RefCell<Buffer>>, Error = io::Error>>
                         } else {
                             Box::new(file.read().and_then(move |content| {
-                                let mut buffers = buffers.borrow_mut();
-                                Ok(buffers
+                                let mut buffers_by_file = buffers_by_file.borrow_mut();
+                                Ok(buffers_by_file
                                     .entry(file.id())
                                     .or_insert_with(|| {
-                                        let mut buffer = Buffer::new();
+                                        let buffer_id = next_buffer_id_cell.get();
+                                        next_buffer_id_cell.set(next_buffer_id_cell.get() + 1);
+                                        let mut buffer = Buffer::new(buffer_id);
                                         buffer.edit(0..0, content.as_str());
                                         buffer.into_shared()
                                     })
@@ -763,7 +761,7 @@ mod tests {
             .run(remote_project.open_buffer(tree_id, &relative_path))
             .unwrap();
         let local_buffer = reactor
-            .run(local_project.borrow().open_buffer(tree_id, &relative_path))
+            .run(local_project.borrow_mut().open_buffer(tree_id, &relative_path))
             .unwrap();
 
         assert_eq!(

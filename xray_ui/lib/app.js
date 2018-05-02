@@ -29,7 +29,14 @@ const theme = {
       { r: 216, g: 49, b: 176, a: 255 },
       { r: 235, g: 221, b: 91, a: 255 },
     ]
-  }
+  },
+  avatarColors: [
+    { r: 31, g: 150, b: 255, a: 255 },
+    { r: 64, g: 181, b: 87, a: 255 },
+    { r: 206, g: 157, b: 59, a: 255 },
+    { r: 216, g: 49, b: 176, a: 255 },
+    { r: 235, g: 221, b: 91, a: 255 },
+  ]
 };
 
 const styletronInstance = new StyletronClient();
