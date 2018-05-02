@@ -10,7 +10,13 @@ use std::ops::Range;
 use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
 
-pub struct BufferView {
+pub trait BufferViewDelegate {
+    fn set_active_buffer_view(&mut self, buffer_view: WeakViewHandle<BufferView<Self>>)
+    where
+        Self: Sized;
+}
+
+pub struct BufferView<T: BufferViewDelegate> {
     buffer: Rc<RefCell<Buffer>>,
     updates_tx: NotifyCell<()>,
     updates_rx: Box<Stream<Item = (), Error = ()>>,
@@ -20,6 +26,7 @@ pub struct BufferView {
     width: Option<f64>,
     line_height: f64,
     scroll_top: f64,
+    delegate: Option<WeakViewHandle<T>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -50,8 +57,8 @@ enum BufferViewAction {
     AddSelectionBelow,
 }
 
-impl BufferView {
-    pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
+impl<T: BufferViewDelegate> BufferView<T> {
+    pub fn new(buffer: Rc<RefCell<Buffer>>, delegate: Option<WeakViewHandle<T>>) -> Self {
         let selection_set_id = {
             let mut buffer = buffer.borrow_mut();
             let start = buffer.anchor_before_offset(0).unwrap();
@@ -76,6 +83,7 @@ impl BufferView {
             width: None,
             line_height: 10.0,
             scroll_top: 0.0,
+            delegate,
         }
     }
 
@@ -551,13 +559,16 @@ impl BufferView {
     }
 }
 
-impl View for BufferView {
+impl<T: BufferViewDelegate> View for BufferView<T> {
     fn component_name(&self) -> &'static str {
         "BufferView"
     }
 
-    fn will_mount(&mut self, window: &mut Window, _: WeakViewHandle<Self>) {
+    fn will_mount(&mut self, window: &mut Window, self_handle: WeakViewHandle<Self>) {
         self.height = Some(window.height());
+        if let Some(ref delegate) = self.delegate {
+            delegate.map(|delegate| delegate.set_active_buffer_view(self_handle));
+        }
     }
 
     fn render(&self) -> serde_json::Value {
@@ -631,7 +642,7 @@ impl View for BufferView {
     }
 }
 
-impl Stream for BufferView {
+impl<T: BufferViewDelegate> Stream for BufferView<T> {
     type Item = ();
     type Error = ();
 
@@ -640,7 +651,7 @@ impl Stream for BufferView {
     }
 }
 
-impl Drop for BufferView {
+impl<T: BufferViewDelegate> Drop for BufferView<T> {
     fn drop(&mut self) {
         self.buffer
             .borrow_mut()

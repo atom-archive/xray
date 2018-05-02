@@ -1,11 +1,12 @@
-use buffer_view::BufferView;
+use buffer_view::{BufferViewDelegate, BufferView};
 use cross_platform;
+use discussion::{Discussion, DiscussionService, DiscussionView, DiscussionViewDelegate};
 use file_finder::{FileFinderView, FileFinderViewDelegate};
 use futures::{Future, Poll, Stream};
 use never::Never;
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
-use project::{LocalProject, PathSearch, PathSearchStatus, Project, ProjectService, RemoteProject,
+use project::{self, LocalProject, PathSearch, PathSearchStatus, Project, ProjectService, RemoteProject,
               TreeId};
 use rpc::{self, client, server};
 use serde_json;
@@ -16,16 +17,22 @@ use window::{View, ViewHandle, WeakViewHandle, Window};
 use ForegroundExecutor;
 use IntoShared;
 
+pub type UserId = usize;
+
 pub trait Workspace {
     fn project(&self) -> Ref<Project>;
+    fn discussion(&self) -> &Rc<RefCell<Discussion>>;
 }
 
 pub struct LocalWorkspace {
+    next_user_id: usize,
+    discussion: Rc<RefCell<Discussion>>,
     project: Rc<RefCell<LocalProject>>,
 }
 
 pub struct RemoteWorkspace {
     project: Rc<RefCell<RemoteProject>>,
+    discussion: Rc<RefCell<Discussion>>,
 }
 
 pub struct WorkspaceService {
@@ -34,7 +41,9 @@ pub struct WorkspaceService {
 
 #[derive(Serialize, Deserialize)]
 pub struct ServiceState {
+    user_id: UserId,
     project: rpc::ServiceId,
+    discussion: rpc::ServiceId,
 }
 
 pub struct WorkspaceView {
@@ -42,6 +51,7 @@ pub struct WorkspaceView {
     workspace: Rc<RefCell<Workspace>>,
     modal_panel: Option<ViewHandle>,
     center_pane: Option<ViewHandle>,
+    left_panel: Option<ViewHandle>,
     updates: NotifyCell<()>,
     self_handle: Option<WeakViewHandle<WorkspaceView>>,
 }
@@ -55,7 +65,9 @@ enum WorkspaceViewAction {
 impl LocalWorkspace {
     pub fn new(project: LocalProject) -> Self {
         Self {
-            project: Rc::new(RefCell::new(project)),
+            next_user_id: 1,
+            project: project.into_shared(),
+            discussion: Discussion::new(0).into_shared(),
         }
     }
 }
@@ -63,6 +75,10 @@ impl LocalWorkspace {
 impl Workspace for LocalWorkspace {
     fn project(&self) -> Ref<Project> {
         self.project.borrow()
+    }
+
+    fn discussion(&self) -> &Rc<RefCell<Discussion>> {
+        &self.discussion
     }
 }
 
@@ -72,10 +88,16 @@ impl RemoteWorkspace {
         service: client::Service<WorkspaceService>,
     ) -> Result<Self, rpc::Error> {
         let state = service.state()?;
-        let project = RemoteProject::new(foreground, service.take_service(state.project)?)?;
+        let project = RemoteProject::new(foreground.clone(), service.take_service(state.project)?)?;
+        let discussion = Discussion::remote(
+            foreground,
+            state.user_id,
+            service.take_service(state.discussion)?,
+        )?;
 
         Ok(Self {
             project: project.into_shared(),
+            discussion,
         })
     }
 }
@@ -83,6 +105,10 @@ impl RemoteWorkspace {
 impl Workspace for RemoteWorkspace {
     fn project(&self) -> Ref<Project> {
         self.project.borrow()
+    }
+
+    fn discussion(&self) -> &Rc<RefCell<Discussion>> {
+        &self.discussion
     }
 }
 
@@ -99,11 +125,20 @@ impl server::Service for WorkspaceService {
     type Response = Never;
 
     fn init(&mut self, connection: &server::Connection) -> ServiceState {
-        let service_handle =
-            connection.add_service(ProjectService::new(self.workspace.borrow().project.clone()));
-
+        let mut workspace = self.workspace.borrow_mut();
+        let user_id = workspace.next_user_id;
+        workspace.next_user_id += 1;
         ServiceState {
-            project: service_handle.service_id(),
+            user_id,
+            project: connection
+                .add_service(ProjectService::new(workspace.project.clone()))
+                .service_id(),
+            discussion: connection
+                .add_service(DiscussionService::new(
+                    user_id,
+                    workspace.discussion.clone(),
+                ))
+                .service_id(),
         }
     }
 }
@@ -115,6 +150,7 @@ impl WorkspaceView {
             foreground,
             modal_panel: None,
             center_pane: None,
+            left_panel: None,
             updates: NotifyCell::new(()),
             self_handle: None,
         }
@@ -141,12 +177,17 @@ impl View for WorkspaceView {
     fn render(&self) -> serde_json::Value {
         json!({
             "modal": self.modal_panel.as_ref().map(|view_handle| view_handle.view_id),
-            "center_pane": self.center_pane.as_ref().map(|view_handle| view_handle.view_id)
+            "center_pane": self.center_pane.as_ref().map(|view_handle| view_handle.view_id),
+            "left_panel": self.left_panel.as_ref().map(|view_handle| view_handle.view_id)
         })
     }
 
-    fn will_mount(&mut self, _window: &mut Window, view_handle: WeakViewHandle<Self>) {
-        self.self_handle = Some(view_handle);
+    fn will_mount(&mut self, window: &mut Window, view_handle: WeakViewHandle<Self>) {
+        self.self_handle = Some(view_handle.clone());
+        self.left_panel = Some(window.add_view(DiscussionView::new(
+            self.workspace.borrow().discussion().clone(),
+            view_handle,
+        )))
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value, window: &mut Window) {
@@ -154,6 +195,22 @@ impl View for WorkspaceView {
             Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(window),
             _ => eprintln!("Unrecognized action"),
         }
+    }
+}
+
+impl BufferViewDelegate for WorkspaceView {
+    fn set_active_buffer_view(&mut self, buffer_view: WeakViewHandle<BufferView<Self>>) {
+
+    }
+}
+
+impl DiscussionViewDelegate for WorkspaceView {
+    fn anchor(&self) -> Option<project::Anchor> {
+        unimplemented!()
+    }
+
+    fn jump(&self, anchor: &project::Anchor) -> Option<project::Anchor> {
+        unimplemented!()
     }
 }
 
@@ -184,11 +241,11 @@ impl FileFinderViewDelegate for WorkspaceView {
                 move |result| {
                     window_handle.map(|window| match result {
                         Ok(buffer) => {
-                            let mut buffer_view = BufferView::new(buffer);
-                            buffer_view.set_line_height(20.0);
-                            let buffer_view = window.add_view(buffer_view);
-                            buffer_view.focus().unwrap();
                             if let Some(view_handle) = view_handle {
+                                let mut buffer_view = BufferView::new(buffer, Some(view_handle.clone()));
+                                buffer_view.set_line_height(20.0);
+                                let buffer_view = window.add_view(buffer_view);
+                                buffer_view.focus().unwrap();
                                 view_handle.map(|view| {
                                     view.center_pane = Some(buffer_view);
                                     view.modal_panel = None;

@@ -11,6 +11,7 @@ use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
 use std::error::Error;
 use std::io;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 use ForegroundExecutor;
@@ -43,6 +44,13 @@ pub struct RemoteProject {
     foreground: ForegroundExecutor,
     service: Rc<RefCell<rpc::client::Service<ProjectService>>>,
     trees: HashMap<TreeId, Box<fs::Tree>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Anchor {
+    tree_id: TreeId,
+    relative_path: cross_platform::Path,
+    range: Range<buffer::Anchor>,
 }
 
 pub struct ProjectService {
