@@ -3,7 +3,7 @@ const ReactDOM = require("react-dom");
 const PropTypes = require("prop-types");
 const { styled } = require("styletron-react");
 const TextPlane = require("./text_plane");
-const debounce = require('../debounce');
+const debounce = require("../debounce");
 const $ = React.createElement;
 
 const CURSOR_BLINK_RESUME_DELAY = 300;
@@ -20,18 +20,18 @@ class TextEditor extends React.Component {
     let derivedState = null;
 
     if (nextProps.width != null && nextProps.width !== prevState.width) {
-      derivedState = {width: nextProps.width};
+      derivedState = { width: nextProps.width };
     }
 
     if (nextProps.height != null && nextProps.height !== prevState.height) {
       if (derivedState) {
         derivedState.height = nextProps.height;
       } else {
-        derivedState = {height: nextProps.height};
+        derivedState = { height: nextProps.height };
       }
     }
 
-    return derivedState
+    return derivedState;
   }
 
   constructor(props) {
@@ -43,13 +43,16 @@ class TextEditor extends React.Component {
       CURSOR_BLINK_RESUME_DELAY
     );
 
-    this.state = {showLocalCursors: true};
+    this.state = { showLocalCursors: true };
   }
 
   componentDidMount() {
     const element = ReactDOM.findDOMNode(this);
-    this.resizeObserver = new ResizeObserver(([{contentRect}]) => {
-      this.componentDidResize({width: contentRect.width, height: contentRect.height})
+    this.resizeObserver = new ResizeObserver(([{ contentRect }]) => {
+      this.componentDidResize({
+        width: contentRect.width,
+        height: contentRect.height
+      });
     });
     this.resizeObserver.observe(element);
 
@@ -59,10 +62,10 @@ class TextEditor extends React.Component {
         height: element.offsetHeight
       };
       this.componentDidResize(dimensions);
-      this.setState(dimensions)
+      this.setState(dimensions);
     }
 
-    element.addEventListener('wheel', this.handleMouseWheel, {passive: true});
+    element.addEventListener("wheel", this.handleMouseWheel, { passive: true });
 
     this.startCursorBlinking();
   }
@@ -70,16 +73,18 @@ class TextEditor extends React.Component {
   componentWillUnmount() {
     this.stopCursorBlinking();
     const element = ReactDOM.findDOMNode(this);
-    element.removeEventListener('wheel', this.handleMouseWheel, {passive: true});
+    element.removeEventListener("wheel", this.handleMouseWheel, {
+      passive: true
+    });
     this.resizeObserver.disconnect();
   }
 
   componentDidResize(measurements) {
     this.props.dispatch({
-      type: 'SetDimensions',
+      type: "SetDimensions",
       width: measurements.width,
       height: measurements.height
-    })
+    });
   }
 
   render() {
@@ -88,8 +93,8 @@ class TextEditor extends React.Component {
       {
         tabIndex: -1,
         onKeyDown: this.handleKeyDown,
-        $ref: (element) => {
-          this.element = element
+        $ref: element => {
+          this.element = element;
         }
       },
       $(TextPlane, {
@@ -101,18 +106,18 @@ class TextEditor extends React.Component {
         width: this.props.width,
         selections: this.props.selections,
         firstVisibleRow: this.props.first_visible_row,
-        lines: this.props.lines
+        lines: this.props.lines,
       })
     );
   }
 
   handleMouseWheel(event) {
-    this.props.dispatch({type: 'UpdateScrollTop', delta: event.deltaY});
+    this.props.dispatch({ type: "UpdateScrollTop", delta: event.deltaY });
   }
 
   handleKeyDown(event) {
     if (event.key.length === 1 && !event.metaKey) {
-      this.props.dispatch({type: 'Edit', text: event.key});
+      this.props.dispatch({ type: "Edit", text: event.key });
       return;
     } else if (event.key === 'Enter') {
       this.props.dispatch({type: 'Edit', text: '\n'});
@@ -122,19 +127,19 @@ class TextEditor extends React.Component {
     const action = actionForKeyDownEvent(event);
     if (action) {
       this.pauseCursorBlinking();
-      this.props.dispatch({type: action});
+      this.props.dispatch({ type: action });
     }
   }
 
-  pauseCursorBlinking () {
-    this.stopCursorBlinking()
-    this.debouncedStartCursorBlinking()
+  pauseCursorBlinking() {
+    this.stopCursorBlinking();
+    this.debouncedStartCursorBlinking();
   }
 
-  stopCursorBlinking () {
+  stopCursorBlinking() {
     if (this.state.cursorsBlinking) {
-      window.clearInterval(this.cursorBlinkIntervalHandle)
-      this.cursorBlinkIntervalHandle = null
+      window.clearInterval(this.cursorBlinkIntervalHandle);
+      this.cursorBlinkIntervalHandle = null;
       this.setState({
         showLocalCursors: true,
         cursorsBlinking: false
@@ -142,7 +147,7 @@ class TextEditor extends React.Component {
     }
   }
 
-  startCursorBlinking () {
+  startCursorBlinking() {
     if (!this.state.cursorsBlinking) {
       this.cursorBlinkIntervalHandle = window.setInterval(() => {
         this.setState({ showLocalCursors: !this.state.showLocalCursors });
@@ -160,23 +165,23 @@ class TextEditor extends React.Component {
   }
 }
 
-function actionForKeyDownEvent (event) {
+function actionForKeyDownEvent(event) {
   switch (event.key) {
     case "ArrowUp":
       if (event.ctrlKey && event.shiftKey) {
-        return "AddSelectionAbove"
+        return "AddSelectionAbove";
       } else if (event.shiftKey) {
-        return "SelectUp"
+        return "SelectUp";
       } else {
-        return "MoveUp"
+        return "MoveUp";
       }
     case "ArrowDown":
       if (event.ctrlKey && event.shiftKey) {
-        return "AddSelectionBelow"
+        return "AddSelectionBelow";
       } else if (event.shiftKey) {
-        return "SelectDown"
+        return "SelectDown";
       } else {
-        return "MoveDown"
+        return "MoveDown";
       }
     case "ArrowLeft":
       return event.shiftKey ? "SelectLeft" : "MoveLeft";

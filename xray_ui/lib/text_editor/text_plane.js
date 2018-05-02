@@ -33,7 +33,9 @@ class TextPlane extends React.Component {
       fontFamily,
       fontSize,
       backgroundColor,
-      baseTextColor
+      baseTextColor,
+      selectionColors,
+      cursorColors
     } = this.context.theme.editor;
 
     const computedLineHeight = this.props.lineHeight;
@@ -59,6 +61,8 @@ class TextPlane extends React.Component {
       selections: this.props.selections,
       showLocalCursors: this.props.showLocalCursors,
       localReplicaId: this.props.localReplicaId,
+      selectionColors,
+      cursorColors,
       computedLineHeight
     });
   }
@@ -319,15 +323,15 @@ class Renderer {
     lines,
     selections,
     showLocalCursors,
-    localReplicaId
+    localReplicaId,
+    selectionColors,
+    cursorColors
   }) {
     const { dpiScale } = this.style;
     const viewportScaleX = 2 / canvasWidth;
     const viewportScaleY = -2 / canvasHeight;
 
     const textColor = { r: 0, g: 0, b: 0, a: 255 };
-    const selectionColor = { r: 255, g: 255, b: 0, a: 255 };
-    const cursorColor = { r: 0, g: 0, b: 0, a: 255 };
     const cursorWidth = 2;
 
     const xPositions = new Map();
@@ -354,8 +358,8 @@ class Renderer {
       canvasWidth,
       selections,
       xPositions,
-      selectionColor,
-      cursorColor,
+      selectionColors,
+      cursorColors,
       cursorWidth,
       showLocalCursors,
       localReplicaId
@@ -373,7 +377,7 @@ class Renderer {
 
   drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY) {
     this.gl.bindVertexArray(this.solidVAO);
-    this.gl.disable(this.gl.BLEND);
+    this.gl.enable(this.gl.BLEND);
     this.gl.useProgram(this.solidProgram);
     this.gl.uniform2f(
       this.solidViewportScaleLocation,
@@ -385,6 +389,12 @@ class Renderer {
       this.gl.ARRAY_BUFFER,
       this.selectionSolidInstances,
       this.gl.STREAM_DRAW
+    );
+    this.gl.blendFuncSeparate(
+      this.gl.SRC_ALPHA,
+      this.gl.ONE_MINUS_SRC_ALPHA,
+      this.gl.ONE,
+      this.gl.ONE
     );
     this.gl.drawElementsInstanced(
       this.gl.TRIANGLES,
@@ -555,8 +565,8 @@ class Renderer {
     canvasWidth,
     selections,
     xPositions,
-    selectionColor,
-    cursorColor,
+    selectionColors,
+    cursorColors,
     cursorWidth,
     showLocalCursors,
     localReplicaId
@@ -568,6 +578,10 @@ class Renderer {
 
     for (var i = 0; i < selections.length; i++) {
       const selection = selections[i];
+      const colorIndex = (selection.replica_id - 1) % selectionColors.length;
+      const selectionColor = selectionColors[colorIndex];
+      const cursorColor = cursorColors[colorIndex];
+
       if (comparePoints(selection.start, selection.end) !== 0) {
         const rowSpan = selection.end.row - selection.start.row;
         const startX = xPositions.get(keyForPoint(selection.start));
