@@ -16,11 +16,6 @@ pub struct Service<T: server::Service> {
     _marker: PhantomData<T>,
 }
 
-pub struct ServiceUpdateStream {
-    _registration: Rc<ServiceRegistration>,
-    updates: unsync::mpsc::UnboundedReceiver<Bytes>,
-}
-
 pub struct ServiceRegistration {
     service_id: ServiceId,
     connection: Weak<RefCell<ConnectionState>>,
@@ -67,10 +62,7 @@ impl<T: server::Service> Service<T> {
             .client_states
             .get_mut(&self.registration.service_id)
             .ok_or(Error::ServiceDropped)?;
-        let updates = ServiceUpdateStream {
-            _registration: self.registration.clone(),
-            updates: client_state.updates_rx.take().ok_or(Error::UpdatesTaken)?,
-        };
+        let updates = client_state.updates_rx.take().ok_or(Error::UpdatesTaken)?;
         let deserialized_updates = updates.map(|update| deserialize(&update).unwrap());
         Ok(Box::new(deserialized_updates))
     }
@@ -370,14 +362,5 @@ impl Drop for ServiceRegistration {
                 .outgoing_tx
                 .unbounded_send(MessageToServer::DroppedService(self.service_id));
         }
-    }
-}
-
-impl Stream for ServiceUpdateStream {
-    type Item = Bytes;
-    type Error = ();
-
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        self.updates.poll()
     }
 }

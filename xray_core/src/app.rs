@@ -208,6 +208,10 @@ impl App {
             None => unimplemented!(),
         };
     }
+    
+    pub fn close_window(&mut self, window_id: WindowId) -> Result<(), ()> {
+        self.windows.remove(&window_id).map(|_| ()).ok_or(())
+    }
 
     pub fn connect_to_client<S>(app: Rc<RefCell<App>>, incoming: S) -> server::Connection
     where

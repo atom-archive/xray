@@ -167,6 +167,9 @@ impl Server {
             }
             IncomingMessage::TcpListen { port } => Box::new(self.tcp_listen(port).into_future()),
             IncomingMessage::ConnectToPeer { address } => self.connect_to_peer(address),
+            IncomingMessage::CloseWindow { window_id } => {
+                Box::new(self.close_window(window_id).into_future())
+            }
             _ => Box::new(future::err(format!("Unexpected message {:?}", message))),
         };
 
@@ -187,6 +190,13 @@ impl Server {
                 eprintln!("Unexpected message {:?}", message);
             }
         }
+    }
+
+    fn close_window(&self, window_id: WindowId) -> Result<(), String> {
+        self.app
+            .borrow_mut()
+            .close_window(window_id)
+            .map_err(|_| "Window not found".to_owned())
     }
 
     fn open_workspace(&self, paths: Vec<PathBuf>) -> Result<(), String> {

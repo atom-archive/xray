@@ -33,7 +33,9 @@ class TextPlane extends React.Component {
       fontFamily,
       fontSize,
       backgroundColor,
-      baseTextColor
+      baseTextColor,
+      selectionColors,
+      cursorColors
     } = this.context.theme.editor;
 
     const computedLineHeight = this.props.lineHeight;
@@ -57,7 +59,10 @@ class TextPlane extends React.Component {
       firstVisibleRow: this.props.firstVisibleRow,
       lines: this.props.lines,
       selections: this.props.selections,
-      showCursors: this.props.showCursors,
+      showLocalCursors: this.props.showLocalCursors,
+      localReplicaId: this.props.localReplicaId,
+      selectionColors,
+      cursorColors,
       computedLineHeight
     });
   }
@@ -160,9 +165,7 @@ class Renderer {
       this.gl.STATIC_DRAW
     );
 
-    this.glyphInstances = new Float32Array(
-      MAX_INSTANCES * GLYPH_INSTANCE_SIZE
-    );
+    this.glyphInstances = new Float32Array(MAX_INSTANCES * GLYPH_INSTANCE_SIZE);
     this.glyphInstancesBuffer = this.gl.createBuffer();
 
     this.selectionSolidInstances = new Float32Array(
@@ -319,26 +322,34 @@ class Renderer {
     firstVisibleRow,
     lines,
     selections,
-    showCursors
+    showLocalCursors,
+    localReplicaId,
+    selectionColors,
+    cursorColors
   }) {
     const { dpiScale } = this.style;
     const viewportScaleX = 2 / canvasWidth;
     const viewportScaleY = -2 / canvasHeight;
 
     const textColor = { r: 0, g: 0, b: 0, a: 255 };
-    const selectionColor = { r: 255, g: 255, b: 0, a: 255 };
-    const cursorColor = { r: 0, g: 0, b: 0, a: 255 };
     const cursorWidth = 2;
 
-    const selectionPositions = new Float32Array(selections.length * 2);
+    const xPositions = new Map();
+    for (let i = 0; i < selections.length; i++) {
+      const { start, end } = selections[i];
+      xPositions.set(keyForPoint(start), 0);
+      xPositions.set(keyForPoint(end), 0);
+    }
+
     const glyphCount = this.populateGlyphInstances(
       scrollTop,
       firstVisibleRow,
       lines,
       selections,
       textColor,
-      selectionPositions
+      xPositions
     );
+
     const {
       selectionSolidCount,
       cursorSolidCount
@@ -346,10 +357,12 @@ class Renderer {
       scrollTop,
       canvasWidth,
       selections,
-      selectionPositions,
-      selectionColor,
-      cursorColor,
-      cursorWidth
+      xPositions,
+      selectionColors,
+      cursorColors,
+      cursorWidth,
+      showLocalCursors,
+      localReplicaId
     );
     this.atlas.uploadTexture();
 
@@ -359,14 +372,12 @@ class Renderer {
 
     this.drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY);
     this.drawText(glyphCount, viewportScaleX, viewportScaleY);
-    if (showCursors) {
-      this.drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY);
-    }
+    this.drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY);
   }
 
   drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY) {
     this.gl.bindVertexArray(this.solidVAO);
-    this.gl.disable(this.gl.BLEND);
+    this.gl.enable(this.gl.BLEND);
     this.gl.useProgram(this.solidProgram);
     this.gl.uniform2f(
       this.solidViewportScaleLocation,
@@ -378,6 +389,12 @@ class Renderer {
       this.gl.ARRAY_BUFFER,
       this.selectionSolidInstances,
       this.gl.STREAM_DRAW
+    );
+    this.gl.blendFuncSeparate(
+      this.gl.SRC_ALPHA,
+      this.gl.ONE_MINUS_SRC_ALPHA,
+      this.gl.ONE,
+      this.gl.ONE
     );
     this.gl.drawElementsInstanced(
       this.gl.TRIANGLES,
@@ -468,7 +485,7 @@ class Renderer {
     lines,
     selections,
     textColor,
-    selectionPositions
+    xPositions
   ) {
     const firstVisibleRowY = firstVisibleRow * this.style.computedLineHeight;
 
@@ -487,16 +504,9 @@ class Renderer {
         position.column <= line.length;
         position.column++
       ) {
-        const selection = selections[selectionIndex];
-        if (selection) {
-          if (comparePoints(position, selection.start) === 0) {
-            selectionPositions[selectionIndex * 2] = x;
-          }
-
-          if (comparePoints(position, selection.end) === 0) {
-            selectionPositions[selectionIndex * 2 + 1] = x;
-            selectionIndex++;
-          }
+        {
+          const key = keyForPoint(position);
+          if (xPositions.has(key)) xPositions.set(key, x);
         }
 
         if (position.column < line.length) {
@@ -554,10 +564,12 @@ class Renderer {
     scrollTop,
     canvasWidth,
     selections,
-    selectionPositions,
-    selectionColor,
-    cursorColor,
-    cursorWidth
+    xPositions,
+    selectionColors,
+    cursorColors,
+    cursorWidth,
+    showLocalCursors,
+    localReplicaId
   ) {
     const { dpiScale, computedLineHeight } = this.style;
 
@@ -566,10 +578,14 @@ class Renderer {
 
     for (var i = 0; i < selections.length; i++) {
       const selection = selections[i];
+      const colorIndex = (selection.replica_id - 1) % selectionColors.length;
+      const selectionColor = selectionColors[colorIndex];
+      const cursorColor = cursorColors[colorIndex];
+
       if (comparePoints(selection.start, selection.end) !== 0) {
         const rowSpan = selection.end.row - selection.start.row;
-        const startX = selectionPositions[i * 2];
-        const endX = selectionPositions[i * 2 + 1];
+        const startX = xPositions.get(keyForPoint(selection.start));
+        const endX = xPositions.get(keyForPoint(selection.end));
 
         if (rowSpan === 0) {
           this.updateSolidInstance(
@@ -617,16 +633,21 @@ class Renderer {
             selectionColor
           );
         }
-      } else {
-        const startX = selectionPositions[i * 2];
+      }
+
+      if (showLocalCursors || localReplicaId !== selection.replica_id) {
+        const cursorPoint = selection.reversed
+          ? selection.start
+          : selection.end;
+        const startX = xPositions.get(keyForPoint(cursorPoint));
         const endX = startX + cursorWidth;
         this.updateSolidInstance(
           this.cursorSolidInstances,
           cursorSolidCount++,
           Math.round(startX),
-          yForRow(selection.start.row),
+          yForRow(cursorPoint.row),
           Math.round(endX - startX),
-          yForRow(selection.start.row + 1) - yForRow(selection.start.row),
+          yForRow(cursorPoint.row + 1) - yForRow(cursorPoint.row),
           cursorColor
         );
       }
@@ -813,4 +834,8 @@ class Atlas {
 
 function comparePoints(a, b) {
   return a.row - b.row || a.column - b.column;
+}
+
+function keyForPoint(point) {
+  return `${point.row}.${point.column}`;
 }

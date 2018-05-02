@@ -88,7 +88,6 @@ websocketServer.on("connection", async ws => {
 
 app.use(webpackDev(compiler, { publicPath: "/" }));
 app.use("/", express.static(path.join(__dirname, "../static")));
-// app.use("/", express.static(path.join(__dirname, "../dist")));
 server.listen(webServerPort, () => {
   console.log(`Using xray server: ${xrayServerAddress}:${xrayServerPort}`);
   console.log("Listening for HTTP connections on port " + webServerPort);
