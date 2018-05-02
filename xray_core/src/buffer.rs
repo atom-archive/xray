@@ -446,7 +446,9 @@ pub mod rpc {
 
     impl Drop for Service {
         fn drop(&mut self) {
-            self.buffer.borrow_mut().remove_remote_selection_sets(self.replica_id);
+            self.buffer
+                .borrow_mut()
+                .remove_remote_selection_sets(self.replica_id);
         }
     }
 
@@ -930,7 +932,8 @@ impl Buffer {
     }
 
     fn remove_remote_selection_sets(&mut self, id: ReplicaId) {
-        self.selections.retain(|(replica_id, _), _| *replica_id != id);
+        self.selections
+            .retain(|(replica_id, _), _| *replica_id != id);
         self.updates.set(());
     }
 
@@ -2479,7 +2482,10 @@ mod tests {
         buffer_3_updates.wait_next(&mut reactor).unwrap();
         assert_eq!(selections(&buffer_1), selections(&buffer_3));
 
-        buffer_1.borrow_mut().remove_selection_set(buffer_1_set_id).unwrap();
+        buffer_1
+            .borrow_mut()
+            .remove_selection_set(buffer_1_set_id)
+            .unwrap();
         buffer_1_updates.wait_next(&mut reactor).unwrap();
 
         buffer_2_updates.wait_next(&mut reactor).unwrap();
@@ -2496,15 +2502,18 @@ mod tests {
         buffer_3_updates.wait_next(&mut reactor).unwrap();
         assert_eq!(selections(&buffer_1), selections(&buffer_3));
 
-        buffer_2.borrow_mut().mutate_selections(buffer_2_set_id, |buffer, selections| {
-            for selection in selections {
-                selection.start = buffer
-                    .anchor_before_offset(
-                        buffer.offset_for_anchor(&selection.start).unwrap() + 1,
-                    )
-                    .unwrap();
-            }
-        }).unwrap();
+        buffer_2
+            .borrow_mut()
+            .mutate_selections(buffer_2_set_id, |buffer, selections| {
+                for selection in selections {
+                    selection.start = buffer
+                        .anchor_before_offset(
+                            buffer.offset_for_anchor(&selection.start).unwrap() + 1,
+                        )
+                        .unwrap();
+                }
+            })
+            .unwrap();
 
         buffer_1_updates.wait_next(&mut reactor).unwrap();
         assert_eq!(selections(&buffer_2), selections(&buffer_1));

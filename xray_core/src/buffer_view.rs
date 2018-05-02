@@ -121,26 +121,28 @@ impl BufferView {
             }
 
             let mut delta = 0_isize;
-            buffer.mutate_selections(self.selection_set_id, |buffer, selections| {
-                *selections = offset_ranges
-                    .into_iter()
-                    .map(|(start, end)| {
-                        let start = start as isize;
-                        let end = end as isize;
-                        let anchor = buffer
-                            .anchor_before_offset((start + delta) as usize + text.len())
-                            .unwrap();
-                        let deleted_count = end - start;
-                        delta += text.len() as isize - deleted_count;
-                        Selection {
-                            start: anchor.clone(),
-                            end: anchor,
-                            reversed: false,
-                            goal_column: None,
-                        }
-                    })
-                    .collect();
-            }).unwrap();
+            buffer
+                .mutate_selections(self.selection_set_id, |buffer, selections| {
+                    *selections = offset_ranges
+                        .into_iter()
+                        .map(|(start, end)| {
+                            let start = start as isize;
+                            let end = end as isize;
+                            let anchor = buffer
+                                .anchor_before_offset((start + delta) as usize + text.len())
+                                .unwrap();
+                            let deleted_count = end - start;
+                            delta += text.len() as isize - deleted_count;
+                            Selection {
+                                start: anchor.clone(),
+                                end: anchor,
+                                reversed: false,
+                                goal_column: None,
+                            }
+                        })
+                        .collect();
+                })
+                .unwrap();
         }
 
         self.updated();
@@ -640,7 +642,10 @@ impl Stream for BufferView {
 
 impl Drop for BufferView {
     fn drop(&mut self) {
-        self.buffer.borrow_mut().remove_selection_set(self.selection_set_id).unwrap();
+        self.buffer
+            .borrow_mut()
+            .remove_selection_set(self.selection_set_id)
+            .unwrap();
         self.dropped.set(true);
     }
 }
