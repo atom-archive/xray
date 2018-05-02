@@ -45,6 +45,7 @@ const Avatar = styled("div", ({ color }) => {
     display: "inline-block",
     width: "16px",
     height: "16px",
+    borderRadius: "8px",
     position: "relative",
     top: "2px",
     marginRight: "4px"
