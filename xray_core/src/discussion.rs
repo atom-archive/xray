@@ -1,5 +1,4 @@
-use futures::{unsync, Async, Future, Poll, Stream};
-use never::Never;
+use futures::{channel, prelude::*};
 use notify_cell::NotifyCell;
 use rpc::{self, client, server};
 use serde_json;
@@ -7,7 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
 use workspace;
-use ForegroundExecutor;
+use Executor;
 use IntoShared;
 use UserId;
 
@@ -19,7 +18,7 @@ pub trait DiscussionViewDelegate {
 pub struct Discussion {
     messages: Vec<Message>,
     local_user_id: UserId,
-    outgoing_message_txs: Vec<unsync::mpsc::UnboundedSender<Message>>,
+    outgoing_message_txs: Vec<channel::mpsc::UnboundedSender<Message>>,
     updates: NotifyCell<()>,
     client: Option<client::Service<DiscussionService>>,
 }
@@ -68,7 +67,7 @@ impl Discussion {
     }
 
     pub fn remote(
-        executor: ForegroundExecutor,
+        executor: Rc<Executor>,
         local_user_id: UserId,
         client: client::Service<DiscussionService>,
     ) -> Result<Rc<RefCell<Self>>, rpc::Error> {
@@ -83,12 +82,16 @@ impl Discussion {
 
         let discussion_weak = Rc::downgrade(&discussion);
         executor
-            .execute(Box::new(client_updates.for_each(move |message| {
-                if let Some(discussion) = discussion_weak.upgrade() {
-                    discussion.borrow_mut().push_message(message);
-                }
-                Ok(())
-            })))
+            .spawn_foreground(Box::new(
+                client_updates
+                    .for_each(move |message| {
+                        if let Some(discussion) = discussion_weak.upgrade() {
+                            discussion.borrow_mut().push_message(message);
+                        }
+                        Ok(())
+                    })
+                    .then(|_| Ok(())),
+            ))
             .unwrap();
         Ok(discussion)
     }
@@ -98,7 +101,7 @@ impl Discussion {
     }
 
     fn outgoing_messages(&mut self) -> impl Stream<Item = Message, Error = Never> {
-        let (tx, rx) = unsync::mpsc::unbounded();
+        let (tx, rx) = channel::mpsc::unbounded();
         self.outgoing_message_txs.push(tx);
         rx.map_err(|_| unreachable!())
     }
@@ -176,8 +179,8 @@ impl<T: DiscussionViewDelegate> Stream for DiscussionView<T> {
     type Item = ();
     type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        self.updates.poll()
+    fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
+        self.updates.poll_next(cx)
     }
 }
 
@@ -198,12 +201,16 @@ impl server::Service for DiscussionService {
     type Request = ServiceRequest;
     type Response = ();
 
-    fn init(&mut self, _: &rpc::server::Connection) -> Self::State {
+    fn init(&mut self, _cx: &mut task::Context, _: &rpc::server::Connection) -> Self::State {
         self.discussion.borrow().messages.clone()
     }
 
-    fn poll_update(&mut self, _: &rpc::server::Connection) -> Async<Option<Self::Update>> {
-        self.outgoing_messages.poll().unwrap()
+    fn poll_update(
+        &mut self,
+        cx: &mut task::Context,
+        _: &rpc::server::Connection,
+    ) -> Async<Option<Self::Update>> {
+        self.outgoing_messages.poll_next(cx).unwrap()
     }
 
     fn request(

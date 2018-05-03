@@ -1,5 +1,5 @@
-use std::cmp;
 use buffer::{Buffer, Point};
+use std::cmp;
 
 pub fn left(buffer: &Buffer, mut point: Point) -> Point {
     if point.column > 0 {

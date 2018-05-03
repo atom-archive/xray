@@ -2,7 +2,7 @@ use super::messages::{MessageToClient, MessageToServer, RequestId, Response, Ser
 use super::{server, Error};
 use bincode::{deserialize, serialize};
 use bytes::Bytes;
-use futures::{self, future, stream, unsync, Async, Future, Poll, Stream};
+use futures::{channel, future, prelude::*, stream};
 use serde::{Deserialize, Serialize};
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -29,9 +29,9 @@ pub struct FullUpdateService<T: server::Service> {
 struct ServiceState {
     has_client: bool,
     state: Bytes,
-    updates_rx: Option<unsync::mpsc::UnboundedReceiver<Bytes>>,
-    updates_tx: unsync::mpsc::UnboundedSender<Bytes>,
-    pending_requests: HashMap<RequestId, unsync::oneshot::Sender<Result<Bytes, Error>>>,
+    updates_rx: Option<channel::mpsc::UnboundedReceiver<Bytes>>,
+    updates_tx: channel::mpsc::UnboundedSender<Bytes>,
+    pending_requests: HashMap<RequestId, channel::oneshot::Sender<Result<Bytes, Error>>>,
 }
 
 pub struct Connection(Rc<RefCell<ConnectionState>>);
@@ -40,8 +40,8 @@ struct ConnectionState {
     next_request_id: RequestId,
     client_states: HashMap<ServiceId, ServiceState>,
     incoming: Box<Stream<Item = Bytes, Error = io::Error>>,
-    outgoing_tx: unsync::mpsc::UnboundedSender<MessageToServer>,
-    outgoing_rx: unsync::mpsc::UnboundedReceiver<MessageToServer>,
+    outgoing_tx: channel::mpsc::UnboundedSender<MessageToServer>,
+    outgoing_rx: channel::mpsc::UnboundedReceiver<MessageToServer>,
 }
 
 impl<T: server::Service> Service<T> {
@@ -55,7 +55,7 @@ impl<T: server::Service> Service<T> {
         Ok(deserialize(&client_state.state).unwrap())
     }
 
-    pub fn updates(&self) -> Result<Box<Stream<Item = T::Update, Error = ()>>, Error> {
+    pub fn updates(&self) -> Result<Box<Stream<Item = T::Update, Error = Never>>, Error> {
         let connection = self.registration.connection()?;
         let mut connection = connection.borrow_mut();
         let client_state = connection
@@ -78,7 +78,7 @@ impl<T: server::Service> Service<T> {
             let request_id = connection.next_request_id;
             connection.next_request_id += 1;
 
-            let (response_tx, response_rx) = unsync::oneshot::channel();
+            let (response_tx, response_rx) = channel::oneshot::channel();
             connection
                 .client_states
                 .get_mut(&registration.service_id)
@@ -86,7 +86,7 @@ impl<T: server::Service> Service<T> {
                 .pending_requests
                 .insert(request_id, response_tx);
             let response_future = response_rx
-                .map_err(|_: futures::Canceled| Error::ServiceDropped)
+                .map_err(|_: channel::oneshot::Canceled| Error::ServiceDropped)
                 .and_then(|response| response.map(|payload| deserialize(&payload).unwrap()));
 
             let request = MessageToServer::Request {
@@ -142,7 +142,7 @@ where
         }
     }
 
-    pub fn updates(&self) -> Result<Box<Stream<Item = (), Error = ()>>, Error> {
+    pub fn updates(&self) -> Result<Box<Stream<Item = (), Error = Never>>, Error> {
         let latest_state_1 = self.latest_state.clone();
         let latest_state_2 = self.latest_state.clone();
         self.service.updates().map(|updates| {
@@ -153,7 +153,7 @@ where
                 *latest_state_2.borrow_mut() = Err(Error::ServiceDropped);
             });
             Box::new(update_latest_state.chain(clear_latest_state))
-                as Box<Stream<Item = (), Error = ()>>
+                as Box<Stream<Item = (), Error = Never>>
         })
     }
 
@@ -182,9 +182,9 @@ impl Connection {
         S: 'static + Stream<Item = Bytes, Error = io::Error>,
         B: 'static + server::Service,
     {
-        Box::new(incoming.into_future().then(|result| match result {
+        Box::new(incoming.next().then(|result| match result {
             Ok((Some(payload), incoming)) => {
-                let (outgoing_tx, outgoing_rx) = unsync::mpsc::unbounded();
+                let (outgoing_tx, outgoing_rx) = channel::mpsc::unbounded();
                 let mut connection = Connection(Rc::new(RefCell::new(ConnectionState {
                     next_request_id: 0,
                     client_states: HashMap::new(),
@@ -246,7 +246,7 @@ impl Connection {
     fn process_insertions(&self, insertions: HashMap<ServiceId, Bytes>) {
         let mut connection = self.0.borrow_mut();
         for (id, state) in insertions {
-            let (updates_tx, updates_rx) = unsync::mpsc::unbounded();
+            let (updates_tx, updates_rx) = channel::mpsc::unbounded();
             connection.client_states.insert(
                 id,
                 ServiceState {
@@ -309,9 +309,9 @@ impl Stream for Connection {
     type Item = Bytes;
     type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
         loop {
-            let incoming_message = self.0.borrow_mut().incoming.poll();
+            let incoming_message = self.0.borrow_mut().incoming.poll_next(cx);
             match incoming_message {
                 Ok(Async::Ready(Some(payload))) => {
                     let message: Result<MessageToClient, Error> = deserialize(&payload).unwrap();
@@ -324,7 +324,7 @@ impl Stream for Connection {
                     }
                 }
                 Ok(Async::Ready(None)) => return Ok(Async::Ready(None)),
-                Ok(Async::NotReady) => break,
+                Ok(Async::Pending) => break,
                 Err(error) => {
                     eprintln!("Error polling incoming connection: {}", error);
                     return Err(());
@@ -332,19 +332,19 @@ impl Stream for Connection {
             }
         }
 
-        match self.0.borrow_mut().outgoing_rx.poll() {
+        match self.0.borrow_mut().outgoing_rx.poll_next(cx) {
             Ok(Async::Ready(Some(message))) => {
                 return Ok(Async::Ready(Some(serialize(&message).unwrap().into())))
             }
             Ok(Async::Ready(None)) => unreachable!(),
-            Ok(Async::NotReady) => {}
+            Ok(Async::Pending) => {}
             Err(_) => {
                 eprintln!("Error polling outgoing messages");
                 return Err(());
             }
         }
 
-        Ok(Async::NotReady)
+        Ok(Async::Pending)
     }
 }
 

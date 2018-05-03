@@ -38,21 +38,28 @@ mod discussion;
 mod file_finder;
 mod fuzzy;
 mod movement;
-mod never;
 mod project;
 #[cfg(test)]
 mod stream_ext;
 mod tree;
 
 pub use app::{App, WindowId};
-use futures::future::{Executor, Future};
-pub use never::Never;
+use futures::{executor, prelude::*};
 use std::cell::RefCell;
 use std::rc::Rc;
 pub use window::{ViewId, WindowUpdate};
 
-pub type ForegroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + 'static>>>;
-pub type BackgroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + Send + 'static>>>;
+pub trait Executor {
+    fn spawn_foreground(
+        &self,
+        f: Box<Future<Item = (), Error = Never> + 'static>,
+    ) -> Result<(), executor::SpawnError>;
+    fn spawn_background(
+        &self,
+        f: Box<Future<Item = (), Error = Never> + Send + 'static>,
+    ) -> Result<(), executor::SpawnError>;
+}
+
 pub type UserId = usize;
 
 pub(crate) trait IntoShared {

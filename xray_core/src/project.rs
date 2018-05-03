@@ -1,9 +1,8 @@
 use buffer::{self, Buffer, BufferId};
 use cross_platform;
 use fs;
-use futures::{future, Async, Future, Poll};
+use futures::{future, prelude::*};
 use fuzzy;
-use never::Never;
 use notify_cell::{NotifyCell, NotifyCellObserver, WeakNotifyCell};
 use rpc;
 use std::cell::{Cell, RefCell};
@@ -13,7 +12,7 @@ use std::error::Error;
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
-use ForegroundExecutor;
+use Executor;
 use IntoShared;
 
 pub type TreeId = usize;
@@ -46,7 +45,7 @@ pub struct LocalProject {
 }
 
 pub struct RemoteProject {
-    foreground: ForegroundExecutor,
+    executor: Rc<Executor>,
     service: Rc<RefCell<rpc::client::Service<ProjectService>>>,
     trees: HashMap<TreeId, Box<fs::Tree>>,
 }
@@ -207,7 +206,7 @@ impl Project for LocalProject {
         &self,
         buffer_id: BufferId,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
-        use futures::IntoFuture;
+        use futures::prelude::*;
         Box::new(
             self.buffers
                 .borrow()
@@ -249,7 +248,7 @@ impl Project for LocalProject {
 
 impl RemoteProject {
     pub fn new(
-        foreground: ForegroundExecutor,
+        executor: Rc<Executor>,
         service: rpc::client::Service<ProjectService>,
     ) -> Result<Self, rpc::Error> {
         let state = service.state()?;
@@ -258,11 +257,11 @@ impl RemoteProject {
             let tree_service = service
                 .take_service(*service_id)
                 .expect("The server should create services for each tree in our project state.");
-            let remote_tree = fs::RemoteTree::new(foreground.clone(), tree_service);
+            let remote_tree = fs::RemoteTree::new(executor.clone(), tree_service);
             trees.insert(*tree_id, Box::new(remote_tree) as Box<fs::Tree>);
         }
         Ok(Self {
-            foreground,
+            executor,
             service: service.into_shared(),
             trees,
         })
@@ -275,7 +274,7 @@ impl Project for RemoteProject {
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
-        let foreground = self.foreground.clone();
+        let executor = self.executor.clone();
         let service = self.service.clone();
 
         Box::new(
@@ -295,7 +294,7 @@ impl Project for RemoteProject {
                                     .take_service(service_id)
                                     .map_err(|error| error.into())
                                     .and_then(|buffer_service| {
-                                        Buffer::remote(foreground, buffer_service)
+                                        Buffer::remote(executor, buffer_service)
                                             .map_err(|error| error.into())
                                     })
                             }),
@@ -308,7 +307,7 @@ impl Project for RemoteProject {
         &self,
         buffer_id: BufferId,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
-        let foreground = self.foreground.clone();
+        let executor = self.executor.clone();
         let service = self.service.clone();
         Box::new(
             self.service
@@ -324,7 +323,7 @@ impl Project for RemoteProject {
                                     .take_service(service_id)
                                     .map_err(|error| error.into())
                                     .and_then(|buffer_service| {
-                                        Buffer::remote(foreground, buffer_service)
+                                        Buffer::remote(executor, buffer_service)
                                             .map_err(|error| error.into())
                                     })
                             }),
@@ -377,7 +376,11 @@ impl rpc::server::Service for ProjectService {
     type Request = RpcRequest;
     type Response = RpcResponse;
 
-    fn init(&mut self, connection: &rpc::server::Connection) -> Self::State {
+    fn init(
+        &mut self,
+        _cx: &mut task::Context,
+        connection: &rpc::server::Connection,
+    ) -> Self::State {
         let mut state = RpcState {
             trees: HashMap::new(),
         };
@@ -392,9 +395,10 @@ impl rpc::server::Service for ProjectService {
 
     fn poll_update(
         &mut self,
+        _cx: &mut task::Context,
         _connection: &rpc::server::Connection,
     ) -> Async<Option<Self::Update>> {
-        Async::NotReady
+        Async::Pending
     }
 
     fn request(
@@ -637,15 +641,18 @@ impl PathSearch {
 
 impl Future for PathSearch {
     type Item = ();
-    type Error = ();
+    type Error = Never;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(&mut self, _cx: &mut task::Context) -> Poll<Self::Item, Self::Error> {
         if self.needle.is_empty() {
             let _ = self.updates.try_set(PathSearchStatus::Ready(Vec::new()));
         } else {
-            let matches = self.find_matches()?;
-            let results = self.rank_matches(matches)?;
-            let _ = self.updates.try_set(PathSearchStatus::Ready(results));
+            let _ = self.find_matches()
+                .and_then(|matches| self.rank_matches(matches))
+                .and_then(|results| {
+                    let _ = self.updates.try_set(PathSearchStatus::Ready(results));
+                    Ok(())
+                });
         }
         Ok(Async::Ready(()))
     }

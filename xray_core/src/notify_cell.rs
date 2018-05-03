@@ -1,19 +1,18 @@
-use std::sync::{Arc, Weak};
-use futures::{Async, Poll, Stream};
-use futures::task::{self, Task};
+use futures::prelude::*;
 use parking_lot::RwLock;
+use std::sync::{Arc, Weak};
 
 type Version = usize;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum TrySetError {
-    ObserverDisconnected
+    ObserverDisconnected,
 }
 
 #[derive(Clone, Debug)]
 pub struct NotifyCell<T: Clone> {
     observer: Option<NotifyCellObserver<T>>,
-    inner: Arc<RwLock<Inner<T>>>
+    inner: Arc<RwLock<Inner<T>>>,
 }
 
 pub struct WeakNotifyCell<T: Clone>(Weak<RwLock<Inner<T>>>);
@@ -28,8 +27,8 @@ pub struct NotifyCellObserver<T: Clone> {
 struct Inner<T: Clone> {
     value: T,
     last_written_at: Version,
-    subscribers: Vec<Task>,
-    dropped: bool
+    wakers: Vec<task::Waker>,
+    dropped: bool,
 }
 
 impl<T: Clone> NotifyCell<T> {
@@ -39,9 +38,9 @@ impl<T: Clone> NotifyCell<T> {
             inner: Arc::new(RwLock::new(Inner {
                 value,
                 last_written_at: 0,
-                subscribers: Vec::new(),
-                dropped: false
-            }))
+                wakers: Vec::new(),
+                dropped: false,
+            })),
         }
     }
 
@@ -51,9 +50,9 @@ impl<T: Clone> NotifyCell<T> {
             inner: Arc::new(RwLock::new(Inner {
                 value,
                 last_written_at: 0,
-                subscribers: Vec::new(),
-                dropped: false
-            }))
+                wakers: Vec::new(),
+                dropped: false,
+            })),
         };
         let weak_cell = WeakNotifyCell(Arc::downgrade(&observer.inner));
         (weak_cell, observer)
@@ -63,8 +62,8 @@ impl<T: Clone> NotifyCell<T> {
         let mut inner = self.inner.write();
         inner.value = value;
         inner.last_written_at += 1;
-        for subscriber in inner.subscribers.drain(..) {
-            subscriber.notify();
+        for waker in inner.wakers.drain(..) {
+            waker.wake();
         }
     }
 
@@ -91,8 +90,8 @@ impl<T: Clone> WeakNotifyCell<T> {
         let mut inner = inner.write();
         inner.value = value;
         inner.last_written_at += 1;
-        for subscriber in inner.subscribers.drain(..) {
-            subscriber.notify();
+        for waker in inner.wakers.drain(..) {
+            waker.wake();
         }
         Ok(())
     }
@@ -108,7 +107,7 @@ impl<T: Clone> Stream for NotifyCellObserver<T> {
     type Item = T;
     type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
         let inner = self.inner.upgradable_read();
 
         if inner.dropped {
@@ -117,8 +116,8 @@ impl<T: Clone> Stream for NotifyCellObserver<T> {
             self.last_polled_at = inner.last_written_at;
             Ok(Async::Ready(Some(inner.value.clone())))
         } else {
-            inner.upgrade().subscribers.push(task::current());
-            Ok(Async::NotReady)
+            inner.upgrade().wakers.push(cx.waker().clone());
+            Ok(Async::Pending)
         }
     }
 }
@@ -127,7 +126,7 @@ impl<T: Clone> Stream for NotifyCell<T> {
     type Item = T;
     type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
         if self.observer.is_none() {
             self.observer = Some(self.observe());
 
@@ -135,12 +134,12 @@ impl<T: Clone> Stream for NotifyCell<T> {
             if inner.last_written_at == 0 {
                 // Release read lock before polling to avoid deadlocks.
                 drop(inner);
-                self.observer.as_mut().unwrap().poll()
+                self.observer.as_mut().unwrap().poll_next(cx)
             } else {
                 Ok(Async::Ready(Some(inner.value.clone())))
             }
         } else {
-            self.observer.as_mut().unwrap().poll()
+            self.observer.as_mut().unwrap().poll_next(cx)
         }
     }
 }
@@ -149,8 +148,8 @@ impl<T: Clone> Drop for NotifyCell<T> {
     fn drop(&mut self) {
         let mut inner = self.inner.write();
         inner.dropped = true;
-        for subscriber in inner.subscribers.drain(..) {
-            subscriber.notify();
+        for waker in inner.wakers.drain(..) {
+            waker.wake();
         }
     }
 }
@@ -160,11 +159,11 @@ mod tests {
     extern crate futures_cpupool;
     extern crate rand;
 
-    use super::*;
-    use std::collections::BTreeSet;
-    use futures::Future;
-    use self::rand::Rng;
     use self::futures_cpupool::CpuPool;
+    use self::rand::Rng;
+    use super::*;
+    use futures::prelude::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn test_notify() {
@@ -203,25 +202,28 @@ mod tests {
 
     #[test]
     fn test_notify_cell_poll() {
-        CpuPool::new_num_cpus().spawn_fn(|| -> Result<(), ()> {
-            let mut cell = NotifyCell::new(1);
-            assert_eq!(cell.poll(), Ok(Async::NotReady));
+        CpuPool::new_num_cpus()
+            .spawn_fn(|| -> Result<(), ()> {
+                let mut cell = NotifyCell::new(1);
+                assert_eq!(cell.poll(), Ok(Async::Pending));
 
-            cell.set(2);
-            assert_eq!(cell.poll(), Ok(Async::Ready(Some(2))));
-            assert_eq!(cell.poll(), Ok(Async::NotReady));
+                cell.set(2);
+                assert_eq!(cell.poll(), Ok(Async::Ready(Some(2))));
+                assert_eq!(cell.poll(), Ok(Async::Pending));
 
-            let mut cell = NotifyCell::new(1);
-            cell.set(2);
-            assert_eq!(cell.poll(), Ok(Async::Ready(Some(2))));
-            assert_eq!(cell.poll(), Ok(Async::NotReady));
+                let mut cell = NotifyCell::new(1);
+                cell.set(2);
+                assert_eq!(cell.poll(), Ok(Async::Ready(Some(2))));
+                assert_eq!(cell.poll(), Ok(Async::Pending));
 
-            cell.set(3);
-            assert_eq!(cell.poll(), Ok(Async::Ready(Some(3))));
-            assert_eq!(cell.poll(), Ok(Async::NotReady));
+                cell.set(3);
+                assert_eq!(cell.poll(), Ok(Async::Ready(Some(3))));
+                assert_eq!(cell.poll(), Ok(Async::Pending));
 
-            Ok(())
-        }).wait().unwrap();
+                Ok(())
+            })
+            .wait()
+            .unwrap();
     }
 
     #[test]

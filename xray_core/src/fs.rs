@@ -1,5 +1,5 @@
 use cross_platform;
-use futures::{Async, Future, Stream};
+use futures::prelude::*;
 use notify_cell::NotifyCell;
 use parking_lot::RwLock;
 use rpc::{client, server};
@@ -11,7 +11,7 @@ use std::io;
 use std::iter::Iterator;
 use std::rc::Rc;
 use std::sync::Arc;
-use ForegroundExecutor;
+use Executor;
 
 pub type EntryId = usize;
 pub type FileId = u64;
@@ -231,8 +231,8 @@ impl server::Service for TreeService {
     type Request = ();
     type Response = ();
 
-    fn init(&mut self, connection: &server::Connection) -> Self::State {
-        if let Async::Ready(Some(tree)) = self.poll_update(connection) {
+    fn init(&mut self, cx: &mut task::Context, connection: &server::Connection) -> Self::State {
+        if let Async::Ready(Some(tree)) = self.poll_update(cx, connection) {
             tree
         } else {
             let root = self.tree.root();
@@ -240,22 +240,26 @@ impl server::Service for TreeService {
         }
     }
 
-    fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
-        if let Some(populated) = self.populated.as_mut().map(|p| p.poll().unwrap()) {
+    fn poll_update(
+        &mut self,
+        cx: &mut task::Context,
+        _: &server::Connection,
+    ) -> Async<Option<Self::Update>> {
+        if let Some(populated) = self.populated.as_mut().map(|p| p.poll(cx).unwrap()) {
             if let Async::Ready(_) = populated {
                 self.populated.take();
                 Async::Ready(Some(self.tree.root().clone()))
             } else {
-                Async::NotReady
+                Async::Pending
             }
         } else {
-            Async::NotReady
+            Async::Pending
         }
     }
 }
 
 impl RemoteTree {
-    pub fn new(foreground: ForegroundExecutor, service: client::Service<TreeService>) -> Self {
+    pub fn new(executor: Rc<Executor>, service: client::Service<TreeService>) -> Self {
         let updates = service.updates().unwrap();
         let state = Rc::new(RefCell::new(RemoteTreeState {
             root: service.state().unwrap(),
@@ -264,13 +268,17 @@ impl RemoteTree {
         }));
 
         let state_clone = state.clone();
-        foreground
-            .execute(Box::new(updates.for_each(move |root| {
-                let mut state = state_clone.borrow_mut();
-                state.root = root;
-                state.updates.set(());
-                Ok(())
-            })))
+        executor
+            .spawn_foreground(Box::new(
+                updates
+                    .for_each(move |root| {
+                        let mut state = state_clone.borrow_mut();
+                        state.root = root;
+                        state.updates.set(());
+                        Ok(())
+                    })
+                    .then(|_| Ok(())),
+            ))
             .unwrap();
 
         RemoteTree(state)
@@ -292,8 +300,7 @@ pub(crate) mod tests {
     use super::*;
     use bincode::{deserialize, serialize};
     use cross_platform::PathComponent;
-    use futures::{future, task, Async, IntoFuture, Poll};
-    use never::Never;
+    use futures::prelude::*;
     use notify_cell::NotifyCell;
     use rpc;
     use std::collections::HashMap;
@@ -439,7 +446,7 @@ pub(crate) mod tests {
                     self.populated
                         .observe()
                         .skip_while(|p| Ok(!p))
-                        .into_future()
+                        .next()
                         .then(|_| Ok(())),
                 )
             }
@@ -554,13 +561,13 @@ pub(crate) mod tests {
         type Item = ();
         type Error = Never;
 
-        fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Self::Item, Self::Error> {
             if self.0 {
                 Ok(Async::Ready(()))
             } else {
                 self.0 = true;
                 task::current().notify();
-                Ok(Async::NotReady)
+                Ok(Async::Pending)
             }
         }
     }

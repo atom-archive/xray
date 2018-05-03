@@ -1,4 +1,4 @@
-use futures::{Future, Poll, Stream};
+use futures::prelude::*;
 use std::fmt::Debug;
 use std::time;
 use tokio_core::reactor;
@@ -19,7 +19,7 @@ where
             type Item = Option<S::Item>;
             type Error = S::Error;
 
-            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+            fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Self::Item, Self::Error> {
                 self.0.poll()
             }
         }

@@ -1,9 +1,11 @@
 use cross_platform;
-use futures::{Async, Poll, Stream};
+use futures::prelude::*;
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use project::{PathSearch, PathSearchResult, PathSearchStatus, TreeId};
 use serde_json;
+use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
+use Executor;
 
 pub trait FileFinderViewDelegate {
     fn search_paths(
@@ -22,6 +24,7 @@ pub trait FileFinderViewDelegate {
 }
 
 pub struct FileFinderView<T: FileFinderViewDelegate> {
+    executor: Rc<Executor>,
     delegate: WeakViewHandle<T>,
     query: String,
     include_ignored: bool,
@@ -57,9 +60,9 @@ impl<T: FileFinderViewDelegate> View for FileFinderView<T> {
 
     fn dispatch_action(&mut self, action: serde_json::Value, window: &mut Window) {
         match serde_json::from_value(action) {
-            Ok(FileFinderAction::UpdateQuery { query }) => self.update_query(query, window),
+            Ok(FileFinderAction::UpdateQuery { query }) => self.update_query(query),
             Ok(FileFinderAction::UpdateIncludeIgnored { include_ignored }) => {
-                self.update_include_ignored(include_ignored, window)
+                self.update_include_ignored(include_ignored)
             }
             Ok(FileFinderAction::SelectPrevious) => self.select_previous(),
             Ok(FileFinderAction::SelectNext) => self.select_next(),
@@ -74,14 +77,14 @@ impl<T: FileFinderViewDelegate> Stream for FileFinderView<T> {
     type Item = ();
     type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
         let search_poll = self.search_updates
             .as_mut()
-            .map(|s| s.poll())
-            .unwrap_or(Ok(Async::NotReady))?;
-        let updates_poll = self.updates.poll()?;
+            .map(|s| s.poll_next(cx))
+            .unwrap_or(Ok(Async::Pending))?;
+        let updates_poll = self.updates.poll_next(cx)?;
         match (search_poll, updates_poll) {
-            (Async::NotReady, Async::NotReady) => Ok(Async::NotReady),
+            (Async::Pending, Async::Pending) => Ok(Async::Pending),
             (Async::Ready(Some(search_status)), _) => {
                 match search_status {
                     PathSearchStatus::Pending => {}
@@ -98,8 +101,9 @@ impl<T: FileFinderViewDelegate> Stream for FileFinderView<T> {
 }
 
 impl<T: FileFinderViewDelegate> FileFinderView<T> {
-    pub fn new(delegate: WeakViewHandle<T>) -> Self {
+    pub fn new(executor: Rc<Executor>, delegate: WeakViewHandle<T>) -> Self {
         Self {
+            executor,
             delegate,
             query: String::new(),
             include_ignored: false,
@@ -110,18 +114,18 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
         }
     }
 
-    fn update_query(&mut self, query: String, window: &mut Window) {
+    fn update_query(&mut self, query: String) {
         if self.query != query {
             self.query = query;
-            self.search(window);
+            self.search();
             self.updates.set(());
         }
     }
 
-    fn update_include_ignored(&mut self, include_ignored: bool, window: &mut Window) {
+    fn update_include_ignored(&mut self, include_ignored: bool) {
         if self.include_ignored != include_ignored {
             self.include_ignored = include_ignored;
-            self.search(window);
+            self.search();
             self.updates.set(());
         }
     }
@@ -152,13 +156,13 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
         self.delegate.map(|delegate| delegate.did_close());
     }
 
-    fn search(&mut self, window: &mut Window) {
+    fn search(&mut self) {
         let search = self.delegate
             .map(|delegate| delegate.search_paths(&self.query, 10, self.include_ignored));
 
         if let Some((search, search_updates)) = search {
             self.search_updates = Some(search_updates);
-            window.spawn(search);
+            self.executor.spawn_background(Box::new(search)).unwrap();
             self.updates.set(());
         }
     }

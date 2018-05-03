@@ -1,6 +1,6 @@
 use super::rpc::{client, Error as RpcError};
 use super::tree::{self, SeekBias, Tree};
-use futures::{unsync, Stream};
+use futures::{channel, prelude::*};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
@@ -13,7 +13,7 @@ use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
 use std::rc::Rc;
 use std::sync::Arc;
-use ForegroundExecutor;
+use Executor;
 use IntoShared;
 use UserId;
 
@@ -50,7 +50,7 @@ pub struct Buffer {
     offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: Version,
     client: Option<client::Service<rpc::Service>>,
-    operation_txs: Vec<unsync::mpsc::UnboundedSender<Arc<Operation>>>,
+    operation_txs: Vec<channel::mpsc::UnboundedSender<Arc<Operation>>>,
     updates: NotifyCell<()>,
     next_local_selection_set_id: SelectionSetId,
     selections: HashMap<(ReplicaId, SelectionSetId), SelectionSet>,
@@ -226,8 +226,7 @@ impl Version {
 pub mod rpc {
     use super::{Buffer, BufferId, EditId, FragmentId, Insertion, InsertionSplit, Operation,
                 ReplicaId, SelectionSetId, SelectionSetState, SelectionSetVersion, Version};
-    use futures::{Async, Future, Stream};
-    use never::Never;
+    use futures::prelude::*;
     use notify_cell::NotifyCellObserver;
     use rpc;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -281,7 +280,7 @@ pub mod rpc {
     pub struct Service {
         replica_id: ReplicaId,
         buffer_updates: NotifyCellObserver<()>,
-        outgoing_ops: Box<Stream<Item = Arc<Operation>, Error = ()>>,
+        outgoing_ops: Box<Stream<Item = Arc<Operation>, Error = Never>>,
         selection_set_versions: HashMap<(ReplicaId, SelectionSetId), SelectionSetVersion>,
         buffer: Rc<RefCell<Buffer>>,
     }
@@ -295,7 +294,7 @@ pub mod rpc {
             let outgoing_ops = buffer
                 .borrow_mut()
                 .outgoing_ops()
-                .filter(move |op| op.replica_id() != replica_id);
+                .filter(move |op| Ok(op.replica_id() != replica_id));
             let buffer_updates = buffer.borrow().updates();
             let selection_set_versions = buffer
                 .borrow()
@@ -312,20 +311,23 @@ pub mod rpc {
             }
         }
 
-        fn poll_outgoing_op(&mut self) -> Async<Option<Update>> {
+        fn poll_outgoing_op(&mut self, cx: &mut task::Context) -> Async<Option<Update>> {
             self.outgoing_ops
-                .poll()
+                .poll_next(cx)
                 .expect("Receiving on a channel cannot produce an error")
                 .map(|option| option.map(|update| Update::Operation(update)))
         }
 
-        fn poll_outgoing_selection_updates(&mut self) -> Async<Option<Update>> {
+        fn poll_outgoing_selection_updates(
+            &mut self,
+            cx: &mut task::Context,
+        ) -> Async<Option<Update>> {
             loop {
                 match self.buffer_updates
-                    .poll()
+                    .poll_next(cx)
                     .expect("Polling a NotifyCellObserver cannot produce an error")
                 {
-                    Async::NotReady => return Async::NotReady,
+                    Async::Pending => return Async::Pending,
                     Async::Ready(None) => unreachable!(),
                     Async::Ready(Some(())) => {
                         let mut removed = HashSet::new();
@@ -373,7 +375,7 @@ pub mod rpc {
         type Request = Request;
         type Response = ();
 
-        fn init(&mut self, _: &rpc::server::Connection) -> Self::State {
+        fn init(&mut self, _cx: &mut task::Context, _: &rpc::server::Connection) -> Self::State {
             let buffer = self.buffer.borrow_mut();
             let mut state = State {
                 id: buffer.id,
@@ -414,17 +416,21 @@ pub mod rpc {
             state
         }
 
-        fn poll_update(&mut self, _: &rpc::server::Connection) -> Async<Option<Self::Update>> {
-            match self.poll_outgoing_op() {
+        fn poll_update(
+            &mut self,
+            cx: &mut task::Context,
+            _: &rpc::server::Connection,
+        ) -> Async<Option<Self::Update>> {
+            match self.poll_outgoing_op(cx) {
                 Async::Ready(Some(update)) => Async::Ready(Some(update)),
-                Async::Ready(None) => match self.poll_outgoing_selection_updates() {
+                Async::Ready(None) => match self.poll_outgoing_selection_updates(cx) {
                     Async::Ready(Some(update)) => Async::Ready(Some(update)),
                     Async::Ready(None) => Async::Ready(None),
-                    Async::NotReady => Async::NotReady,
+                    Async::Pending => Async::Pending,
                 },
-                Async::NotReady => match self.poll_outgoing_selection_updates() {
+                Async::Pending => match self.poll_outgoing_selection_updates(cx) {
                     Async::Ready(Some(update)) => Async::Ready(Some(update)),
-                    Async::Ready(None) | Async::NotReady => Async::NotReady,
+                    Async::Ready(None) | Async::Pending => Async::Pending,
                 },
             }
         }
@@ -531,7 +537,7 @@ impl Buffer {
     }
 
     pub fn remote(
-        foreground: ForegroundExecutor,
+        executor: Rc<Executor>,
         client: client::Service<rpc::Service>,
     ) -> Result<Rc<RefCell<Buffer>>, RpcError> {
         let state = client.state()?;
@@ -589,32 +595,37 @@ impl Buffer {
         }.into_shared();
 
         let buffer_weak = Rc::downgrade(&buffer);
-        foreground
-            .execute(Box::new(incoming_updates.for_each(move |update| {
-                if let Some(buffer) = buffer_weak.upgrade() {
-                    let mut buffer = buffer.borrow_mut();
-                    match update {
-                        rpc::Update::Operation(operation) => {
-                            if buffer.integrate_op(operation).is_err() {
-                                unimplemented!("Invalid op");
+        executor
+            .spawn_foreground(Box::new(
+                incoming_updates
+                    .for_each(move |update| {
+                        if let Some(buffer) = buffer_weak.upgrade() {
+                            let mut buffer = buffer.borrow_mut();
+                            match update {
+                                rpc::Update::Operation(operation) => {
+                                    if buffer.integrate_op(operation).is_err() {
+                                        unimplemented!("Invalid op");
+                                    }
+                                }
+                                rpc::Update::Selections { updated, removed } => {
+                                    for ((replica_id, set_id), state) in updated {
+                                        debug_assert!(replica_id != buffer.replica_id);
+                                        buffer
+                                            .update_remote_selection_set(replica_id, set_id, state);
+                                    }
+
+                                    for (replica_id, set_id) in removed {
+                                        debug_assert!(replica_id != buffer.replica_id);
+                                        buffer.remove_remote_selection_set(replica_id, set_id);
+                                    }
+                                }
                             }
                         }
-                        rpc::Update::Selections { updated, removed } => {
-                            for ((replica_id, set_id), state) in updated {
-                                debug_assert!(replica_id != buffer.replica_id);
-                                buffer.update_remote_selection_set(replica_id, set_id, state);
-                            }
 
-                            for (replica_id, set_id) in removed {
-                                debug_assert!(replica_id != buffer.replica_id);
-                                buffer.remove_remote_selection_set(replica_id, set_id);
-                            }
-                        }
-                    }
-                }
-
-                Ok(())
-            })))
+                        Ok(())
+                    })
+                    .then(|_| Ok(())),
+            ))
             .unwrap();
 
         Ok(buffer)
@@ -979,8 +990,8 @@ impl Buffer {
             .clone())
     }
 
-    fn outgoing_ops(&mut self) -> unsync::mpsc::UnboundedReceiver<Arc<Operation>> {
-        let (tx, rx) = unsync::mpsc::unbounded();
+    fn outgoing_ops(&mut self) -> channel::mpsc::UnboundedReceiver<Arc<Operation>> {
+        let (tx, rx) = channel::mpsc::unbounded();
         self.operation_txs.push(tx);
         rx
     }
@@ -2439,7 +2450,7 @@ mod tests {
         local_buffer.borrow_mut().edit(2..4, "ghi");
 
         let mut reactor = reactor::Core::new().unwrap();
-        let foreground = Rc::new(reactor.handle());
+        let executor = Rc::new(reactor.handle());
         let client_1 =
             rpc::tests::connect(&mut reactor, super::rpc::Service::new(local_buffer.clone()));
         let remote_buffer_1 = Buffer::remote(foreground.clone(), client_1).unwrap();
@@ -2495,7 +2506,7 @@ mod tests {
         let buffer_1 = buffer_1.into_shared();
 
         let mut reactor = reactor::Core::new().unwrap();
-        let foreground = Rc::new(reactor.handle());
+        let executor = Rc::new(reactor.handle());
         let buffer_2 = Buffer::remote(
             foreground.clone(),
             rpc::tests::connect(&mut reactor, super::rpc::Service::new(buffer_1.clone())),

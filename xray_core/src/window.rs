@@ -1,13 +1,10 @@
-use futures::task::{self, Task};
-use futures::{Async, Future, Poll, Stream};
+use futures::prelude::*;
 use serde_json;
-use std::boxed::Box;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::marker::Unsize;
 use std::ops::CoerceUnsized;
 use std::rc::{Rc, Weak};
-use BackgroundExecutor;
 
 pub type ViewId = usize;
 
@@ -34,7 +31,6 @@ pub struct WindowUpdateStream {
 }
 
 pub struct Inner {
-    background: Option<BackgroundExecutor>,
     root_view: Option<ViewHandle>,
     next_view_id: ViewId,
     views: HashMap<ViewId, Rc<RefCell<View<Item = (), Error = ()>>>>,
@@ -43,7 +39,7 @@ pub struct Inner {
     focused: Option<ViewId>,
     height: f64,
     update_stream_counter: usize,
-    update_stream_task: Option<Task>,
+    update_stream_waker: Option<task::Waker>,
 }
 
 pub struct ViewHandle {
@@ -68,9 +64,8 @@ pub struct ViewUpdate {
 }
 
 impl Window {
-    pub fn new(background: Option<BackgroundExecutor>, height: f64) -> Self {
+    pub fn new(height: f64) -> Self {
         Window(Rc::new(RefCell::new(Inner {
-            background,
             root_view: None,
             next_view_id: 0,
             views: HashMap::new(),
@@ -79,7 +74,7 @@ impl Window {
             focused: None,
             height: height,
             update_stream_counter: 0,
-            update_stream_task: None,
+            update_stream_waker: None,
         })))
     }
 
@@ -133,14 +128,6 @@ impl Window {
         }
     }
 
-    pub fn spawn<F: Future<Item = (), Error = ()> + Send + 'static>(&self, future: F) {
-        self.0
-            .borrow()
-            .background
-            .as_ref()
-            .map(|background| background.execute(Box::new(future)));
-    }
-
     pub fn handle(&self) -> WeakWindowHandle {
         WeakWindowHandle(Rc::downgrade(&self.0))
     }
@@ -162,7 +149,7 @@ impl Stream for WindowUpdateStream {
     type Item = WindowUpdate;
     type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
         let inner_ref = match self.inner.upgrade() {
             None => return Ok(Async::Ready(None)),
             Some(inner) => inner,
@@ -196,7 +183,7 @@ impl Stream for WindowUpdateStream {
                 }
 
                 for (id, ref view) in inner.views.iter() {
-                    let result = view.borrow_mut().poll();
+                    let result = view.borrow_mut().poll_next(cx);
                     if !inner.inserted.contains(&id) {
                         if let Ok(Async::Ready(Some(()))) = result {
                             let view = view.borrow();
@@ -217,7 +204,7 @@ impl Stream for WindowUpdateStream {
 
                 for (id, ref view) in inner.views.iter() {
                     let mut view = view.borrow_mut();
-                    let _ = view.poll();
+                    let _ = view.poll_next(cx);
                     window_update.updated.push(ViewUpdate {
                         view_id: *id,
                         component_name: view.component_name(),
@@ -234,8 +221,8 @@ impl Stream for WindowUpdateStream {
         inner.removed.clear();
 
         if window_update.removed.is_empty() && window_update.updated.is_empty() {
-            inner.update_stream_task = Some(task::current());
-            Ok(Async::NotReady)
+            inner.update_stream_waker = Some(cx.waker().clone());
+            Ok(Async::Pending)
         } else {
             Ok(Async::Ready(Some(window_update)))
         }
@@ -244,7 +231,7 @@ impl Stream for WindowUpdateStream {
 
 impl Inner {
     fn notify(&mut self) {
-        self.update_stream_task.take().map(|task| task.notify());
+        self.update_stream_waker.take().map(|waker| waker.wake());
     }
 
     fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<View<Item = (), Error = ()>>>> {
@@ -350,8 +337,8 @@ mod tests {
         type Item = ();
         type Error = ();
 
-        fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-            self.updates.poll()
+        fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
+            self.updates.poll_next(cx)
         }
     }
 }

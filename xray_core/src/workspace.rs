@@ -3,8 +3,7 @@ use buffer_view::{BufferView, BufferViewDelegate};
 use cross_platform;
 use discussion::{Discussion, DiscussionService, DiscussionView, DiscussionViewDelegate};
 use file_finder::{FileFinderView, FileFinderViewDelegate};
-use futures::{Future, Poll, Stream};
-use never::Never;
+use futures::prelude::*;
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
 use project::{self, LocalProject, PathSearch, PathSearchStatus, Project, ProjectService,
@@ -15,7 +14,7 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::ops::Range;
 use std::rc::Rc;
 use window::{View, ViewHandle, WeakViewHandle, WeakWindowHandle, Window};
-use ForegroundExecutor;
+use Executor;
 use IntoShared;
 use UserId;
 
@@ -51,7 +50,7 @@ pub struct ServiceState {
 }
 
 pub struct WorkspaceView {
-    foreground: ForegroundExecutor,
+    executor: Rc<Executor>,
     workspace: Rc<RefCell<Workspace>>,
     active_buffer_view: Option<WeakViewHandle<BufferView>>,
     center_pane: Option<ViewHandle>,
@@ -106,13 +105,13 @@ impl Workspace for LocalWorkspace {
 
 impl RemoteWorkspace {
     pub fn new(
-        foreground: ForegroundExecutor,
+        executor: Rc<Executor>,
         service: client::Service<WorkspaceService>,
     ) -> Result<Self, rpc::Error> {
         let state = service.state()?;
-        let project = RemoteProject::new(foreground.clone(), service.take_service(state.project)?)?;
+        let project = RemoteProject::new(executor.clone(), service.take_service(state.project)?)?;
         let discussion = Discussion::remote(
-            foreground,
+            executor,
             state.user_id,
             service.take_service(state.discussion)?,
         )?;
@@ -151,11 +150,11 @@ impl WorkspaceService {
 
 impl server::Service for WorkspaceService {
     type State = ServiceState;
-    type Update = Never;
-    type Request = Never;
-    type Response = Never;
+    type Update = ();
+    type Request = ();
+    type Response = ();
 
-    fn init(&mut self, connection: &server::Connection) -> ServiceState {
+    fn init(&mut self, _cx: &mut task::Context, connection: &server::Connection) -> ServiceState {
         let mut workspace = self.workspace.borrow_mut();
         let user_id = workspace.next_user_id;
         workspace.next_user_id += 1;
@@ -175,10 +174,10 @@ impl server::Service for WorkspaceService {
 }
 
 impl WorkspaceView {
-    pub fn new(foreground: ForegroundExecutor, workspace: Rc<RefCell<Workspace>>) -> Self {
+    pub fn new(executor: Rc<Executor>, workspace: Rc<RefCell<Workspace>>) -> Self {
         WorkspaceView {
             workspace,
-            foreground,
+            executor,
             active_buffer_view: None,
             center_pane: None,
             modal: None,
@@ -194,7 +193,7 @@ impl WorkspaceView {
             self.modal = None;
         } else {
             let delegate = self.self_handle.as_ref().cloned().unwrap();
-            let view = window.add_view(FileFinderView::new(delegate));
+            let view = window.add_view(FileFinderView::new(self.executor.clone(), delegate));
             view.focus().unwrap();
             self.modal = Some(view);
         }
@@ -221,8 +220,8 @@ impl WorkspaceView {
         if let Some(window_handle) = self.window_handle.clone() {
             let user_id = self.workspace.borrow().user_id();
             let view_handle = self.self_handle.clone();
-            self.foreground
-                .execute(Box::new(buffer.then(move |result| {
+            self.executor
+                .spawn_foreground(Box::new(buffer.then(move |result| {
                     window_handle.map(|window| match result {
                         Ok(buffer) => {
                             if let Some(view_handle) = view_handle {
@@ -337,7 +336,7 @@ impl Stream for WorkspaceView {
     type Item = ();
     type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        self.updates.poll()
+    fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
+        self.updates.poll_next(cx)
     }
 }

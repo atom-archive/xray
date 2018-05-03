@@ -1,8 +1,6 @@
 use bytes::Bytes;
 use fs;
-use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures::{future, Async, Future, IntoFuture, Stream};
-use never::Never;
+use futures::{channel, future, prelude::*};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use project::LocalProject;
 use rpc::{self, client, server};
@@ -14,8 +12,7 @@ use std::io;
 use std::rc::Rc;
 use window::{ViewId, Window, WindowUpdateStream};
 use workspace::{LocalWorkspace, RemoteWorkspace, Workspace, WorkspaceService, WorkspaceView};
-use BackgroundExecutor;
-use ForegroundExecutor;
+use Executor;
 use IntoShared;
 
 pub type WindowId = usize;
@@ -24,11 +21,10 @@ type PeerId = usize;
 
 pub struct App {
     headless: bool,
-    foreground: ForegroundExecutor,
-    background: BackgroundExecutor,
+    executor: Rc<Executor>,
     file_provider: Rc<fs::FileProvider>,
-    commands_tx: UnboundedSender<Command>,
-    commands_rx: Option<UnboundedReceiver<Command>>,
+    commands_tx: channel::mpsc::UnboundedSender<Command>,
+    commands_rx: Option<channel::mpsc::UnboundedReceiver<Command>>,
     peer_list: Rc<RefCell<PeerList>>,
     next_workspace_id: WorkspaceId,
     workspaces: HashMap<WorkspaceId, WorkspaceEntry>,
@@ -42,16 +38,16 @@ pub enum Command {
 }
 
 pub struct PeerList {
-    foreground: ForegroundExecutor,
+    executor: Rc<Executor>,
     next_peer_id: PeerId,
     peers: HashMap<PeerId, Peer>,
-    opened_workspaces_tx: UnboundedSender<RemoteWorkspace>,
-    opened_workspaces_rx: Option<UnboundedReceiver<RemoteWorkspace>>,
+    opened_workspaces_tx: channel::mpsc::UnboundedSender<RemoteWorkspace>,
+    opened_workspaces_rx: Option<channel::mpsc::UnboundedReceiver<RemoteWorkspace>>,
     updates: NotifyCell<()>,
 }
 
 struct Peer {
-    foreground: ForegroundExecutor,
+    executor: Rc<Executor>,
     service: client::FullUpdateService<AppService>,
 }
 
@@ -103,16 +99,14 @@ enum WorkspaceOpenError {
 impl App {
     pub fn new<T: 'static + fs::FileProvider>(
         headless: bool,
-        foreground: ForegroundExecutor,
-        background: BackgroundExecutor,
+        executor: Rc<Executor>,
         file_provider: T,
     ) -> Rc<RefCell<Self>> {
-        let (commands_tx, commands_rx) = mpsc::unbounded();
-        let peer_list = PeerList::new(foreground.clone()).into_shared();
+        let (commands_tx, commands_rx) = channel::mpsc::unbounded();
+        let peer_list = PeerList::new(executor.clone()).into_shared();
         let app = App {
             headless,
-            foreground: foreground.clone(),
-            background,
+            executor: executor.clone(),
             file_provider: Rc::new(file_provider),
             commands_tx,
             commands_rx: Some(commands_rx),
@@ -125,8 +119,8 @@ impl App {
         }.into_shared();
 
         let app_clone = app.clone();
-        foreground
-            .execute(Box::new(
+        executor
+            .spawn_foreground(Box::new(
                 peer_list
                     .borrow_mut()
                     .take_opened_workspaces()
@@ -137,14 +131,15 @@ impl App {
                         app.add_workspace(WorkspaceEntry::Remote(workspace.clone()));
                         app.open_workspace_window(workspace);
                         Ok(())
-                    }),
+                    })
+                    .then(|_| Ok(())),
             ))
             .unwrap();
 
         app
     }
 
-    pub fn commands(&mut self) -> Option<UnboundedReceiver<Command>> {
+    pub fn commands(&mut self) -> Option<channel::mpsc::UnboundedReceiver<Command>> {
         self.commands_rx.take()
     }
 
@@ -168,11 +163,9 @@ impl App {
 
     fn open_workspace_window<T: 'static + Workspace>(&mut self, workspace: Rc<RefCell<T>>) {
         if !self.headless {
-            let mut window = Window::new(Some(self.background.clone()), 0.0);
-            let workspace_view_handle = window.add_view(WorkspaceView::new(
-                self.foreground.clone(),
-                workspace.clone(),
-            ));
+            let mut window = Window::new(0.0);
+            let workspace_view_handle =
+                window.add_view(WorkspaceView::new(self.executor.clone(), workspace.clone()));
             window.set_root_view(workspace_view_handle);
             let window_id = self.next_window_id;
             self.next_window_id += 1;
@@ -181,7 +174,7 @@ impl App {
                 .unbounded_send(Command::OpenWindow(window_id))
                 .is_err()
             {
-                let (commands_tx, commands_rx) = mpsc::unbounded();
+                let (commands_tx, commands_rx) = channel::mpsc::unbounded();
                 commands_tx
                     .unbounded_send(Command::OpenWindow(window_id))
                     .unwrap();
@@ -208,7 +201,7 @@ impl App {
             None => unimplemented!(),
         };
     }
-    
+
     pub fn close_window(&mut self, window_id: WindowId) -> Result<(), ()> {
         self.windows.remove(&window_id).map(|_| ()).ok_or(())
     }
@@ -232,10 +225,10 @@ impl App {
 }
 
 impl PeerList {
-    fn new(foreground: ForegroundExecutor) -> Self {
-        let (tx, rx) = mpsc::unbounded();
+    fn new(executor: Rc<Executor>) -> Self {
+        let (tx, rx) = channel::mpsc::unbounded();
         PeerList {
-            foreground,
+            executor,
             next_peer_id: 0,
             peers: HashMap::new(),
             opened_workspaces_tx: tx,
@@ -265,7 +258,9 @@ impl PeerList {
         self.updates.observe()
     }
 
-    fn take_opened_workspaces(&mut self) -> Option<UnboundedReceiver<RemoteWorkspace>> {
+    fn take_opened_workspaces(
+        &mut self,
+    ) -> Option<channel::mpsc::UnboundedReceiver<RemoteWorkspace>> {
         self.opened_workspaces_rx.take()
     }
 
@@ -282,15 +277,19 @@ impl PeerList {
                 let peer_id = peer_list.next_peer_id;
                 peer_list.next_peer_id += 1;
 
-                let peer = Peer::new(peer_list.foreground.clone(), peer_service);
+                let peer = Peer::new(peer_list.executor.clone(), peer_service);
                 let peer_updates = peer.updates()?;
                 let peer_list_updates = peer_list.updates.clone();
                 peer_list
-                    .foreground
-                    .execute(Box::new(peer_updates.for_each(move |_| {
-                        peer_list_updates.set(());
-                        Ok(())
-                    })))
+                    .executor
+                    .spawn_foreground(Box::new(
+                        peer_updates
+                            .for_each(move |_| {
+                                peer_list_updates.set(());
+                                Ok(())
+                            })
+                            .then(|_| Ok(())),
+                    ))
                     .unwrap();
 
                 peer_list.peers.insert(peer_id, peer);
@@ -306,9 +305,9 @@ impl PeerList {
     fn open_first_workspace(&self, peer_id: PeerId) {
         if let Some(peer) = self.peers.get(&peer_id) {
             let opened_workspaces_tx = self.opened_workspaces_tx.clone();
-            self.foreground
-                .execute(Box::new(peer.open_first_workspace().then(
-                    move |result| match result {
+            self.executor
+                .spawn_foreground(Box::new(peer.open_first_workspace().then(move |result| {
+                    match result {
                         Ok(Some(workspace)) => {
                             let _ = opened_workspaces_tx.unbounded_send(workspace);
                             Ok(())
@@ -321,22 +320,22 @@ impl PeerList {
                             eprintln!("Error opening remote workspace: {}", error);
                             Ok(())
                         }
-                    },
-                )))
+                    }
+                })))
                 .unwrap();
         }
     }
 }
 
 impl Peer {
-    fn new(foreground: ForegroundExecutor, service: client::Service<AppService>) -> Self {
+    fn new(executor: Rc<Executor>, service: client::Service<AppService>) -> Self {
         Self {
-            foreground,
+            executor,
             service: client::FullUpdateService::new(service),
         }
     }
 
-    fn updates(&self) -> Result<Box<Stream<Item = (), Error = ()>>, rpc::Error> {
+    fn updates(&self) -> Result<Box<Stream<Item = (), Error = Never>>, rpc::Error> {
         Ok(Box::new(self.service.updates()?.map(|_| ())))
     }
 
@@ -357,7 +356,7 @@ impl Peer {
         &self,
         workspace_id: WorkspaceId,
     ) -> Box<Future<Item = Option<RemoteWorkspace>, Error = WorkspaceOpenError>> {
-        let foreground = self.foreground.clone();
+        let executor = self.executor.clone();
         let service = self.service.clone();
         Box::new(
             self.service
@@ -374,7 +373,7 @@ impl Peer {
                                 .take_service(service_id)
                                 .map_err(|e| WorkspaceOpenError::from(e))?;
                             let remote_workspace =
-                                RemoteWorkspace::new(foreground, workspace_service)
+                                RemoteWorkspace::new(executor, workspace_service)
                                     .map_err(|e| WorkspaceOpenError::from(e))?;
                             Ok(Some(remote_workspace))
                         }
@@ -403,15 +402,19 @@ impl server::Service for AppService {
     type Request = ServiceRequest;
     type Response = Result<ServiceResponse, ServiceError>;
 
-    fn init(&mut self, _connection: &server::Connection) -> Self::State {
+    fn init(&mut self, _cx: &mut task::Context, _connection: &server::Connection) -> Self::State {
         self.state()
     }
 
-    fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
-        match self.updates.poll() {
+    fn poll_update(
+        &mut self,
+        cx: &mut task::Context,
+        _: &server::Connection,
+    ) -> Async<Option<Self::Update>> {
+        match self.updates.poll_next(cx) {
             Ok(Async::Ready(Some(()))) => Async::Ready(Some(self.state())),
             Ok(Async::Ready(None)) | Err(_) => Async::Ready(None),
-            Ok(Async::NotReady) => Async::NotReady,
+            Ok(Async::Pending) => Async::Pending,
         }
     }
 
@@ -467,7 +470,7 @@ impl fmt::Display for WorkspaceOpenError {
 mod tests {
     use super::*;
     use fs::tests::{TestFileProvider, TestTree};
-    use futures::{unsync, Future, Sink};
+    use futures::prelude::*;
     use stream_ext::StreamExt;
     use tokio_core::reactor;
 
@@ -512,9 +515,9 @@ mod tests {
     }
 
     fn connect(reactor: &mut reactor::Core, server: Rc<RefCell<App>>, client: Rc<RefCell<App>>) {
-        let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
+        let (server_to_client_tx, server_to_client_rx) = channel::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
-        let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
+        let (client_to_server_tx, client_to_server_rx) = channel::mpsc::unbounded();
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
 
         let server_outgoing = App::connect_to_client(server, client_to_server_rx);

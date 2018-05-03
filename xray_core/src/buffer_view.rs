@@ -1,5 +1,5 @@
 use buffer::{self, Buffer, BufferId, Point, Selection, SelectionSetId};
-use futures::{Poll, Stream};
+use futures::prelude::*;
 use movement;
 use notify_cell::NotifyCell;
 use serde_json;
@@ -790,8 +790,8 @@ impl Stream for BufferView {
     type Item = ();
     type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        self.updates_rx.poll()
+    fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
+        self.updates_rx.poll_next(cx)
     }
 }
 
@@ -1228,9 +1228,13 @@ mod tests {
             .set_scroll_top(2.5 * line_height);
         assert_eq!(editor.scroll_top(), 2.5 * line_height);
 
-        editor.autoscroll_to_range(start.clone()..start.clone(), true).unwrap();
+        editor
+            .autoscroll_to_range(start.clone()..start.clone(), true)
+            .unwrap();
         assert_eq!(editor.scroll_top(), 0.0);
-        editor.autoscroll_to_range(end.clone()..end.clone(), true).unwrap();
+        editor
+            .autoscroll_to_range(end.clone()..end.clone(), true)
+            .unwrap();
         assert_eq!(
             editor.scroll_top(),
             (max_point.row as f64 * line_height) - (height / 2.0)

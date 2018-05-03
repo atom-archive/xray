@@ -43,8 +43,7 @@ impl error::Error for Error {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use futures::{future, unsync, Async, Future, Sink, Stream};
-    use never::Never;
+    use futures::prelude::*;
     use notify_cell::{NotifyCell, NotifyCellObserver};
     use std::rc::Rc;
     use stream_ext::StreamExt;
@@ -161,7 +160,11 @@ pub(crate) mod tests {
             type Request = ();
             type Response = ();
 
-            fn init(&mut self, connection: &server::Connection) -> Self::State {
+            fn init(
+                &mut self,
+                cx: &mut task::Context,
+                connection: &server::Connection,
+            ) -> Self::State {
                 self.init_called = true;
                 while self.services_to_add_on_init != 0 {
                     self.child_services
@@ -181,7 +184,7 @@ pub(crate) mod tests {
                         .push(connection.add_service(NoopService::new(0, 0)));
                     self.services_to_add_on_update -= 1;
                 }
-                Async::NotReady
+                Async::Pending
             }
         }
 
@@ -208,7 +211,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_interrupting_connection_to_client() {
-        let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
+        let (client_to_server_tx, client_to_server_rx) = channel::mpsc::unbounded();
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
         let model = Rc::new(TestModel::new(42));
         let mut server = server::Connection::new(client_to_server_rx, TestService::new(model));
@@ -219,7 +222,7 @@ pub(crate) mod tests {
     #[test]
     fn test_interrupting_connection_to_server_during_handshake() {
         let mut reactor = reactor::Core::new().unwrap();
-        let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
+        let (server_to_client_tx, server_to_client_rx) = channel::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
         drop(server_to_client_tx);
         let client_future = client::Connection::new::<_, TestService>(server_to_client_rx);
@@ -230,9 +233,9 @@ pub(crate) mod tests {
     fn test_interrupting_connection_to_server_after_handshake() {
         let mut reactor = reactor::Core::new().unwrap();
 
-        let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
+        let (server_to_client_tx, server_to_client_rx) = channel::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
-        let (_client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
+        let (_client_to_server_tx, client_to_server_rx) = channel::mpsc::unbounded();
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
 
         let model = Rc::new(TestModel::new(42));
@@ -262,9 +265,9 @@ pub(crate) mod tests {
         service: S,
         delay: Option<u64>,
     ) -> client::Service<S> {
-        let (server_to_client_tx, server_to_client_rx) = unsync::mpsc::unbounded();
+        let (server_to_client_tx, server_to_client_rx) = channel::mpsc::unbounded();
         let server_to_client_rx = server_to_client_rx.map_err(|_| unreachable!());
-        let (client_to_server_tx, client_to_server_rx) = unsync::mpsc::unbounded();
+        let (client_to_server_tx, client_to_server_rx) = channel::mpsc::unbounded();
         let client_to_server_rx = client_to_server_rx.map_err(|_| unreachable!());
 
         let server = if let Some(delay) = delay {
@@ -336,11 +339,15 @@ pub(crate) mod tests {
         type Request = TestRequest;
         type Response = TestServiceResponse;
 
-        fn init(&mut self, _: &server::Connection) -> Self::State {
+        fn init(&mut self, cx: &mut task::Context, _: &server::Connection) -> Self::State {
             self.model.cell.get()
         }
 
-        fn poll_update(&mut self, _: &server::Connection) -> Async<Option<Self::Update>> {
+        fn poll_update(
+            &mut self,
+            cx: &mut task::Context,
+            _: &server::Connection,
+        ) -> Async<Option<Self::Update>> {
             self.observer.poll().unwrap()
         }
 
@@ -369,7 +376,7 @@ pub(crate) mod tests {
                     Some(Box::new(future::ok(TestServiceResponse::Ack)))
                 }
                 TestRequest::CreateServiceAsync => {
-                    use futures;
+                    use futures::prelude::*;
                     use std::thread;
 
                     let (tx, rx) = futures::sync::oneshot::channel();

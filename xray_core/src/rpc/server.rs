@@ -2,10 +2,7 @@ use super::messages::{MessageToClient, MessageToServer, RequestId, Response, Ser
 use super::Error;
 use bincode::{deserialize, serialize};
 use bytes::Bytes;
-use futures::stream::FuturesUnordered;
-use futures::task::{self, Task};
-use futures::{future, Async, Future, Poll, Stream};
-use never::Never;
+use futures::{future, prelude::*, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -19,10 +16,14 @@ pub trait Service {
     type Request: 'static + Serialize + for<'a> Deserialize<'a>;
     type Response: 'static + Serialize + for<'a> Deserialize<'a>;
 
-    fn init(&mut self, connection: &Connection) -> Self::State;
+    fn init(&mut self, cx: &mut task::Context, connection: &Connection) -> Self::State;
 
-    fn poll_update(&mut self, _connection: &Connection) -> Async<Option<Self::Update>> {
-        Async::NotReady
+    fn poll_update(
+        &mut self,
+        _cx: &mut task::Context,
+        _connection: &Connection,
+    ) -> Async<Option<Self::Update>> {
+        Async::Pending
     }
 
     fn request(
@@ -35,8 +36,12 @@ pub trait Service {
 }
 
 trait RawBytesService {
-    fn init(&mut self, connection: &mut Connection) -> Bytes;
-    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Bytes>>;
+    fn init(&mut self, cx: &mut task::Context, connection: &mut Connection) -> Bytes;
+    fn poll_update(
+        &mut self,
+        cx: &mut task::Context,
+        connection: &mut Connection,
+    ) -> Async<Option<Bytes>>;
     fn request(
         &mut self,
         request: Bytes,
@@ -56,7 +61,7 @@ struct ConnectionState {
     incoming: Box<Stream<Item = Bytes, Error = io::Error>>,
     pending_responses:
         Rc<RefCell<FuturesUnordered<Box<Future<Item = ResponseEnvelope, Error = Never>>>>>,
-    pending_task: Option<Task>,
+    waker: Option<task::Waker>,
 }
 
 struct ServiceRegistration {
@@ -87,7 +92,7 @@ impl Connection {
             removed: HashSet::new(),
             incoming: Box::new(incoming),
             pending_responses: Rc::new(RefCell::new(FuturesUnordered::new())),
-            pending_task: None,
+            waker: None,
         })));
         connection.add_service(root_service);
         connection
@@ -114,9 +119,9 @@ impl Connection {
         handle
     }
 
-    fn poll_incoming(&mut self) -> Result<bool, io::Error> {
+    fn poll_incoming(&mut self, cx: &mut task::Context) -> Result<bool, io::Error> {
         loop {
-            let poll = self.0.borrow_mut().incoming.poll();
+            let poll = self.0.borrow_mut().incoming.poll_next(cx);
             match poll {
                 Ok(Async::Ready(Some(request))) => match deserialize(&request).unwrap() {
                     MessageToServer::Request {
@@ -158,7 +163,7 @@ impl Connection {
                     }
                 },
                 Ok(Async::Ready(None)) => return Ok(false),
-                Ok(Async::NotReady) => return Ok(true),
+                Ok(Async::Pending) => return Ok(true),
                 Err(error) => {
                     eprintln!("Error polling incoming connection: {}", error);
                     return Err(error);
@@ -167,18 +172,18 @@ impl Connection {
         }
     }
 
-    fn poll_outgoing(&mut self) -> Poll<Option<Bytes>, ()> {
+    fn poll_outgoing(&mut self, cx: &mut task::Context) -> Poll<Option<Bytes>, ()> {
         let pending_responses = self.0.borrow_mut().pending_responses.clone();
         let mut responses = HashMap::new();
         loop {
-            match pending_responses.borrow_mut().poll() {
+            match pending_responses.borrow_mut().poll_next(cx) {
                 Ok(Async::Ready(Some(envelope))) => {
                     responses
                         .entry(envelope.service_id)
                         .or_insert(Vec::new())
                         .push((envelope.request_id, envelope.response));
                 }
-                Ok(Async::Ready(None)) | Ok(Async::NotReady) => break,
+                Ok(Async::Ready(None)) | Ok(Async::Pending) => break,
                 Err(_) => unreachable!(),
             }
         }
@@ -196,7 +201,7 @@ impl Connection {
         let mut updates: HashMap<ServiceId, Vec<Bytes>> = HashMap::new();
         for id in existing_service_ids {
             if let Some(service) = self.take_service(id) {
-                while let Async::Ready(Some(update)) = service.borrow_mut().poll_update(self) {
+                while let Async::Ready(Some(update)) = service.borrow_mut().poll_update(cx, self) {
                     updates.entry(id).or_insert(Vec::new()).push(update);
                 }
             }
@@ -208,8 +213,8 @@ impl Connection {
             for id in inserted {
                 if let Some(service) = self.take_service(id) {
                     let mut service = service.borrow_mut();
-                    insertions.insert(id, service.init(self));
-                    while let Async::Ready(Some(update)) = service.poll_update(self) {
+                    insertions.insert(id, service.init(cx, self));
+                    while let Async::Ready(Some(update)) = service.poll_update(cx, self) {
                         updates.entry(id).or_insert(Vec::new()).push(update);
                     }
                 }
@@ -230,8 +235,8 @@ impl Connection {
                     .into();
             Ok(Async::Ready(Some(message)))
         } else {
-            self.0.borrow_mut().pending_task = Some(task::current());
-            Ok(Async::NotReady)
+            self.0.borrow_mut().waker = Some(cx.waker().clone());
+            Ok(Async::Pending)
         }
     }
 
@@ -244,8 +249,8 @@ impl Stream for Connection {
     type Item = Bytes;
     type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        match self.poll_incoming() {
+    fn poll_next(&mut self, cx: &mut task::Context) -> Poll<Option<Self::Item>, Self::Error> {
+        match self.poll_incoming(cx) {
             Ok(true) => {}
             Ok(false) => return Ok(Async::Ready(None)),
             Err(error) => {
@@ -256,7 +261,7 @@ impl Stream for Connection {
             }
         }
 
-        self.poll_outgoing()
+        self.poll_outgoing(cx)
     }
 }
 
@@ -272,7 +277,7 @@ impl Drop for ServiceRegistration {
             let mut connection = connection.borrow_mut();
             connection.services.remove(&self.service_id);
             connection.removed.insert(self.service_id);
-            connection.pending_task.as_ref().map(|task| task.notify());
+            connection.waker.as_ref().map(|waker| waker.wake());
         }
     }
 }
@@ -281,12 +286,16 @@ impl<T> RawBytesService for T
 where
     T: Service,
 {
-    fn init(&mut self, connection: &mut Connection) -> Bytes {
-        serialize(&T::init(self, connection)).unwrap().into()
+    fn init(&mut self, cx: &mut task::Context, connection: &mut Connection) -> Bytes {
+        serialize(&T::init(self, cx, connection)).unwrap().into()
     }
 
-    fn poll_update(&mut self, connection: &mut Connection) -> Async<Option<Bytes>> {
-        T::poll_update(self, connection)
+    fn poll_update(
+        &mut self,
+        cx: &mut task::Context,
+        connection: &mut Connection,
+    ) -> Async<Option<Bytes>> {
+        T::poll_update(self, cx, connection)
             .map(|option| option.map(|update| serialize(&update).unwrap().into()))
     }
 
