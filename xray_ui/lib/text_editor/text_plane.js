@@ -41,7 +41,7 @@ class TextPlane extends React.Component {
     const selectionColors = cursorColors.map(color => {
       color = Object.assign({}, color);
       color.a = 0.5;
-      return color
+      return color;
     });
 
     const computedLineHeight = this.props.lineHeight;
@@ -363,6 +363,7 @@ class Renderer {
     } = this.populateSelectionSolidInstances(
       scrollTop,
       canvasWidth,
+      paddingLeft,
       selections,
       xPositions,
       selectionColors,
@@ -503,7 +504,7 @@ class Renderer {
 
     for (var i = 0; i < lines.length; i++) {
       position.row = firstVisibleRow + i;
-      let x = 5;
+      let x = paddingLeft;
       const line = lines[i];
 
       for (
@@ -570,6 +571,7 @@ class Renderer {
   populateSelectionSolidInstances(
     scrollTop,
     canvasWidth,
+    paddingLeft,
     selections,
     xPositions,
     selectionColors,
@@ -620,7 +622,7 @@ class Renderer {
             this.updateSolidInstance(
               this.selectionSolidInstances,
               selectionSolidCount++,
-              0,
+              paddingLeft,
               yForRow(selection.start.row + 1),
               Math.round(canvasWidth),
               yForRow(selection.end.row) - yForRow(selection.start.row + 1),
@@ -632,9 +634,9 @@ class Renderer {
           this.updateSolidInstance(
             this.selectionSolidInstances,
             selectionSolidCount++,
-            0,
+            paddingLeft,
             yForRow(selection.end.row),
-            Math.round(endX),
+            Math.round(endX - paddingLeft),
             yForRow(selection.end.row + 1) - yForRow(selection.end.row),
             selectionColor
           );
