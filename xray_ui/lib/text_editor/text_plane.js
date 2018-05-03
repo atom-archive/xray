@@ -61,7 +61,6 @@ class TextPlane extends React.Component {
       lines: this.props.lines,
       selections: this.props.selections,
       showLocalCursors: this.props.showLocalCursors,
-      localReplicaId: this.props.localReplicaId,
       selectionColors,
       cursorColors,
       computedLineHeight
@@ -325,7 +324,6 @@ class Renderer {
     lines,
     selections,
     showLocalCursors,
-    localReplicaId,
     selectionColors,
     cursorColors
   }) {
@@ -364,8 +362,7 @@ class Renderer {
       selectionColors,
       cursorColors,
       cursorWidth,
-      showLocalCursors,
-      localReplicaId
+      showLocalCursors
     );
     this.atlas.uploadTexture();
 
@@ -572,8 +569,7 @@ class Renderer {
     selectionColors,
     cursorColors,
     cursorWidth,
-    showLocalCursors,
-    localReplicaId
+    showLocalCursors
   ) {
     const { dpiScale, computedLineHeight } = this.style;
 
@@ -582,7 +578,7 @@ class Renderer {
 
     for (var i = 0; i < selections.length; i++) {
       const selection = selections[i];
-      const colorIndex = (selection.replica_id - 1) % selectionColors.length;
+      const colorIndex = selection.user_id % selectionColors.length;
       const selectionColor = selectionColors[colorIndex];
       const cursorColor = cursorColors[colorIndex];
 
@@ -639,7 +635,7 @@ class Renderer {
         }
       }
 
-      if (showLocalCursors || localReplicaId !== selection.replica_id) {
+      if (showLocalCursors || selection.remote) {
         const cursorPoint = selection.reversed
           ? selection.start
           : selection.end;

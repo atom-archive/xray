@@ -52,6 +52,7 @@ pub use window::{ViewId, WindowUpdate};
 
 pub type ForegroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + 'static>>>;
 pub type BackgroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + Send + 'static>>>;
+pub type UserId = usize;
 
 pub(crate) trait IntoShared {
     fn into_shared(self) -> Rc<RefCell<Self>>;

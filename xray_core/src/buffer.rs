@@ -15,6 +15,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use ForegroundExecutor;
 use IntoShared;
+use UserId;
 
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
@@ -89,7 +90,14 @@ pub struct Selection {
 }
 
 struct SelectionSet {
+    user_id: UserId,
+    selections: Vec<Selection>,
     version: SelectionSetVersion,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SelectionSetState {
+    user_id: UserId,
     selections: Vec<Selection>,
 }
 
@@ -216,7 +224,8 @@ impl Version {
 
 pub mod rpc {
     use super::{Buffer, BufferId, EditId, FragmentId, Insertion, InsertionSplit, Operation,
-                ReplicaId, Selection, SelectionSetId, SelectionSetVersion, Version};
+                ReplicaId, SelectionSetId, SelectionSetState, SelectionSetVersion,
+                Version};
     use futures::{Async, Future, Stream};
     use never::Never;
     use notify_cell::NotifyCellObserver;
@@ -235,7 +244,7 @@ pub mod rpc {
         pub(super) insertions: HashMap<EditId, Insertion>,
         pub(super) insertion_splits: HashMap<EditId, Vec<InsertionSplit>>,
         pub(super) version: Version,
-        pub(super) selections: HashMap<(ReplicaId, SelectionSetId), Vec<Selection>>,
+        pub(super) selections: HashMap<(ReplicaId, SelectionSetId), SelectionSetState>,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -244,7 +253,7 @@ pub mod rpc {
             #[serde(serialize_with = "serialize_op", deserialize_with = "deserialize_op")]
             Arc<Operation>,
         ),
-        UpdateSelectionSet(SelectionSetId, Vec<Selection>),
+        UpdateSelectionSet(SelectionSetId, SelectionSetState),
         RemoveSelectionSet(SelectionSetId),
     }
 
@@ -255,7 +264,7 @@ pub mod rpc {
             Arc<Operation>,
         ),
         Selections {
-            updated: HashMap<(ReplicaId, SelectionSetId), Vec<Selection>>,
+            updated: HashMap<(ReplicaId, SelectionSetId), SelectionSetState>,
             removed: HashSet<(ReplicaId, SelectionSetId)>,
         },
     }
@@ -328,7 +337,7 @@ pub mod rpc {
                                 if let Some(selection_set) = buffer.selections.get(id) {
                                     if selection_set.version > *last_polled_version {
                                         *last_polled_version = selection_set.version;
-                                        updated.insert(*id, selection_set.selections.clone());
+                                        updated.insert(*id, selection_set.state());
                                     }
                                     true
                                 } else {
@@ -339,7 +348,7 @@ pub mod rpc {
 
                         for (id, selection_set) in &buffer.selections {
                             self.selection_set_versions.entry(*id).or_insert_with(|| {
-                                updated.insert(*id, selection_set.selections.clone());
+                                updated.insert(*id, selection_set.state());
                                 selection_set.version
                             });
                         }
@@ -394,9 +403,7 @@ pub mod rpc {
 
             state.selections = HashMap::new();
             for (id, selection_set) in &buffer.selections {
-                state
-                    .selections
-                    .insert(*id, selection_set.selections.clone());
+                state.selections.insert(*id, selection_set.state());
             }
 
             state
@@ -430,11 +437,11 @@ pub mod rpc {
                         unimplemented!("Invalid op: terminate the service and respond with error?");
                     }
                 }
-                Request::UpdateSelectionSet(set_id, selections) => {
+                Request::UpdateSelectionSet(set_id, state) => {
                     self.buffer.borrow_mut().update_remote_selection_set(
                         self.replica_id,
                         set_id,
-                        selections,
+                        state,
                     );
                 }
                 Request::RemoveSelectionSet(set_id) => {
@@ -547,12 +554,13 @@ impl Buffer {
         }
 
         let mut selection_sets = HashMap::new();
-        for (id, selections) in state.selections {
+        for (id, state) in state.selections {
             selection_sets.insert(
                 id,
                 SelectionSet {
+                    user_id: state.user_id,
+                    selections: state.selections,
                     version: 0,
-                    selections,
                 },
             );
         }
@@ -587,8 +595,8 @@ impl Buffer {
                             }
                         }
                         rpc::Update::Selections { updated, removed } => {
-                            for ((replica_id, set_id), selections) in updated {
-                                buffer.update_remote_selection_set(replica_id, set_id, selections);
+                            for ((replica_id, set_id), state) in updated {
+                                buffer.update_remote_selection_set(replica_id, set_id, state);
                             }
 
                             for (replica_id, set_id) in removed {
@@ -678,21 +686,25 @@ impl Buffer {
         }
     }
 
-    pub fn add_selection_set(&mut self, selections: Vec<Selection>) -> SelectionSetId {
+    pub fn add_selection_set(
+        &mut self,
+        user_id: UserId,
+        selections: Vec<Selection>,
+    ) -> SelectionSetId {
         let id = self.next_local_selection_set_id;
 
+        let set = SelectionSet {
+            version: 0,
+            selections,
+            user_id,
+        };
+
         if let Some(ref client) = self.client {
-            client.request(rpc::Request::UpdateSelectionSet(id, selections.clone()));
+            client.request(rpc::Request::UpdateSelectionSet(id, set.state()));
         }
 
         self.next_local_selection_set_id += 1;
-        self.selections.insert(
-            (self.replica_id, id),
-            SelectionSet {
-                version: 0,
-                selections,
-            },
-        );
+        self.selections.insert((self.replica_id, id), set);
         self.updates.set(());
         id
     }
@@ -724,10 +736,7 @@ impl Buffer {
         self.merge_selections(&mut set.selections);
         set.version += 1;
         if let Some(ref client) = self.client {
-            client.request(rpc::Request::UpdateSelectionSet(
-                id.1,
-                set.selections.clone(),
-            ));
+            client.request(rpc::Request::UpdateSelectionSet(id.1, set.state()));
         }
         self.selections.insert(id, set);
         self.updates.set(());
@@ -752,13 +761,13 @@ impl Buffer {
         }
     }
 
-    pub fn remote_selections(&self) -> impl Iterator<Item = (ReplicaId, &[Selection])> {
+    pub fn remote_selections(&self) -> impl Iterator<Item = (UserId, &[Selection])> {
         let local_replica_id = self.replica_id;
         self.selections
             .iter()
             .filter_map(move |((replica_id, _), set)| {
                 if *replica_id != local_replica_id {
-                    Some((*replica_id, set.selections.as_slice()))
+                    Some((set.user_id, set.selections.as_slice()))
                 } else {
                     None
                 }
@@ -923,16 +932,17 @@ impl Buffer {
         &mut self,
         replica_id: ReplicaId,
         set_id: SelectionSetId,
-        selections: Vec<Selection>,
+        state: SelectionSetState,
     ) {
         let set = self.selections
             .entry((replica_id, set_id))
             .or_insert(SelectionSet {
-                version: 0,
+                user_id: state.user_id,
                 selections: Vec::new(),
+                version: 0,
             });
         set.version += 1;
-        set.selections = selections;
+        set.selections = state.selections;
         self.updates.set(());
     }
 
@@ -1492,6 +1502,15 @@ impl Ord for Point {
         match self.row.cmp(&other.row) {
             cmp::Ordering::Equal => self.column.cmp(&other.column),
             comparison @ _ => comparison,
+        }
+    }
+}
+
+impl SelectionSet {
+    fn state(&self) -> SelectionSetState {
+        SelectionSetState {
+            user_id: self.user_id,
+            selections: self.selections.clone(),
         }
     }
 }
@@ -2456,9 +2475,9 @@ mod tests {
         let mut buffer_1 = Buffer::new(0);
         buffer_1.edit(0..0, "abcdef");
         let sels = vec![empty_selection(&buffer_1, 1), empty_selection(&buffer_1, 3)];
-        buffer_1.add_selection_set(sels);
+        buffer_1.add_selection_set(0, sels);
         let sels = vec![empty_selection(&buffer_1, 2), empty_selection(&buffer_1, 4)];
-        let buffer_1_set_id = buffer_1.add_selection_set(sels);
+        let buffer_1_set_id = buffer_1.add_selection_set(0, sels);
         let buffer_1 = buffer_1.into_shared();
 
         let mut reactor = reactor::Core::new().unwrap();
@@ -2508,7 +2527,7 @@ mod tests {
         assert_eq!(selections(&buffer_1), selections(&buffer_3));
 
         let sels = vec![empty_selection(&buffer_2.borrow(), 1)];
-        let buffer_2_set_id = buffer_2.borrow_mut().add_selection_set(sels);
+        let buffer_2_set_id = buffer_2.borrow_mut().add_selection_set(0, sels);
         buffer_2_updates.wait_next(&mut reactor).unwrap();
 
         buffer_1_updates.wait_next(&mut reactor).unwrap();

@@ -7,8 +7,8 @@ use futures::{Future, Poll, Stream};
 use never::Never;
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
-use project::{LocalProject, PathSearch, PathSearchStatus, Project, ProjectService,
-              RemoteProject, TreeId};
+use project::{LocalProject, PathSearch, PathSearchStatus, Project, ProjectService, RemoteProject,
+              TreeId};
 use rpc::{self, client, server};
 use serde_json;
 use std::cell::{Ref, RefCell, RefMut};
@@ -17,22 +17,24 @@ use std::rc::Rc;
 use window::{View, ViewHandle, WeakViewHandle, Window};
 use ForegroundExecutor;
 use IntoShared;
-
-pub type UserId = usize;
+use UserId;
 
 pub trait Workspace {
+    fn user_id(&self) -> UserId;
     fn project(&self) -> Ref<Project>;
     fn project_mut(&self) -> RefMut<Project>;
     fn discussion(&self) -> &Rc<RefCell<Discussion>>;
 }
 
 pub struct LocalWorkspace {
-    next_user_id: usize,
+    next_user_id: UserId,
+    user_id: UserId,
     discussion: Rc<RefCell<Discussion>>,
     project: Rc<RefCell<LocalProject>>,
 }
 
 pub struct RemoteWorkspace {
+    user_id: UserId,
     project: Rc<RefCell<RemoteProject>>,
     discussion: Rc<RefCell<Discussion>>,
 }
@@ -74,6 +76,7 @@ enum WorkspaceViewAction {
 impl LocalWorkspace {
     pub fn new(project: LocalProject) -> Self {
         Self {
+            user_id: 0,
             next_user_id: 1,
             project: project.into_shared(),
             discussion: Discussion::new(0).into_shared(),
@@ -82,6 +85,10 @@ impl LocalWorkspace {
 }
 
 impl Workspace for LocalWorkspace {
+    fn user_id(&self) -> UserId {
+        self.user_id
+    }
+
     fn project(&self) -> Ref<Project> {
         self.project.borrow()
     }
@@ -109,6 +116,7 @@ impl RemoteWorkspace {
         )?;
 
         Ok(Self {
+            user_id: state.user_id,
             project: project.into_shared(),
             discussion,
         })
@@ -116,6 +124,10 @@ impl RemoteWorkspace {
 }
 
 impl Workspace for RemoteWorkspace {
+    fn user_id(&self) -> UserId {
+        self.user_id
+    }
+
     fn project(&self) -> Ref<Project> {
         self.project.borrow()
     }
@@ -258,6 +270,7 @@ impl FileFinderViewDelegate for WorkspaceView {
         let window_handle = window.handle();
         let workspace = self.workspace.borrow();
         let project = workspace.project_mut();
+        let user_id = workspace.user_id();
         let view_handle = self.self_handle.clone();
         self.foreground
             .execute(Box::new(project.open_buffer(tree_id, path).then(
@@ -266,7 +279,7 @@ impl FileFinderViewDelegate for WorkspaceView {
                         Ok(buffer) => {
                             if let Some(view_handle) = view_handle {
                                 let mut buffer_view =
-                                    BufferView::new(buffer, Some(view_handle.clone()));
+                                    BufferView::new(buffer, user_id, Some(view_handle.clone()));
                                 buffer_view.set_line_height(20.0);
                                 let buffer_view = window.add_view(buffer_view);
                                 buffer_view.focus().unwrap();

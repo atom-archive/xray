@@ -1,4 +1,4 @@
-use buffer::{Buffer, BufferId, Point, ReplicaId, Selection, SelectionSetId};
+use buffer::{Buffer, BufferId, Point, Selection, SelectionSetId};
 use futures::{Poll, Stream};
 use movement;
 use notify_cell::NotifyCell;
@@ -9,6 +9,7 @@ use std::cmp::{self, Ordering};
 use std::ops::Range;
 use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
+use UserId;
 
 pub trait BufferViewDelegate {
     fn set_active_buffer_view(&mut self, buffer_view: WeakViewHandle<BufferView<Self>>)
@@ -17,6 +18,7 @@ pub trait BufferViewDelegate {
 }
 
 pub struct BufferView<T: BufferViewDelegate> {
+    user_id: UserId,
     buffer: Rc<RefCell<Buffer>>,
     updates_tx: NotifyCell<()>,
     updates_rx: Box<Stream<Item = (), Error = ()>>,
@@ -31,10 +33,11 @@ pub struct BufferView<T: BufferViewDelegate> {
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
 struct SelectionProps {
-    pub replica_id: ReplicaId,
+    pub user_id: UserId,
     pub start: Point,
     pub end: Point,
     pub reversed: bool,
+    pub remote: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,22 +61,30 @@ enum BufferViewAction {
 }
 
 impl<T: BufferViewDelegate> BufferView<T> {
-    pub fn new(buffer: Rc<RefCell<Buffer>>, delegate: Option<WeakViewHandle<T>>) -> Self {
+    pub fn new(
+        buffer: Rc<RefCell<Buffer>>,
+        user_id: UserId,
+        delegate: Option<WeakViewHandle<T>>,
+    ) -> Self {
         let selection_set_id = {
             let mut buffer = buffer.borrow_mut();
             let start = buffer.anchor_before_offset(0).unwrap();
             let end = buffer.anchor_before_offset(0).unwrap();
-            buffer.add_selection_set(vec![Selection {
-                start,
-                end,
-                reversed: false,
-                goal_column: None,
-            }])
+            buffer.add_selection_set(
+                user_id,
+                vec![Selection {
+                    start,
+                    end,
+                    reversed: false,
+                    goal_column: None,
+                }],
+            )
         };
 
         let updates_tx = NotifyCell::new(());
         let updates_rx = Box::new(updates_tx.observe().select(buffer.borrow().updates()));
         Self {
+            user_id,
             updates_tx,
             updates_rx,
             buffer,
@@ -494,13 +505,14 @@ impl<T: BufferViewDelegate> BufferView<T> {
         let buffer = self.buffer.borrow();
         let mut rendered_selections = Vec::new();
 
-        for (replica_id, selections) in buffer.remote_selections() {
+        for (user_id, selections) in buffer.remote_selections() {
             for selection in self.query_selections(selections, &range) {
                 rendered_selections.push(SelectionProps {
-                    replica_id,
+                    user_id,
                     start: buffer.point_for_anchor(&selection.start).unwrap(),
                     end: buffer.point_for_anchor(&selection.end).unwrap(),
                     reversed: selection.reversed,
+                    remote: true,
                 });
             }
         }
@@ -509,10 +521,11 @@ impl<T: BufferViewDelegate> BufferView<T> {
             self.query_selections(&buffer.selections(self.selection_set_id).unwrap(), &range)
         {
             rendered_selections.push(SelectionProps {
-                replica_id: buffer.replica_id,
+                user_id: self.user_id,
                 start: buffer.point_for_anchor(&selection.start).unwrap(),
                 end: buffer.point_for_anchor(&selection.end).unwrap(),
                 reversed: selection.reversed,
+                remote: false,
             });
         }
 
@@ -611,7 +624,6 @@ impl<T: BufferViewDelegate> View for BufferView<T> {
             "width": self.width,
             "line_height": self.line_height,
             "selections": self.render_selections(start..end),
-            "local_replica_id": buffer.replica_id,
         })
     }
 
@@ -668,12 +680,13 @@ impl<T: BufferViewDelegate> Drop for BufferView<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use IntoShared;
     use workspace::WorkspaceView;
+    use IntoShared;
 
     #[test]
     fn test_cursor_movement() {
-        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
+        let mut editor =
+            BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(0..0, "abc");
         editor.buffer.borrow_mut().edit(3..3, "\n");
         editor.buffer.borrow_mut().edit(4..4, "\ndef");
@@ -754,7 +767,8 @@ mod tests {
 
     #[test]
     fn test_selection_movement() {
-        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
+        let mut editor =
+            BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(0..0, "abc");
         editor.buffer.borrow_mut().edit(3..3, "\n");
         editor.buffer.borrow_mut().edit(4..4, "\ndef");
@@ -845,7 +859,8 @@ mod tests {
 
     #[test]
     fn test_backspace() {
-        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
+        let mut editor =
+            BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
@@ -857,7 +872,8 @@ mod tests {
 
     #[test]
     fn test_delete() {
-        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
+        let mut editor =
+            BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
@@ -869,7 +885,8 @@ mod tests {
 
     #[test]
     fn test_add_selection() {
-        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
+        let mut editor =
+            BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor
             .buffer
             .borrow_mut()
@@ -923,7 +940,8 @@ mod tests {
 
     #[test]
     fn test_add_selection_above() {
-        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
+        let mut editor =
+            BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(
             0..0,
             "\
@@ -992,7 +1010,8 @@ mod tests {
 
     #[test]
     fn test_add_selection_below() {
-        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
+        let mut editor =
+            BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(
             0..0,
             "\
@@ -1052,7 +1071,8 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
+        let mut editor =
+            BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
 
         editor.buffer.borrow_mut().edit(0..0, "abcdefgh\nhijklmno");
 
@@ -1082,7 +1102,7 @@ mod tests {
         let line_height = 6.0;
 
         {
-            let mut editor = BufferView::<WorkspaceView>::new(buffer.clone(), None);
+            let mut editor = BufferView::<WorkspaceView>::new(buffer.clone(), 0, None);
             editor
                 .set_height(3.0 * line_height)
                 .set_line_height(line_height)
@@ -1113,7 +1133,7 @@ mod tests {
 
         // Selection starting at the end of buffer
         {
-            let mut editor = BufferView::<WorkspaceView>::new(buffer.clone(), None);
+            let mut editor = BufferView::<WorkspaceView>::new(buffer.clone(), 0, None);
             editor
                 .set_height(8.0 * line_height)
                 .set_line_height(line_height)
@@ -1131,7 +1151,7 @@ mod tests {
 
         // Selection ending exactly at first visible row
         {
-            let mut editor = BufferView::<WorkspaceView>::new(buffer.clone(), None);
+            let mut editor = BufferView::<WorkspaceView>::new(buffer.clone(), 0, None);
             editor
                 .set_height(3.0 * line_height)
                 .set_line_height(line_height)
@@ -1148,7 +1168,8 @@ mod tests {
     #[test]
     fn test_render_past_last_line() {
         let line_height = 4.0;
-        let mut editor = BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), None);
+        let mut editor =
+            BufferView::<WorkspaceView>::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
 
         editor
             .set_height(3.0 * line_height)
@@ -1172,7 +1193,7 @@ mod tests {
     #[test]
     fn test_dropping_view_removes_selection_set() {
         let buffer = Buffer::new(0).into_shared();
-        let editor = BufferView::<WorkspaceView>::new(buffer.clone(), None);
+        let editor = BufferView::<WorkspaceView>::new(buffer.clone(), 0, None);
         let selection_set_id = editor.selection_set_id;
         assert!(buffer.borrow_mut().selections(selection_set_id).is_ok());
 
@@ -1195,38 +1216,42 @@ mod tests {
             .selections()
             .iter()
             .map(|s| SelectionProps {
-                replica_id: buffer.replica_id,
+                user_id: 0,
                 start: buffer.point_for_anchor(&s.start).unwrap(),
                 end: buffer.point_for_anchor(&s.end).unwrap(),
                 reversed: s.reversed,
+                remote: false,
             })
             .collect()
     }
 
     fn empty_selection(row: u32, column: u32) -> SelectionProps {
         SelectionProps {
-            replica_id: 1,
+            user_id: 0,
             start: Point::new(row, column),
             end: Point::new(row, column),
             reversed: false,
+            remote: false,
         }
     }
 
     fn selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
         SelectionProps {
-            replica_id: 1,
+            user_id: 0,
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
             reversed: false,
+            remote: false,
         }
     }
 
     fn rev_selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
         SelectionProps {
-            replica_id: 1,
+            user_id: 0,
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
             reversed: true,
+            remote: false
         }
     }
 }

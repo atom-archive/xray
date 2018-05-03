@@ -6,9 +6,10 @@ use serde_json;
 use std::cell::RefCell;
 use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
-use workspace::{self, UserId};
+use workspace;
 use ForegroundExecutor;
 use IntoShared;
+use UserId;
 
 pub trait DiscussionViewDelegate {
     fn anchor(&self) -> Option<workspace::Anchor>;
