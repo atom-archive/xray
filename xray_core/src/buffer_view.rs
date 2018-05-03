@@ -108,6 +108,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
     }
 
     pub fn set_height(&mut self, height: f64) -> &mut Self {
+        debug_assert!(height >= 0_f64);
         self.height = Some(height);
         self.autoscroll(false);
         self.updated();
@@ -115,6 +116,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
     }
 
     pub fn set_width(&mut self, width: f64) -> &mut Self {
+        debug_assert!(width >= 0_f64);
         self.width = Some(width);
         self.autoscroll(false);
         self.updated();
@@ -122,6 +124,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
     }
 
     pub fn set_line_height(&mut self, line_height: f64) -> &mut Self {
+        debug_assert!(line_height > 0_f64);
         self.line_height = line_height;
         self.autoscroll(false);
         self.updated();
@@ -129,6 +132,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
     }
 
     pub fn set_scroll_top(&mut self, scroll_top: f64) -> &mut Self {
+        debug_assert!(scroll_top >= 0_f64);
         self.scroll_top = scroll_top;
         self.pending_autoscroll = None;
         self.updated();
@@ -654,7 +658,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
             let desired_bottom;
             if center {
                 let center_position = ((start.row + end.row) as f64 / 2_f64) * self.line_height;
-                desired_top = center_position - height / 2_f64;
+                desired_top = 0_f64.max(center_position - height / 2_f64);
                 desired_bottom = center_position + height / 2_f64;
             } else {
                 desired_top = start.row.saturating_sub(self.vertical_margin) as f64 * self.line_height;
