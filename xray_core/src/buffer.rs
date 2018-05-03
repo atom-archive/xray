@@ -346,11 +346,16 @@ pub mod rpc {
                                 }
                             });
 
-                        for (id, selection_set) in &buffer.selections {
-                            self.selection_set_versions.entry(*id).or_insert_with(|| {
-                                updated.insert(*id, selection_set.state());
-                                selection_set.version
-                            });
+                        for ((replica_id, set_id), selection_set) in &buffer.selections {
+                            if *replica_id != self.replica_id {
+                                self.selection_set_versions
+                                    .entry((*replica_id, *set_id))
+                                    .or_insert_with(|| {
+                                        updated
+                                            .insert((*replica_id, *set_id), selection_set.state());
+                                        selection_set.version
+                                    });
+                            }
                         }
 
                         if updated.len() > 0 || removed.len() > 0 {
@@ -596,10 +601,12 @@ impl Buffer {
                         }
                         rpc::Update::Selections { updated, removed } => {
                             for ((replica_id, set_id), state) in updated {
+                                debug_assert!(replica_id != buffer.replica_id);
                                 buffer.update_remote_selection_set(replica_id, set_id, state);
                             }
 
                             for (replica_id, set_id) in removed {
+                                debug_assert!(replica_id != buffer.replica_id);
                                 buffer.remove_remote_selection_set(replica_id, set_id);
                             }
                         }
@@ -731,7 +738,9 @@ impl Buffer {
         F: FnOnce(&Buffer, &mut Vec<Selection>),
     {
         let id = (self.replica_id, set_id);
-        let mut set = self.selections.remove(&id).ok_or(Error::SelectionSetNotFound)?;
+        let mut set = self.selections
+            .remove(&id)
+            .ok_or(Error::SelectionSetNotFound)?;
         f(self, &mut set.selections);
         self.merge_selections(&mut set.selections);
         set.version += 1;
