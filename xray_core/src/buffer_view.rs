@@ -1228,9 +1228,9 @@ mod tests {
             .set_scroll_top(2.5 * line_height);
         assert_eq!(editor.scroll_top(), 2.5 * line_height);
 
-        editor.autoscroll_to_range(start.clone()..start.clone(), true);
+        editor.autoscroll_to_range(start.clone()..start.clone(), true).unwrap();
         assert_eq!(editor.scroll_top(), 0.0);
-        editor.autoscroll_to_range(end.clone()..end.clone(), true);
+        editor.autoscroll_to_range(end.clone()..end.clone(), true).unwrap();
         assert_eq!(
             editor.scroll_top(),
             (max_point.row as f64 * line_height) - (height / 2.0)
