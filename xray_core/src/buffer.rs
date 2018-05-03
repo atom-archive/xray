@@ -35,6 +35,7 @@ pub enum Error {
     OffsetOutOfRange,
     InvalidAnchor,
     InvalidOperation,
+    SelectionSetNotFound,
 }
 
 pub struct Buffer {
@@ -224,8 +225,7 @@ impl Version {
 
 pub mod rpc {
     use super::{Buffer, BufferId, EditId, FragmentId, Insertion, InsertionSplit, Operation,
-                ReplicaId, SelectionSetId, SelectionSetState, SelectionSetVersion,
-                Version};
+                ReplicaId, SelectionSetId, SelectionSetState, SelectionSetVersion, Version};
     use futures::{Async, Future, Stream};
     use never::Never;
     use notify_cell::NotifyCellObserver;
@@ -726,12 +726,12 @@ impl Buffer {
             .map(|set| set.selections.as_slice())
     }
 
-    pub fn mutate_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), ()>
+    pub fn mutate_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), Error>
     where
         F: FnOnce(&Buffer, &mut Vec<Selection>),
     {
         let id = (self.replica_id, set_id);
-        let mut set = self.selections.remove(&id).ok_or(())?;
+        let mut set = self.selections.remove(&id).ok_or(Error::SelectionSetNotFound)?;
         f(self, &mut set.selections);
         self.merge_selections(&mut set.selections);
         set.version += 1;
@@ -1431,6 +1431,11 @@ impl Buffer {
 impl Point {
     pub fn new(row: u32, column: u32) -> Self {
         Point { row, column }
+    }
+
+    #[cfg(test)]
+    pub fn zero() -> Self {
+        Point::new(0, 0)
     }
 
     pub fn is_zero(&self) -> bool {

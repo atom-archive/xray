@@ -218,7 +218,7 @@ impl WorkspaceView {
                                     BufferView::new(buffer, user_id, Some(view_handle.clone()));
                                 buffer_view.set_line_height(20.0);
                                 if let Some(selected_range) = selected_range {
-                                    buffer_view.set_selected_range(selected_range);
+                                    buffer_view.set_selected_anchor_range(selected_range);
                                 }
                                 let buffer_view = window.add_view(buffer_view);
                                 buffer_view.focus().unwrap();
