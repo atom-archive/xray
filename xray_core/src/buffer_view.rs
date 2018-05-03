@@ -658,7 +658,8 @@ impl BufferView {
 
     fn flush_pending_autoscroll_to_selection(&mut self) {
         if let Some(request) = self.pending_autoscroll.take() {
-            self.autoscroll_to_range(request.range, request.center);
+            self.autoscroll_to_range(request.range, request.center)
+                .unwrap();
         }
     }
 
@@ -667,14 +668,15 @@ impl BufferView {
         range: Range<buffer::Anchor>,
         center: bool,
     ) -> Result<(), buffer::Error> {
+        // Ensure points are valid even if we can't autoscroll immediately because
+        // flush_pending_autoscroll_to_selection unwraps.
+        let (start, end) = {
+            let buffer = self.buffer.borrow();
+            let start = buffer.point_for_anchor(&range.start)?;
+            let end = buffer.point_for_anchor(&range.end)?;
+            (start, end)
+        };
         if let Some(height) = self.height {
-            let (start, end) = {
-                let buffer = self.buffer.borrow();
-                let start = buffer.point_for_anchor(&range.start)?;
-                let end = buffer.point_for_anchor(&range.end)?;
-                (start, end)
-            };
-
             let desired_top;
             let desired_bottom;
             if center {

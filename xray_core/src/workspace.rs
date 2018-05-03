@@ -7,12 +7,11 @@ use futures::{Future, Poll, Stream};
 use never::Never;
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
-use project::{LocalProject, PathSearch, PathSearchStatus, Project, ProjectService, RemoteProject,
-              TreeId};
+use project::{self, LocalProject, PathSearch, PathSearchStatus, Project, ProjectService,
+              RemoteProject, TreeId};
 use rpc::{self, client, server};
 use serde_json;
 use std::cell::{Ref, RefCell, RefMut};
-use std::fmt;
 use std::ops::Range;
 use std::rc::Rc;
 use window::{View, ViewHandle, WeakViewHandle, WeakWindowHandle, Window};
@@ -201,10 +200,9 @@ impl WorkspaceView {
         self.updates.set(());
     }
 
-    fn open_buffer<T, E>(&self, buffer: T, selected_range: Option<Range<buffer::Anchor>>)
+    fn open_buffer<T>(&self, buffer: T, selected_range: Option<Range<buffer::Anchor>>)
     where
-        T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = E>,
-        E: fmt::Debug,
+        T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = project::OpenError>,
     {
         if let Some(window_handle) = self.window_handle.clone() {
             let user_id = self.workspace.borrow().user_id();
@@ -218,7 +216,12 @@ impl WorkspaceView {
                                     BufferView::new(buffer, user_id, Some(view_handle.clone()));
                                 buffer_view.set_line_height(20.0);
                                 if let Some(selected_range) = selected_range {
-                                    buffer_view.set_selected_anchor_range(selected_range);
+                                    if let Err(error) =
+                                        buffer_view.set_selected_anchor_range(selected_range)
+                                    {
+                                        eprintln!("Error setting anchor range: {:?}", error);
+                                        unimplemented!("Error setting anchor range: {:?}", error);
+                                    }
                                 }
                                 let buffer_view = window.add_view(buffer_view);
                                 buffer_view.focus().unwrap();
