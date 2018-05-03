@@ -201,7 +201,7 @@ impl WorkspaceView {
         self.updates.set(());
     }
 
-    fn open_buffer<T, E>(&self, buffer: T)
+    fn open_buffer<T, E>(&self, buffer: T, selected_range: Option<Range<buffer::Anchor>>)
     where
         T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = E>,
         E: fmt::Debug,
@@ -217,6 +217,9 @@ impl WorkspaceView {
                                 let mut buffer_view =
                                     BufferView::new(buffer, user_id, Some(view_handle.clone()));
                                 buffer_view.set_line_height(20.0);
+                                if let Some(selected_range) = selected_range {
+                                    buffer_view.set_selected_range(selected_range);
+                                }
                                 let buffer_view = window.add_view(buffer_view);
                                 buffer_view.focus().unwrap();
                                 view_handle.map(|view| {
@@ -286,7 +289,10 @@ impl DiscussionViewDelegate for WorkspaceView {
 
     fn jump(&self, anchor: &Anchor) {
         let workspace = self.workspace.borrow();
-        self.open_buffer(workspace.project().open_buffer(anchor.buffer_id));
+        self.open_buffer(
+            workspace.project().open_buffer(anchor.buffer_id),
+            Some(anchor.range.clone()),
+        );
     }
 }
 
@@ -309,7 +315,7 @@ impl FileFinderViewDelegate for WorkspaceView {
 
     fn did_confirm(&mut self, tree_id: TreeId, path: &cross_platform::Path, _: &mut Window) {
         let workspace = self.workspace.borrow();
-        self.open_buffer(workspace.project().open_path(tree_id, path));
+        self.open_buffer(workspace.project().open_path(tree_id, path), None);
     }
 }
 
