@@ -54,7 +54,7 @@ pub struct ServiceState {
 pub struct WorkspaceView {
     foreground: ForegroundExecutor,
     workspace: Rc<RefCell<Workspace>>,
-    active_buffer_view: Option<WeakViewHandle<BufferView<WorkspaceView>>>,
+    active_buffer_view: Option<WeakViewHandle<BufferView>>,
     center_pane: Option<ViewHandle>,
     modal: Option<ViewHandle>,
     left_panel: Option<ViewHandle>,
@@ -272,7 +272,7 @@ impl View for WorkspaceView {
 }
 
 impl BufferViewDelegate for WorkspaceView {
-    fn set_active_buffer_view(&mut self, handle: WeakViewHandle<BufferView<Self>>) {
+    fn set_active_buffer_view(&mut self, handle: WeakViewHandle<BufferView>) {
         self.active_buffer_view = Some(handle);
     }
 }
