@@ -23,7 +23,7 @@ const Messages = styled("div", {
   marginBottom: "5px",
   overflowY: "auto",
   "::-webkit-scrollbar": {
-    width: "5px",
+    width: "5px"
   },
   "::-webkit-scrollbar-thumb": {
     borderRadius: "5px",
@@ -31,17 +31,16 @@ const Messages = styled("div", {
   }
 });
 
-const Message = styled("div", ({$first}) => ({
+const Message = styled("div", ({ $first }) => ({
   padding: "5px",
-    fontFamily: "Helvetica Neue",
-    cursor: "default",
-    overflowWrap: "break-word",
-    marginTop: $first ? "auto" : null,
-    ":hover": {
-      background: "rgba(31, 150, 255, 0.3)"
-    }
-  })
-);
+  fontFamily: "Helvetica Neue",
+  cursor: "default",
+  overflowWrap: "break-word",
+  marginTop: $first ? "auto" : null,
+  ":hover": {
+    background: "rgba(31, 150, 255, 0.3)"
+  }
+}));
 
 const Avatar = styled("div", ({ $color }) => {
   const { r, g, b, a } = $color;
@@ -95,11 +94,13 @@ class Discussion extends React.Component {
           }
         },
         this.props.messages.map((message, i) => {
-          const avatarColor =
-            userColors[message.user_id % userColors.length];
+          const avatarColor = userColors[message.user_id % userColors.length];
           return $(
             Message,
-            {$first: i === 0},
+            {
+              $first: i === 0,
+              onClick: () => this.jumpToAnchor(message.index)
+            },
             $(Avatar, { $color: avatarColor }),
             message.text
           );
@@ -125,6 +126,13 @@ class Discussion extends React.Component {
       }
       event.preventDefault();
     }
+  }
+
+  jumpToAnchor(index) {
+    this.props.dispatch({
+      type: "Jump",
+      message_index: index
+    });
   }
 }
 

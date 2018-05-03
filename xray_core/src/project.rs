@@ -19,10 +19,14 @@ use IntoShared;
 pub type TreeId = usize;
 
 pub trait Project {
-    fn open_buffer(
+    fn open_path(
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>>;
+    fn open_buffer(
+        &self,
+        buffer_id: BufferId,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>>;
     fn search_paths(
         &self,
@@ -59,9 +63,12 @@ pub struct RpcState {
 
 #[derive(Deserialize, Serialize)]
 pub enum RpcRequest {
-    OpenBuffer {
+    OpenPath {
         tree_id: TreeId,
         relative_path: cross_platform::Path,
+    },
+    OpenBuffer {
+        buffer_id: BufferId,
     },
 }
 
@@ -109,6 +116,7 @@ enum MatchMarker {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum OpenError {
+    BufferNotFound,
     TreeNotFound,
     IoError(String),
     RpcError(rpc::Error),
@@ -153,7 +161,7 @@ impl LocalProject {
 }
 
 impl Project for LocalProject {
-    fn open_buffer(
+    fn open_path(
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
@@ -161,6 +169,7 @@ impl Project for LocalProject {
         if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
             let next_buffer_id_cell = self.next_buffer_id.clone();
             let buffers_by_file = self.buffers_by_file.clone();
+            let buffers = self.buffers.clone();
             Box::new(
                 self.file_provider
                     .open(&absolute_path)
@@ -179,7 +188,9 @@ impl Project for LocalProject {
                                         next_buffer_id_cell.set(next_buffer_id_cell.get() + 1);
                                         let mut buffer = Buffer::new(buffer_id);
                                         buffer.edit(0..0, content.as_str());
-                                        buffer.into_shared()
+                                        let buffer = buffer.into_shared();
+                                        buffers.borrow_mut().insert(buffer_id, buffer.clone());
+                                        buffer
                                     })
                                     .clone())
                             }))
@@ -190,6 +201,21 @@ impl Project for LocalProject {
         } else {
             Box::new(future::err(OpenError::TreeNotFound))
         }
+    }
+
+    fn open_buffer(
+        &self,
+        buffer_id: BufferId,
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+        use futures::IntoFuture;
+        Box::new(
+            self.buffers
+                .borrow()
+                .get(&buffer_id)
+                .cloned()
+                .ok_or(OpenError::BufferNotFound)
+                .into_future(),
+        )
     }
 
     fn search_paths(
@@ -244,7 +270,7 @@ impl RemoteProject {
 }
 
 impl Project for RemoteProject {
-    fn open_buffer(
+    fn open_path(
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
@@ -255,10 +281,39 @@ impl Project for RemoteProject {
         Box::new(
             self.service
                 .borrow()
-                .request(RpcRequest::OpenBuffer {
+                .request(RpcRequest::OpenPath {
                     tree_id,
                     relative_path: relative_path.clone(),
                 })
+                .then(move |response| {
+                    response
+                        .map_err(|error| error.into())
+                        .and_then(|response| match response {
+                            RpcResponse::OpenedBuffer(result) => result.and_then(|service_id| {
+                                service
+                                    .borrow()
+                                    .take_service(service_id)
+                                    .map_err(|error| error.into())
+                                    .and_then(|buffer_service| {
+                                        Buffer::remote(foreground, buffer_service)
+                                            .map_err(|error| error.into())
+                                    })
+                            }),
+                        })
+                }),
+        )
+    }
+
+    fn open_buffer(
+        &self,
+        buffer_id: BufferId,
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+        let foreground = self.foreground.clone();
+        let service = self.service.clone();
+        Box::new(
+            self.service
+                .borrow()
+                .request(RpcRequest::OpenBuffer { buffer_id })
                 .then(move |response| {
                     response
                         .map_err(|error| error.into())
@@ -348,7 +403,7 @@ impl rpc::server::Service for ProjectService {
         connection: &rpc::server::Connection,
     ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
         match request {
-            RpcRequest::OpenBuffer {
+            RpcRequest::OpenPath {
                 tree_id,
                 relative_path,
             } => {
@@ -356,7 +411,7 @@ impl rpc::server::Service for ProjectService {
                 Some(Box::new(
                     self.project
                         .borrow()
-                        .open_buffer(tree_id, &relative_path)
+                        .open_path(tree_id, &relative_path)
                         .then(move |result| {
                             Ok(RpcResponse::OpenedBuffer(result.map(|buffer| {
                                 connection
@@ -365,6 +420,18 @@ impl rpc::server::Service for ProjectService {
                             })))
                         }),
                 ))
+            }
+            RpcRequest::OpenBuffer { buffer_id } => {
+                let connection = connection.clone();
+                Some(Box::new(self.project.borrow().open_buffer(buffer_id).then(
+                    move |result| {
+                        Ok(RpcResponse::OpenedBuffer(result.map(|buffer| {
+                            connection
+                                .add_service(buffer::rpc::Service::new(buffer))
+                                .service_id()
+                        })))
+                    },
+                )))
             }
         }
     }
@@ -631,8 +698,8 @@ mod tests {
             "abc",
         );
 
-        let buffer_future_1 = project.open_buffer(tree_id, &relative_path);
-        let buffer_future_2 = project.open_buffer(tree_id, &relative_path);
+        let buffer_future_1 = project.open_path(tree_id, &relative_path);
+        let buffer_future_2 = project.open_path(tree_id, &relative_path);
         let (buffer_1, buffer_2) = buffer_future_1.join(buffer_future_2).wait().unwrap();
         assert!(Rc::ptr_eq(&buffer_1, &buffer_2));
     }
@@ -758,10 +825,14 @@ mod tests {
         file_provider.write_sync(absolute_path, "abc");
 
         let remote_buffer = reactor
-            .run(remote_project.open_buffer(tree_id, &relative_path))
+            .run(remote_project.open_path(tree_id, &relative_path))
             .unwrap();
         let local_buffer = reactor
-            .run(local_project.borrow_mut().open_buffer(tree_id, &relative_path))
+            .run(
+                local_project
+                    .borrow_mut()
+                    .open_path(tree_id, &relative_path),
+            )
             .unwrap();
 
         assert_eq!(

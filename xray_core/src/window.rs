@@ -28,6 +28,7 @@ impl Drop for Window {
     }
 }
 
+#[derive(Clone)]
 pub struct WeakWindowHandle(Weak<RefCell<Inner>>);
 
 pub struct WindowUpdateStream {

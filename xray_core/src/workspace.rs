@@ -1,4 +1,4 @@
-use buffer::{self, BufferId};
+use buffer::{self, Buffer, BufferId};
 use buffer_view::{BufferView, BufferViewDelegate};
 use cross_platform;
 use discussion::{Discussion, DiscussionService, DiscussionView, DiscussionViewDelegate};
@@ -12,9 +12,10 @@ use project::{LocalProject, PathSearch, PathSearchStatus, Project, ProjectServic
 use rpc::{self, client, server};
 use serde_json;
 use std::cell::{Ref, RefCell, RefMut};
+use std::fmt;
 use std::ops::Range;
 use std::rc::Rc;
-use window::{View, ViewHandle, WeakViewHandle, Window};
+use window::{View, ViewHandle, WeakViewHandle, WeakWindowHandle, Window};
 use ForegroundExecutor;
 use IntoShared;
 use UserId;
@@ -59,6 +60,7 @@ pub struct WorkspaceView {
     left_panel: Option<ViewHandle>,
     updates: NotifyCell<()>,
     self_handle: Option<WeakViewHandle<WorkspaceView>>,
+    window_handle: Option<WeakWindowHandle>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -183,6 +185,7 @@ impl WorkspaceView {
             left_panel: None,
             updates: NotifyCell::new(()),
             self_handle: None,
+            window_handle: None,
         }
     }
 
@@ -196,6 +199,42 @@ impl WorkspaceView {
             self.modal = Some(view);
         }
         self.updates.set(());
+    }
+
+    fn open_buffer<T, E>(&self, buffer: T)
+    where
+        T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = E>,
+        E: fmt::Debug,
+    {
+        if let Some(window_handle) = self.window_handle.clone() {
+            let user_id = self.workspace.borrow().user_id();
+            let view_handle = self.self_handle.clone();
+            self.foreground
+                .execute(Box::new(buffer.then(move |result| {
+                    window_handle.map(|window| match result {
+                        Ok(buffer) => {
+                            if let Some(view_handle) = view_handle {
+                                let mut buffer_view =
+                                    BufferView::new(buffer, user_id, Some(view_handle.clone()));
+                                buffer_view.set_line_height(20.0);
+                                let buffer_view = window.add_view(buffer_view);
+                                buffer_view.focus().unwrap();
+                                view_handle.map(|view| {
+                                    view.center_pane = Some(buffer_view);
+                                    view.modal = None;
+                                    view.updates.set(());
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Error opening buffer {:?}", error);
+                            unimplemented!("Error handling for open_buffer: {:?}", error);
+                        }
+                    });
+                    Ok(())
+                })))
+                .unwrap();
+        }
     }
 }
 
@@ -214,6 +253,7 @@ impl View for WorkspaceView {
 
     fn will_mount(&mut self, window: &mut Window, view_handle: WeakViewHandle<Self>) {
         self.self_handle = Some(view_handle.clone());
+        self.window_handle = Some(window.handle());
         self.left_panel = Some(window.add_view(DiscussionView::new(
             self.workspace.borrow().discussion().clone(),
             view_handle,
@@ -245,7 +285,8 @@ impl DiscussionViewDelegate for WorkspaceView {
     }
 
     fn jump(&self, anchor: &Anchor) {
-        unimplemented!()
+        let workspace = self.workspace.borrow();
+        self.open_buffer(workspace.project().open_buffer(anchor.buffer_id));
     }
 }
 
@@ -266,39 +307,9 @@ impl FileFinderViewDelegate for WorkspaceView {
         self.updates.set(());
     }
 
-    fn did_confirm(&mut self, tree_id: TreeId, path: &cross_platform::Path, window: &mut Window) {
-        let window_handle = window.handle();
+    fn did_confirm(&mut self, tree_id: TreeId, path: &cross_platform::Path, _: &mut Window) {
         let workspace = self.workspace.borrow();
-        let project = workspace.project_mut();
-        let user_id = workspace.user_id();
-        let view_handle = self.self_handle.clone();
-        self.foreground
-            .execute(Box::new(project.open_buffer(tree_id, path).then(
-                move |result| {
-                    window_handle.map(|window| match result {
-                        Ok(buffer) => {
-                            if let Some(view_handle) = view_handle {
-                                let mut buffer_view =
-                                    BufferView::new(buffer, user_id, Some(view_handle.clone()));
-                                buffer_view.set_line_height(20.0);
-                                let buffer_view = window.add_view(buffer_view);
-                                buffer_view.focus().unwrap();
-                                view_handle.map(|view| {
-                                    view.center_pane = Some(buffer_view);
-                                    view.modal = None;
-                                    view.updates.set(());
-                                });
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("Error opening buffer {:?}", error);
-                            unimplemented!("Error handling for open_buffer: {:?}", error);
-                        }
-                    });
-                    Ok(())
-                },
-            )))
-            .unwrap();
+        self.open_buffer(workspace.project().open_path(tree_id, path));
     }
 }
 
