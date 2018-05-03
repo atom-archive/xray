@@ -22,12 +22,6 @@ pub trait View: Stream<Item = (), Error = ()> {
 
 pub struct Window(Rc<RefCell<Inner>>);
 
-impl Drop for Window {
-    fn drop(&mut self) {
-        eprintln!("Dropping window");
-    }
-}
-
 #[derive(Clone)]
 pub struct WeakWindowHandle(Weak<RefCell<Inner>>);
 
