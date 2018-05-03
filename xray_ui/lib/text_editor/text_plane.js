@@ -29,14 +29,20 @@ class TextPlane extends React.Component {
   async componentDidUpdate() {
     if (this.canvas == null) return;
 
+    const { userColors } = this.context.theme;
     const {
       fontFamily,
       fontSize,
       backgroundColor,
-      baseTextColor,
-      selectionColors,
-      cursorColors
+      baseTextColor
     } = this.context.theme.editor;
+
+    const cursorColors = userColors;
+    const selectionColors = cursorColors.map(color => {
+      color = Object.assign({}, color);
+      color.a = 0.5;
+      return color
+    });
 
     const computedLineHeight = this.props.lineHeight;
 

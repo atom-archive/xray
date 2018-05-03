@@ -78,7 +78,7 @@ class Discussion extends React.Component {
   }
 
   render() {
-    const { avatarColors } = this.context.theme;
+    const { userColors } = this.context.theme;
     return $(
       Root,
       null,
@@ -91,7 +91,7 @@ class Discussion extends React.Component {
         },
         this.props.messages.map(message => {
           const avatarColor =
-            avatarColors[message.user_id % avatarColors.length];
+            userColors[message.user_id % userColors.length];
           return $(
             Message,
             null,

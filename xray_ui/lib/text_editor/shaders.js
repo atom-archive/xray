@@ -26,7 +26,7 @@ exports.textBlendVertex = `
       vec2 targetPixelPosition = targetOrigin + unitQuadVertex * targetSize;
       vec2 targetPosition = targetPixelPosition * viewportScale + vec2(-1.0, 1.0);
       gl_Position = vec4(targetPosition, 0.0, 1.0);
-      textColor = textColorRGBA * vec4(1.0 / 255.0);
+      textColor = textColorRGBA * vec4(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0);
       // Conversion to sRGB.
       textColor = textColor * textColor;
       textColor = textColorRGBA;
@@ -95,7 +95,7 @@ exports.solidVertex = `
       vec2 targetPixelPosition = targetOrigin + unitQuadVertex * targetSize;
       vec2 targetPosition = targetPixelPosition * viewportScale + vec2(-1.0, 1.0);
       gl_Position = vec4(targetPosition, 0.0, 1.0);
-      color = colorRGBA * vec4(1.0 / 255.0);
+      color = colorRGBA * vec4(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0);
   }
 `.trim()
 
