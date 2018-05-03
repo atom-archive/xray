@@ -110,7 +110,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
     pub fn set_height(&mut self, height: f64) -> &mut Self {
         debug_assert!(height >= 0_f64);
         self.height = Some(height);
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
         self.updated();
         self
     }
@@ -118,7 +118,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
     pub fn set_width(&mut self, width: f64) -> &mut Self {
         debug_assert!(width >= 0_f64);
         self.width = Some(width);
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
         self.updated();
         self
     }
@@ -126,7 +126,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
     pub fn set_line_height(&mut self, line_height: f64) -> &mut Self {
         debug_assert!(line_height > 0_f64);
         self.line_height = line_height;
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
         self.updated();
         self
     }
@@ -190,7 +190,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 .unwrap();
         }
 
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
         self.updated();
     }
 
@@ -228,7 +228,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 });
             })
             .unwrap();
-        self.autoscroll(true);
+        self.autoscroll_to_selection(true);
         self.updated();
     }
 
@@ -259,7 +259,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 );
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn add_selection_above(&mut self) {
@@ -320,7 +320,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn add_selection_below(&mut self) {
@@ -383,7 +383,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn move_left(&mut self) {
@@ -408,7 +408,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn select_left(&mut self) {
@@ -425,7 +425,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn move_right(&mut self) {
@@ -450,7 +450,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn select_right(&mut self) {
@@ -467,7 +467,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn move_up(&mut self) {
@@ -490,7 +490,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn select_up(&mut self) {
@@ -505,7 +505,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn move_down(&mut self) {
@@ -528,7 +528,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn select_down(&mut self) {
@@ -543,7 +543,7 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 }
             })
             .unwrap();
-        self.autoscroll(false);
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn selections(&self) -> Ref<[Selection]> {
@@ -626,7 +626,21 @@ impl<T: BufferViewDelegate> BufferView<T> {
         }
     }
 
-    fn autoscroll(&mut self, center: bool) {
+    fn autoscroll_to_cursor(&mut self, center: bool) {
+        let anchor = {
+            let selections = self.selections();
+            let selection = selections.last().unwrap();
+            if selection.reversed {
+                selection.start.clone()
+            } else {
+                selection.end.clone()
+            }
+        };
+
+        self.autoscroll_to_range(anchor.clone()..anchor, center);
+    }
+
+    fn autoscroll_to_selection(&mut self, center: bool) {
         let range = {
             let selections = self.selections();
             let selection = selections.last().unwrap();
@@ -636,16 +650,14 @@ impl<T: BufferViewDelegate> BufferView<T> {
         self.autoscroll_to_range(range, center);
     }
 
-    fn flush_pending_autoscroll(&mut self) {
+    fn flush_pending_autoscroll_to_selection(&mut self) {
         if let Some(request) = self.pending_autoscroll.take() {
             self.autoscroll_to_range(request.range, request.center);
         }
     }
 
     fn autoscroll_to_range(&mut self, range: Range<buffer::Anchor>, center: bool) {
-        if self.height.is_none() {
-            self.pending_autoscroll = Some(AutoScrollRequest { range, center });
-        } else {
+        if let Some(height) = self.height {
             let (start, end) = {
                 let buffer = self.buffer.borrow();
                 let start = buffer.point_for_anchor(&range.start).unwrap();
@@ -653,7 +665,6 @@ impl<T: BufferViewDelegate> BufferView<T> {
                 (start, end)
             };
 
-            let height = self.height.unwrap();
             let desired_top;
             let desired_bottom;
             if center {
@@ -670,6 +681,8 @@ impl<T: BufferViewDelegate> BufferView<T> {
             } else if self.scroll_bottom() < desired_bottom {
                 self.set_scroll_top(desired_bottom - height);
             }
+        } else {
+            self.pending_autoscroll = Some(AutoScrollRequest { range, center });
         }
     }
 
@@ -685,7 +698,7 @@ impl<T: BufferViewDelegate> View for BufferView<T> {
 
     fn will_mount(&mut self, window: &mut Window, self_handle: WeakViewHandle<Self>) {
         self.height = Some(window.height());
-        self.flush_pending_autoscroll();
+        self.flush_pending_autoscroll_to_selection();
         if let Some(ref delegate) = self.delegate {
             delegate.map(|delegate| delegate.set_active_buffer_view(self_handle));
         }
