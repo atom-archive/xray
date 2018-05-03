@@ -1549,15 +1549,12 @@ impl<'a> Iter<'a> {
             SeekBias::Right,
         );
 
-        let mut fragment_offset = 0;
-        if let Some(fragment) = fragment_cursor.item() {
-            let fragment_start_row = fragment_cursor.start::<Point>().row;
-            if target_row != fragment_start_row {
-                let target_row_within_fragment = target_row - fragment_start_row - 1;
-                fragment_offset = fragment.insertion.text.newline_offsets
-                    [target_row_within_fragment as usize] + 1;
-            }
-        }
+        let fragment_offset = if let Some(fragment) = fragment_cursor.item() {
+            let point_in_fragment = Point::new(target_row, 0) - &fragment_cursor.start::<Point>();
+            fragment.offset_for_point(point_in_fragment).unwrap()
+        } else {
+            0
+        };
 
         Self {
             fragment_cursor,
@@ -2135,6 +2132,17 @@ mod tests {
 
         let iter = buffer.iter_starting_at_row(5);
         assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "");
+
+        // Regression test:
+        let mut buffer = Buffer::new(0);
+        buffer.edit(0..0, "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
+        buffer.edit(60..60, "\n");
+
+        let iter = buffer.iter_starting_at_row(6);
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "    \"xray_wasm\",\n]\n"
+        );
     }
 
     #[test]
