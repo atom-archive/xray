@@ -14,22 +14,15 @@ const theme = {
     backgroundColor: "white",
     baseTextColor: "black",
     fontSize: 14,
-    lineHeight: 1.5,
-    selectionColors: [
-      { r: 31, g: 150, b: 255, a: 125 },
-      { r: 64, g: 181, b: 87, a: 125 },
-      { r: 206, g: 157, b: 59, a: 125 },
-      { r: 216, g: 49, b: 176, a: 125 },
-      { r: 235, g: 221, b: 91, a: 125 },
-    ],
-    cursorColors: [
-      { r: 31, g: 150, b: 255, a: 255 },
-      { r: 64, g: 181, b: 87, a: 255 },
-      { r: 206, g: 157, b: 59, a: 255 },
-      { r: 216, g: 49, b: 176, a: 255 },
-      { r: 235, g: 221, b: 91, a: 255 },
-    ]
-  }
+    lineHeight: 1.5
+  },
+  userColors: [
+    { r: 31, g: 150, b: 255, a: 1 },
+    { r: 64, g: 181, b: 87, a: 1 },
+    { r: 206, g: 157, b: 59, a: 1 },
+    { r: 216, g: 49, b: 176, a: 1 },
+    { r: 235, g: 221, b: 91, a: 1 },
+  ]
 };
 
 const styletronInstance = new StyletronClient();

@@ -5,13 +5,33 @@ const { styled } = require("styletron-react");
 const Modal = require("./modal");
 const View = require("./view");
 const $ = React.createElement;
+const VerticalToolbar = require("./vertical_toolbar");
 
 const Root = styled("div", {
   position: "relative",
   width: "100%",
   height: "100%",
   padding: 0,
-  margin: 0
+  margin: 0,
+  display: "flex"
+});
+
+const LeftPanel = styled("div", {
+  width: "300px",
+  height: "100%"
+});
+
+const Pane = styled("div", {
+  flex: 1,
+  position: "relative"
+});
+
+const PaneInner = styled("div", {
+  position: "absolute",
+  left: 0,
+  top: 0,
+  bottom: 0,
+  right: 0
 });
 
 const BackgroundTip = styled("div", {
@@ -26,12 +46,18 @@ class Workspace extends React.Component {
   constructor() {
     super();
     this.didKeyDown = this.didKeyDown.bind(this);
+    this.toggleDiscussion = this.toggleDiscussion.bind(this);
   }
 
   render() {
     let modal;
     if (this.props.modal) {
       modal = $(Modal, null, $(View, { id: this.props.modal }));
+    }
+
+    let leftPanel;
+    if (this.props.left_panel) {
+      leftPanel = $(LeftPanel, null, $(View, { id: this.props.left_panel }));
     }
 
     let centerItem;
@@ -47,7 +73,9 @@ class Workspace extends React.Component {
         tabIndex: -1,
         onKeyDownCapture: this.didKeyDown
       },
-      centerItem,
+      $(VerticalToolbar, { onToggleDiscussion: this.toggleDiscussion }),
+      leftPanel,
+      $(Pane, null, $(PaneInner, null, centerItem)),
       modal
     );
   }
@@ -63,6 +91,10 @@ class Workspace extends React.Component {
         event.stopPropagation();
       }
     }
+  }
+
+  toggleDiscussion() {
+    this.props.dispatch({ type: "ToggleDiscussion" });
   }
 }
 

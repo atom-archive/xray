@@ -15,12 +15,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 use ForegroundExecutor;
 use IntoShared;
+use UserId;
 
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
 type LamportTimestamp = usize;
 pub type SelectionSetId = usize;
 type SelectionSetVersion = usize;
+pub type BufferId = usize;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Version(
@@ -33,9 +35,11 @@ pub enum Error {
     OffsetOutOfRange,
     InvalidAnchor,
     InvalidOperation,
+    SelectionSetNotFound,
 }
 
 pub struct Buffer {
+    id: BufferId,
     pub replica_id: ReplicaId,
     next_replica_id: Option<ReplicaId>,
     local_clock: LocalTimestamp,
@@ -87,7 +91,14 @@ pub struct Selection {
 }
 
 struct SelectionSet {
+    user_id: UserId,
+    selections: Vec<Selection>,
     version: SelectionSetVersion,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SelectionSetState {
+    user_id: UserId,
     selections: Vec<Selection>,
 }
 
@@ -213,8 +224,8 @@ impl Version {
 }
 
 pub mod rpc {
-    use super::{Buffer, EditId, FragmentId, Insertion, InsertionSplit, Operation, ReplicaId,
-                Selection, SelectionSetId, SelectionSetVersion, Version};
+    use super::{Buffer, BufferId, EditId, FragmentId, Insertion, InsertionSplit, Operation,
+                ReplicaId, SelectionSetId, SelectionSetState, SelectionSetVersion, Version};
     use futures::{Async, Future, Stream};
     use never::Never;
     use notify_cell::NotifyCellObserver;
@@ -227,12 +238,13 @@ pub mod rpc {
 
     #[derive(Serialize, Deserialize)]
     pub struct State {
+        pub(super) id: BufferId,
         pub(super) replica_id: ReplicaId,
         pub(super) fragments: Vec<Fragment>,
         pub(super) insertions: HashMap<EditId, Insertion>,
         pub(super) insertion_splits: HashMap<EditId, Vec<InsertionSplit>>,
         pub(super) version: Version,
-        pub(super) selections: HashMap<(ReplicaId, SelectionSetId), Vec<Selection>>,
+        pub(super) selections: HashMap<(ReplicaId, SelectionSetId), SelectionSetState>,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -241,7 +253,7 @@ pub mod rpc {
             #[serde(serialize_with = "serialize_op", deserialize_with = "deserialize_op")]
             Arc<Operation>,
         ),
-        UpdateSelectionSet(SelectionSetId, Vec<Selection>),
+        UpdateSelectionSet(SelectionSetId, SelectionSetState),
         RemoveSelectionSet(SelectionSetId),
     }
 
@@ -252,7 +264,7 @@ pub mod rpc {
             Arc<Operation>,
         ),
         Selections {
-            updated: HashMap<(ReplicaId, SelectionSetId), Vec<Selection>>,
+            updated: HashMap<(ReplicaId, SelectionSetId), SelectionSetState>,
             removed: HashSet<(ReplicaId, SelectionSetId)>,
         },
     }
@@ -325,7 +337,7 @@ pub mod rpc {
                                 if let Some(selection_set) = buffer.selections.get(id) {
                                     if selection_set.version > *last_polled_version {
                                         *last_polled_version = selection_set.version;
-                                        updated.insert(*id, selection_set.selections.clone());
+                                        updated.insert(*id, selection_set.state());
                                     }
                                     true
                                 } else {
@@ -334,11 +346,16 @@ pub mod rpc {
                                 }
                             });
 
-                        for (id, selection_set) in &buffer.selections {
-                            self.selection_set_versions.entry(*id).or_insert_with(|| {
-                                updated.insert(*id, selection_set.selections.clone());
-                                selection_set.version
-                            });
+                        for ((replica_id, set_id), selection_set) in &buffer.selections {
+                            if *replica_id != self.replica_id {
+                                self.selection_set_versions
+                                    .entry((*replica_id, *set_id))
+                                    .or_insert_with(|| {
+                                        updated
+                                            .insert((*replica_id, *set_id), selection_set.state());
+                                        selection_set.version
+                                    });
+                            }
                         }
 
                         if updated.len() > 0 || removed.len() > 0 {
@@ -359,6 +376,7 @@ pub mod rpc {
         fn init(&mut self, _: &rpc::server::Connection) -> Self::State {
             let buffer = self.buffer.borrow_mut();
             let mut state = State {
+                id: buffer.id,
                 replica_id: self.replica_id,
                 fragments: Vec::new(),
                 insertions: HashMap::new(),
@@ -390,9 +408,7 @@ pub mod rpc {
 
             state.selections = HashMap::new();
             for (id, selection_set) in &buffer.selections {
-                state
-                    .selections
-                    .insert(*id, selection_set.selections.clone());
+                state.selections.insert(*id, selection_set.state());
             }
 
             state
@@ -426,11 +442,11 @@ pub mod rpc {
                         unimplemented!("Invalid op: terminate the service and respond with error?");
                     }
                 }
-                Request::UpdateSelectionSet(set_id, selections) => {
+                Request::UpdateSelectionSet(set_id, state) => {
                     self.buffer.borrow_mut().update_remote_selection_set(
                         self.replica_id,
                         set_id,
-                        selections,
+                        state,
                     );
                 }
                 Request::RemoveSelectionSet(set_id) => {
@@ -464,7 +480,7 @@ pub mod rpc {
 }
 
 impl Buffer {
-    pub fn new() -> Self {
+    pub fn new(id: BufferId) -> Self {
         let mut fragments = Tree::new();
 
         // Push start sentinel.
@@ -496,6 +512,7 @@ impl Buffer {
         );
 
         Self {
+            id,
             replica_id: 1,
             next_replica_id: Some(2),
             local_clock: 0,
@@ -542,17 +559,19 @@ impl Buffer {
         }
 
         let mut selection_sets = HashMap::new();
-        for (id, selections) in state.selections {
+        for (id, state) in state.selections {
             selection_sets.insert(
                 id,
                 SelectionSet {
+                    user_id: state.user_id,
+                    selections: state.selections,
                     version: 0,
-                    selections,
                 },
             );
         }
 
         let buffer = Buffer {
+            id: state.id,
             replica_id: state.replica_id,
             next_replica_id: None,
             local_clock: 0,
@@ -581,11 +600,13 @@ impl Buffer {
                             }
                         }
                         rpc::Update::Selections { updated, removed } => {
-                            for ((replica_id, set_id), selections) in updated {
-                                buffer.update_remote_selection_set(replica_id, set_id, selections);
+                            for ((replica_id, set_id), state) in updated {
+                                debug_assert!(replica_id != buffer.replica_id);
+                                buffer.update_remote_selection_set(replica_id, set_id, state);
                             }
 
                             for (replica_id, set_id) in removed {
+                                debug_assert!(replica_id != buffer.replica_id);
                                 buffer.remove_remote_selection_set(replica_id, set_id);
                             }
                         }
@@ -597,6 +618,10 @@ impl Buffer {
             .unwrap();
 
         Ok(buffer)
+    }
+
+    pub fn id(&self) -> BufferId {
+        self.id
     }
 
     pub fn next_replica_id(&mut self) -> Result<ReplicaId, ()> {
@@ -668,21 +693,25 @@ impl Buffer {
         }
     }
 
-    pub fn add_selection_set(&mut self, selections: Vec<Selection>) -> SelectionSetId {
+    pub fn add_selection_set(
+        &mut self,
+        user_id: UserId,
+        selections: Vec<Selection>,
+    ) -> SelectionSetId {
         let id = self.next_local_selection_set_id;
 
+        let set = SelectionSet {
+            version: 0,
+            selections,
+            user_id,
+        };
+
         if let Some(ref client) = self.client {
-            client.request(rpc::Request::UpdateSelectionSet(id, selections.clone()));
+            client.request(rpc::Request::UpdateSelectionSet(id, set.state()));
         }
 
         self.next_local_selection_set_id += 1;
-        self.selections.insert(
-            (self.replica_id, id),
-            SelectionSet {
-                version: 0,
-                selections,
-            },
-        );
+        self.selections.insert((self.replica_id, id), set);
         self.updates.set(());
         id
     }
@@ -704,20 +733,19 @@ impl Buffer {
             .map(|set| set.selections.as_slice())
     }
 
-    pub fn mutate_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), ()>
+    pub fn mutate_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), Error>
     where
         F: FnOnce(&Buffer, &mut Vec<Selection>),
     {
         let id = (self.replica_id, set_id);
-        let mut set = self.selections.remove(&id).ok_or(())?;
+        let mut set = self.selections
+            .remove(&id)
+            .ok_or(Error::SelectionSetNotFound)?;
         f(self, &mut set.selections);
         self.merge_selections(&mut set.selections);
         set.version += 1;
         if let Some(ref client) = self.client {
-            client.request(rpc::Request::UpdateSelectionSet(
-                id.1,
-                set.selections.clone(),
-            ));
+            client.request(rpc::Request::UpdateSelectionSet(id.1, set.state()));
         }
         self.selections.insert(id, set);
         self.updates.set(());
@@ -742,13 +770,13 @@ impl Buffer {
         }
     }
 
-    pub fn remote_selections(&self) -> impl Iterator<Item = (ReplicaId, &[Selection])> {
+    pub fn remote_selections(&self) -> impl Iterator<Item = (UserId, &[Selection])> {
         let local_replica_id = self.replica_id;
         self.selections
             .iter()
             .filter_map(move |((replica_id, _), set)| {
                 if *replica_id != local_replica_id {
-                    Some((*replica_id, set.selections.as_slice()))
+                    Some((set.user_id, set.selections.as_slice()))
                 } else {
                     None
                 }
@@ -913,16 +941,17 @@ impl Buffer {
         &mut self,
         replica_id: ReplicaId,
         set_id: SelectionSetId,
-        selections: Vec<Selection>,
+        state: SelectionSetState,
     ) {
         let set = self.selections
             .entry((replica_id, set_id))
             .or_insert(SelectionSet {
-                version: 0,
+                user_id: state.user_id,
                 selections: Vec::new(),
+                version: 0,
             });
         set.version += 1;
-        set.selections = selections;
+        set.selections = state.selections;
         self.updates.set(());
     }
 
@@ -1413,6 +1442,11 @@ impl Point {
         Point { row, column }
     }
 
+    #[cfg(test)]
+    pub fn zero() -> Self {
+        Point::new(0, 0)
+    }
+
     pub fn is_zero(&self) -> bool {
         self.row == 0 && self.column == 0
     }
@@ -1482,6 +1516,15 @@ impl Ord for Point {
         match self.row.cmp(&other.row) {
             cmp::Ordering::Equal => self.column.cmp(&other.column),
             comparison @ _ => comparison,
+        }
+    }
+}
+
+impl SelectionSet {
+    fn state(&self) -> SelectionSetState {
+        SelectionSetState {
+            user_id: self.user_id,
+            selections: self.selections.clone(),
         }
     }
 }
@@ -1585,6 +1628,10 @@ impl Selection {
 
     pub fn is_empty(&self, buffer: &Buffer) -> bool {
         buffer.cmp_anchors(&self.start, &self.end).unwrap() == cmp::Ordering::Equal
+    }
+
+    pub fn anchor_range(&self) -> Range<Anchor> {
+        self.start.clone()..self.end.clone()
     }
 }
 
@@ -1989,7 +2036,7 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         buffer.edit(0..0, "abc");
         assert_eq!(buffer.to_string(), "abc");
         buffer.edit(3..3, "def");
@@ -2010,7 +2057,7 @@ mod tests {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new();
+            let mut buffer = Buffer::new(0);
             let mut reference_string = String::new();
 
             for _i in 0..30 {
@@ -2033,7 +2080,7 @@ mod tests {
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         buffer.edit(0..0, "abcd\nefg\nhij");
         buffer.edit(12..12, "kl\nmno");
         buffer.edit(18..18, "\npqrs\n");
@@ -2050,7 +2097,7 @@ mod tests {
 
     #[test]
     fn iter_starting_at_row() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         buffer.edit(0..0, "abcd\nefgh\nij");
         buffer.edit(12..12, "kl\nmno");
         buffer.edit(18..18, "\npqrs");
@@ -2169,7 +2216,7 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         buffer.edit(0..0, "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
@@ -2311,7 +2358,7 @@ mod tests {
 
     #[test]
     fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::new(0);
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
@@ -2342,7 +2389,7 @@ mod tests {
             let mut buffers = Vec::new();
             let mut queues = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new();
+                let mut buffer = Buffer::new(0);
                 buffer.replica_id = i + 1;
                 buffers.push(buffer);
                 queues.push(Vec::new());
@@ -2387,7 +2434,7 @@ mod tests {
 
     #[test]
     fn test_edit_replication() {
-        let local_buffer = Buffer::new().into_shared();
+        let local_buffer = Buffer::new(0).into_shared();
         local_buffer.borrow_mut().edit(0..0, "abcdef");
         local_buffer.borrow_mut().edit(2..4, "ghi");
 
@@ -2439,12 +2486,12 @@ mod tests {
     fn test_selection_replication() {
         use stream_ext::StreamExt;
 
-        let mut buffer_1 = Buffer::new();
+        let mut buffer_1 = Buffer::new(0);
         buffer_1.edit(0..0, "abcdef");
         let sels = vec![empty_selection(&buffer_1, 1), empty_selection(&buffer_1, 3)];
-        buffer_1.add_selection_set(sels);
+        buffer_1.add_selection_set(0, sels);
         let sels = vec![empty_selection(&buffer_1, 2), empty_selection(&buffer_1, 4)];
-        let buffer_1_set_id = buffer_1.add_selection_set(sels);
+        let buffer_1_set_id = buffer_1.add_selection_set(0, sels);
         let buffer_1 = buffer_1.into_shared();
 
         let mut reactor = reactor::Core::new().unwrap();
@@ -2494,7 +2541,7 @@ mod tests {
         assert_eq!(selections(&buffer_1), selections(&buffer_3));
 
         let sels = vec![empty_selection(&buffer_2.borrow(), 1)];
-        let buffer_2_set_id = buffer_2.borrow_mut().add_selection_set(sels);
+        let buffer_2_set_id = buffer_2.borrow_mut().add_selection_set(0, sels);
         buffer_2_updates.wait_next(&mut reactor).unwrap();
 
         buffer_1_updates.wait_next(&mut reactor).unwrap();

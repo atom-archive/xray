@@ -29,14 +29,20 @@ class TextPlane extends React.Component {
   async componentDidUpdate() {
     if (this.canvas == null) return;
 
+    const { userColors } = this.context.theme;
     const {
       fontFamily,
       fontSize,
       backgroundColor,
-      baseTextColor,
-      selectionColors,
-      cursorColors
+      baseTextColor
     } = this.context.theme.editor;
+
+    const cursorColors = userColors;
+    const selectionColors = cursorColors.map(color => {
+      color = Object.assign({}, color);
+      color.a = 0.5;
+      return color;
+    });
 
     const computedLineHeight = this.props.lineHeight;
 
@@ -56,11 +62,11 @@ class TextPlane extends React.Component {
       canvasWidth: this.props.width * window.devicePixelRatio,
       canvasHeight: this.props.height * window.devicePixelRatio,
       scrollTop: this.props.scrollTop,
+      paddingLeft: this.props.paddingLeft || 0,
       firstVisibleRow: this.props.firstVisibleRow,
       lines: this.props.lines,
       selections: this.props.selections,
       showLocalCursors: this.props.showLocalCursors,
-      localReplicaId: this.props.localReplicaId,
       selectionColors,
       cursorColors,
       computedLineHeight
@@ -319,11 +325,11 @@ class Renderer {
     canvasHeight,
     canvasWidth,
     scrollTop,
+    paddingLeft,
     firstVisibleRow,
     lines,
     selections,
     showLocalCursors,
-    localReplicaId,
     selectionColors,
     cursorColors
   }) {
@@ -344,6 +350,7 @@ class Renderer {
     const glyphCount = this.populateGlyphInstances(
       scrollTop,
       firstVisibleRow,
+      paddingLeft,
       lines,
       selections,
       textColor,
@@ -356,13 +363,13 @@ class Renderer {
     } = this.populateSelectionSolidInstances(
       scrollTop,
       canvasWidth,
+      paddingLeft,
       selections,
       xPositions,
       selectionColors,
       cursorColors,
       cursorWidth,
-      showLocalCursors,
-      localReplicaId
+      showLocalCursors
     );
     this.atlas.uploadTexture();
 
@@ -482,6 +489,7 @@ class Renderer {
   populateGlyphInstances(
     scrollTop,
     firstVisibleRow,
+    paddingLeft,
     lines,
     selections,
     textColor,
@@ -496,7 +504,7 @@ class Renderer {
 
     for (var i = 0; i < lines.length; i++) {
       position.row = firstVisibleRow + i;
-      let x = 0;
+      let x = paddingLeft;
       const line = lines[i];
 
       for (
@@ -563,13 +571,13 @@ class Renderer {
   populateSelectionSolidInstances(
     scrollTop,
     canvasWidth,
+    paddingLeft,
     selections,
     xPositions,
     selectionColors,
     cursorColors,
     cursorWidth,
-    showLocalCursors,
-    localReplicaId
+    showLocalCursors
   ) {
     const { dpiScale, computedLineHeight } = this.style;
 
@@ -578,7 +586,7 @@ class Renderer {
 
     for (var i = 0; i < selections.length; i++) {
       const selection = selections[i];
-      const colorIndex = (selection.replica_id - 1) % selectionColors.length;
+      const colorIndex = selection.user_id % selectionColors.length;
       const selectionColor = selectionColors[colorIndex];
       const cursorColor = cursorColors[colorIndex];
 
@@ -614,7 +622,7 @@ class Renderer {
             this.updateSolidInstance(
               this.selectionSolidInstances,
               selectionSolidCount++,
-              0,
+              paddingLeft,
               yForRow(selection.start.row + 1),
               Math.round(canvasWidth),
               yForRow(selection.end.row) - yForRow(selection.start.row + 1),
@@ -626,16 +634,16 @@ class Renderer {
           this.updateSolidInstance(
             this.selectionSolidInstances,
             selectionSolidCount++,
-            0,
+            paddingLeft,
             yForRow(selection.end.row),
-            Math.round(endX),
+            Math.round(endX - paddingLeft),
             yForRow(selection.end.row + 1) - yForRow(selection.end.row),
             selectionColor
           );
         }
       }
 
-      if (showLocalCursors || localReplicaId !== selection.replica_id) {
+      if (showLocalCursors || selection.remote) {
         const cursorPoint = selection.reversed
           ? selection.start
           : selection.end;

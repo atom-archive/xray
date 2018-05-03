@@ -1,4 +1,5 @@
 #![cfg_attr(target_arch = "wasm32", feature(proc_macro, wasm_custom_section, wasm_import_module))]
+#![feature(unsize, coerce_unsized)]
 
 extern crate bincode;
 extern crate bytes;
@@ -33,6 +34,7 @@ pub mod rpc;
 pub mod window;
 pub mod workspace;
 
+mod discussion;
 mod file_finder;
 mod fuzzy;
 mod movement;
@@ -51,6 +53,7 @@ pub use window::{ViewId, WindowUpdate};
 
 pub type ForegroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + 'static>>>;
 pub type BackgroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + Send + 'static>>>;
+pub type UserId = usize;
 
 pub(crate) trait IntoShared {
     fn into_shared(self) -> Rc<RefCell<Self>>;

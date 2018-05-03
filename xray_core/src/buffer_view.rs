@@ -1,4 +1,4 @@
-use buffer::{Buffer, Point, ReplicaId, Selection, SelectionSetId};
+use buffer::{self, Buffer, BufferId, Point, Selection, SelectionSetId};
 use futures::{Poll, Stream};
 use movement;
 use notify_cell::NotifyCell;
@@ -9,8 +9,14 @@ use std::cmp::{self, Ordering};
 use std::ops::Range;
 use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
+use UserId;
+
+pub trait BufferViewDelegate {
+    fn set_active_buffer_view(&mut self, buffer_view: WeakViewHandle<BufferView>);
+}
 
 pub struct BufferView {
+    user_id: UserId,
     buffer: Rc<RefCell<Buffer>>,
     updates_tx: NotifyCell<()>,
     updates_rx: Box<Stream<Item = (), Error = ()>>,
@@ -20,14 +26,18 @@ pub struct BufferView {
     width: Option<f64>,
     line_height: f64,
     scroll_top: f64,
+    vertical_margin: u32,
+    pending_autoscroll: Option<AutoScrollRequest>,
+    delegate: Option<WeakViewHandle<BufferViewDelegate>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
 struct SelectionProps {
-    pub replica_id: ReplicaId,
+    pub user_id: UserId,
     pub start: Point,
     pub end: Point,
     pub reversed: bool,
+    pub remote: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,23 +60,36 @@ enum BufferViewAction {
     AddSelectionBelow,
 }
 
+struct AutoScrollRequest {
+    range: Range<buffer::Anchor>,
+    center: bool,
+}
+
 impl BufferView {
-    pub fn new(buffer: Rc<RefCell<Buffer>>) -> Self {
+    pub fn new(
+        buffer: Rc<RefCell<Buffer>>,
+        user_id: UserId,
+        delegate: Option<WeakViewHandle<BufferViewDelegate>>,
+    ) -> Self {
         let selection_set_id = {
             let mut buffer = buffer.borrow_mut();
             let start = buffer.anchor_before_offset(0).unwrap();
             let end = buffer.anchor_before_offset(0).unwrap();
-            buffer.add_selection_set(vec![Selection {
-                start,
-                end,
-                reversed: false,
-                goal_column: None,
-            }])
+            buffer.add_selection_set(
+                user_id,
+                vec![Selection {
+                    start,
+                    end,
+                    reversed: false,
+                    goal_column: None,
+                }],
+            )
         };
 
         let updates_tx = NotifyCell::new(());
         let updates_rx = Box::new(updates_tx.observe().select(buffer.borrow().updates()));
         Self {
+            user_id,
             updates_tx,
             updates_rx,
             buffer,
@@ -76,31 +99,51 @@ impl BufferView {
             width: None,
             line_height: 10.0,
             scroll_top: 0.0,
+            vertical_margin: 2,
+            pending_autoscroll: None,
+            delegate,
         }
     }
 
     pub fn set_height(&mut self, height: f64) -> &mut Self {
+        debug_assert!(height >= 0_f64);
         self.height = Some(height);
+        self.autoscroll_to_cursor(false);
         self.updated();
         self
     }
 
     pub fn set_width(&mut self, width: f64) -> &mut Self {
+        debug_assert!(width >= 0_f64);
         self.width = Some(width);
+        self.autoscroll_to_cursor(false);
         self.updated();
         self
     }
 
     pub fn set_line_height(&mut self, line_height: f64) -> &mut Self {
+        debug_assert!(line_height > 0_f64);
         self.line_height = line_height;
+        self.autoscroll_to_cursor(false);
         self.updated();
         self
     }
 
     pub fn set_scroll_top(&mut self, scroll_top: f64) -> &mut Self {
+        debug_assert!(scroll_top >= 0_f64);
         self.scroll_top = scroll_top;
+        self.pending_autoscroll = None;
         self.updated();
         self
+    }
+
+    fn scroll_top(&self) -> f64 {
+        let max_scroll_top = f64::from(self.buffer.borrow().max_point().row) * self.line_height;
+        self.scroll_top.min(max_scroll_top)
+    }
+
+    fn scroll_bottom(&self) -> f64 {
+        self.scroll_top() + self.height.unwrap_or(0.0)
     }
 
     pub fn edit(&mut self, text: &str) {
@@ -145,6 +188,7 @@ impl BufferView {
                 .unwrap();
         }
 
+        self.autoscroll_to_cursor(false);
         self.updated();
     }
 
@@ -167,6 +211,30 @@ impl BufferView {
         self.selections()
             .iter()
             .all(|selection| selection.is_empty(&buffer))
+    }
+
+    pub fn set_selected_anchor_range(
+        &mut self,
+        range: Range<buffer::Anchor>,
+    ) -> Result<(), buffer::Error> {
+        {
+            let mut buffer = self.buffer.borrow_mut();
+            // Ensure the supplied anchors are valid to preserve invariants.
+            buffer.offset_for_anchor(&range.start)?;
+            buffer.offset_for_anchor(&range.end)?;
+            buffer.mutate_selections(self.selection_set_id, |_, selections| {
+                selections.clear();
+                selections.push(Selection {
+                    start: range.start,
+                    end: range.end,
+                    reversed: false,
+                    goal_column: None,
+                });
+            })?;
+        }
+        self.autoscroll_to_selection(true);
+        self.updated();
+        Ok(())
     }
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
@@ -196,6 +264,7 @@ impl BufferView {
                 );
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn add_selection_above(&mut self) {
@@ -256,6 +325,7 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn add_selection_below(&mut self) {
@@ -318,6 +388,7 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn move_left(&mut self) {
@@ -342,6 +413,7 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn select_left(&mut self) {
@@ -358,6 +430,7 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn move_right(&mut self) {
@@ -382,6 +455,7 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn select_right(&mut self) {
@@ -398,6 +472,7 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn move_up(&mut self) {
@@ -420,6 +495,7 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn select_up(&mut self) {
@@ -434,6 +510,7 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn move_down(&mut self) {
@@ -456,6 +533,7 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn select_down(&mut self) {
@@ -470,19 +548,31 @@ impl BufferView {
                 }
             })
             .unwrap();
+        self.autoscroll_to_cursor(false);
+    }
+
+    pub fn selections(&self) -> Ref<[Selection]> {
+        Ref::map(self.buffer.borrow(), |buffer| {
+            buffer.selections(self.selection_set_id).unwrap()
+        })
+    }
+
+    pub fn buffer_id(&self) -> BufferId {
+        self.buffer.borrow().id()
     }
 
     fn render_selections(&self, range: Range<Point>) -> Vec<SelectionProps> {
         let buffer = self.buffer.borrow();
         let mut rendered_selections = Vec::new();
 
-        for (replica_id, selections) in buffer.remote_selections() {
+        for (user_id, selections) in buffer.remote_selections() {
             for selection in self.query_selections(selections, &range) {
                 rendered_selections.push(SelectionProps {
-                    replica_id,
+                    user_id,
                     start: buffer.point_for_anchor(&selection.start).unwrap(),
                     end: buffer.point_for_anchor(&selection.end).unwrap(),
                     reversed: selection.reversed,
+                    remote: true,
                 });
             }
         }
@@ -491,10 +581,11 @@ impl BufferView {
             self.query_selections(&buffer.selections(self.selection_set_id).unwrap(), &range)
         {
             rendered_selections.push(SelectionProps {
-                replica_id: buffer.replica_id,
+                user_id: self.user_id,
                 start: buffer.point_for_anchor(&selection.start).unwrap(),
                 end: buffer.point_for_anchor(&selection.end).unwrap(),
                 reversed: selection.reversed,
+                remote: false,
             });
         }
 
@@ -540,10 +631,75 @@ impl BufferView {
         }
     }
 
-    fn selections(&self) -> Ref<[Selection]> {
-        Ref::map(self.buffer.borrow(), |buffer| {
-            buffer.selections(self.selection_set_id).unwrap()
-        })
+    fn autoscroll_to_cursor(&mut self, center: bool) {
+        let anchor = {
+            let selections = self.selections();
+            let selection = selections.last().unwrap();
+            if selection.reversed {
+                selection.start.clone()
+            } else {
+                selection.end.clone()
+            }
+        };
+
+        self.autoscroll_to_range(anchor.clone()..anchor, center)
+            .unwrap();
+    }
+
+    fn autoscroll_to_selection(&mut self, center: bool) {
+        let range = {
+            let selections = self.selections();
+            let selection = selections.last().unwrap();
+            selection.start.clone()..selection.end.clone()
+        };
+
+        self.autoscroll_to_range(range, center).unwrap();
+    }
+
+    fn flush_pending_autoscroll_to_selection(&mut self) {
+        if let Some(request) = self.pending_autoscroll.take() {
+            self.autoscroll_to_range(request.range, request.center)
+                .unwrap();
+        }
+    }
+
+    fn autoscroll_to_range(
+        &mut self,
+        range: Range<buffer::Anchor>,
+        center: bool,
+    ) -> Result<(), buffer::Error> {
+        // Ensure points are valid even if we can't autoscroll immediately because
+        // flush_pending_autoscroll_to_selection unwraps.
+        let (start, end) = {
+            let buffer = self.buffer.borrow();
+            let start = buffer.point_for_anchor(&range.start)?;
+            let end = buffer.point_for_anchor(&range.end)?;
+            (start, end)
+        };
+        if let Some(height) = self.height {
+            let desired_top;
+            let desired_bottom;
+            if center {
+                let center_position = ((start.row + end.row) as f64 / 2_f64) * self.line_height;
+                desired_top = 0_f64.max(center_position - height / 2_f64);
+                desired_bottom = center_position + height / 2_f64;
+            } else {
+                desired_top =
+                    start.row.saturating_sub(self.vertical_margin) as f64 * self.line_height;
+                desired_bottom =
+                    end.row.saturating_add(self.vertical_margin) as f64 * self.line_height;
+            }
+
+            if self.scroll_top() > desired_top {
+                self.set_scroll_top(desired_top);
+            } else if self.scroll_bottom() < desired_bottom {
+                self.set_scroll_top(desired_bottom - height);
+            }
+        } else {
+            self.pending_autoscroll = Some(AutoScrollRequest { range, center });
+        }
+
+        Ok(())
     }
 
     fn updated(&mut self) {
@@ -556,18 +712,18 @@ impl View for BufferView {
         "BufferView"
     }
 
-    fn will_mount(&mut self, window: &mut Window, _: WeakViewHandle<Self>) {
+    fn will_mount(&mut self, window: &mut Window, self_handle: WeakViewHandle<Self>) {
         self.height = Some(window.height());
+        self.flush_pending_autoscroll_to_selection();
+        if let Some(ref delegate) = self.delegate {
+            delegate.map(|delegate| delegate.set_active_buffer_view(self_handle));
+        }
     }
 
     fn render(&self) -> serde_json::Value {
         let buffer = self.buffer.borrow();
-
-        let max_scroll_top = f64::from(buffer.max_point().row) * self.line_height;
-        let scroll_top = self.scroll_top.min(max_scroll_top);
-        let scroll_bottom = scroll_top + self.height.unwrap_or(0.0);
-        let start = Point::new((scroll_top / self.line_height).floor() as u32, 0);
-        let end = Point::new((scroll_bottom / self.line_height).ceil() as u32, 0);
+        let start = Point::new((self.scroll_top() / self.line_height).floor() as u32, 0);
+        let end = Point::new((self.scroll_bottom() / self.line_height).ceil() as u32, 0);
 
         let mut lines = Vec::new();
         let mut cur_line = Vec::new();
@@ -596,14 +752,13 @@ impl View for BufferView {
             "width": self.width,
             "line_height": self.line_height,
             "selections": self.render_selections(start..end),
-            "local_replica_id": buffer.replica_id,
         })
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value, _: &mut Window) {
         match serde_json::from_value(action) {
             Ok(BufferViewAction::UpdateScrollTop { delta }) => {
-                let mut scroll_top = self.scroll_top + delta;
+                let mut scroll_top = self.scroll_top() + delta;
                 if scroll_top < 0.0 {
                     scroll_top = 0.0;
                 }
@@ -657,7 +812,7 @@ mod tests {
 
     #[test]
     fn test_cursor_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(0..0, "abc");
         editor.buffer.borrow_mut().edit(3..3, "\n");
         editor.buffer.borrow_mut().edit(4..4, "\ndef");
@@ -738,7 +893,7 @@ mod tests {
 
     #[test]
     fn test_selection_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(0..0, "abc");
         editor.buffer.borrow_mut().edit(3..3, "\n");
         editor.buffer.borrow_mut().edit(4..4, "\ndef");
@@ -829,7 +984,7 @@ mod tests {
 
     #[test]
     fn test_backspace() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
@@ -841,7 +996,7 @@ mod tests {
 
     #[test]
     fn test_delete() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
@@ -853,7 +1008,7 @@ mod tests {
 
     #[test]
     fn test_add_selection() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor
             .buffer
             .borrow_mut()
@@ -907,7 +1062,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_above() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(
             0..0,
             "\
@@ -976,7 +1131,7 @@ mod tests {
 
     #[test]
     fn test_add_selection_below() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(
             0..0,
             "\
@@ -1036,7 +1191,7 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
 
         editor.buffer.borrow_mut().edit(0..0, "abcdefgh\nhijklmno");
 
@@ -1058,19 +1213,40 @@ mod tests {
     }
 
     #[test]
+    fn test_autoscroll() {
+        let mut buffer = Buffer::new(0);
+        buffer.edit(0..0, "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
+        let start = buffer.anchor_before_offset(0).unwrap();
+        let end = buffer.anchor_before_offset(buffer.len()).unwrap();
+        let max_point = buffer.max_point();
+        let mut editor = BufferView::new(buffer.into_shared(), 0, None);
+        let line_height = 5.0;
+        let height = 3.0 * line_height;
+        editor
+            .set_height(height)
+            .set_line_height(line_height)
+            .set_scroll_top(2.5 * line_height);
+        assert_eq!(editor.scroll_top(), 2.5 * line_height);
+
+        editor.autoscroll_to_range(start.clone()..start.clone(), true).unwrap();
+        assert_eq!(editor.scroll_top(), 0.0);
+        editor.autoscroll_to_range(end.clone()..end.clone(), true).unwrap();
+        assert_eq!(
+            editor.scroll_top(),
+            (max_point.row as f64 * line_height) - (height / 2.0)
+        );
+    }
+
+    #[test]
     fn test_render() {
-        let buffer = Rc::new(RefCell::new(Buffer::new()));
+        let buffer = Rc::new(RefCell::new(Buffer::new(0)));
         buffer
             .borrow_mut()
             .edit(0..0, "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
         let line_height = 6.0;
 
         {
-            let mut editor = BufferView::new(buffer.clone());
-            editor
-                .set_height(3.0 * line_height)
-                .set_line_height(line_height)
-                .set_scroll_top(2.5 * line_height);
+            let mut editor = BufferView::new(buffer.clone(), 0, None);
             // Selections starting or ending outside viewport
             editor.add_selection(Point::new(1, 2), Point::new(3, 1));
             editor.add_selection(Point::new(5, 2), Point::new(6, 0));
@@ -1078,6 +1254,10 @@ mod tests {
             editor.add_selection(Point::new(3, 2), Point::new(4, 1));
             // Selection fully outside viewport
             editor.add_selection(Point::new(6, 3), Point::new(7, 2));
+            editor
+                .set_height(3.0 * line_height)
+                .set_line_height(line_height)
+                .set_scroll_top(2.5 * line_height);
 
             let frame = editor.render();
             assert_eq!(frame["first_visible_row"], 2);
@@ -1097,12 +1277,12 @@ mod tests {
 
         // Selection starting at the end of buffer
         {
-            let mut editor = BufferView::new(buffer.clone());
+            let mut editor = BufferView::new(buffer.clone(), 0, None);
+            editor.add_selection(Point::new(8, 2), Point::new(8, 2));
             editor
                 .set_height(8.0 * line_height)
                 .set_line_height(line_height)
                 .set_scroll_top(1.0 * line_height);
-            editor.add_selection(Point::new(8, 2), Point::new(8, 2));
 
             let frame = editor.render();
             assert_eq!(frame["first_visible_row"], 1);
@@ -1115,12 +1295,12 @@ mod tests {
 
         // Selection ending exactly at first visible row
         {
-            let mut editor = BufferView::new(buffer.clone());
+            let mut editor = BufferView::new(buffer.clone(), 0, None);
+            editor.add_selection(Point::new(0, 2), Point::new(1, 0));
             editor
                 .set_height(3.0 * line_height)
                 .set_line_height(line_height)
                 .set_scroll_top(1.0 * line_height);
-            editor.add_selection(Point::new(0, 2), Point::new(1, 0));
 
             let frame = editor.render();
             assert_eq!(frame["first_visible_row"], 1);
@@ -1132,14 +1312,13 @@ mod tests {
     #[test]
     fn test_render_past_last_line() {
         let line_height = 4.0;
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new())));
-
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor.buffer.borrow_mut().edit(0..0, "abc\ndef\nghi");
+        editor.add_selection(Point::new(2, 3), Point::new(2, 3));
         editor
             .set_height(3.0 * line_height)
             .set_line_height(line_height)
             .set_scroll_top(2.0 * line_height);
-        editor.buffer.borrow_mut().edit(0..0, "abc\ndef\nghi");
-        editor.add_selection(Point::new(2, 3), Point::new(2, 3));
 
         let frame = editor.render();
         assert_eq!(frame["first_visible_row"], 2);
@@ -1155,8 +1334,8 @@ mod tests {
 
     #[test]
     fn test_dropping_view_removes_selection_set() {
-        let buffer = Buffer::new().into_shared();
-        let editor = BufferView::new(buffer.clone());
+        let buffer = Buffer::new(0).into_shared();
+        let editor = BufferView::new(buffer.clone(), 0, None);
         let selection_set_id = editor.selection_set_id;
         assert!(buffer.borrow_mut().selections(selection_set_id).is_ok());
 
@@ -1179,38 +1358,42 @@ mod tests {
             .selections()
             .iter()
             .map(|s| SelectionProps {
-                replica_id: buffer.replica_id,
+                user_id: 0,
                 start: buffer.point_for_anchor(&s.start).unwrap(),
                 end: buffer.point_for_anchor(&s.end).unwrap(),
                 reversed: s.reversed,
+                remote: false,
             })
             .collect()
     }
 
     fn empty_selection(row: u32, column: u32) -> SelectionProps {
         SelectionProps {
-            replica_id: 1,
+            user_id: 0,
             start: Point::new(row, column),
             end: Point::new(row, column),
             reversed: false,
+            remote: false,
         }
     }
 
     fn selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
         SelectionProps {
-            replica_id: 1,
+            user_id: 0,
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
             reversed: false,
+            remote: false,
         }
     }
 
     fn rev_selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
         SelectionProps {
-            replica_id: 1,
+            user_id: 0,
             start: Point::new(start.0, start.1),
             end: Point::new(end.0, end.1),
             reversed: true,
+            remote: false,
         }
     }
 }

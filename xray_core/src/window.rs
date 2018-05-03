@@ -4,6 +4,8 @@ use serde_json;
 use std::boxed::Box;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::marker::Unsize;
+use std::ops::CoerceUnsized;
 use std::rc::{Rc, Weak};
 use BackgroundExecutor;
 
@@ -22,6 +24,7 @@ pub trait View: Stream<Item = (), Error = ()> {
 
 pub struct Window(Rc<RefCell<Inner>>);
 
+#[derive(Clone)]
 pub struct WeakWindowHandle(Weak<RefCell<Inner>>);
 
 pub struct WindowUpdateStream {
@@ -48,7 +51,7 @@ pub struct ViewHandle {
     inner: Weak<RefCell<Inner>>,
 }
 
-pub struct WeakViewHandle<T>(Weak<RefCell<T>>);
+pub struct WeakViewHandle<T: ?Sized>(Weak<RefCell<T>>);
 
 #[derive(Serialize, Debug)]
 pub struct WindowUpdate {
@@ -276,7 +279,7 @@ impl Drop for ViewHandle {
     }
 }
 
-impl<T> WeakViewHandle<T> {
+impl<T: ?Sized> WeakViewHandle<T> {
     pub fn map<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&mut T) -> R,
@@ -285,10 +288,17 @@ impl<T> WeakViewHandle<T> {
     }
 }
 
-impl<T> Clone for WeakViewHandle<T> {
+impl<T: ?Sized> Clone for WeakViewHandle<T> {
     fn clone(&self) -> Self {
         WeakViewHandle(self.0.clone())
     }
+}
+
+impl<T, U> CoerceUnsized<WeakViewHandle<U>> for WeakViewHandle<T>
+where
+    T: Unsize<U> + ?Sized,
+    U: ?Sized,
+{
 }
 
 #[cfg(test)]
