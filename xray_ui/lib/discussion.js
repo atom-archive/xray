@@ -17,9 +17,11 @@ const Root = styled("div", {
 
 const Messages = styled("div", {
   flex: 1,
+  display: "flex",
+  flexDirection: "column",
   background: "white",
   marginBottom: "5px",
-  overflowY: "scroll",
+  overflowY: "auto",
   "::-webkit-scrollbar": {
     width: "5px",
   },
@@ -29,17 +31,20 @@ const Messages = styled("div", {
   }
 });
 
-const Message = styled("div", {
+const Message = styled("div", ({$first}) => ({
   padding: "5px",
-  fontFamily: "Helvetica Neue",
-  cursor: "default",
-  ":hover": {
-    background: "rgba(31, 150, 255, 0.3)"
-  }
-});
+    fontFamily: "Helvetica Neue",
+    cursor: "default",
+    overflowWrap: "break-word",
+    marginTop: $first ? "auto" : null,
+    ":hover": {
+      background: "rgba(31, 150, 255, 0.3)"
+    }
+  })
+);
 
-const Avatar = styled("div", ({ color }) => {
-  const { r, g, b, a } = color;
+const Avatar = styled("div", ({ $color }) => {
+  const { r, g, b, a } = $color;
   return {
     backgroundColor: `rgba(${r}, ${g}, ${b}, ${a})`,
     display: "inline-block",
@@ -89,13 +94,13 @@ class Discussion extends React.Component {
             this.messages = messages;
           }
         },
-        this.props.messages.map(message => {
+        this.props.messages.map((message, i) => {
           const avatarColor =
             userColors[message.user_id % userColors.length];
           return $(
             Message,
-            null,
-            $(Avatar, { color: avatarColor }),
+            {$first: i === 0},
+            $(Avatar, { $color: avatarColor }),
             message.text
           );
         })
