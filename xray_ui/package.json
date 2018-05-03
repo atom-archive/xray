@@ -11,6 +11,7 @@
     "prop-types": "^15.6.0",
     "react": "^16.3.0",
     "react-autosize-textarea": "^3.0.3",
+    "react-component-octicons": "^1.6.0",
     "react-dom": "^16.3.0",
     "styletron-engine-atomic": "1.0.4",
     "styletron-react": "4.0.3"

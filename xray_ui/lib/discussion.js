@@ -7,7 +7,10 @@ const $ = React.createElement;
 const Root = styled("div", {
   width: "100%",
   height: "100%",
-  padding: "5px",
+  paddingTop: "5px",
+  paddingRight: "5px",
+  paddingBottom: "5px",
+  paddingLeft: 0,
   margin: 0,
   display: "flex",
   flexDirection: "column",

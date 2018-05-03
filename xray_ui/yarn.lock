@@ -1150,6 +1150,10 @@ react-autosize-textarea@^3.0.3:
     line-height "^0.3.1"
     prop-types "^15.5.6"
 
+react-component-octicons@^1.6.0:
+  version "1.6.0"
+  resolved "https://registry.yarnpkg.com/react-component-octicons/-/react-component-octicons-1.6.0.tgz#a318ba78f464739db7788f05aa17d66758f35563"
+
 react-dom@^16.3.0:
   version "16.3.2"
   resolved "https://registry.yarnpkg.com/react-dom/-/react-dom-16.3.2.tgz#cb90f107e09536d683d84ed5d4888e9640e0e4df"

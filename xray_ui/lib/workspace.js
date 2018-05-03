@@ -5,6 +5,7 @@ const { styled } = require("styletron-react");
 const Modal = require("./modal");
 const View = require("./view");
 const $ = React.createElement;
+const VerticalToolbar = require("./vertical_toolbar");
 
 const Root = styled("div", {
   position: "relative",
@@ -45,6 +46,7 @@ class Workspace extends React.Component {
   constructor() {
     super();
     this.didKeyDown = this.didKeyDown.bind(this);
+    this.toggleDiscussion = this.toggleDiscussion.bind(this);
   }
 
   render() {
@@ -71,6 +73,7 @@ class Workspace extends React.Component {
         tabIndex: -1,
         onKeyDownCapture: this.didKeyDown
       },
+      $(VerticalToolbar, { onToggleDiscussion: this.toggleDiscussion }),
       leftPanel,
       $(Pane, null, $(PaneInner, null, centerItem)),
       modal
@@ -88,6 +91,10 @@ class Workspace extends React.Component {
         event.stopPropagation();
       }
     }
+  }
+
+  toggleDiscussion() {
+    this.props.dispatch({ type: "ToggleDiscussion" });
   }
 }
 

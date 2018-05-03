@@ -72,6 +72,7 @@ pub struct Anchor {
 #[serde(tag = "type")]
 enum WorkspaceViewAction {
     ToggleFileFinder,
+    ToggleDiscussion,
 }
 
 impl LocalWorkspace {
@@ -200,6 +201,19 @@ impl WorkspaceView {
         self.updates.set(());
     }
 
+    fn toggle_discussion(&mut self, window: &mut Window) {
+        if self.left_panel.is_some() {
+            self.left_panel = None;
+        } else {
+            let delegate = self.self_handle.as_ref().cloned().unwrap();
+            self.left_panel = Some(window.add_view(DiscussionView::new(
+                self.workspace.borrow().discussion().clone(),
+                delegate,
+            )));
+        }
+        self.updates.set(());
+    }
+
     fn open_buffer<T>(&self, buffer: T, selected_range: Option<Range<buffer::Anchor>>)
     where
         T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = project::OpenError>,
@@ -260,15 +274,12 @@ impl View for WorkspaceView {
     fn will_mount(&mut self, window: &mut Window, view_handle: WeakViewHandle<Self>) {
         self.self_handle = Some(view_handle.clone());
         self.window_handle = Some(window.handle());
-        self.left_panel = Some(window.add_view(DiscussionView::new(
-            self.workspace.borrow().discussion().clone(),
-            view_handle,
-        )))
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value, window: &mut Window) {
         match serde_json::from_value(action) {
             Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(window),
+            Ok(WorkspaceViewAction::ToggleDiscussion) => self.toggle_discussion(window),
             _ => eprintln!("Unrecognized action"),
         }
     }
