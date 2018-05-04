@@ -753,21 +753,27 @@ impl Buffer {
     }
 
     fn merge_selections(&mut self, selections: &mut Vec<Selection>) {
-        let mut i = 1;
-        while i < selections.len() {
-            if self.cmp_anchors(&selections[i - 1].end, &selections[i].start)
-                .unwrap() >= cmp::Ordering::Equal
-            {
-                let removed = selections.remove(i);
-                if self.cmp_anchors(&removed.end, &selections[i - 1].end)
-                    .unwrap() > cmp::Ordering::Equal
-                {
-                    selections[i - 1].end = removed.end;
+        let mut new_selections = Vec::with_capacity(selections.len());
+        {
+            let mut old_selections = selections.drain(..);
+            if let Some(mut prev_selection) = old_selections.next() {
+                for selection in old_selections {
+                    if self.cmp_anchors(&prev_selection.end, &selection.start)
+                        .unwrap() >= cmp::Ordering::Equal
+                    {
+                        if self.cmp_anchors(&selection.end, &prev_selection.end)
+                            .unwrap() > cmp::Ordering::Equal
+                        {
+                            prev_selection.end = selection.end;
+                        }
+                    } else {
+                        new_selections.push(mem::replace(&mut prev_selection, selection));
+                    }
                 }
-            } else {
-                i += 1;
+                new_selections.push(prev_selection);
             }
         }
+        *selections = new_selections;
     }
 
     pub fn remote_selections(&self) -> impl Iterator<Item = (UserId, &[Selection])> {
