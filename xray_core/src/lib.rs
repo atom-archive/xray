@@ -7,6 +7,7 @@ extern crate bytes;
 extern crate lazy_static;
 extern crate futures;
 extern crate parking_lot;
+extern crate seahash;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;

@@ -2,11 +2,13 @@ use super::rpc::{client, Error as RpcError};
 use super::tree::{self, SeekBias, Tree};
 use futures::{unsync, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
+use seahash::SeaHasher;
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::BuildHasherDefault;
 use std::iter;
 use std::marker;
 use std::mem;
@@ -46,14 +48,14 @@ pub struct Buffer {
     lamport_clock: LamportTimestamp,
     fragments: Tree<Fragment>,
     insertion_splits: HashMap<EditId, Tree<InsertionSplit>>,
-    anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
-    offset_cache: RefCell<HashMap<Point, usize>>,
+    anchor_cache: RefCell<HashMap<Anchor, (usize, Point), BuildHasherDefault<SeaHasher>>>,
+    offset_cache: RefCell<HashMap<Point, usize, BuildHasherDefault<SeaHasher>>>,
     pub version: Version,
     client: Option<client::Service<rpc::Service>>,
     operation_txs: Vec<unsync::mpsc::UnboundedSender<Arc<Operation>>>,
     updates: NotifyCell<()>,
     next_local_selection_set_id: SelectionSetId,
-    selections: HashMap<(ReplicaId, SelectionSetId), SelectionSet>,
+    selections: HashMap<(ReplicaId, SelectionSetId), SelectionSet, BuildHasherDefault<SeaHasher>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
@@ -519,13 +521,13 @@ impl Buffer {
             lamport_clock: 0,
             fragments,
             insertion_splits,
-            anchor_cache: RefCell::new(HashMap::new()),
-            offset_cache: RefCell::new(HashMap::new()),
+            anchor_cache: RefCell::new(HashMap::default()),
+            offset_cache: RefCell::new(HashMap::default()),
             version: Version::new(),
             client: None,
             operation_txs: Vec::new(),
             updates: NotifyCell::new(()),
-            selections: HashMap::new(),
+            selections: HashMap::default(),
             next_local_selection_set_id: 0,
         }
     }
@@ -558,7 +560,7 @@ impl Buffer {
             insertion_splits.insert(insertion_id, split_tree);
         }
 
-        let mut selection_sets = HashMap::new();
+        let mut selection_sets = HashMap::default();
         for (id, state) in state.selections {
             selection_sets.insert(
                 id,
@@ -578,8 +580,8 @@ impl Buffer {
             lamport_clock: 0,
             fragments,
             insertion_splits,
-            anchor_cache: RefCell::new(HashMap::new()),
-            offset_cache: RefCell::new(HashMap::new()),
+            anchor_cache: RefCell::new(HashMap::default()),
+            offset_cache: RefCell::new(HashMap::default()),
             version: state.version,
             client: Some(client),
             operation_txs: Vec::new(),
