@@ -735,6 +735,53 @@ impl Buffer {
             .map(|set| set.selections.as_slice())
     }
 
+    pub fn insert_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), Error>
+    where
+        F: FnOnce(&Buffer, &[Selection]) -> Vec<Selection>,
+    {
+        self.mutate_selections(set_id, |buffer, old_selections| {
+            let mut new_selections = f(buffer, old_selections);
+            new_selections.sort_unstable_by(|a, b| buffer.cmp_anchors(&a.start, &b.start).unwrap());
+
+            let mut selections = Vec::with_capacity(old_selections.len() + new_selections.len());
+            {
+                let mut old_selections = old_selections.drain(..).peekable();
+                let mut new_selections = new_selections.drain(..).peekable();
+                loop {
+                    if old_selections.peek().is_some() {
+                        if new_selections.peek().is_some() {
+                            match buffer
+                                .cmp_anchors(
+                                    &old_selections.peek().unwrap().start,
+                                    &new_selections.peek().unwrap().start,
+                                )
+                                .unwrap()
+                            {
+                                cmp::Ordering::Less => {
+                                    selections.push(old_selections.next().unwrap());
+                                }
+                                cmp::Ordering::Equal => {
+                                    selections.push(old_selections.next().unwrap());
+                                    selections.push(new_selections.next().unwrap());
+                                }
+                                cmp::Ordering::Greater => {
+                                    selections.push(new_selections.next().unwrap());
+                                }
+                            }
+                        } else {
+                            selections.push(old_selections.next().unwrap());
+                        }
+                    } else if new_selections.peek().is_some() {
+                        selections.push(new_selections.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+            }
+            *old_selections = selections;
+        })
+    }
+
     pub fn mutate_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), Error>
     where
         F: FnOnce(&Buffer, &mut Vec<Selection>),

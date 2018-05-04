@@ -270,7 +270,7 @@ impl BufferView {
     pub fn add_selection_above(&mut self) {
         self.buffer
             .borrow_mut()
-            .mutate_selections(self.selection_set_id, |buffer, selections| {
+            .insert_selections(self.selection_set_id, |buffer, selections| {
                 let mut new_selections = Vec::new();
                 for selection in selections.iter() {
                     let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
@@ -313,16 +313,7 @@ impl BufferView {
                         }
                     }
                 }
-
-                for selection in new_selections {
-                    let index = match selections.binary_search_by(|probe| {
-                        buffer.cmp_anchors(&probe.start, &selection.start).unwrap()
-                    }) {
-                        Ok(index) => index,
-                        Err(index) => index,
-                    };
-                    selections.insert(index, selection);
-                }
+                new_selections
             })
             .unwrap();
         self.autoscroll_to_cursor(false);
@@ -331,7 +322,7 @@ impl BufferView {
     pub fn add_selection_below(&mut self) {
         self.buffer
             .borrow_mut()
-            .mutate_selections(self.selection_set_id, |buffer, selections| {
+            .insert_selections(self.selection_set_id, |buffer, selections| {
                 let max_row = buffer.max_point().row;
 
                 let mut new_selections = Vec::new();
@@ -376,16 +367,7 @@ impl BufferView {
                         }
                     }
                 }
-
-                for selection in new_selections {
-                    let index = match selections.binary_search_by(|probe| {
-                        buffer.cmp_anchors(&probe.start, &selection.start).unwrap()
-                    }) {
-                        Ok(index) => index,
-                        Err(index) => index,
-                    };
-                    selections.insert(index, selection);
-                }
+                new_selections
             })
             .unwrap();
         self.autoscroll_to_cursor(false);
