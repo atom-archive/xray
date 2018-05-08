@@ -5,3 +5,6 @@ members = [
     "xray_cli",
     "xray_wasm",
 ]
+
+[profile.release]
+debug = true

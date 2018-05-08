@@ -670,11 +670,11 @@ impl Buffer {
         Iter::starting_at_row(self, row)
     }
 
-    pub fn edit<T: Into<Text>>(
-        &mut self,
-        old_range: Range<usize>,
-        new_text: T,
-    ) -> Option<Arc<Operation>> {
+    pub fn edit<'a, I, T>(&mut self, old_ranges: I, new_text: T) -> Vec<Arc<Operation>>
+    where
+        I: IntoIterator<Item = &'a Range<usize>>,
+        T: Into<Text>,
+    {
         let new_text = new_text.into();
         let new_text = if new_text.len() > 0 {
             Some(Arc::new(new_text))
@@ -682,17 +682,22 @@ impl Buffer {
             None
         };
 
-        if new_text.is_some() || old_range.end > old_range.start {
-            let op = Arc::new(self.splice_fragments(old_range, new_text));
-            self.anchor_cache.borrow_mut().clear();
-            self.offset_cache.borrow_mut().clear();
-            self.version.inc(self.replica_id);
-            self.broadcast_op(&op);
-            self.updates.set(());
-            Some(op)
-        } else {
-            None
-        }
+        old_ranges
+            .into_iter()
+            .filter_map(|old_range| {
+                if new_text.is_some() || old_range.end > old_range.start {
+                    let op = Arc::new(self.splice_fragments(old_range, new_text.clone()));
+                    self.anchor_cache.borrow_mut().clear();
+                    self.offset_cache.borrow_mut().clear();
+                    self.version.inc(self.replica_id);
+                    self.broadcast_op(&op);
+                    self.updates.set(());
+                    Some(op)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn add_selection_set(
@@ -1042,7 +1047,7 @@ impl Buffer {
 
     fn splice_fragments(
         &mut self,
-        old_range: Range<usize>,
+        old_range: &Range<usize>,
         new_text: Option<Arc<Text>>,
     ) -> Operation {
         self.local_clock += 1;
@@ -2089,17 +2094,17 @@ mod tests {
     #[test]
     fn test_edit() {
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "abc");
+        buffer.edit(&[0..0], "abc");
         assert_eq!(buffer.to_string(), "abc");
-        buffer.edit(3..3, "def");
+        buffer.edit(&[3..3], "def");
         assert_eq!(buffer.to_string(), "abcdef");
-        buffer.edit(0..0, "ghi");
+        buffer.edit(&[0..0], "ghi");
         assert_eq!(buffer.to_string(), "ghiabcdef");
-        buffer.edit(5..5, "jkl");
+        buffer.edit(&[5..5], "jkl");
         assert_eq!(buffer.to_string(), "ghiabjklcdef");
-        buffer.edit(6..7, "");
+        buffer.edit(&[6..7], "");
         assert_eq!(buffer.to_string(), "ghiabjlcdef");
-        buffer.edit(4..9, "mno");
+        buffer.edit(&[4..9], "mno");
         assert_eq!(buffer.to_string(), "ghiamnoef");
     }
 
@@ -2119,7 +2124,7 @@ mod tests {
                     .take(rng.gen_range(0, 10))
                     .collect::<String>();
 
-                buffer.edit(start..end, new_text.as_str());
+                buffer.edit(&[start..end], new_text.as_str());
                 reference_string = [
                     &reference_string[0..start],
                     new_text.as_str(),
@@ -2133,10 +2138,10 @@ mod tests {
     #[test]
     fn test_len_for_row() {
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "abcd\nefg\nhij");
-        buffer.edit(12..12, "kl\nmno");
-        buffer.edit(18..18, "\npqrs\n");
-        buffer.edit(18..21, "\nPQ");
+        buffer.edit(&[0..0], "abcd\nefg\nhij");
+        buffer.edit(&[12..12], "kl\nmno");
+        buffer.edit(&[18..18], "\npqrs\n");
+        buffer.edit(&[18..21], "\nPQ");
 
         assert_eq!(buffer.len_for_row(0), Ok(4));
         assert_eq!(buffer.len_for_row(1), Ok(3));
@@ -2150,10 +2155,10 @@ mod tests {
     #[test]
     fn iter_starting_at_row() {
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "abcd\nefgh\nij");
-        buffer.edit(12..12, "kl\nmno");
-        buffer.edit(18..18, "\npqrs");
-        buffer.edit(18..21, "\nPQ");
+        buffer.edit(&[0..0], "abcd\nefgh\nij");
+        buffer.edit(&[12..12], "kl\nmno");
+        buffer.edit(&[18..18], "\npqrs");
+        buffer.edit(&[18..21], "\nPQ");
 
         let iter = buffer.iter_starting_at_row(0);
         assert_eq!(
@@ -2190,8 +2195,8 @@ mod tests {
 
         // Regression test:
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
-        buffer.edit(60..60, "\n");
+        buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
+        buffer.edit(&[60..60], "\n");
 
         let iter = buffer.iter_starting_at_row(6);
         assert_eq!(
@@ -2280,11 +2285,11 @@ mod tests {
     #[test]
     fn test_anchors() {
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "abc");
+        buffer.edit(&[0..0], "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
 
-        buffer.edit(1..1, "def\n");
+        buffer.edit(&[1..1], "def\n");
         assert_eq!(buffer.to_string(), "adef\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
@@ -2297,7 +2302,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.edit(2..3, "");
+        buffer.edit(&[2..3], "");
         assert_eq!(buffer.to_string(), "adf\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
@@ -2310,7 +2315,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.edit(5..5, "ghi\n");
+        buffer.edit(&[5..5], "ghi\n");
         assert_eq!(buffer.to_string(), "adf\nbghi\nc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 9);
@@ -2323,7 +2328,7 @@ mod tests {
             Point { row: 2, column: 0 }
         );
 
-        buffer.edit(7..9, "");
+        buffer.edit(&[7..9], "");
         assert_eq!(buffer.to_string(), "adf\nbghc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
@@ -2425,7 +2430,7 @@ mod tests {
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
-        buffer.edit(0..0, "abc");
+        buffer.edit(&[0..0], "abc");
         assert_eq!(buffer.to_string(), "abc");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 3);
@@ -2433,8 +2438,8 @@ mod tests {
         let after_start_anchor = buffer.anchor_after_offset(0).unwrap();
         let before_end_anchor = buffer.anchor_before_offset(3).unwrap();
 
-        buffer.edit(3..3, "def");
-        buffer.edit(0..0, "ghi");
+        buffer.edit(&[3..3], "def");
+        buffer.edit(&[0..0], "ghi");
         assert_eq!(buffer.to_string(), "ghiabcdef");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
@@ -2469,15 +2474,15 @@ mod tests {
                         .take(rng.gen_range(0, 10))
                         .collect::<String>();
 
-                    if let Some(op) = buffer.edit(start..end, new_text.as_str()) {
+                    for op in buffer.edit(&[start..end], new_text.as_str()) {
                         for (index, queue) in queues.iter_mut().enumerate() {
                             if index != replica_index {
                                 queue.push(op.clone());
                             }
                         }
-
-                        edit_count -= 1;
                     }
+
+                    edit_count -= 1;
                 } else if !queues[replica_index].is_empty() {
                     buffer
                         .integrate_op(queues[replica_index].remove(0))
@@ -2498,8 +2503,8 @@ mod tests {
     #[test]
     fn test_edit_replication() {
         let local_buffer = Buffer::new(0).into_shared();
-        local_buffer.borrow_mut().edit(0..0, "abcdef");
-        local_buffer.borrow_mut().edit(2..4, "ghi");
+        local_buffer.borrow_mut().edit(&[0..0], "abcdef");
+        local_buffer.borrow_mut().edit(&[2..4], "ghi");
 
         let mut reactor = reactor::Core::new().unwrap();
         let foreground = Rc::new(reactor.handle());
@@ -2518,8 +2523,8 @@ mod tests {
             local_buffer.borrow().to_string()
         );
 
-        local_buffer.borrow_mut().edit(3..6, "jk");
-        remote_buffer_1.borrow_mut().edit(7..7, "lmn");
+        local_buffer.borrow_mut().edit(&[3..6], "jk");
+        remote_buffer_1.borrow_mut().edit(&[7..7], "lmn");
         let anchor = remote_buffer_1.borrow().anchor_before_offset(8).unwrap();
 
         let mut remaining_tries = 10;
@@ -2550,7 +2555,7 @@ mod tests {
         use stream_ext::StreamExt;
 
         let mut buffer_1 = Buffer::new(0);
-        buffer_1.edit(0..0, "abcdef");
+        buffer_1.edit(&[0..0], "abcdef");
         let sels = vec![empty_selection(&buffer_1, 1), empty_selection(&buffer_1, 3)];
         buffer_1.add_selection_set(0, sels);
         let sels = vec![empty_selection(&buffer_1, 2), empty_selection(&buffer_1, 4)];
