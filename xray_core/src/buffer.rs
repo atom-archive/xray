@@ -2,11 +2,13 @@ use super::rpc::{client, Error as RpcError};
 use super::tree::{self, SeekBias, Tree};
 use futures::{unsync, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
+use seahash::SeaHasher;
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::BuildHasherDefault;
 use std::iter;
 use std::marker;
 use std::mem;
@@ -46,14 +48,14 @@ pub struct Buffer {
     lamport_clock: LamportTimestamp,
     fragments: Tree<Fragment>,
     insertion_splits: HashMap<EditId, Tree<InsertionSplit>>,
-    anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
-    offset_cache: RefCell<HashMap<Point, usize>>,
+    anchor_cache: RefCell<HashMap<Anchor, (usize, Point), BuildHasherDefault<SeaHasher>>>,
+    offset_cache: RefCell<HashMap<Point, usize, BuildHasherDefault<SeaHasher>>>,
     pub version: Version,
     client: Option<client::Service<rpc::Service>>,
     operation_txs: Vec<unsync::mpsc::UnboundedSender<Arc<Operation>>>,
     updates: NotifyCell<()>,
     next_local_selection_set_id: SelectionSetId,
-    selections: HashMap<(ReplicaId, SelectionSetId), SelectionSet>,
+    selections: HashMap<(ReplicaId, SelectionSetId), SelectionSet, BuildHasherDefault<SeaHasher>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
@@ -519,13 +521,13 @@ impl Buffer {
             lamport_clock: 0,
             fragments,
             insertion_splits,
-            anchor_cache: RefCell::new(HashMap::new()),
-            offset_cache: RefCell::new(HashMap::new()),
+            anchor_cache: RefCell::new(HashMap::default()),
+            offset_cache: RefCell::new(HashMap::default()),
             version: Version::new(),
             client: None,
             operation_txs: Vec::new(),
             updates: NotifyCell::new(()),
-            selections: HashMap::new(),
+            selections: HashMap::default(),
             next_local_selection_set_id: 0,
         }
     }
@@ -558,7 +560,7 @@ impl Buffer {
             insertion_splits.insert(insertion_id, split_tree);
         }
 
-        let mut selection_sets = HashMap::new();
+        let mut selection_sets = HashMap::default();
         for (id, state) in state.selections {
             selection_sets.insert(
                 id,
@@ -578,8 +580,8 @@ impl Buffer {
             lamport_clock: 0,
             fragments,
             insertion_splits,
-            anchor_cache: RefCell::new(HashMap::new()),
-            offset_cache: RefCell::new(HashMap::new()),
+            anchor_cache: RefCell::new(HashMap::default()),
+            offset_cache: RefCell::new(HashMap::default()),
             version: state.version,
             client: Some(client),
             operation_txs: Vec::new(),
@@ -733,6 +735,53 @@ impl Buffer {
             .map(|set| set.selections.as_slice())
     }
 
+    pub fn insert_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), Error>
+    where
+        F: FnOnce(&Buffer, &[Selection]) -> Vec<Selection>,
+    {
+        self.mutate_selections(set_id, |buffer, old_selections| {
+            let mut new_selections = f(buffer, old_selections);
+            new_selections.sort_unstable_by(|a, b| buffer.cmp_anchors(&a.start, &b.start).unwrap());
+
+            let mut selections = Vec::with_capacity(old_selections.len() + new_selections.len());
+            {
+                let mut old_selections = old_selections.drain(..).peekable();
+                let mut new_selections = new_selections.drain(..).peekable();
+                loop {
+                    if old_selections.peek().is_some() {
+                        if new_selections.peek().is_some() {
+                            match buffer
+                                .cmp_anchors(
+                                    &old_selections.peek().unwrap().start,
+                                    &new_selections.peek().unwrap().start,
+                                )
+                                .unwrap()
+                            {
+                                cmp::Ordering::Less => {
+                                    selections.push(old_selections.next().unwrap());
+                                }
+                                cmp::Ordering::Equal => {
+                                    selections.push(old_selections.next().unwrap());
+                                    selections.push(new_selections.next().unwrap());
+                                }
+                                cmp::Ordering::Greater => {
+                                    selections.push(new_selections.next().unwrap());
+                                }
+                            }
+                        } else {
+                            selections.push(old_selections.next().unwrap());
+                        }
+                    } else if new_selections.peek().is_some() {
+                        selections.push(new_selections.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+            }
+            *old_selections = selections;
+        })
+    }
+
     pub fn mutate_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), Error>
     where
         F: FnOnce(&Buffer, &mut Vec<Selection>),
@@ -753,21 +802,27 @@ impl Buffer {
     }
 
     fn merge_selections(&mut self, selections: &mut Vec<Selection>) {
-        let mut i = 1;
-        while i < selections.len() {
-            if self.cmp_anchors(&selections[i - 1].end, &selections[i].start)
-                .unwrap() >= cmp::Ordering::Equal
-            {
-                let removed = selections.remove(i);
-                if self.cmp_anchors(&removed.end, &selections[i - 1].end)
-                    .unwrap() > cmp::Ordering::Equal
-                {
-                    selections[i - 1].end = removed.end;
+        let mut new_selections = Vec::with_capacity(selections.len());
+        {
+            let mut old_selections = selections.drain(..);
+            if let Some(mut prev_selection) = old_selections.next() {
+                for selection in old_selections {
+                    if self.cmp_anchors(&prev_selection.end, &selection.start)
+                        .unwrap() >= cmp::Ordering::Equal
+                    {
+                        if self.cmp_anchors(&selection.end, &prev_selection.end)
+                            .unwrap() > cmp::Ordering::Equal
+                        {
+                            prev_selection.end = selection.end;
+                        }
+                    } else {
+                        new_selections.push(mem::replace(&mut prev_selection, selection));
+                    }
                 }
-            } else {
-                i += 1;
+                new_selections.push(prev_selection);
             }
         }
+        *selections = new_selections;
     }
 
     pub fn remote_selections(&self) -> impl Iterator<Item = (UserId, &[Selection])> {
