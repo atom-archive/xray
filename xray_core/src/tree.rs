@@ -114,6 +114,10 @@ impl<'a, T: Item> Tree<T> {
         D::from_summary(self.summary())
     }
 
+    pub fn last(&self) -> Option<&T> {
+        self.rightmost_leaf().map(|leaf| leaf.value())
+    }
+
     pub fn push(&mut self, item: T) {
         self.push_tree(Tree(Arc::new(Node::Leaf {
             summary: item.summarize(),

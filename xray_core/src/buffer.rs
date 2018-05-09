@@ -682,22 +682,15 @@ impl Buffer {
             None
         };
 
-        old_ranges
+        self.anchor_cache.borrow_mut().clear();
+        self.offset_cache.borrow_mut().clear();
+        // TODO: Go back to using an iterator and pass it to splice_fragments2.
+        let old_ranges: Vec<_> = old_ranges
             .into_iter()
-            .filter_map(|old_range| {
-                if new_text.is_some() || old_range.end > old_range.start {
-                    let op = Arc::new(self.splice_fragments(old_range, new_text.clone()));
-                    self.anchor_cache.borrow_mut().clear();
-                    self.offset_cache.borrow_mut().clear();
-                    self.version.inc(self.replica_id);
-                    self.broadcast_op(&op);
-                    self.updates.set(());
-                    Some(op)
-                } else {
-                    None
-                }
-            })
-            .collect()
+            .filter(|old_range| new_text.is_some() || old_range.end > old_range.start)
+            .cloned()
+            .collect();
+        self.splice_fragments2(&old_ranges, new_text)
     }
 
     pub fn add_selection_set(
@@ -1043,6 +1036,181 @@ impl Buffer {
         let (tx, rx) = unsync::mpsc::unbounded();
         self.operation_txs.push(tx);
         rx
+    }
+
+    fn splice_fragments2(
+        &mut self,
+        ranges: &[Range<usize>],
+        new_text: Option<Arc<Text>>,
+    ) -> Vec<Arc<Operation>> {
+        if ranges.len() == 0 {
+            return Vec::new();
+        }
+
+        let mut ops = Vec::with_capacity(ranges.len());
+        let mut timestamps = Vec::with_capacity(ranges.len());
+        for _ in ranges {
+            self.local_clock += 1;
+            self.lamport_clock += 1;
+            timestamps.push((self.local_clock, self.lamport_clock));
+        }
+
+        let old_fragments = self.fragments.clone();
+        let mut cursor = old_fragments.cursor();
+        let mut new_fragments = Tree::new();
+        new_fragments
+            .push_tree(cursor.build_prefix(&CharacterCount(ranges[0].start), SeekBias::Right));
+
+        let mut i = 0;
+        while i < ranges.len() && cursor.item().is_some() {
+            let mut fragment = cursor.item().unwrap().clone();
+            let mut fragment_start = cursor.start::<CharacterCount>().0;
+            let mut fragment_end = fragment_start + fragment.len();
+
+            let old_split_tree = self.insertion_splits
+                .remove(&fragment.insertion.id)
+                .unwrap();
+            let mut splits_cursor = old_split_tree.cursor();
+            let mut new_split_tree = splits_cursor
+                .build_prefix(&InsertionOffset(fragment.start_offset), SeekBias::Right);
+
+            // Find all splices that start or end within the current fragment. Then, split the
+            // fragment and reassemble it in both trees accounting for the deleted and the newly
+            // inserted text.
+            while i < ranges.len() && ranges[i].start < fragment_end {
+                let range = &ranges[i];
+                let (local_timestamp, lamport_timestamp) = timestamps[i];
+
+                if range.start > fragment_start {
+                    let mut prefix = fragment.clone();
+                    prefix.end_offset = prefix.start_offset + (range.start - fragment_start);
+                    prefix.id =
+                        FragmentId::between(&new_fragments.last().unwrap().id, &fragment.id);
+                    fragment.start_offset = prefix.end_offset;
+                    new_fragments.push(prefix.clone());
+                    new_split_tree.push(InsertionSplit {
+                        extent: prefix.end_offset - prefix.start_offset,
+                        fragment_id: prefix.id,
+                    });
+                    fragment_start = range.start;
+                }
+
+                if new_text.is_some() && range.start == fragment_start {
+                    let replica_id = self.replica_id;
+                    let new_fragment = self.build_fragment_to_insert(
+                        EditId {
+                            replica_id,
+                            timestamp: local_timestamp,
+                        },
+                        new_fragments.last().unwrap(),
+                        Some(&fragment),
+                        new_text.clone().unwrap(),
+                        lamport_timestamp,
+                    );
+                    new_fragments.push(new_fragment);
+                }
+
+                if range.end < fragment_end {
+                    if range.end > fragment_start {
+                        let mut prefix = fragment.clone();
+                        prefix.end_offset = prefix.start_offset + (range.end - fragment_start);
+                        prefix.id =
+                            FragmentId::between(&new_fragments.last().unwrap().id, &fragment.id);
+                        if fragment.is_visible() {
+                            prefix.deletions.insert(EditId {
+                                replica_id: self.replica_id,
+                                timestamp: local_timestamp,
+                            });
+                        }
+                        fragment.start_offset = prefix.end_offset;
+                        new_fragments.push(prefix.clone());
+                        new_split_tree.push(InsertionSplit {
+                            extent: prefix.end_offset - prefix.start_offset,
+                            fragment_id: prefix.id,
+                        });
+                        fragment_start = range.end;
+                    }
+
+                    i += 1;
+                } else {
+                    if fragment.is_visible() {
+                        fragment.deletions.insert(EditId {
+                            replica_id: self.replica_id,
+                            timestamp: local_timestamp,
+                        });
+                    }
+                    break;
+                }
+            }
+            new_split_tree.push(InsertionSplit {
+                extent: fragment.end_offset - fragment.start_offset,
+                fragment_id: fragment.id.clone(),
+            });
+            splits_cursor.next();
+            new_split_tree.push_tree(splits_cursor.build_suffix());
+            self.insertion_splits
+                .insert(fragment.insertion.id, new_split_tree);
+            new_fragments.push(fragment);
+
+            // Scan forward until we find a fragment that is not fully contained by the last splice.
+            cursor.next();
+            if i < ranges.len() {
+                while let Some(mut fragment) = cursor.item().cloned() {
+                    fragment_start = cursor.start::<CharacterCount>().0;
+                    fragment_end = fragment_start + fragment.len();
+                    if ranges[i].end >= fragment_end {
+                        if fragment.is_visible() {
+                            let (local_timestamp, _) = timestamps[i];
+                            fragment.deletions.insert(EditId {
+                                replica_id: self.replica_id,
+                                timestamp: local_timestamp,
+                            });
+                        }
+                        new_fragments.push(fragment);
+                        cursor.next();
+                    } else {
+                        break;
+                    }
+                }
+
+                // If the last considered splice starts after the end of the fragment that the
+                // cursor is parked at, we should seek to the next splice's start range and push
+                // all the fragments in between into the new tree.
+                if ranges[i].end == fragment_end {
+                    i += 1;
+                } else if ranges[i].start > fragment_end {
+                    new_fragments.push_tree(
+                        cursor.build_prefix(&CharacterCount(ranges[i].start), SeekBias::Right),
+                    );
+                }
+            }
+        }
+
+        // Handle ranges that are at the end of the buffer. In theory we should only have one
+        // because ranges must be sorted and disjoint.
+        if i != ranges.len() {
+            debug_assert_eq!(i + 1, ranges.len());
+            if let Some(new_text) = new_text.clone() {
+                let (local_timestamp, lamport_timestamp) = timestamps[i];
+                let replica_id = self.replica_id;
+                let new_fragment = self.build_fragment_to_insert(
+                    EditId {
+                        replica_id,
+                        timestamp: local_timestamp,
+                    },
+                    new_fragments.last().unwrap(),
+                    None,
+                    new_text,
+                    lamport_timestamp,
+                );
+                new_fragments.push(new_fragment);
+            }
+        } else {
+            new_fragments.push_tree(cursor.build_suffix());
+        }
+
+        self.fragments = new_fragments;
+        ops
     }
 
     fn splice_fragments(

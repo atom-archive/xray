@@ -159,7 +159,7 @@ impl BufferView {
             }
 
             let mut buffer = self.buffer.borrow_mut();
-            buffer.edit(offset_ranges.iter().rev(), text);
+            buffer.edit(&offset_ranges, text);
 
             let mut delta = 0_isize;
             buffer
