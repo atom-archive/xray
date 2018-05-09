@@ -1130,15 +1130,19 @@ impl Buffer {
                         });
                         fragment_start = range.end;
                     }
+                } else if fragment.is_visible() {
+                    fragment.deletions.insert(EditId {
+                        replica_id: self.replica_id,
+                        timestamp: local_timestamp,
+                    });
+                }
 
+                // If the splice ends inside this fragment, we can advance to the next splice and
+                // check if it also intersects the current fragment. Otherwise we break out of the
+                // loop and find the first fragment that the splice does not contain fully.
+                if range.end <= fragment_end {
                     i += 1;
                 } else {
-                    if fragment.is_visible() {
-                        fragment.deletions.insert(EditId {
-                            replica_id: self.replica_id,
-                            timestamp: local_timestamp,
-                        });
-                    }
                     break;
                 }
             }
@@ -1152,13 +1156,14 @@ impl Buffer {
                 .insert(fragment.insertion.id, new_split_tree);
             new_fragments.push(fragment);
 
-            // Scan forward until we find a fragment that is not fully contained by the last splice.
+            // Scan forward until we find a fragment that is not fully contained by the current splice.
             cursor.next();
             if i < ranges.len() {
                 while let Some(mut fragment) = cursor.item().cloned() {
+                    let range = &ranges[i];
                     fragment_start = cursor.start::<CharacterCount>().0;
                     fragment_end = fragment_start + fragment.len();
-                    if ranges[i].end >= fragment_end {
+                    if range.start < fragment_start && range.end >= fragment_end {
                         if fragment.is_visible() {
                             let (local_timestamp, _) = timestamps[i];
                             fragment.deletions.insert(EditId {
@@ -1168,17 +1173,23 @@ impl Buffer {
                         }
                         new_fragments.push(fragment);
                         cursor.next();
+
+                        if range.end == fragment_end {
+                            i += 1;
+                            break;
+                        }
                     } else {
                         break;
                     }
                 }
 
-                // If the last considered splice starts after the end of the fragment that the
-                // cursor is parked at, we should seek to the next splice's start range and push
-                // all the fragments in between into the new tree.
-                if ranges[i].end == fragment_end {
-                    i += 1;
-                } else if ranges[i].start > fragment_end {
+                // If the splice we are currently evaluating starts after the end of the fragment
+                // that the cursor is parked at, we should seek to the next splice's start range
+                // and push all the fragments in between into the new tree.
+                if ranges
+                    .get(i)
+                    .map_or(false, |range| range.start > fragment_end)
+                {
                     new_fragments.push_tree(
                         cursor.build_prefix(&CharacterCount(ranges[i].start), SeekBias::Right),
                     );
@@ -2285,19 +2296,29 @@ mod tests {
             let mut buffer = Buffer::new(0);
             let mut reference_string = String::new();
 
-            for _i in 0..30 {
-                let end = rng.gen_range::<usize>(0, buffer.len() + 1);
-                let start = rng.gen_range::<usize>(0, end + 1);
+            for _i in 0..10 {
+                let mut old_ranges: Vec<Range<usize>> = Vec::new();
+                for _ in 0..5 {
+                    let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
+                    if last_end > buffer.len() {
+                        break;
+                    }
+                    let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
+                    let start = rng.gen_range::<usize>(last_end, end + 1);
+                    old_ranges.push(start..end);
+                }
                 let new_text = RandomCharIter(rng)
                     .take(rng.gen_range(0, 10))
                     .collect::<String>();
 
-                buffer.edit(&[start..end], new_text.as_str());
-                reference_string = [
-                    &reference_string[0..start],
-                    new_text.as_str(),
-                    &reference_string[end..],
-                ].concat();
+                buffer.edit(&old_ranges, new_text.as_str());
+                for old_range in old_ranges.iter().rev() {
+                    reference_string = [
+                        &reference_string[0..old_range.start],
+                        new_text.as_str(),
+                        &reference_string[old_range.end..],
+                    ].concat();
+                }
                 assert_eq!(buffer.to_string(), reference_string);
             }
         }
