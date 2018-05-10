@@ -1049,17 +1049,14 @@ impl Buffer {
         }
 
         let mut ops = Vec::with_capacity(ranges.len());
-        let mut timestamps = Vec::with_capacity(ranges.len());
-        for _ in ranges {
-            self.local_clock += 1;
-            self.lamport_clock += 1;
-            timestamps.push((self.local_clock, self.lamport_clock));
-        }
 
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
         let mut new_fragments = Tree::new();
         new_fragments.push_tree(cursor.slice(&CharacterCount(ranges[0].start), SeekBias::Right));
+
+        self.local_clock += 1;
+        self.lamport_clock += 1;
 
         let mut i = 0;
         while i < ranges.len() && cursor.item().is_some() {
@@ -1079,7 +1076,6 @@ impl Buffer {
             // inserted text.
             while i < ranges.len() && ranges[i].start < fragment_end {
                 let range = &ranges[i];
-                let (local_timestamp, lamport_timestamp) = timestamps[i];
 
                 if range.start > fragment_start {
                     let mut prefix = fragment.clone();
@@ -1097,6 +1093,8 @@ impl Buffer {
 
                 if new_text.is_some() && range.start == fragment_start {
                     let replica_id = self.replica_id;
+                    let local_timestamp = self.local_clock;
+                    let lamport_timestamp = self.lamport_clock;
                     let new_fragment = self.build_fragment_to_insert(
                         EditId {
                             replica_id,
@@ -1119,7 +1117,7 @@ impl Buffer {
                         if fragment.is_visible() {
                             prefix.deletions.insert(EditId {
                                 replica_id: self.replica_id,
-                                timestamp: local_timestamp,
+                                timestamp: self.local_clock,
                             });
                         }
                         fragment.start_offset = prefix.end_offset;
@@ -1133,7 +1131,7 @@ impl Buffer {
                 } else if fragment.is_visible() {
                     fragment.deletions.insert(EditId {
                         replica_id: self.replica_id,
-                        timestamp: local_timestamp,
+                        timestamp: self.local_clock,
                     });
                 }
 
@@ -1142,6 +1140,10 @@ impl Buffer {
                 // loop and find the first fragment that the splice does not contain fully.
                 if range.end <= fragment_end {
                     i += 1;
+                    if i < ranges.len() {
+                        self.local_clock += 1;
+                        self.lamport_clock += 1;
+                    }
                 } else {
                     break;
                 }
@@ -1167,10 +1169,9 @@ impl Buffer {
                     fragment_end = fragment_start + fragment.len();
                     if range.start < fragment_start && range.end >= fragment_end {
                         if fragment.is_visible() {
-                            let (local_timestamp, _) = timestamps[i];
                             fragment.deletions.insert(EditId {
                                 replica_id: self.replica_id,
-                                timestamp: local_timestamp,
+                                timestamp: self.local_clock,
                             });
                         }
                         new_fragments.push(fragment);
@@ -1178,6 +1179,10 @@ impl Buffer {
 
                         if range.end == fragment_end {
                             i += 1;
+                            if i < ranges.len() {
+                                self.local_clock += 1;
+                                self.lamport_clock += 1;
+                            }
                             break;
                         }
                     } else {
@@ -1203,8 +1208,9 @@ impl Buffer {
         if i != ranges.len() {
             debug_assert_eq!(i + 1, ranges.len());
             if let Some(new_text) = new_text.clone() {
-                let (local_timestamp, lamport_timestamp) = timestamps[i];
                 let replica_id = self.replica_id;
+                let local_timestamp = self.local_clock;
+                let lamport_timestamp = self.lamport_clock;
                 let new_fragment = self.build_fragment_to_insert(
                     EditId {
                         replica_id,
