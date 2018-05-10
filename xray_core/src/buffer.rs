@@ -1046,19 +1046,19 @@ impl Buffer {
 
     fn splice_fragments<'a, I>(
         &mut self,
-        mut ranges: I,
+        mut old_ranges: I,
         new_text: Option<Arc<Text>>,
     ) -> Vec<Arc<Operation>>
     where
         I: Iterator<Item = &'a Range<usize>>,
     {
-        let mut cur_range = ranges.next();
+        let mut cur_range = old_ranges.next();
         if cur_range.is_none() {
             return Vec::new();
         }
 
         let replica_id = self.replica_id;
-        let mut ops = Vec::with_capacity(ranges.size_hint().0);
+        let mut ops = Vec::with_capacity(old_ranges.size_hint().0);
 
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
@@ -1193,7 +1193,7 @@ impl Buffer {
                     end_id = None;
                     end_offset = None;
                     version_in_range = Version::new();
-                    cur_range = ranges.next();
+                    cur_range = old_ranges.next();
                     if cur_range.is_some() {
                         self.local_clock += 1;
                         self.lamport_clock += 1;
@@ -1254,7 +1254,7 @@ impl Buffer {
                             end_offset = None;
                             version_in_range = Version::new();
 
-                            cur_range = ranges.next();
+                            cur_range = old_ranges.next();
                             if cur_range.is_some() {
                                 self.local_clock += 1;
                                 self.lamport_clock += 1;
@@ -1281,7 +1281,7 @@ impl Buffer {
         // Handle range that is at the end of the buffer if it exists. There should never be
         // multiple because ranges must be disjoint.
         if cur_range.is_some() {
-            debug_assert_eq!(ranges.next(), None);
+            debug_assert_eq!(old_ranges.next(), None);
             let local_timestamp = self.local_clock;
             let lamport_timestamp = self.lamport_clock;
             let id = EditId {
