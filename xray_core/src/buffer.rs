@@ -2623,13 +2623,21 @@ mod tests {
                 let replica_index = rng.gen_range::<usize>(site_range.start, site_range.end);
                 let buffer = &mut buffers[replica_index];
                 if edit_count > 0 && rng.gen() {
-                    let end = rng.gen_range::<usize>(0, buffer.len() + 1);
-                    let start = rng.gen_range::<usize>(0, end + 1);
+                    let mut old_ranges: Vec<Range<usize>> = Vec::new();
+                    for _ in 0..5 {
+                        let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
+                        if last_end > buffer.len() {
+                            break;
+                        }
+                        let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
+                        let start = rng.gen_range::<usize>(last_end, end + 1);
+                        old_ranges.push(start..end);
+                    }
                     let new_text = RandomCharIter(rng)
                         .take(rng.gen_range(0, 10))
                         .collect::<String>();
 
-                    for op in buffer.edit(&[start..end], new_text.as_str()) {
+                    for op in buffer.edit(&old_ranges, new_text.as_str()) {
                         for (index, queue) in queues.iter_mut().enumerate() {
                             if index != replica_index {
                                 queue.push(op.clone());
