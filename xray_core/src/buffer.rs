@@ -683,13 +683,11 @@ impl Buffer {
         };
 
         // TODO: Go back to using an iterator and pass it to splice_fragments.
-        let old_ranges: Vec<_> = old_ranges
+        let old_ranges = old_ranges
             .into_iter()
-            .filter(|old_range| new_text.is_some() || old_range.end > old_range.start)
-            .cloned()
-            .collect();
+            .filter(|old_range| new_text.is_some() || old_range.end > old_range.start);
 
-        let ops = self.splice_fragments(&old_ranges, new_text);
+        let ops = self.splice_fragments(old_ranges, new_text.clone());
         self.anchor_cache.borrow_mut().clear();
         self.offset_cache.borrow_mut().clear();
         for op in &ops {
@@ -1046,22 +1044,29 @@ impl Buffer {
         rx
     }
 
-    fn splice_fragments(
+    fn splice_fragments<'a, I>(
         &mut self,
-        ranges: &[Range<usize>],
+        mut ranges: I,
         new_text: Option<Arc<Text>>,
-    ) -> Vec<Arc<Operation>> {
-        if ranges.len() == 0 {
+    ) -> Vec<Arc<Operation>>
+    where
+        I: Iterator<Item = &'a Range<usize>>,
+    {
+        let mut cur_range = ranges.next();
+        if cur_range.is_none() {
             return Vec::new();
         }
 
         let replica_id = self.replica_id;
-        let mut ops = Vec::with_capacity(ranges.len());
+        let mut ops = Vec::with_capacity(ranges.size_hint().0);
 
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
         let mut new_fragments = Tree::new();
-        new_fragments.push_tree(cursor.slice(&CharacterCount(ranges[0].start), SeekBias::Right));
+        new_fragments.push_tree(cursor.slice(
+            &CharacterCount(cur_range.as_ref().unwrap().start),
+            SeekBias::Right,
+        ));
 
         self.local_clock += 1;
         self.lamport_clock += 1;
@@ -1071,8 +1076,7 @@ impl Buffer {
         let mut end_offset = None;
         let mut version_in_range = Version::new();
 
-        let mut i = 0;
-        while i < ranges.len() && cursor.item().is_some() {
+        while cur_range.is_some() && cursor.item().is_some() {
             let mut fragment = cursor.item().unwrap().clone();
             let mut fragment_start = cursor.start::<CharacterCount>().0;
             let mut fragment_end = fragment_start + fragment.len();
@@ -1087,8 +1091,8 @@ impl Buffer {
             // Find all splices that start or end within the current fragment. Then, split the
             // fragment and reassemble it in both trees accounting for the deleted and the newly
             // inserted text.
-            while i < ranges.len() && ranges[i].start < fragment_end {
-                let range = &ranges[i];
+            while cur_range.map_or(false, |range| range.start < fragment_end) {
+                let range = cur_range.clone().unwrap();
                 if range.start > fragment_start {
                     let mut prefix = fragment.clone();
                     prefix.end_offset = prefix.start_offset + (range.start - fragment_start);
@@ -1189,8 +1193,8 @@ impl Buffer {
                     end_id = None;
                     end_offset = None;
                     version_in_range = Version::new();
-                    i += 1;
-                    if i < ranges.len() {
+                    cur_range = ranges.next();
+                    if cur_range.is_some() {
                         self.local_clock += 1;
                         self.lamport_clock += 1;
                     }
@@ -1212,9 +1216,8 @@ impl Buffer {
 
             // Scan forward until we find a fragment that is not fully contained by the current splice.
             cursor.next();
-            if i < ranges.len() {
+            if let Some(range) = cur_range.clone() {
                 while let Some(mut fragment) = cursor.item().cloned() {
-                    let range = &ranges[i];
                     fragment_start = cursor.start::<CharacterCount>().0;
                     fragment_end = fragment_start + fragment.len();
                     if range.start < fragment_start && range.end >= fragment_end {
@@ -1251,8 +1254,8 @@ impl Buffer {
                             end_offset = None;
                             version_in_range = Version::new();
 
-                            i += 1;
-                            if i < ranges.len() {
+                            cur_range = ranges.next();
+                            if cur_range.is_some() {
                                 self.local_clock += 1;
                                 self.lamport_clock += 1;
                             }
@@ -1266,21 +1269,19 @@ impl Buffer {
                 // If the splice we are currently evaluating starts after the end of the fragment
                 // that the cursor is parked at, we should seek to the next splice's start range
                 // and push all the fragments in between into the new tree.
-                if ranges
-                    .get(i)
-                    .map_or(false, |range| range.start > fragment_end)
-                {
-                    new_fragments
-                        .push_tree(cursor.slice(&CharacterCount(ranges[i].start), SeekBias::Right));
+                if cur_range.map_or(false, |range| range.start > fragment_end) {
+                    new_fragments.push_tree(cursor.slice(
+                        &CharacterCount(cur_range.as_ref().unwrap().start),
+                        SeekBias::Right,
+                    ));
                 }
             }
         }
 
         // Handle range that is at the end of the buffer if it exists. There should never be
         // multiple because ranges must be disjoint.
-        if i != ranges.len() {
-            debug_assert_eq!(i + 1, ranges.len());
-
+        if cur_range.is_some() {
+            debug_assert_eq!(ranges.next(), None);
             let local_timestamp = self.local_clock;
             let lamport_timestamp = self.lamport_clock;
             let id = EditId {
