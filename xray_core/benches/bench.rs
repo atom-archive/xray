@@ -38,12 +38,17 @@ fn add_selection(c: &mut Criterion) {
 fn edit(c: &mut Criterion) {
     c.bench_function("edit", |b| {
         b.iter_with_setup(
-            || create_buffer_view(10),
-            |mut buffer_view| {
-                for _ in 0..25 {
-                    buffer_view.select_right();
-                    buffer_view.edit("-");
+            || {
+                let mut buffer_view = create_buffer_view(50);
+                for i in 0..50 {
+                    buffer_view.add_selection(Point::new(i, 0), Point::new(i, 0));
                 }
+                buffer_view
+            },
+            |mut buffer_view| {
+                buffer_view.edit("a");
+                buffer_view.edit("b");
+                buffer_view.edit("c");
             },
         )
     });
@@ -54,7 +59,7 @@ fn create_buffer_view(lines: usize) -> BufferView {
     for i in 0..lines {
         let len = buffer.len();
         buffer.edit(
-            len..len,
+            &[len..len],
             format!("Lorem ipsum dolor sit amet {}\n", i).as_str(),
         );
     }
