@@ -682,14 +682,14 @@ impl Buffer {
             None
         };
 
-        // TODO: Go back to using an iterator and pass it to splice_fragments.
-        let old_ranges = old_ranges
-            .into_iter()
-            .filter(|old_range| new_text.is_some() || old_range.end > old_range.start);
-
-        let ops = self.splice_fragments(old_ranges, new_text.clone());
         self.anchor_cache.borrow_mut().clear();
         self.offset_cache.borrow_mut().clear();
+        let ops = self.splice_fragments(
+            old_ranges
+                .into_iter()
+                .filter(|old_range| new_text.is_some() || old_range.end > old_range.start),
+            new_text.clone(),
+        );
         for op in &ops {
             self.broadcast_op(op);
         }
