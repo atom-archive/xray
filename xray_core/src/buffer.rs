@@ -205,9 +205,9 @@ impl Version {
         Version(Arc::new(HashMap::new()))
     }
 
-    fn inc(&mut self, replica_id: ReplicaId) {
+    fn set(&mut self, replica_id: ReplicaId, timestamp: LocalTimestamp) {
         let map = Arc::make_mut(&mut self.0);
-        *map.entry(replica_id).or_insert(0) += 1;
+        *map.entry(replica_id).or_insert(0) = timestamp;
     }
 
     fn include(&mut self, insertion: &Insertion) {
@@ -682,15 +682,22 @@ impl Buffer {
             None
         };
 
-        self.anchor_cache.borrow_mut().clear();
-        self.offset_cache.borrow_mut().clear();
         // TODO: Go back to using an iterator and pass it to splice_fragments.
         let old_ranges: Vec<_> = old_ranges
             .into_iter()
             .filter(|old_range| new_text.is_some() || old_range.end > old_range.start)
             .cloned()
             .collect();
-        self.splice_fragments(&old_ranges, new_text)
+
+        let ops = self.splice_fragments(&old_ranges, new_text);
+        self.anchor_cache.borrow_mut().clear();
+        self.offset_cache.borrow_mut().clear();
+        for op in &ops {
+            self.broadcast_op(op);
+        }
+        self.version.set(self.replica_id, self.local_clock);
+        self.updates.set(());
+        ops
     }
 
     pub fn add_selection_set(
@@ -1048,6 +1055,7 @@ impl Buffer {
             return Vec::new();
         }
 
+        let replica_id = self.replica_id;
         let mut ops = Vec::with_capacity(ranges.len());
 
         let old_fragments = self.fragments.clone();
@@ -1057,6 +1065,11 @@ impl Buffer {
 
         self.local_clock += 1;
         self.lamport_clock += 1;
+        let mut start_id = None;
+        let mut start_offset = None;
+        let mut end_id = None;
+        let mut end_offset = None;
+        let mut version_in_range = Version::new();
 
         let mut i = 0;
         while i < ranges.len() && cursor.item().is_some() {
@@ -1076,7 +1089,6 @@ impl Buffer {
             // inserted text.
             while i < ranges.len() && ranges[i].start < fragment_end {
                 let range = &ranges[i];
-
                 if range.start > fragment_start {
                     let mut prefix = fragment.clone();
                     prefix.end_offset = prefix.start_offset + (range.start - fragment_start);
@@ -1091,21 +1103,34 @@ impl Buffer {
                     fragment_start = range.start;
                 }
 
-                if new_text.is_some() && range.start == fragment_start {
-                    let replica_id = self.replica_id;
+                if range.end == fragment_start {
+                    end_id = Some(new_fragments.last().unwrap().insertion.id);
+                    end_offset = Some(new_fragments.last().unwrap().end_offset);
+                } else if range.end == fragment_end {
+                    end_id = Some(fragment.insertion.id);
+                    end_offset = Some(fragment.end_offset);
+                }
+
+                if range.start == fragment_start {
                     let local_timestamp = self.local_clock;
                     let lamport_timestamp = self.lamport_clock;
-                    let new_fragment = self.build_fragment_to_insert(
-                        EditId {
-                            replica_id,
-                            timestamp: local_timestamp,
-                        },
-                        new_fragments.last().unwrap(),
-                        Some(&fragment),
-                        new_text.clone().unwrap(),
-                        lamport_timestamp,
-                    );
-                    new_fragments.push(new_fragment);
+
+                    start_id = Some(new_fragments.last().unwrap().insertion.id);
+                    start_offset = Some(new_fragments.last().unwrap().end_offset);
+
+                    if let Some(new_text) = new_text.clone() {
+                        let new_fragment = self.build_fragment_to_insert(
+                            EditId {
+                                replica_id,
+                                timestamp: local_timestamp,
+                            },
+                            new_fragments.last().unwrap(),
+                            Some(&fragment),
+                            new_text,
+                            lamport_timestamp,
+                        );
+                        new_fragments.push(new_fragment);
+                    }
                 }
 
                 if range.end < fragment_end {
@@ -1116,7 +1141,7 @@ impl Buffer {
                             FragmentId::between(&new_fragments.last().unwrap().id, &fragment.id);
                         if fragment.is_visible() {
                             prefix.deletions.insert(EditId {
-                                replica_id: self.replica_id,
+                                replica_id,
                                 timestamp: self.local_clock,
                             });
                         }
@@ -1127,18 +1152,43 @@ impl Buffer {
                             fragment_id: prefix.id,
                         });
                         fragment_start = range.end;
+                        end_id = Some(fragment.insertion.id);
+                        end_offset = Some(fragment.start_offset);
+                        version_in_range.include(&fragment.insertion);
                     }
-                } else if fragment.is_visible() {
-                    fragment.deletions.insert(EditId {
-                        replica_id: self.replica_id,
-                        timestamp: self.local_clock,
-                    });
+                } else {
+                    version_in_range.include(&fragment.insertion);
+                    if fragment.is_visible() {
+                        fragment.deletions.insert(EditId {
+                            replica_id,
+                            timestamp: self.local_clock,
+                        });
+                    }
                 }
 
                 // If the splice ends inside this fragment, we can advance to the next splice and
                 // check if it also intersects the current fragment. Otherwise we break out of the
                 // loop and find the first fragment that the splice does not contain fully.
                 if range.end <= fragment_end {
+                    ops.push(Arc::new(Operation::Edit {
+                        id: EditId {
+                            replica_id,
+                            timestamp: self.local_clock,
+                        },
+                        start_id: start_id.unwrap(),
+                        start_offset: start_offset.unwrap(),
+                        end_id: end_id.unwrap(),
+                        end_offset: end_offset.unwrap(),
+                        new_text: new_text.clone(),
+                        timestamp: self.lamport_clock,
+                        version_in_range,
+                    }));
+
+                    start_id = None;
+                    start_offset = None;
+                    end_id = None;
+                    end_offset = None;
+                    version_in_range = Version::new();
                     i += 1;
                     if i < ranges.len() {
                         self.local_clock += 1;
@@ -1170,14 +1220,37 @@ impl Buffer {
                     if range.start < fragment_start && range.end >= fragment_end {
                         if fragment.is_visible() {
                             fragment.deletions.insert(EditId {
-                                replica_id: self.replica_id,
+                                replica_id,
                                 timestamp: self.local_clock,
                             });
                         }
-                        new_fragments.push(fragment);
+                        version_in_range.include(&fragment.insertion);
+                        new_fragments.push(fragment.clone());
                         cursor.next();
 
                         if range.end == fragment_end {
+                            end_id = Some(fragment.insertion.id);
+                            end_offset = Some(fragment.end_offset);
+                            ops.push(Arc::new(Operation::Edit {
+                                id: EditId {
+                                    replica_id,
+                                    timestamp: self.local_clock,
+                                },
+                                start_id: start_id.unwrap(),
+                                start_offset: start_offset.unwrap(),
+                                end_id: end_id.unwrap(),
+                                end_offset: end_offset.unwrap(),
+                                new_text: new_text.clone(),
+                                timestamp: self.lamport_clock,
+                                version_in_range,
+                            }));
+
+                            start_id = None;
+                            start_offset = None;
+                            end_id = None;
+                            end_offset = None;
+                            version_in_range = Version::new();
+
                             i += 1;
                             if i < ranges.len() {
                                 self.local_clock += 1;
@@ -1207,15 +1280,27 @@ impl Buffer {
         // multiple because ranges must be disjoint.
         if i != ranges.len() {
             debug_assert_eq!(i + 1, ranges.len());
-            if let Some(new_text) = new_text.clone() {
-                let replica_id = self.replica_id;
-                let local_timestamp = self.local_clock;
-                let lamport_timestamp = self.lamport_clock;
+
+            let local_timestamp = self.local_clock;
+            let lamport_timestamp = self.lamport_clock;
+            let id = EditId {
+                replica_id,
+                timestamp: local_timestamp,
+            };
+            ops.push(Arc::new(Operation::Edit {
+                id,
+                start_id: new_fragments.last().unwrap().insertion.id,
+                start_offset: new_fragments.last().unwrap().end_offset,
+                end_id: new_fragments.last().unwrap().insertion.id,
+                end_offset: new_fragments.last().unwrap().end_offset,
+                new_text: new_text.clone(),
+                timestamp: lamport_timestamp,
+                version_in_range: Version::new(),
+            }));
+
+            if let Some(new_text) = new_text {
                 let new_fragment = self.build_fragment_to_insert(
-                    EditId {
-                        replica_id,
-                        timestamp: local_timestamp,
-                    },
+                    id,
                     new_fragments.last().unwrap(),
                     None,
                     new_text,
