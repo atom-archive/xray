@@ -187,7 +187,7 @@ impl Project for LocalProject {
                                         let buffer_id = next_buffer_id_cell.get();
                                         next_buffer_id_cell.set(next_buffer_id_cell.get() + 1);
                                         let mut buffer = Buffer::new(buffer_id);
-                                        buffer.edit(0..0, content.as_str());
+                                        buffer.edit(&[0..0], content.as_str());
                                         let buffer = buffer.into_shared();
                                         buffers.borrow_mut().insert(buffer_id, buffer.clone());
                                         buffer

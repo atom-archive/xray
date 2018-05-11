@@ -205,9 +205,9 @@ impl Version {
         Version(Arc::new(HashMap::new()))
     }
 
-    fn inc(&mut self, replica_id: ReplicaId) {
+    fn set(&mut self, replica_id: ReplicaId, timestamp: LocalTimestamp) {
         let map = Arc::make_mut(&mut self.0);
-        *map.entry(replica_id).or_insert(0) += 1;
+        *map.entry(replica_id).or_insert(0) = timestamp;
     }
 
     fn include(&mut self, insertion: &Insertion) {
@@ -670,11 +670,11 @@ impl Buffer {
         Iter::starting_at_row(self, row)
     }
 
-    pub fn edit<T: Into<Text>>(
-        &mut self,
-        old_range: Range<usize>,
-        new_text: T,
-    ) -> Option<Arc<Operation>> {
+    pub fn edit<'a, I, T>(&mut self, old_ranges: I, new_text: T) -> Vec<Arc<Operation>>
+    where
+        I: IntoIterator<Item = &'a Range<usize>>,
+        T: Into<Text>,
+    {
         let new_text = new_text.into();
         let new_text = if new_text.len() > 0 {
             Some(Arc::new(new_text))
@@ -682,17 +682,20 @@ impl Buffer {
             None
         };
 
-        if new_text.is_some() || old_range.end > old_range.start {
-            let op = Arc::new(self.splice_fragments(old_range, new_text));
-            self.anchor_cache.borrow_mut().clear();
-            self.offset_cache.borrow_mut().clear();
-            self.version.inc(self.replica_id);
-            self.broadcast_op(&op);
-            self.updates.set(());
-            Some(op)
-        } else {
-            None
+        self.anchor_cache.borrow_mut().clear();
+        self.offset_cache.borrow_mut().clear();
+        let ops = self.splice_fragments(
+            old_ranges
+                .into_iter()
+                .filter(|old_range| new_text.is_some() || old_range.end > old_range.start),
+            new_text.clone(),
+        );
+        for op in &ops {
+            self.broadcast_op(op);
         }
+        self.version.set(self.replica_id, self.local_clock);
+        self.updates.set(());
+        ops
     }
 
     pub fn add_selection_set(
@@ -899,7 +902,7 @@ impl Buffer {
 
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
-        let mut new_fragments = cursor.build_prefix(&start_fragment_id, SeekBias::Left);
+        let mut new_fragments = cursor.slice(&start_fragment_id, SeekBias::Left);
 
         if start_offset == cursor.item().unwrap().end_offset {
             new_fragments.push(cursor.item().unwrap().clone());
@@ -986,7 +989,8 @@ impl Buffer {
             ));
         }
 
-        new_fragments.push_tree(cursor.build_suffix());
+        new_fragments
+            .push_tree(cursor.slice(&old_fragments.len::<CharacterCount>(), SeekBias::Right));
         self.fragments = new_fragments;
         self.lamport_clock = cmp::max(self.lamport_clock, timestamp) + 1;
         Ok(())
@@ -1040,132 +1044,278 @@ impl Buffer {
         rx
     }
 
-    fn splice_fragments(
+    fn splice_fragments<'a, I>(
         &mut self,
-        old_range: Range<usize>,
+        mut old_ranges: I,
         new_text: Option<Arc<Text>>,
-    ) -> Operation {
-        self.local_clock += 1;
-        self.lamport_clock += 1;
-        let lamport_timestamp = self.lamport_clock;
+    ) -> Vec<Arc<Operation>>
+    where
+        I: Iterator<Item = &'a Range<usize>>,
+    {
+        let mut cur_range = old_ranges.next();
+        if cur_range.is_none() {
+            return Vec::new();
+        }
 
-        let edit_id = EditId {
-            replica_id: self.replica_id,
-            timestamp: self.local_clock,
-        };
+        let replica_id = self.replica_id;
+        let mut ops = Vec::with_capacity(old_ranges.size_hint().0);
 
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
-        let mut new_fragments =
-            cursor.build_prefix(&CharacterCount(old_range.start), SeekBias::Right);
+        let mut new_fragments = Tree::new();
+        new_fragments.push_tree(cursor.slice(
+            &CharacterCount(cur_range.as_ref().unwrap().start),
+            SeekBias::Right,
+        ));
 
+        self.local_clock += 1;
+        self.lamport_clock += 1;
         let mut start_id = None;
         let mut start_offset = None;
         let mut end_id = None;
         let mut end_offset = None;
         let mut version_in_range = Version::new();
 
-        if cursor.item().is_none() {
-            let prev_fragment = cursor.prev_item().unwrap();
-            start_id = Some(prev_fragment.insertion.id);
-            start_offset = Some(prev_fragment.end_offset);
-            end_id = start_id.clone();
-            end_offset = start_offset.clone();
-            if let Some(new_text) = new_text.clone() {
-                new_fragments.push(self.build_fragment_to_insert(
-                    edit_id,
-                    prev_fragment,
+        while cur_range.is_some() && cursor.item().is_some() {
+            let mut fragment = cursor.item().unwrap().clone();
+            let mut fragment_start = cursor.start::<CharacterCount>().0;
+            let mut fragment_end = fragment_start + fragment.len();
+
+            let old_split_tree = self.insertion_splits
+                .remove(&fragment.insertion.id)
+                .unwrap();
+            let mut splits_cursor = old_split_tree.cursor();
+            let mut new_split_tree =
+                splits_cursor.slice(&InsertionOffset(fragment.start_offset), SeekBias::Right);
+
+            // Find all splices that start or end within the current fragment. Then, split the
+            // fragment and reassemble it in both trees accounting for the deleted and the newly
+            // inserted text.
+            while cur_range.map_or(false, |range| range.start < fragment_end) {
+                let range = cur_range.clone().unwrap();
+                if range.start > fragment_start {
+                    let mut prefix = fragment.clone();
+                    prefix.end_offset = prefix.start_offset + (range.start - fragment_start);
+                    prefix.id =
+                        FragmentId::between(&new_fragments.last().unwrap().id, &fragment.id);
+                    fragment.start_offset = prefix.end_offset;
+                    new_fragments.push(prefix.clone());
+                    new_split_tree.push(InsertionSplit {
+                        extent: prefix.end_offset - prefix.start_offset,
+                        fragment_id: prefix.id,
+                    });
+                    fragment_start = range.start;
+                }
+
+                if range.end == fragment_start {
+                    end_id = Some(new_fragments.last().unwrap().insertion.id);
+                    end_offset = Some(new_fragments.last().unwrap().end_offset);
+                } else if range.end == fragment_end {
+                    end_id = Some(fragment.insertion.id);
+                    end_offset = Some(fragment.end_offset);
+                }
+
+                if range.start == fragment_start {
+                    let local_timestamp = self.local_clock;
+                    let lamport_timestamp = self.lamport_clock;
+
+                    start_id = Some(new_fragments.last().unwrap().insertion.id);
+                    start_offset = Some(new_fragments.last().unwrap().end_offset);
+
+                    if let Some(new_text) = new_text.clone() {
+                        let new_fragment = self.build_fragment_to_insert(
+                            EditId {
+                                replica_id,
+                                timestamp: local_timestamp,
+                            },
+                            new_fragments.last().unwrap(),
+                            Some(&fragment),
+                            new_text,
+                            lamport_timestamp,
+                        );
+                        new_fragments.push(new_fragment);
+                    }
+                }
+
+                if range.end < fragment_end {
+                    if range.end > fragment_start {
+                        let mut prefix = fragment.clone();
+                        prefix.end_offset = prefix.start_offset + (range.end - fragment_start);
+                        prefix.id =
+                            FragmentId::between(&new_fragments.last().unwrap().id, &fragment.id);
+                        if fragment.is_visible() {
+                            prefix.deletions.insert(EditId {
+                                replica_id,
+                                timestamp: self.local_clock,
+                            });
+                        }
+                        fragment.start_offset = prefix.end_offset;
+                        new_fragments.push(prefix.clone());
+                        new_split_tree.push(InsertionSplit {
+                            extent: prefix.end_offset - prefix.start_offset,
+                            fragment_id: prefix.id,
+                        });
+                        fragment_start = range.end;
+                        end_id = Some(fragment.insertion.id);
+                        end_offset = Some(fragment.start_offset);
+                        version_in_range.include(&fragment.insertion);
+                    }
+                } else {
+                    version_in_range.include(&fragment.insertion);
+                    if fragment.is_visible() {
+                        fragment.deletions.insert(EditId {
+                            replica_id,
+                            timestamp: self.local_clock,
+                        });
+                    }
+                }
+
+                // If the splice ends inside this fragment, we can advance to the next splice and
+                // check if it also intersects the current fragment. Otherwise we break out of the
+                // loop and find the first fragment that the splice does not contain fully.
+                if range.end <= fragment_end {
+                    ops.push(Arc::new(Operation::Edit {
+                        id: EditId {
+                            replica_id,
+                            timestamp: self.local_clock,
+                        },
+                        start_id: start_id.unwrap(),
+                        start_offset: start_offset.unwrap(),
+                        end_id: end_id.unwrap(),
+                        end_offset: end_offset.unwrap(),
+                        new_text: new_text.clone(),
+                        timestamp: self.lamport_clock,
+                        version_in_range,
+                    }));
+
+                    start_id = None;
+                    start_offset = None;
+                    end_id = None;
+                    end_offset = None;
+                    version_in_range = Version::new();
+                    cur_range = old_ranges.next();
+                    if cur_range.is_some() {
+                        self.local_clock += 1;
+                        self.lamport_clock += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            new_split_tree.push(InsertionSplit {
+                extent: fragment.end_offset - fragment.start_offset,
+                fragment_id: fragment.id.clone(),
+            });
+            splits_cursor.next();
+            new_split_tree.push_tree(
+                splits_cursor.slice(&old_split_tree.len::<InsertionOffset>(), SeekBias::Right),
+            );
+            self.insertion_splits
+                .insert(fragment.insertion.id, new_split_tree);
+            new_fragments.push(fragment);
+
+            // Scan forward until we find a fragment that is not fully contained by the current splice.
+            cursor.next();
+            if let Some(range) = cur_range.clone() {
+                while let Some(mut fragment) = cursor.item().cloned() {
+                    fragment_start = cursor.start::<CharacterCount>().0;
+                    fragment_end = fragment_start + fragment.len();
+                    if range.start < fragment_start && range.end >= fragment_end {
+                        if fragment.is_visible() {
+                            fragment.deletions.insert(EditId {
+                                replica_id,
+                                timestamp: self.local_clock,
+                            });
+                        }
+                        version_in_range.include(&fragment.insertion);
+                        new_fragments.push(fragment.clone());
+                        cursor.next();
+
+                        if range.end == fragment_end {
+                            end_id = Some(fragment.insertion.id);
+                            end_offset = Some(fragment.end_offset);
+                            ops.push(Arc::new(Operation::Edit {
+                                id: EditId {
+                                    replica_id,
+                                    timestamp: self.local_clock,
+                                },
+                                start_id: start_id.unwrap(),
+                                start_offset: start_offset.unwrap(),
+                                end_id: end_id.unwrap(),
+                                end_offset: end_offset.unwrap(),
+                                new_text: new_text.clone(),
+                                timestamp: self.lamport_clock,
+                                version_in_range,
+                            }));
+
+                            start_id = None;
+                            start_offset = None;
+                            end_id = None;
+                            end_offset = None;
+                            version_in_range = Version::new();
+
+                            cur_range = old_ranges.next();
+                            if cur_range.is_some() {
+                                self.local_clock += 1;
+                                self.lamport_clock += 1;
+                            }
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                // If the splice we are currently evaluating starts after the end of the fragment
+                // that the cursor is parked at, we should seek to the next splice's start range
+                // and push all the fragments in between into the new tree.
+                if cur_range.map_or(false, |range| range.start > fragment_end) {
+                    new_fragments.push_tree(cursor.slice(
+                        &CharacterCount(cur_range.as_ref().unwrap().start),
+                        SeekBias::Right,
+                    ));
+                }
+            }
+        }
+
+        // Handle range that is at the end of the buffer if it exists. There should never be
+        // multiple because ranges must be disjoint.
+        if cur_range.is_some() {
+            debug_assert_eq!(old_ranges.next(), None);
+            let local_timestamp = self.local_clock;
+            let lamport_timestamp = self.lamport_clock;
+            let id = EditId {
+                replica_id,
+                timestamp: local_timestamp,
+            };
+            ops.push(Arc::new(Operation::Edit {
+                id,
+                start_id: new_fragments.last().unwrap().insertion.id,
+                start_offset: new_fragments.last().unwrap().end_offset,
+                end_id: new_fragments.last().unwrap().insertion.id,
+                end_offset: new_fragments.last().unwrap().end_offset,
+                new_text: new_text.clone(),
+                timestamp: lamport_timestamp,
+                version_in_range: Version::new(),
+            }));
+
+            if let Some(new_text) = new_text {
+                let new_fragment = self.build_fragment_to_insert(
+                    id,
+                    new_fragments.last().unwrap(),
                     None,
                     new_text,
                     lamport_timestamp,
-                ));
+                );
+                new_fragments.push(new_fragment);
             }
         } else {
-            let mut fragment_start = cursor.start::<CharacterCount>().0;
-            while cursor.item().is_some() && fragment_start <= old_range.end {
-                let fragment = cursor.item().unwrap();
-                let fragment_end = fragment_start + fragment.len();
-
-                let split_start = if old_range.start > fragment_start {
-                    fragment.start_offset + (old_range.start - fragment_start)
-                } else {
-                    fragment.start_offset
-                };
-                let split_end = if old_range.end < fragment_end {
-                    fragment.start_offset + (old_range.end - fragment_start)
-                } else {
-                    fragment.end_offset
-                };
-
-                if old_range.start == fragment_start {
-                    let prev_fragment = cursor.prev_item().unwrap();
-                    start_id = Some(prev_fragment.insertion.id);
-                    start_offset = Some(prev_fragment.end_offset);
-                } else if old_range.start > fragment_start {
-                    start_id = Some(fragment.insertion.id);
-                    start_offset = Some(split_start);
-                }
-
-                if old_range.end == fragment_start {
-                    let prev_fragment = cursor.prev_item().unwrap();
-                    end_id = Some(prev_fragment.insertion.id);
-                    end_offset = Some(prev_fragment.end_offset);
-                } else if old_range.end <= fragment_end {
-                    end_id = Some(fragment.insertion.id);
-                    end_offset = Some(split_end);
-                }
-
-                let (before_range, within_range, after_range) = self.split_fragment(
-                    cursor.prev_item().unwrap(),
-                    fragment,
-                    split_start..split_end,
-                );
-                let insertion = if new_text.is_some() && old_range.start >= fragment_start {
-                    Some(self.build_fragment_to_insert(
-                        edit_id,
-                        before_range.as_ref().or(cursor.prev_item()).unwrap(),
-                        within_range.as_ref().or(after_range.as_ref()),
-                        new_text.clone().unwrap(),
-                        lamport_timestamp,
-                    ))
-                } else {
-                    None
-                };
-                if let Some(fragment) = before_range {
-                    new_fragments.push(fragment);
-                }
-                if let Some(fragment) = insertion {
-                    new_fragments.push(fragment);
-                }
-                if let Some(mut fragment) = within_range {
-                    if fragment.is_visible() {
-                        fragment.deletions.insert(edit_id.clone());
-                        version_in_range.include(&fragment.insertion);
-                    }
-                    new_fragments.push(fragment);
-                }
-                if let Some(fragment) = after_range {
-                    new_fragments.push(fragment);
-                }
-
-                fragment_start = fragment_end;
-                cursor.next();
-            }
+            new_fragments
+                .push_tree(cursor.slice(&old_fragments.len::<CharacterCount>(), SeekBias::Right));
         }
 
-        new_fragments.push_tree(cursor.build_suffix());
         self.fragments = new_fragments;
-
-        Operation::Edit {
-            id: edit_id,
-            start_id: start_id.unwrap(),
-            start_offset: start_offset.unwrap(),
-            end_id: end_id.unwrap(),
-            end_offset: end_offset.unwrap(),
-            new_text,
-            version_in_range,
-            timestamp: self.lamport_clock,
-        }
+        ops
     }
 
     fn split_fragment(
@@ -1219,7 +1369,7 @@ impl Buffer {
                 .unwrap();
             let mut cursor = old_split_tree.cursor();
             let mut new_split_tree =
-                cursor.build_prefix(&InsertionOffset(fragment.start_offset), SeekBias::Right);
+                cursor.slice(&InsertionOffset(fragment.start_offset), SeekBias::Right);
 
             if let Some(ref fragment) = before_range {
                 new_split_tree.push(InsertionSplit {
@@ -1243,7 +1393,8 @@ impl Buffer {
             }
 
             cursor.next();
-            new_split_tree.push_tree(cursor.build_suffix());
+            new_split_tree
+                .push_tree(cursor.slice(&old_split_tree.len::<InsertionOffset>(), SeekBias::Right));
 
             self.insertion_splits
                 .insert(fragment.insertion.id, new_split_tree);
@@ -2089,17 +2240,17 @@ mod tests {
     #[test]
     fn test_edit() {
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "abc");
+        buffer.edit(&[0..0], "abc");
         assert_eq!(buffer.to_string(), "abc");
-        buffer.edit(3..3, "def");
+        buffer.edit(&[3..3], "def");
         assert_eq!(buffer.to_string(), "abcdef");
-        buffer.edit(0..0, "ghi");
+        buffer.edit(&[0..0], "ghi");
         assert_eq!(buffer.to_string(), "ghiabcdef");
-        buffer.edit(5..5, "jkl");
+        buffer.edit(&[5..5], "jkl");
         assert_eq!(buffer.to_string(), "ghiabjklcdef");
-        buffer.edit(6..7, "");
+        buffer.edit(&[6..7], "");
         assert_eq!(buffer.to_string(), "ghiabjlcdef");
-        buffer.edit(4..9, "mno");
+        buffer.edit(&[4..9], "mno");
         assert_eq!(buffer.to_string(), "ghiamnoef");
     }
 
@@ -2112,19 +2263,29 @@ mod tests {
             let mut buffer = Buffer::new(0);
             let mut reference_string = String::new();
 
-            for _i in 0..30 {
-                let end = rng.gen_range::<usize>(0, buffer.len() + 1);
-                let start = rng.gen_range::<usize>(0, end + 1);
+            for _i in 0..10 {
+                let mut old_ranges: Vec<Range<usize>> = Vec::new();
+                for _ in 0..5 {
+                    let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
+                    if last_end > buffer.len() {
+                        break;
+                    }
+                    let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
+                    let start = rng.gen_range::<usize>(last_end, end + 1);
+                    old_ranges.push(start..end);
+                }
                 let new_text = RandomCharIter(rng)
                     .take(rng.gen_range(0, 10))
                     .collect::<String>();
 
-                buffer.edit(start..end, new_text.as_str());
-                reference_string = [
-                    &reference_string[0..start],
-                    new_text.as_str(),
-                    &reference_string[end..],
-                ].concat();
+                buffer.edit(&old_ranges, new_text.as_str());
+                for old_range in old_ranges.iter().rev() {
+                    reference_string = [
+                        &reference_string[0..old_range.start],
+                        new_text.as_str(),
+                        &reference_string[old_range.end..],
+                    ].concat();
+                }
                 assert_eq!(buffer.to_string(), reference_string);
             }
         }
@@ -2133,10 +2294,10 @@ mod tests {
     #[test]
     fn test_len_for_row() {
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "abcd\nefg\nhij");
-        buffer.edit(12..12, "kl\nmno");
-        buffer.edit(18..18, "\npqrs\n");
-        buffer.edit(18..21, "\nPQ");
+        buffer.edit(&[0..0], "abcd\nefg\nhij");
+        buffer.edit(&[12..12], "kl\nmno");
+        buffer.edit(&[18..18], "\npqrs\n");
+        buffer.edit(&[18..21], "\nPQ");
 
         assert_eq!(buffer.len_for_row(0), Ok(4));
         assert_eq!(buffer.len_for_row(1), Ok(3));
@@ -2150,10 +2311,10 @@ mod tests {
     #[test]
     fn iter_starting_at_row() {
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "abcd\nefgh\nij");
-        buffer.edit(12..12, "kl\nmno");
-        buffer.edit(18..18, "\npqrs");
-        buffer.edit(18..21, "\nPQ");
+        buffer.edit(&[0..0], "abcd\nefgh\nij");
+        buffer.edit(&[12..12], "kl\nmno");
+        buffer.edit(&[18..18], "\npqrs");
+        buffer.edit(&[18..21], "\nPQ");
 
         let iter = buffer.iter_starting_at_row(0);
         assert_eq!(
@@ -2190,8 +2351,8 @@ mod tests {
 
         // Regression test:
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
-        buffer.edit(60..60, "\n");
+        buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
+        buffer.edit(&[60..60], "\n");
 
         let iter = buffer.iter_starting_at_row(6);
         assert_eq!(
@@ -2280,11 +2441,11 @@ mod tests {
     #[test]
     fn test_anchors() {
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "abc");
+        buffer.edit(&[0..0], "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
 
-        buffer.edit(1..1, "def\n");
+        buffer.edit(&[1..1], "def\n");
         assert_eq!(buffer.to_string(), "adef\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
@@ -2297,7 +2458,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.edit(2..3, "");
+        buffer.edit(&[2..3], "");
         assert_eq!(buffer.to_string(), "adf\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
@@ -2310,7 +2471,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.edit(5..5, "ghi\n");
+        buffer.edit(&[5..5], "ghi\n");
         assert_eq!(buffer.to_string(), "adf\nbghi\nc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 9);
@@ -2323,7 +2484,7 @@ mod tests {
             Point { row: 2, column: 0 }
         );
 
-        buffer.edit(7..9, "");
+        buffer.edit(&[7..9], "");
         assert_eq!(buffer.to_string(), "adf\nbghc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
@@ -2425,7 +2586,7 @@ mod tests {
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
-        buffer.edit(0..0, "abc");
+        buffer.edit(&[0..0], "abc");
         assert_eq!(buffer.to_string(), "abc");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 3);
@@ -2433,8 +2594,8 @@ mod tests {
         let after_start_anchor = buffer.anchor_after_offset(0).unwrap();
         let before_end_anchor = buffer.anchor_before_offset(3).unwrap();
 
-        buffer.edit(3..3, "def");
-        buffer.edit(0..0, "ghi");
+        buffer.edit(&[3..3], "def");
+        buffer.edit(&[0..0], "ghi");
         assert_eq!(buffer.to_string(), "ghiabcdef");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
@@ -2463,21 +2624,29 @@ mod tests {
                 let replica_index = rng.gen_range::<usize>(site_range.start, site_range.end);
                 let buffer = &mut buffers[replica_index];
                 if edit_count > 0 && rng.gen() {
-                    let end = rng.gen_range::<usize>(0, buffer.len() + 1);
-                    let start = rng.gen_range::<usize>(0, end + 1);
+                    let mut old_ranges: Vec<Range<usize>> = Vec::new();
+                    for _ in 0..5 {
+                        let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
+                        if last_end > buffer.len() {
+                            break;
+                        }
+                        let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
+                        let start = rng.gen_range::<usize>(last_end, end + 1);
+                        old_ranges.push(start..end);
+                    }
                     let new_text = RandomCharIter(rng)
                         .take(rng.gen_range(0, 10))
                         .collect::<String>();
 
-                    if let Some(op) = buffer.edit(start..end, new_text.as_str()) {
+                    for op in buffer.edit(&old_ranges, new_text.as_str()) {
                         for (index, queue) in queues.iter_mut().enumerate() {
                             if index != replica_index {
                                 queue.push(op.clone());
                             }
                         }
-
-                        edit_count -= 1;
                     }
+
+                    edit_count -= 1;
                 } else if !queues[replica_index].is_empty() {
                     buffer
                         .integrate_op(queues[replica_index].remove(0))
@@ -2498,8 +2667,8 @@ mod tests {
     #[test]
     fn test_edit_replication() {
         let local_buffer = Buffer::new(0).into_shared();
-        local_buffer.borrow_mut().edit(0..0, "abcdef");
-        local_buffer.borrow_mut().edit(2..4, "ghi");
+        local_buffer.borrow_mut().edit(&[0..0], "abcdef");
+        local_buffer.borrow_mut().edit(&[2..4], "ghi");
 
         let mut reactor = reactor::Core::new().unwrap();
         let foreground = Rc::new(reactor.handle());
@@ -2518,8 +2687,8 @@ mod tests {
             local_buffer.borrow().to_string()
         );
 
-        local_buffer.borrow_mut().edit(3..6, "jk");
-        remote_buffer_1.borrow_mut().edit(7..7, "lmn");
+        local_buffer.borrow_mut().edit(&[3..6], "jk");
+        remote_buffer_1.borrow_mut().edit(&[7..7], "lmn");
         let anchor = remote_buffer_1.borrow().anchor_before_offset(8).unwrap();
 
         let mut remaining_tries = 10;
@@ -2550,7 +2719,7 @@ mod tests {
         use stream_ext::StreamExt;
 
         let mut buffer_1 = Buffer::new(0);
-        buffer_1.edit(0..0, "abcdef");
+        buffer_1.edit(&[0..0], "abcdef");
         let sels = vec![empty_selection(&buffer_1, 1), empty_selection(&buffer_1, 3)];
         buffer_1.add_selection_set(0, sels);
         let sels = vec![empty_selection(&buffer_1, 2), empty_selection(&buffer_1, 4)];

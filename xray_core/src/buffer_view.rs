@@ -154,23 +154,21 @@ impl BufferView {
                 for selection in self.selections().iter() {
                     let start = buffer.offset_for_anchor(&selection.start).unwrap();
                     let end = buffer.offset_for_anchor(&selection.end).unwrap();
-                    offset_ranges.push((start, end));
+                    offset_ranges.push(start..end);
                 }
             }
 
             let mut buffer = self.buffer.borrow_mut();
-            for &(start, end) in offset_ranges.iter().rev() {
-                buffer.edit(start..end, text);
-            }
+            buffer.edit(&offset_ranges, text);
 
             let mut delta = 0_isize;
             buffer
                 .mutate_selections(self.selection_set_id, |buffer, selections| {
                     *selections = offset_ranges
                         .into_iter()
-                        .map(|(start, end)| {
-                            let start = start as isize;
-                            let end = end as isize;
+                        .map(|range| {
+                            let start = range.start as isize;
+                            let end = range.end as isize;
                             let anchor = buffer
                                 .anchor_before_offset((start + delta) as usize + text.len())
                                 .unwrap();
@@ -795,9 +793,9 @@ mod tests {
     #[test]
     fn test_cursor_movement() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(0..0, "abc");
-        editor.buffer.borrow_mut().edit(3..3, "\n");
-        editor.buffer.borrow_mut().edit(4..4, "\ndef");
+        editor.buffer.borrow_mut().edit(&[0..0], "abc");
+        editor.buffer.borrow_mut().edit(&[3..3], "\n");
+        editor.buffer.borrow_mut().edit(&[4..4], "\ndef");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
         editor.move_right();
@@ -876,9 +874,9 @@ mod tests {
     #[test]
     fn test_selection_movement() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(0..0, "abc");
-        editor.buffer.borrow_mut().edit(3..3, "\n");
-        editor.buffer.borrow_mut().edit(4..4, "\ndef");
+        editor.buffer.borrow_mut().edit(&[0..0], "abc");
+        editor.buffer.borrow_mut().edit(&[3..3], "\n");
+        editor.buffer.borrow_mut().edit(&[4..4], "\ndef");
 
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
@@ -967,7 +965,7 @@ mod tests {
     #[test]
     fn test_backspace() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
+        editor.buffer.borrow_mut().edit(&[0..0], "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
         editor.backspace();
@@ -979,7 +977,7 @@ mod tests {
     #[test]
     fn test_delete() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(0..0, "abcdefghi");
+        editor.buffer.borrow_mut().edit(&[0..0], "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
         editor.delete();
@@ -994,7 +992,7 @@ mod tests {
         editor
             .buffer
             .borrow_mut()
-            .edit(0..0, "abcd\nefgh\nijkl\nmnop");
+            .edit(&[0..0], "abcd\nefgh\nijkl\nmnop");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
         // Adding non-overlapping selections
@@ -1046,7 +1044,7 @@ mod tests {
     fn test_add_selection_above() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(
-            0..0,
+            &[0..0],
             "\
              abcdefghijk\n\
              lmnop\n\
@@ -1115,7 +1113,7 @@ mod tests {
     fn test_add_selection_below() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(
-            0..0,
+            &[0..0],
             "\
              abcdefgh\n\
              ijklm\n\
@@ -1175,7 +1173,10 @@ mod tests {
     fn test_edit() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
 
-        editor.buffer.borrow_mut().edit(0..0, "abcdefgh\nhijklmno");
+        editor
+            .buffer
+            .borrow_mut()
+            .edit(&[0..0], "abcdefgh\nhijklmno");
 
         // Three selections on the same line
         editor.select_right();
@@ -1197,7 +1198,7 @@ mod tests {
     #[test]
     fn test_autoscroll() {
         let mut buffer = Buffer::new(0);
-        buffer.edit(0..0, "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
+        buffer.edit(&[0..0], "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
         let start = buffer.anchor_before_offset(0).unwrap();
         let end = buffer.anchor_before_offset(buffer.len()).unwrap();
         let max_point = buffer.max_point();
@@ -1228,7 +1229,7 @@ mod tests {
         let buffer = Rc::new(RefCell::new(Buffer::new(0)));
         buffer
             .borrow_mut()
-            .edit(0..0, "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
+            .edit(&[0..0], "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
         let line_height = 6.0;
 
         {
@@ -1299,7 +1300,7 @@ mod tests {
     fn test_render_past_last_line() {
         let line_height = 4.0;
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(0..0, "abc\ndef\nghi");
+        editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
         editor.add_selection(Point::new(2, 3), Point::new(2, 3));
         editor
             .set_height(3.0 * line_height)
