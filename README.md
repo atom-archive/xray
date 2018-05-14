@@ -167,16 +167,16 @@ By May 1, we'd like it to be possible for multiple Xray clients to connect to a 
 * [ ] Load and save buffers
 * [ ] Key bindings system
 * [ ] Remote headless workspace
-  * [ ] File finder
-  * [ ] Loading a buffer
-  * [ ] Editing can be shared between multiple participants
+  * [x] File finder
+  * [x] Loading a buffer
+  * [x] Editing can be shared between multiple participants
   * [ ] Saving
-  * [ ] Discussions
+  * [x] Discussions
   * [ ] Following
 * [ ] Flesh out basic editor experience
   * [ ] Gutter with line numbers
-  * [ ] Autoscroll
-  * [ ] Easy movement and editing operations
+  * [x] Autoscroll
+  * [x] Easy movement and editing operations
   * [ ] Mouse interaction
 
 ## Q2 2018
