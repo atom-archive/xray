@@ -73,11 +73,15 @@ pub enum RpcRequest {
     OpenBuffer {
         buffer_id: BufferId,
     },
+    SaveBuffer {
+        buffer_id: BufferId,
+    },
 }
 
 #[derive(Deserialize, Serialize)]
 pub enum RpcResponse {
     OpenedBuffer(Result<rpc::ServiceId, Error>),
+    SavedBuffer(Result<(), Error>),
 }
 
 pub struct PathSearch {
@@ -123,6 +127,7 @@ pub enum Error {
     TreeNotFound,
     IoError(String),
     RpcError(rpc::Error),
+    UnexpectedResponse,
 }
 
 impl LocalProject {
@@ -334,6 +339,7 @@ impl Project for RemoteProject {
                                             .map_err(|error| error.into())
                                     })
                             }),
+                            _ => Err(Error::UnexpectedResponse),
                         })
                 }),
         )
@@ -363,13 +369,23 @@ impl Project for RemoteProject {
                                             .map_err(|error| error.into())
                                     })
                             }),
+                            _ => Err(Error::UnexpectedResponse),
                         })
                 }),
         )
     }
 
     fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>> {
-        unimplemented!()
+        Box::new(
+            self.service
+                .borrow()
+                .request(RpcRequest::SaveBuffer { buffer_id })
+                .map_err(|error| error.into())
+                .and_then(|response| match response {
+                    RpcResponse::SavedBuffer(result) => result,
+                    _ => Err(Error::UnexpectedResponse),
+                }),
+        )
     }
 
     fn search_paths(
@@ -472,6 +488,12 @@ impl rpc::server::Service for ProjectService {
                     },
                 )))
             }
+            RpcRequest::SaveBuffer { buffer_id } => Some(Box::new(
+                self.project
+                    .borrow()
+                    .save_buffer(buffer_id)
+                    .then(|result| Ok(RpcResponse::SavedBuffer(result))),
+            )),
         }
     }
 }
