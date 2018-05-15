@@ -6,11 +6,11 @@ Xray is an experimental Electron-based text editor informed by what we've learne
 
 ## Updates
 
+* [May 14, 2018](./docs/updates/2018_05_14.md)
 * [May 7, 2018](./docs/updates/2018_05_07.md)
 * [April 30, 2018](./docs/updates/2018_04_30.md)
 * [April 23, 2018](./docs/updates/2018_04_23.md)
 * [April 16, 2018](./docs/updates/2018_04_16.md)
-* [April 9, 2018](./docs/updates/2018_04_09.md)
 * [Archives](./docs/updates/)
 
 ## Foundational priorities
