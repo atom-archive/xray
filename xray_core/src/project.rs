@@ -42,7 +42,9 @@ pub struct LocalProject {
     next_buffer_id: Rc<Cell<BufferId>>,
     trees: HashMap<TreeId, Rc<fs::LocalTree>>,
     buffers: Rc<RefCell<HashMap<BufferId, Rc<RefCell<Buffer>>>>>,
-    buffers_by_file: Rc<RefCell<HashMap<fs::FileId, Rc<RefCell<Buffer>>>>>,
+    files: Rc<RefCell<HashMap<fs::FileId, Box<fs::File>>>>,
+    buffers_by_file: Rc<RefCell<HashMap<fs::FileId, BufferId>>>,
+    files_by_buffer: Rc<RefCell<HashMap<BufferId, fs::FileId>>>,
 }
 
 pub struct RemoteProject {
@@ -133,7 +135,9 @@ impl LocalProject {
             next_buffer_id: Rc::new(Cell::new(0)),
             trees: HashMap::new(),
             buffers: Rc::new(RefCell::new(HashMap::new())),
+            files: Rc::new(RefCell::new(HashMap::new())),
             buffers_by_file: Rc::new(RefCell::new(HashMap::new())),
+            files_by_buffer: Rc::new(RefCell::new(HashMap::new())),
         };
         for tree in trees {
             project.add_tree(tree);
@@ -169,30 +173,41 @@ impl Project for LocalProject {
         if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
             let next_buffer_id_cell = self.next_buffer_id.clone();
             let buffers_by_file = self.buffers_by_file.clone();
+            let files_by_buffer = self.files_by_buffer.clone();
             let buffers = self.buffers.clone();
+            let files = self.files.clone();
             Box::new(
                 self.file_provider
                     .open(&absolute_path)
                     .and_then(move |file| {
-                        let buffer = buffers_by_file.borrow().get(&file.id()).cloned();
-                        if let Some(buffer) = buffer {
+                        let buffer_id = buffers_by_file.borrow().get(&file.id()).cloned();
+                        if let Some(ref buffer_id) = buffer_id {
+                            let buffer = buffers.borrow().get(buffer_id).unwrap().clone();
                             Box::new(future::ok(buffer))
                                 as Box<Future<Item = Rc<RefCell<Buffer>>, Error = io::Error>>
                         } else {
                             Box::new(file.read().and_then(move |content| {
-                                let mut buffers_by_file = buffers_by_file.borrow_mut();
-                                Ok(buffers_by_file
-                                    .entry(file.id())
-                                    .or_insert_with(|| {
-                                        let buffer_id = next_buffer_id_cell.get();
-                                        next_buffer_id_cell.set(next_buffer_id_cell.get() + 1);
-                                        let mut buffer = Buffer::new(buffer_id);
-                                        buffer.edit(&[0..0], content.as_str());
-                                        let buffer = buffer.into_shared();
-                                        buffers.borrow_mut().insert(buffer_id, buffer.clone());
-                                        buffer
-                                    })
-                                    .clone())
+                                let buffer_id = buffers_by_file.borrow().get(&file.id()).cloned();
+                                if let Some(ref buffer_id) = buffer_id {
+                                    Ok(buffers.borrow().get(buffer_id).unwrap().clone())
+                                } else {
+                                    let buffer_id = next_buffer_id_cell.get();
+                                    next_buffer_id_cell.set(next_buffer_id_cell.get() + 1);
+                                    let mut buffer = Buffer::new(buffer_id);
+                                    buffer.edit(&[0..0], content.as_str());
+                                    let buffer = buffer.into_shared();
+
+                                    let mut buffers = buffers.borrow_mut();
+                                    let mut files = files.borrow_mut();
+                                    let mut buffers_by_file = buffers_by_file.borrow_mut();
+                                    let mut files_by_buffer = files_by_buffer.borrow_mut();
+                                    buffers_by_file.insert(file.id(), buffer_id);
+                                    files_by_buffer.insert(buffer_id, file.id());
+                                    buffers.insert(buffer_id, buffer.clone());
+                                    files.insert(file.id(), file);
+
+                                    Ok(buffer)
+                                }
                             }))
                         }
                     })
