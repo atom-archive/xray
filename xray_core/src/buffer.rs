@@ -60,7 +60,6 @@ pub struct Buffer {
 
 pub struct BufferSnapshot {
     fragments: Tree<Fragment>,
-    version: Version,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
@@ -661,7 +660,6 @@ impl Buffer {
     pub fn snapshot(&self) -> BufferSnapshot {
         BufferSnapshot {
             fragments: self.fragments.clone(),
-            version: self.version.clone(),
         }
     }
 
@@ -1668,6 +1666,11 @@ impl BufferSnapshot {
             }
         })
     }
+
+    #[cfg(test)]
+    pub fn to_string(&self) -> String {
+        String::from_utf16_lossy(&self.iter().flat_map(|c| c).cloned().collect::<Vec<u16>>())
+    }
 }
 
 impl Point {
@@ -2628,6 +2631,22 @@ mod tests {
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
         assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_snapshot() {
+        let mut buffer = Buffer::new(0);
+        buffer.edit(&[0..0], "abcdefghi");
+        buffer.edit(&[3..6], "DEF");
+
+        let snapshot = buffer.snapshot();
+        assert_eq!(buffer.to_string(), String::from("abcDEFghi"));
+        assert_eq!(snapshot.to_string(), String::from("abcDEFghi"));
+
+        buffer.edit(&[0..1], "A");
+        buffer.edit(&[8..9], "I");
+        assert_eq!(buffer.to_string(), String::from("AbcDEFghI"));
+        assert_eq!(snapshot.to_string(), String::from("abcDEFghi"));
     }
 
     #[test]

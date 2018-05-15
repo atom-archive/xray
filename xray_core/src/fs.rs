@@ -36,10 +36,8 @@ pub trait FileProvider {
 pub trait File {
     fn id(&self) -> FileId;
     fn read(&self) -> Box<Future<Item = String, Error = io::Error>>;
-    fn write_snapshot(
-        &self,
-        snapshot: BufferSnapshot,
-    ) -> Box<Future<Item = (), Error = io::Error>>;
+    fn write_snapshot(&self, snapshot: BufferSnapshot)
+        -> Box<Future<Item = (), Error = io::Error>>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -545,6 +543,18 @@ pub(crate) mod tests {
             Box::new(NextTick::new().then(move |_| {
                 let file = file.borrow();
                 future::ok(file.content.clone())
+            }))
+        }
+
+        fn write_snapshot(
+            &self,
+            snapshot: BufferSnapshot,
+        ) -> Box<Future<Item = (), Error = io::Error>> {
+            let file = self.0.clone();
+            Box::new(NextTick::new().then(move |_| {
+                let mut file = file.borrow_mut();
+                file.content = snapshot.to_string();
+                future::ok(())
             }))
         }
     }
