@@ -1661,7 +1661,8 @@ impl BufferSnapshot {
     pub fn iter<'a>(&'a self) -> impl 'a + Iterator<Item = &'a [u16]> {
         self.fragments.iter().filter_map(|fragment| {
             if fragment.is_visible() {
-                Some(fragment.insertion.text.code_units.as_ref())
+                let range = fragment.start_offset..fragment.end_offset;
+                Some(&fragment.insertion.text.code_units[range])
             } else {
                 None
             }
