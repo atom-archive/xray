@@ -75,6 +75,7 @@ pub struct Anchor {
 enum WorkspaceViewAction {
     ToggleFileFinder,
     ToggleDiscussion,
+    SaveActiveBuffer,
 }
 
 impl LocalWorkspace {
@@ -258,6 +259,26 @@ impl WorkspaceView {
                 .unwrap();
         }
     }
+
+    fn save_active_buffer(&self) {
+        if let Some(ref active_buffer_view) = self.active_buffer_view {
+            if let Some(buffer_id) = active_buffer_view.map(|buffer_view| buffer_view.buffer_id()) {
+                let workspace = self.workspace.borrow();
+                self.foreground
+                    .execute(Box::new(workspace.project().save_buffer(buffer_id).then(
+                        |result| {
+                            if let Err(error) = result {
+                                eprintln!("Error saving buffer {:?}", error);
+                                unimplemented!("Error handling for save_buffer: {:?}", error);
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )))
+                    .unwrap();
+            }
+        }
+    }
 }
 
 impl View for WorkspaceView {
@@ -282,7 +303,8 @@ impl View for WorkspaceView {
         match serde_json::from_value(action) {
             Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(window),
             Ok(WorkspaceViewAction::ToggleDiscussion) => self.toggle_discussion(window),
-            _ => eprintln!("Unrecognized action"),
+            Ok(WorkspaceViewAction::SaveActiveBuffer) => self.save_active_buffer(),
+            Err(error) => eprintln!("Unrecognized action {}", error),
         }
     }
 }

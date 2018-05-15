@@ -1,13 +1,15 @@
 use futures::{self, Future, Stream};
 use ignore::WalkBuilder;
 use parking_lot::Mutex;
+use std::char::decode_utf16;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
+use xray_core::buffer::BufferSnapshot;
 use xray_core::cross_platform;
 use xray_core::fs as xray_fs;
 use xray_core::notify_cell::NotifyCell;
@@ -139,7 +141,10 @@ impl xray_fs::FileProvider for FileProvider {
 
         thread::spawn(|| {
             fn open(path: PathBuf) -> Result<File, io::Error> {
-                Ok(File::new(fs::File::open(path)?)?)
+                Ok(File::new(fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)?)?)
             }
 
             let _ = tx.send(open(path));
@@ -180,6 +185,37 @@ impl xray_fs::File for File {
             let _ = tx.send(read(&file.lock()));
         });
 
+        Box::new(rx.then(|result| result.expect("Sender should not be dropped")))
+    }
+
+    fn write_snapshot(
+        &self,
+        snapshot: BufferSnapshot,
+    ) -> Box<Future<Item = (), Error = io::Error>> {
+        let (tx, rx) = futures::sync::oneshot::channel();
+        let file = self.file.clone();
+        thread::spawn(move || {
+            fn write(file: &mut fs::File, snapshot: BufferSnapshot) -> Result<(), io::Error> {
+                let mut buf_writer = io::BufWriter::new(file);
+                let mut encode_buf = [0_u8; 4];
+                for character in snapshot
+                    .iter()
+                    .flat_map(|c| decode_utf16(c.iter().cloned()))
+                {
+                    let character = character.map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "buffer did not contain valid UTF-8",
+                        )
+                    })?;
+                    let encoded_char = character.encode_utf8(&mut encode_buf);
+                    buf_writer.write(encoded_char.as_bytes())?;
+                }
+                Ok(())
+            }
+
+            let _ = tx.send(write(&mut file.lock(), snapshot));
+        });
         Box::new(rx.then(|result| result.expect("Sender should not be dropped")))
     }
 }

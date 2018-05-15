@@ -28,6 +28,7 @@ pub trait Project {
         &self,
         buffer_id: BufferId,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>>;
+    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>>;
     fn search_paths(
         &self,
         needle: &str,
@@ -233,6 +234,25 @@ impl Project for LocalProject {
         )
     }
 
+    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>> {
+        if let Some(file_id) = self.files_by_buffer.borrow().get(&buffer_id) {
+            if let Some(buffer) = self.buffers.borrow().get(&buffer_id).cloned() {
+                let files = self.files.borrow();
+                let file = files.get(&file_id).unwrap();
+                Box::new(
+                    file.write_snapshot(buffer.borrow().snapshot())
+                        .map_err(|error| {
+                            Error::IoError(error::Error::description(&error).to_owned())
+                        }),
+                )
+            } else {
+                Box::new(future::err(Error::BufferNotFound))
+            }
+        } else {
+            unimplemented!("Handle trying to save an unsaved buffer")
+        }
+    }
+
     fn search_paths(
         &self,
         needle: &str,
@@ -346,6 +366,10 @@ impl Project for RemoteProject {
                         })
                 }),
         )
+    }
+
+    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>> {
+        unimplemented!()
     }
 
     fn search_paths(

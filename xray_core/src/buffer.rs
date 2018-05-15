@@ -58,6 +58,11 @@ pub struct Buffer {
     selections: HashMap<(ReplicaId, SelectionSetId), SelectionSet, BuildHasherDefault<SeaHasher>>,
 }
 
+pub struct BufferSnapshot {
+    fragments: Tree<Fragment>,
+    version: Version,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
 pub struct Point {
     pub row: u32,
@@ -226,8 +231,10 @@ impl Version {
 }
 
 pub mod rpc {
-    use super::{Buffer, BufferId, EditId, FragmentId, Insertion, InsertionSplit, Operation,
-                ReplicaId, SelectionSetId, SelectionSetState, SelectionSetVersion, Version};
+    use super::{
+        Buffer, BufferId, EditId, FragmentId, Insertion, InsertionSplit, Operation, ReplicaId,
+        SelectionSetId, SelectionSetState, SelectionSetVersion, Version,
+    };
     use futures::{Async, Future, Stream};
     use never::Never;
     use notify_cell::NotifyCellObserver;
@@ -649,6 +656,13 @@ impl Buffer {
 
     pub fn max_point(&self) -> Point {
         self.fragments.len::<Point>()
+    }
+
+    pub fn snapshot(&self) -> BufferSnapshot {
+        BufferSnapshot {
+            fragments: self.fragments.clone(),
+            version: self.version.clone(),
+        }
     }
 
     pub fn to_u16_chars(&self) -> Vec<u16> {
@@ -1640,6 +1654,18 @@ impl Buffer {
         if let Ok(mut offset_cache) = self.offset_cache.try_borrow_mut() {
             offset_cache.insert(point, offset);
         }
+    }
+}
+
+impl BufferSnapshot {
+    pub fn iter<'a>(&'a self) -> impl 'a + Iterator<Item = &'a [u16]> {
+        self.fragments.iter().filter_map(|fragment| {
+            if fragment.is_visible() {
+                Some(fragment.insertion.text.code_units.as_ref())
+            } else {
+                None
+            }
+        })
     }
 }
 

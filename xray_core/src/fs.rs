@@ -1,3 +1,4 @@
+use buffer::BufferSnapshot;
 use cross_platform;
 use futures::{Async, Future, Stream};
 use notify_cell::NotifyCell;
@@ -35,6 +36,10 @@ pub trait FileProvider {
 pub trait File {
     fn id(&self) -> FileId;
     fn read(&self) -> Box<Future<Item = String, Error = io::Error>>;
+    fn write_snapshot(
+        &self,
+        snapshot: BufferSnapshot,
+    ) -> Box<Future<Item = (), Error = io::Error>>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
