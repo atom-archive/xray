@@ -7,8 +7,10 @@ use futures::{Future, Poll, Stream};
 use never::Never;
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
-use project::{self, LocalProject, PathSearch, PathSearchStatus, Project, ProjectService,
-              RemoteProject, TreeId};
+use project::{
+    self, LocalProject, PathSearch, PathSearchStatus, Project, ProjectService, RemoteProject,
+    TreeId,
+};
 use rpc::{self, client, server};
 use serde_json;
 use std::cell::{Ref, RefCell, RefMut};
@@ -216,7 +218,7 @@ impl WorkspaceView {
 
     fn open_buffer<T>(&self, buffer: T, selected_range: Option<Range<buffer::Anchor>>)
     where
-        T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = project::OpenError>,
+        T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = project::Error>,
     {
         if let Some(window_handle) = self.window_handle.clone() {
             let user_id = self.workspace.borrow().user_id();

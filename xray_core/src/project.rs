@@ -9,7 +9,7 @@ use rpc;
 use std::cell::{Cell, RefCell};
 use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
-use std::error::Error;
+use std::error;
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -23,11 +23,11 @@ pub trait Project {
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>>;
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>>;
     fn open_buffer(
         &self,
         buffer_id: BufferId,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>>;
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>>;
     fn search_paths(
         &self,
         needle: &str,
@@ -74,7 +74,7 @@ pub enum RpcRequest {
 
 #[derive(Deserialize, Serialize)]
 pub enum RpcResponse {
-    OpenedBuffer(Result<rpc::ServiceId, OpenError>),
+    OpenedBuffer(Result<rpc::ServiceId, Error>),
 }
 
 pub struct PathSearch {
@@ -115,7 +115,7 @@ enum MatchMarker {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum OpenError {
+pub enum Error {
     BufferNotFound,
     TreeNotFound,
     IoError(String),
@@ -165,7 +165,7 @@ impl Project for LocalProject {
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
         if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
             let next_buffer_id_cell = self.next_buffer_id.clone();
             let buffers_by_file = self.buffers_by_file.clone();
@@ -199,21 +199,21 @@ impl Project for LocalProject {
                     .map_err(|error| error.into()),
             )
         } else {
-            Box::new(future::err(OpenError::TreeNotFound))
+            Box::new(future::err(Error::TreeNotFound))
         }
     }
 
     fn open_buffer(
         &self,
         buffer_id: BufferId,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
         use futures::IntoFuture;
         Box::new(
             self.buffers
                 .borrow()
                 .get(&buffer_id)
                 .cloned()
-                .ok_or(OpenError::BufferNotFound)
+                .ok_or(Error::BufferNotFound)
                 .into_future(),
         )
     }
@@ -274,7 +274,7 @@ impl Project for RemoteProject {
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
         let foreground = self.foreground.clone();
         let service = self.service.clone();
 
@@ -307,7 +307,7 @@ impl Project for RemoteProject {
     fn open_buffer(
         &self,
         buffer_id: BufferId,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
         let foreground = self.foreground.clone();
         let service = self.service.clone();
         Box::new(
@@ -667,15 +667,15 @@ impl PartialOrd for PathSearchResult {
 
 impl Eq for PathSearchResult {}
 
-impl From<io::Error> for OpenError {
+impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
-        OpenError::IoError(error.description().to_owned())
+        Error::IoError(error::Error::description(&error).to_owned())
     }
 }
 
-impl From<rpc::Error> for OpenError {
+impl From<rpc::Error> for Error {
     fn from(error: rpc::Error) -> Self {
-        OpenError::RpcError(error)
+        Error::RpcError(error)
     }
 }
 
