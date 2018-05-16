@@ -557,32 +557,6 @@ impl Buffer {
         }
     }
 
-    pub fn set_file<T: 'static + fs::File>(&mut self, file: T) {
-        self.file = Some(Box::new(file));
-    }
-
-    pub fn save(&self) -> Option<Box<Future<Item = (), Error = Error>>> {
-        use std::error;
-
-        if let Some(ref client) = self.client {
-            Some(Box::new(client.request(rpc::Request::Save).then(
-                |response| match response {
-                    Ok(rpc::Response::Saved) => Ok(()),
-                    Ok(rpc::Response::Error(error)) => Err(error),
-                    Err(error) => Err(Error::RpcError(error)),
-                },
-            )))
-        } else {
-            self.file.as_ref().map(|file| {
-                Box::new(
-                    file.write_snapshot(self.snapshot()).map_err(|error| {
-                        Error::IoError(error::Error::description(&error).to_owned())
-                    }),
-                ) as Box<Future<Item = (), Error = Error>>
-            })
-        }
-    }
-
     pub fn remote(
         foreground: ForegroundExecutor,
         client: client::Service<rpc::Service>,
@@ -682,6 +656,36 @@ impl Buffer {
         let replica_id = self.next_replica_id.ok_or(())?;
         self.next_replica_id = Some(replica_id + 1);
         Ok(replica_id)
+    }
+
+    pub fn file_id(&self) -> Option<fs::FileId> {
+        self.file.as_ref().map(|file| file.id())
+    }
+
+    pub fn set_file(&mut self, file: Box<fs::File>) {
+        self.file = Some(file);
+    }
+
+    pub fn save(&self) -> Option<Box<Future<Item = (), Error = Error>>> {
+        use std::error;
+
+        if let Some(ref client) = self.client {
+            Some(Box::new(client.request(rpc::Request::Save).then(
+                |response| match response {
+                    Ok(rpc::Response::Saved) => Ok(()),
+                    Ok(rpc::Response::Error(error)) => Err(error),
+                    Err(error) => Err(Error::RpcError(error)),
+                },
+            )))
+        } else {
+            self.file.as_ref().map(|file| {
+                Box::new(
+                    file.write_snapshot(self.snapshot()).map_err(|error| {
+                        Error::IoError(error::Error::description(&error).to_owned())
+                    }),
+                ) as Box<Future<Item = (), Error = Error>>
+            })
+        }
     }
 
     pub fn len(&self) -> usize {
