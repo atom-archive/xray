@@ -1,5 +1,5 @@
 use buffer::{self, Buffer, BufferId, Point, Selection, SelectionSetId};
-use futures::{Poll, Stream};
+use futures::{Future, Poll, Stream};
 use movement;
 use notify_cell::NotifyCell;
 use serde_json;
@@ -144,6 +144,10 @@ impl BufferView {
 
     fn scroll_bottom(&self) -> f64 {
         self.scroll_top() + self.height.unwrap_or(0.0)
+    }
+
+    pub fn save(&self) -> Option<Box<Future<Item = (), Error = buffer::Error>>> {
+        self.buffer.borrow().save()
     }
 
     pub fn edit(&mut self, text: &str) {

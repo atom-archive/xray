@@ -1,6 +1,7 @@
 use super::rpc::{client, Error as RpcError};
 use super::tree::{self, SeekBias, Tree};
-use futures::{unsync, Stream};
+use fs;
+use futures::{unsync, Future, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use seahash::SeaHasher;
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
@@ -32,12 +33,14 @@ pub struct Version(
     Arc<HashMap<ReplicaId, LocalTimestamp>>,
 );
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Error {
     OffsetOutOfRange,
     InvalidAnchor,
     InvalidOperation,
     SelectionSetNotFound,
+    IoError(String),
+    RpcError(RpcError),
 }
 
 pub struct Buffer {
@@ -56,6 +59,7 @@ pub struct Buffer {
     updates: NotifyCell<()>,
     next_local_selection_set_id: SelectionSetId,
     selections: HashMap<(ReplicaId, SelectionSetId), SelectionSet, BuildHasherDefault<SeaHasher>>,
+    file: Option<Box<fs::File>>,
 }
 
 pub struct BufferSnapshot {
@@ -263,6 +267,13 @@ pub mod rpc {
         ),
         UpdateSelectionSet(SelectionSetId, SelectionSetState),
         RemoveSelectionSet(SelectionSetId),
+        Save,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub enum Response {
+        Saved,
+        Error(super::Error),
     }
 
     #[derive(Serialize, Deserialize)]
@@ -379,7 +390,7 @@ pub mod rpc {
         type State = State;
         type Update = Update;
         type Request = Request;
-        type Response = ();
+        type Response = Response;
 
         fn init(&mut self, _: &rpc::server::Connection) -> Self::State {
             let buffer = self.buffer.borrow_mut();
@@ -449,6 +460,7 @@ pub mod rpc {
                     if buffer.integrate_op(op).is_err() {
                         unimplemented!("Invalid op: terminate the service and respond with error?");
                     }
+                    None
                 }
                 Request::UpdateSelectionSet(set_id, state) => {
                     self.buffer.borrow_mut().update_remote_selection_set(
@@ -456,15 +468,21 @@ pub mod rpc {
                         set_id,
                         state,
                     );
+                    None
                 }
                 Request::RemoveSelectionSet(set_id) => {
                     self.buffer
                         .borrow_mut()
                         .remove_remote_selection_set(self.replica_id, set_id);
+                    None
                 }
-            };
-
-            None
+                Request::Save => Some(Box::new(self.buffer.borrow().save().then(|result| {
+                    match result {
+                        Ok(_) => Ok(Response::Saved),
+                        Err(error) => Ok(Response::Error(error)),
+                    }
+                }))),
+            }
         }
     }
 
@@ -535,6 +553,33 @@ impl Buffer {
             updates: NotifyCell::new(()),
             selections: HashMap::default(),
             next_local_selection_set_id: 0,
+            file: None,
+        }
+    }
+
+    pub fn set_file<T: 'static + fs::File>(&mut self, file: T) {
+        self.file = Some(Box::new(file));
+    }
+
+    pub fn save(&self) -> Option<Box<Future<Item = (), Error = Error>>> {
+        use std::error;
+
+        if let Some(ref client) = self.client {
+            Some(Box::new(client.request(rpc::Request::Save).then(
+                |response| match response {
+                    Ok(rpc::Response::Saved) => Ok(()),
+                    Ok(rpc::Response::Error(error)) => Err(error),
+                    Err(error) => Err(Error::RpcError(error)),
+                },
+            )))
+        } else {
+            self.file.as_ref().map(|file| {
+                Box::new(
+                    file.write_snapshot(self.snapshot()).map_err(|error| {
+                        Error::IoError(error::Error::description(&error).to_owned())
+                    }),
+                ) as Box<Future<Item = (), Error = Error>>
+            })
         }
     }
 
@@ -594,6 +639,7 @@ impl Buffer {
             updates: NotifyCell::new(()),
             selections: selection_sets,
             next_local_selection_set_id: 0,
+            file: None,
         }.into_shared();
 
         let buffer_weak = Rc::downgrade(&buffer);

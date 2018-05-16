@@ -6,7 +6,7 @@ pub use self::messages::{Response, ServiceId};
 use std::error;
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Error {
     ConnectionDropped,
     IoError(String),

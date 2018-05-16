@@ -28,7 +28,6 @@ pub trait Project {
         &self,
         buffer_id: BufferId,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>>;
-    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>>;
     fn search_paths(
         &self,
         needle: &str,
@@ -73,15 +72,11 @@ pub enum RpcRequest {
     OpenBuffer {
         buffer_id: BufferId,
     },
-    SaveBuffer {
-        buffer_id: BufferId,
-    },
 }
 
 #[derive(Deserialize, Serialize)]
 pub enum RpcResponse {
     OpenedBuffer(Result<rpc::ServiceId, Error>),
-    SavedBuffer(Result<(), Error>),
 }
 
 pub struct PathSearch {
@@ -239,25 +234,6 @@ impl Project for LocalProject {
         )
     }
 
-    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>> {
-        if let Some(file_id) = self.files_by_buffer.borrow().get(&buffer_id) {
-            if let Some(buffer) = self.buffers.borrow().get(&buffer_id).cloned() {
-                let files = self.files.borrow();
-                let file = files.get(&file_id).unwrap();
-                Box::new(
-                    file.write_snapshot(buffer.borrow().snapshot())
-                        .map_err(|error| {
-                            Error::IoError(error::Error::description(&error).to_owned())
-                        }),
-                )
-            } else {
-                Box::new(future::err(Error::BufferNotFound))
-            }
-        } else {
-            unimplemented!("Handle trying to save an unsaved buffer")
-        }
-    }
-
     fn search_paths(
         &self,
         needle: &str,
@@ -339,7 +315,6 @@ impl Project for RemoteProject {
                                             .map_err(|error| error.into())
                                     })
                             }),
-                            _ => Err(Error::UnexpectedResponse),
                         })
                 }),
         )
@@ -369,21 +344,7 @@ impl Project for RemoteProject {
                                             .map_err(|error| error.into())
                                     })
                             }),
-                            _ => Err(Error::UnexpectedResponse),
                         })
-                }),
-        )
-    }
-
-    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>> {
-        Box::new(
-            self.service
-                .borrow()
-                .request(RpcRequest::SaveBuffer { buffer_id })
-                .map_err(|error| error.into())
-                .and_then(|response| match response {
-                    RpcResponse::SavedBuffer(result) => result,
-                    _ => Err(Error::UnexpectedResponse),
                 }),
         )
     }
@@ -488,12 +449,6 @@ impl rpc::server::Service for ProjectService {
                     },
                 )))
             }
-            RpcRequest::SaveBuffer { buffer_id } => Some(Box::new(
-                self.project
-                    .borrow()
-                    .save_buffer(buffer_id)
-                    .then(|result| Ok(RpcResponse::SavedBuffer(result))),
-            )),
         }
     }
 }
