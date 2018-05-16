@@ -9,7 +9,7 @@ use rpc;
 use std::cell::{Cell, RefCell};
 use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
-use std::error::Error;
+use std::error;
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -23,11 +23,12 @@ pub trait Project {
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>>;
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>>;
     fn open_buffer(
         &self,
         buffer_id: BufferId,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>>;
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>>;
+    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>>;
     fn search_paths(
         &self,
         needle: &str,
@@ -42,7 +43,9 @@ pub struct LocalProject {
     next_buffer_id: Rc<Cell<BufferId>>,
     trees: HashMap<TreeId, Rc<fs::LocalTree>>,
     buffers: Rc<RefCell<HashMap<BufferId, Rc<RefCell<Buffer>>>>>,
-    buffers_by_file: Rc<RefCell<HashMap<fs::FileId, Rc<RefCell<Buffer>>>>>,
+    files: Rc<RefCell<HashMap<fs::FileId, Box<fs::File>>>>,
+    buffers_by_file: Rc<RefCell<HashMap<fs::FileId, BufferId>>>,
+    files_by_buffer: Rc<RefCell<HashMap<BufferId, fs::FileId>>>,
 }
 
 pub struct RemoteProject {
@@ -70,11 +73,15 @@ pub enum RpcRequest {
     OpenBuffer {
         buffer_id: BufferId,
     },
+    SaveBuffer {
+        buffer_id: BufferId,
+    },
 }
 
 #[derive(Deserialize, Serialize)]
 pub enum RpcResponse {
-    OpenedBuffer(Result<rpc::ServiceId, OpenError>),
+    OpenedBuffer(Result<rpc::ServiceId, Error>),
+    SavedBuffer(Result<(), Error>),
 }
 
 pub struct PathSearch {
@@ -115,11 +122,12 @@ enum MatchMarker {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum OpenError {
+pub enum Error {
     BufferNotFound,
     TreeNotFound,
     IoError(String),
     RpcError(rpc::Error),
+    UnexpectedResponse,
 }
 
 impl LocalProject {
@@ -133,7 +141,9 @@ impl LocalProject {
             next_buffer_id: Rc::new(Cell::new(0)),
             trees: HashMap::new(),
             buffers: Rc::new(RefCell::new(HashMap::new())),
+            files: Rc::new(RefCell::new(HashMap::new())),
             buffers_by_file: Rc::new(RefCell::new(HashMap::new())),
+            files_by_buffer: Rc::new(RefCell::new(HashMap::new())),
         };
         for tree in trees {
             project.add_tree(tree);
@@ -165,57 +175,87 @@ impl Project for LocalProject {
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
         if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
             let next_buffer_id_cell = self.next_buffer_id.clone();
             let buffers_by_file = self.buffers_by_file.clone();
+            let files_by_buffer = self.files_by_buffer.clone();
             let buffers = self.buffers.clone();
+            let files = self.files.clone();
             Box::new(
                 self.file_provider
                     .open(&absolute_path)
                     .and_then(move |file| {
-                        let buffer = buffers_by_file.borrow().get(&file.id()).cloned();
-                        if let Some(buffer) = buffer {
+                        let buffer_id = buffers_by_file.borrow().get(&file.id()).cloned();
+                        if let Some(ref buffer_id) = buffer_id {
+                            let buffer = buffers.borrow().get(buffer_id).unwrap().clone();
                             Box::new(future::ok(buffer))
                                 as Box<Future<Item = Rc<RefCell<Buffer>>, Error = io::Error>>
                         } else {
                             Box::new(file.read().and_then(move |content| {
-                                let mut buffers_by_file = buffers_by_file.borrow_mut();
-                                Ok(buffers_by_file
-                                    .entry(file.id())
-                                    .or_insert_with(|| {
-                                        let buffer_id = next_buffer_id_cell.get();
-                                        next_buffer_id_cell.set(next_buffer_id_cell.get() + 1);
-                                        let mut buffer = Buffer::new(buffer_id);
-                                        buffer.edit(&[0..0], content.as_str());
-                                        let buffer = buffer.into_shared();
-                                        buffers.borrow_mut().insert(buffer_id, buffer.clone());
-                                        buffer
-                                    })
-                                    .clone())
+                                let buffer_id = buffers_by_file.borrow().get(&file.id()).cloned();
+                                if let Some(ref buffer_id) = buffer_id {
+                                    Ok(buffers.borrow().get(buffer_id).unwrap().clone())
+                                } else {
+                                    let buffer_id = next_buffer_id_cell.get();
+                                    next_buffer_id_cell.set(next_buffer_id_cell.get() + 1);
+                                    let mut buffer = Buffer::new(buffer_id);
+                                    buffer.edit(&[0..0], content.as_str());
+                                    let buffer = buffer.into_shared();
+
+                                    let mut buffers = buffers.borrow_mut();
+                                    let mut files = files.borrow_mut();
+                                    let mut buffers_by_file = buffers_by_file.borrow_mut();
+                                    let mut files_by_buffer = files_by_buffer.borrow_mut();
+                                    buffers_by_file.insert(file.id(), buffer_id);
+                                    files_by_buffer.insert(buffer_id, file.id());
+                                    buffers.insert(buffer_id, buffer.clone());
+                                    files.insert(file.id(), file);
+
+                                    Ok(buffer)
+                                }
                             }))
                         }
                     })
                     .map_err(|error| error.into()),
             )
         } else {
-            Box::new(future::err(OpenError::TreeNotFound))
+            Box::new(future::err(Error::TreeNotFound))
         }
     }
 
     fn open_buffer(
         &self,
         buffer_id: BufferId,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
         use futures::IntoFuture;
         Box::new(
             self.buffers
                 .borrow()
                 .get(&buffer_id)
                 .cloned()
-                .ok_or(OpenError::BufferNotFound)
+                .ok_or(Error::BufferNotFound)
                 .into_future(),
         )
+    }
+
+    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>> {
+        if let Some(file_id) = self.files_by_buffer.borrow().get(&buffer_id) {
+            if let Some(buffer) = self.buffers.borrow().get(&buffer_id).cloned() {
+                let files = self.files.borrow();
+                let file = files.get(&file_id).unwrap();
+                Box::new(
+                    file.write_snapshot(buffer.borrow().snapshot())
+                        .map_err(|error| {
+                            Error::IoError(error::Error::description(&error).to_owned())
+                        }),
+                )
+            } else {
+                Box::new(future::err(Error::BufferNotFound))
+            }
+        } else {
+            unimplemented!("Handle trying to save an unsaved buffer")
+        }
     }
 
     fn search_paths(
@@ -274,7 +314,7 @@ impl Project for RemoteProject {
         &self,
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
         let foreground = self.foreground.clone();
         let service = self.service.clone();
 
@@ -299,6 +339,7 @@ impl Project for RemoteProject {
                                             .map_err(|error| error.into())
                                     })
                             }),
+                            _ => Err(Error::UnexpectedResponse),
                         })
                 }),
         )
@@ -307,7 +348,7 @@ impl Project for RemoteProject {
     fn open_buffer(
         &self,
         buffer_id: BufferId,
-    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = OpenError>> {
+    ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
         let foreground = self.foreground.clone();
         let service = self.service.clone();
         Box::new(
@@ -328,7 +369,21 @@ impl Project for RemoteProject {
                                             .map_err(|error| error.into())
                                     })
                             }),
+                            _ => Err(Error::UnexpectedResponse),
                         })
+                }),
+        )
+    }
+
+    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>> {
+        Box::new(
+            self.service
+                .borrow()
+                .request(RpcRequest::SaveBuffer { buffer_id })
+                .map_err(|error| error.into())
+                .and_then(|response| match response {
+                    RpcResponse::SavedBuffer(result) => result,
+                    _ => Err(Error::UnexpectedResponse),
                 }),
         )
     }
@@ -433,6 +488,12 @@ impl rpc::server::Service for ProjectService {
                     },
                 )))
             }
+            RpcRequest::SaveBuffer { buffer_id } => Some(Box::new(
+                self.project
+                    .borrow()
+                    .save_buffer(buffer_id)
+                    .then(|result| Ok(RpcResponse::SavedBuffer(result))),
+            )),
         }
     }
 }
@@ -667,15 +728,15 @@ impl PartialOrd for PathSearchResult {
 
 impl Eq for PathSearchResult {}
 
-impl From<io::Error> for OpenError {
+impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
-        OpenError::IoError(error.description().to_owned())
+        Error::IoError(error::Error::description(&error).to_owned())
     }
 }
 
-impl From<rpc::Error> for OpenError {
+impl From<rpc::Error> for Error {
     fn from(error: rpc::Error) -> Self {
-        OpenError::RpcError(error)
+        Error::RpcError(error)
     }
 }
 

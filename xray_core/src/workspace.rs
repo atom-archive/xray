@@ -7,8 +7,10 @@ use futures::{Future, Poll, Stream};
 use never::Never;
 use notify_cell::NotifyCell;
 use notify_cell::NotifyCellObserver;
-use project::{self, LocalProject, PathSearch, PathSearchStatus, Project, ProjectService,
-              RemoteProject, TreeId};
+use project::{
+    self, LocalProject, PathSearch, PathSearchStatus, Project, ProjectService, RemoteProject,
+    TreeId,
+};
 use rpc::{self, client, server};
 use serde_json;
 use std::cell::{Ref, RefCell, RefMut};
@@ -73,6 +75,7 @@ pub struct Anchor {
 enum WorkspaceViewAction {
     ToggleFileFinder,
     ToggleDiscussion,
+    SaveActiveBuffer,
 }
 
 impl LocalWorkspace {
@@ -216,7 +219,7 @@ impl WorkspaceView {
 
     fn open_buffer<T>(&self, buffer: T, selected_range: Option<Range<buffer::Anchor>>)
     where
-        T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = project::OpenError>,
+        T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = project::Error>,
     {
         if let Some(window_handle) = self.window_handle.clone() {
             let user_id = self.workspace.borrow().user_id();
@@ -256,6 +259,26 @@ impl WorkspaceView {
                 .unwrap();
         }
     }
+
+    fn save_active_buffer(&self) {
+        if let Some(ref active_buffer_view) = self.active_buffer_view {
+            if let Some(buffer_id) = active_buffer_view.map(|buffer_view| buffer_view.buffer_id()) {
+                let workspace = self.workspace.borrow();
+                self.foreground
+                    .execute(Box::new(workspace.project().save_buffer(buffer_id).then(
+                        |result| {
+                            if let Err(error) = result {
+                                eprintln!("Error saving buffer {:?}", error);
+                                unimplemented!("Error handling for save_buffer: {:?}", error);
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )))
+                    .unwrap();
+            }
+        }
+    }
 }
 
 impl View for WorkspaceView {
@@ -280,7 +303,8 @@ impl View for WorkspaceView {
         match serde_json::from_value(action) {
             Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(window),
             Ok(WorkspaceViewAction::ToggleDiscussion) => self.toggle_discussion(window),
-            _ => eprintln!("Unrecognized action"),
+            Ok(WorkspaceViewAction::SaveActiveBuffer) => self.save_active_buffer(),
+            Err(error) => eprintln!("Unrecognized action {}", error),
         }
     }
 }

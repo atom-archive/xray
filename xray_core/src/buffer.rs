@@ -58,6 +58,10 @@ pub struct Buffer {
     selections: HashMap<(ReplicaId, SelectionSetId), SelectionSet, BuildHasherDefault<SeaHasher>>,
 }
 
+pub struct BufferSnapshot {
+    fragments: Tree<Fragment>,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Hash)]
 pub struct Point {
     pub row: u32,
@@ -226,8 +230,10 @@ impl Version {
 }
 
 pub mod rpc {
-    use super::{Buffer, BufferId, EditId, FragmentId, Insertion, InsertionSplit, Operation,
-                ReplicaId, SelectionSetId, SelectionSetState, SelectionSetVersion, Version};
+    use super::{
+        Buffer, BufferId, EditId, FragmentId, Insertion, InsertionSplit, Operation, ReplicaId,
+        SelectionSetId, SelectionSetState, SelectionSetVersion, Version,
+    };
     use futures::{Async, Future, Stream};
     use never::Never;
     use notify_cell::NotifyCellObserver;
@@ -649,6 +655,12 @@ impl Buffer {
 
     pub fn max_point(&self) -> Point {
         self.fragments.len::<Point>()
+    }
+
+    pub fn snapshot(&self) -> BufferSnapshot {
+        BufferSnapshot {
+            fragments: self.fragments.clone(),
+        }
     }
 
     pub fn to_u16_chars(&self) -> Vec<u16> {
@@ -1643,6 +1655,24 @@ impl Buffer {
     }
 }
 
+impl BufferSnapshot {
+    pub fn iter<'a>(&'a self) -> impl 'a + Iterator<Item = &'a [u16]> {
+        self.fragments.iter().filter_map(|fragment| {
+            if fragment.is_visible() {
+                let range = fragment.start_offset..fragment.end_offset;
+                Some(&fragment.insertion.text.code_units[range])
+            } else {
+                None
+            }
+        })
+    }
+
+    #[cfg(test)]
+    pub fn to_string(&self) -> String {
+        String::from_utf16_lossy(&self.iter().flat_map(|c| c).cloned().collect::<Vec<u16>>())
+    }
+}
+
 impl Point {
     pub fn new(row: u32, column: u32) -> Self {
         Point { row, column }
@@ -2601,6 +2631,22 @@ mod tests {
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
         assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_snapshot() {
+        let mut buffer = Buffer::new(0);
+        buffer.edit(&[0..0], "abcdefghi");
+        buffer.edit(&[3..6], "DEF");
+
+        let snapshot = buffer.snapshot();
+        assert_eq!(buffer.to_string(), String::from("abcDEFghi"));
+        assert_eq!(snapshot.to_string(), String::from("abcDEFghi"));
+
+        buffer.edit(&[0..1], "A");
+        buffer.edit(&[8..9], "I");
+        assert_eq!(buffer.to_string(), String::from("AbcDEFghI"));
+        assert_eq!(snapshot.to_string(), String::from("abcDEFghi"));
     }
 
     #[test]
