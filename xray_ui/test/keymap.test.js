@@ -25,13 +25,14 @@ suite("Keymap", () => {
               { add: ["a", "b"] },
               $(Action, { type: "Action1" }),
               $(Action, { type: "Action2" }),
+              $(Action, { type: "Action3" }),
               $(
                 "div",
                 null,
                 $(
                   ActionContext,
                   { add: ["c"], remove: ["a"] },
-                  $(Action, { type: "Action3" }),
+                  $(Action, { type: "Action4" }),
                   $("div", { id: "target" })
                 )
               )
@@ -44,7 +45,7 @@ suite("Keymap", () => {
     let dispatchedActions;
     const keyBindings = [
       { key: "ctrl-a", context: "a b", action: "Action1" },
-      { key: "ctrl-a", context: "b c", action: "Action3" },
+      { key: "ctrl-a", context: "b c", action: "Action4" },
       { key: "ctrl-b", context: "a b", action: "Action2" },
       { key: "ctrl-c", context: "a b", action: "UnregisteredAction" }
     ];
@@ -56,14 +57,23 @@ suite("Keymap", () => {
     });
     const target = component.find("#target");
 
+    // Dispatch action when finding the first context/keybinding that match the event...
     dispatchedActions = [];
     target.simulate("keyDown", { ctrlKey: true, key: "a" });
-    assert.deepEqual(dispatchedActions, ["Action3"]);
+    assert.deepEqual(dispatchedActions, ["Action4"]);
 
+    // ...and walk up the DOM until a matching context is found.
     dispatchedActions = [];
     target.simulate("keyDown", { ctrlKey: true, key: "b" });
     assert.deepEqual(dispatchedActions, ["Action2"]);
 
+    // Override a previous keybinding by specifying it later in the list.
+    dispatchedActions = [];
+    keyBindings.push({ key: "ctrl-b", context: "a b", action: "Action3" });
+    target.simulate("keyDown", { ctrlKey: true, key: "b" });
+    assert.deepEqual(dispatchedActions, ["Action3"]);
+
+    // Simulate a keystroke that matches a context/keybinding but that maps to an unknown action.
     dispatchedActions = [];
     target.simulate("keyDown", { ctrlKey: true, key: "c" });
     assert.deepEqual(dispatchedActions, []);
