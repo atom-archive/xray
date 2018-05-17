@@ -3,34 +3,30 @@ const propTypes = require("prop-types");
 const React = require("react");
 const { mount } = require("./helpers/component_helpers");
 const $ = React.createElement;
-const {
-  Keymap,
-  KeymapProvider,
-  ActionContext,
-  Action
-} = require("../lib/keymap");
+const { KeymapProvider, ActionContext, Action } = require("../lib/keymap");
 
 suite("Keymap", () => {
-  test.only("dispatching an action via a keystroke", () => {
+  test("dispatching an action via a keystroke", () => {
     class Component extends React.Component {
       render() {
         return $(
           KeymapProvider,
-          { keymap },
+          { keyBindings: this.props.keyBindings },
           $(
             "div",
             null,
             $(
               ActionContext,
-              { add: ["a"] },
+              { add: ["a", "b"] },
               $(Action, { type: "Action1" }),
+              $(Action, { type: "Action2" }),
               $(
                 "div",
                 null,
                 $(
                   ActionContext,
-                  { add: ["b"] },
-                  $(Action, { type: "Action2" }),
+                  { add: ["c"], remove: ["a"] },
+                  $(Action, { type: "Action3" }),
                   $("div", { id: "target" })
                 )
               )
@@ -40,14 +36,31 @@ suite("Keymap", () => {
       }
     }
 
-    const dispatchedActions = [];
-    const keymap = new Keymap();
-
-    const component = mount($(Component), {
-      context: { dispatch: action => dispatchedActions.push(action) },
-      childContextTypes: { dispatch: propTypes.func }
+    let dispatchedActions;
+    const keyBindings = [
+      { key: "ctrl-alt-a", context: "a b", action: "Action1" },
+      { key: "ctrl-alt-a", context: "b c", action: "Action3" },
+      { key: "ctrl-alt-b", context: "a b", action: "Action2" },
+      { key: "ctrl-alt-c", context: "a b", action: "UnregisteredAction" }
+    ];
+    const component = mount($(Component, { keyBindings }), {
+      context: {
+        dispatchAction: action => dispatchedActions.push(action.type)
+      },
+      childContextTypes: { dispatchAction: propTypes.func }
     });
+    const target = component.find("#target");
 
-    component.find("#target").simulate("keyDown");
+    dispatchedActions = [];
+    target.simulate("keyDown", { ctrlKey: true, altKey: true, key: "a" });
+    assert.deepEqual(dispatchedActions, ["Action3"]);
+
+    dispatchedActions = [];
+    target.simulate("keyDown", { ctrlKey: true, altKey: true, key: "b" });
+    assert.deepEqual(dispatchedActions, ["Action2"]);
+
+    dispatchedActions = [];
+    target.simulate("keyDown", { ctrlKey: true, altKey: true, key: "c" });
+    assert.deepEqual(dispatchedActions, []);
   });
 });

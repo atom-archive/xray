@@ -26,7 +26,7 @@ class KeymapProvider extends React.Component {
   }
 
   handleKeyDown(event) {
-    const keyBindings = this.props.keyBindings;
+    const { keyBindings } = this.props;
     const keystrokeString = keystrokeStringForEvent(event);
 
     let element = event.target;
@@ -35,13 +35,14 @@ class KeymapProvider extends React.Component {
       if (actionSet) {
         for (let i = keyBindings.length - 1; i >= 0; i--) {
           const keyBinding = keyBindings[i];
+          const dispatchAction = actionSet.actions.get(keyBinding.action);
           if (
             keyBinding.key === keystrokeString &&
-            actionSet.actions.has(keyBinding.action) &&
+            dispatchAction &&
             contextMatches(actionSet.context, keyBinding.context)
           ) {
-            const dispatchAction = actionSet.actions.get(keyBinding.action);
             dispatchAction({ type: keyBinding.action });
+            return;
           }
         }
       }
@@ -64,16 +65,38 @@ KeymapProvider.childContextTypes = {
 };
 
 class ActionContext extends React.Component {
-  constructor() {
+  constructor(props) {
     super();
     this.actionSet = new ActionSet();
   }
 
+  componentWillMount() {
+    this.actionSet.context = this.context.currentActionSet
+      ? new Set(this.context.currentActionSet.context)
+      : new Set();
+
+    if (this.props.add) {
+      if (Array.isArray(this.props.add)) {
+        for (let i = 0; i < this.props.add.length; i++) {
+          this.actionSet.context.add(this.props.add[i]);
+        }
+      } else {
+        this.actionSet.context.add(this.props.add[i]);
+      }
+    }
+
+    if (this.props.remove) {
+      if (Array.isArray(this.props.remove)) {
+        for (let i = 0; i < this.props.remove.length; i++) {
+          this.actionSet.context.delete(this.props.remove[i]);
+        }
+      } else {
+        this.actionSet.context.delete(this.props.remove[i]);
+      }
+    }
+  }
+
   componentDidMount() {
-    const { context } = this.props;
-    this.actionSet.context = new Set(
-      Array.isArray(context) ? context : [context]
-    );
     this.context.actionSets.set(
       ReactDOM.findDOMNode(this).parentElement,
       this.actionSet
@@ -92,7 +115,8 @@ class ActionContext extends React.Component {
 }
 
 ActionContext.contextTypes = {
-  actionSets: propTypes.instanceOf(WeakMap)
+  actionSets: propTypes.instanceOf(WeakMap),
+  currentActionSet: propTypes.instanceOf(ActionSet)
 };
 
 ActionContext.childContextTypes = {
@@ -120,7 +144,7 @@ Action.contextTypes = {
 function keystrokeStringForEvent(event) {
   let keystroke = "";
   if (event.ctrlKey) keystroke = "ctrl";
-  if (event.altKey) keystroke = appendKeystrokeElement(keystroke, "ctrl");
+  if (event.altKey) keystroke = appendKeystrokeElement(keystroke, "alt");
   if (event.shiftKey) keystroke = appendKeystrokeElement(keystroke, "shift");
   if (event.metaKey) keystroke = appendKeystrokeElement(keystroke, "cmd");
   return appendKeystrokeElement(keystroke, event.key);
@@ -134,7 +158,16 @@ function appendKeystrokeElement(keyString, element) {
 
 function contextMatches(context, expression) {
   // TODO: Support arbitrary boolean expressions
-  return context.has(expression);
+  let expressionStartIndex = 0;
+  for (let i = 0; i < expression.length; i++) {
+    if (expression[i] == " ") {
+      const component = expression.slice(expressionStartIndex, i);
+      if (!context.has(component)) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 module.exports = { KeymapProvider, ActionContext, Action, contextMatches };
