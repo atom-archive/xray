@@ -11,7 +11,7 @@ use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
 use std::error;
 use std::io;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use ForegroundExecutor;
 use IntoShared;
@@ -28,7 +28,6 @@ pub trait Project {
         &self,
         buffer_id: BufferId,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>>;
-    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>>;
     fn search_paths(
         &self,
         needle: &str,
@@ -37,15 +36,16 @@ pub trait Project {
     ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
 }
 
+struct BufferWeakSet {
+    buffers: Vec<Weak<RefCell<Buffer>>>,
+}
+
 pub struct LocalProject {
     file_provider: Rc<fs::FileProvider>,
     next_tree_id: TreeId,
     next_buffer_id: Rc<Cell<BufferId>>,
     trees: HashMap<TreeId, Rc<fs::LocalTree>>,
-    buffers: Rc<RefCell<HashMap<BufferId, Rc<RefCell<Buffer>>>>>,
-    files: Rc<RefCell<HashMap<fs::FileId, Box<fs::File>>>>,
-    buffers_by_file: Rc<RefCell<HashMap<fs::FileId, BufferId>>>,
-    files_by_buffer: Rc<RefCell<HashMap<BufferId, fs::FileId>>>,
+    buffers: Rc<RefCell<BufferWeakSet>>,
 }
 
 pub struct RemoteProject {
@@ -73,15 +73,11 @@ pub enum RpcRequest {
     OpenBuffer {
         buffer_id: BufferId,
     },
-    SaveBuffer {
-        buffer_id: BufferId,
-    },
 }
 
 #[derive(Deserialize, Serialize)]
 pub enum RpcResponse {
     OpenedBuffer(Result<rpc::ServiceId, Error>),
-    SavedBuffer(Result<(), Error>),
 }
 
 pub struct PathSearch {
@@ -130,6 +126,50 @@ pub enum Error {
     UnexpectedResponse,
 }
 
+impl BufferWeakSet {
+    fn new() -> Self {
+        Self {
+            buffers: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, buffer: Buffer) -> Rc<RefCell<Buffer>> {
+        let buffer = Rc::new(RefCell::new(buffer));
+        self.buffers.push(Rc::downgrade(&buffer));
+        buffer
+    }
+
+    fn find_by_buffer_id(&mut self, buffer_id: BufferId) -> Option<Rc<RefCell<Buffer>>> {
+        let mut found_buffer = None;
+        self.buffers.retain(|buffer| {
+            if let Some(buffer) = buffer.upgrade() {
+                if buffer_id == buffer.borrow().id() {
+                    found_buffer = Some(buffer);
+                }
+                true
+            } else {
+                false
+            }
+        });
+        found_buffer
+    }
+
+    fn find_by_file_id(&mut self, file_id: fs::FileId) -> Option<Rc<RefCell<Buffer>>> {
+        let mut found_buffer = None;
+        self.buffers.retain(|buffer| {
+            if let Some(buffer) = buffer.upgrade() {
+                if buffer.borrow().file_id().map_or(false, |id| file_id == id) {
+                    found_buffer = Some(buffer);
+                }
+                true
+            } else {
+                false
+            }
+        });
+        found_buffer
+    }
+}
+
 impl LocalProject {
     pub fn new<T>(file_provider: Rc<fs::FileProvider>, trees: Vec<T>) -> Self
     where
@@ -140,10 +180,7 @@ impl LocalProject {
             next_tree_id: 0,
             next_buffer_id: Rc::new(Cell::new(0)),
             trees: HashMap::new(),
-            buffers: Rc::new(RefCell::new(HashMap::new())),
-            files: Rc::new(RefCell::new(HashMap::new())),
-            buffers_by_file: Rc::new(RefCell::new(HashMap::new())),
-            files_by_buffer: Rc::new(RefCell::new(HashMap::new())),
+            buffers: Rc::new(RefCell::new(BufferWeakSet::new())),
         };
         for tree in trees {
             project.add_tree(tree);
@@ -178,41 +215,27 @@ impl Project for LocalProject {
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
         if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
             let next_buffer_id_cell = self.next_buffer_id.clone();
-            let buffers_by_file = self.buffers_by_file.clone();
-            let files_by_buffer = self.files_by_buffer.clone();
             let buffers = self.buffers.clone();
-            let files = self.files.clone();
             Box::new(
                 self.file_provider
                     .open(&absolute_path)
                     .and_then(move |file| {
-                        let buffer_id = buffers_by_file.borrow().get(&file.id()).cloned();
-                        if let Some(ref buffer_id) = buffer_id {
-                            let buffer = buffers.borrow().get(buffer_id).unwrap().clone();
+                        let buffer = buffers.borrow_mut().find_by_file_id(file.id());
+                        if let Some(buffer) = buffer {
                             Box::new(future::ok(buffer))
                                 as Box<Future<Item = Rc<RefCell<Buffer>>, Error = io::Error>>
                         } else {
                             Box::new(file.read().and_then(move |content| {
-                                let buffer_id = buffers_by_file.borrow().get(&file.id()).cloned();
-                                if let Some(ref buffer_id) = buffer_id {
-                                    Ok(buffers.borrow().get(buffer_id).unwrap().clone())
+                                let buffer = buffers.borrow_mut().find_by_file_id(file.id());
+                                if let Some(buffer) = buffer {
+                                    Ok(buffer)
                                 } else {
                                     let buffer_id = next_buffer_id_cell.get();
                                     next_buffer_id_cell.set(next_buffer_id_cell.get() + 1);
                                     let mut buffer = Buffer::new(buffer_id);
                                     buffer.edit(&[0..0], content.as_str());
-                                    let buffer = buffer.into_shared();
-
-                                    let mut buffers = buffers.borrow_mut();
-                                    let mut files = files.borrow_mut();
-                                    let mut buffers_by_file = buffers_by_file.borrow_mut();
-                                    let mut files_by_buffer = files_by_buffer.borrow_mut();
-                                    buffers_by_file.insert(file.id(), buffer_id);
-                                    files_by_buffer.insert(buffer_id, file.id());
-                                    buffers.insert(buffer_id, buffer.clone());
-                                    files.insert(file.id(), file);
-
-                                    Ok(buffer)
+                                    buffer.set_file(file);
+                                    Ok(buffers.borrow_mut().insert(buffer))
                                 }
                             }))
                         }
@@ -231,31 +254,11 @@ impl Project for LocalProject {
         use futures::IntoFuture;
         Box::new(
             self.buffers
-                .borrow()
-                .get(&buffer_id)
-                .cloned()
+                .borrow_mut()
+                .find_by_buffer_id(buffer_id)
                 .ok_or(Error::BufferNotFound)
                 .into_future(),
         )
-    }
-
-    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>> {
-        if let Some(file_id) = self.files_by_buffer.borrow().get(&buffer_id) {
-            if let Some(buffer) = self.buffers.borrow().get(&buffer_id).cloned() {
-                let files = self.files.borrow();
-                let file = files.get(&file_id).unwrap();
-                Box::new(
-                    file.write_snapshot(buffer.borrow().snapshot())
-                        .map_err(|error| {
-                            Error::IoError(error::Error::description(&error).to_owned())
-                        }),
-                )
-            } else {
-                Box::new(future::err(Error::BufferNotFound))
-            }
-        } else {
-            unimplemented!("Handle trying to save an unsaved buffer")
-        }
     }
 
     fn search_paths(
@@ -339,7 +342,6 @@ impl Project for RemoteProject {
                                             .map_err(|error| error.into())
                                     })
                             }),
-                            _ => Err(Error::UnexpectedResponse),
                         })
                 }),
         )
@@ -369,21 +371,7 @@ impl Project for RemoteProject {
                                             .map_err(|error| error.into())
                                     })
                             }),
-                            _ => Err(Error::UnexpectedResponse),
                         })
-                }),
-        )
-    }
-
-    fn save_buffer(&self, buffer_id: BufferId) -> Box<Future<Item = (), Error = Error>> {
-        Box::new(
-            self.service
-                .borrow()
-                .request(RpcRequest::SaveBuffer { buffer_id })
-                .map_err(|error| error.into())
-                .and_then(|response| match response {
-                    RpcResponse::SavedBuffer(result) => result,
-                    _ => Err(Error::UnexpectedResponse),
                 }),
         )
     }
@@ -488,12 +476,6 @@ impl rpc::server::Service for ProjectService {
                     },
                 )))
             }
-            RpcRequest::SaveBuffer { buffer_id } => Some(Box::new(
-                self.project
-                    .borrow()
-                    .save_buffer(buffer_id)
-                    .then(|result| Ok(RpcResponse::SavedBuffer(result))),
-            )),
         }
     }
 }
@@ -763,6 +745,33 @@ mod tests {
         let buffer_future_2 = project.open_path(tree_id, &relative_path);
         let (buffer_1, buffer_2) = buffer_future_1.join(buffer_future_2).wait().unwrap();
         assert!(Rc::ptr_eq(&buffer_1, &buffer_2));
+    }
+
+    #[test]
+    fn test_drop_buffer_rc() {
+        let file_provider = Rc::new(TestFileProvider::new());
+        let project = build_project(file_provider.clone());
+
+        let tree_id = 0;
+        let relative_path = cross_platform::Path::from("subdir-a/subdir-1/bar");
+        let absolute_path = project.resolve_path(tree_id, &relative_path).unwrap();
+        file_provider.write_sync(absolute_path, "disk");
+
+        let buffer_1 = project.open_path(tree_id, &relative_path).wait().unwrap();
+        buffer_1.borrow_mut().edit(&[0..4], "memory");
+        let buffer_2 = project.open_path(tree_id, &relative_path).wait().unwrap();
+        assert_eq!(buffer_2.borrow().to_string(), "memory");
+
+        // Dropping only one of the two strong references does not release the buffer.
+        drop(buffer_2);
+        let buffer_3 = project.open_path(tree_id, &relative_path).wait().unwrap();
+        assert_eq!(buffer_3.borrow().to_string(), "memory");
+
+        // Dropping all strong references causes the buffer to be released.
+        drop(buffer_1);
+        drop(buffer_3);
+        let buffer_4 = project.open_path(tree_id, &relative_path).wait().unwrap();
+        assert_eq!(buffer_4.borrow().to_string(), "disk");
     }
 
     #[test]

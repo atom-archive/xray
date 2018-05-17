@@ -213,21 +213,18 @@ impl WorkspaceView {
 
     fn save_active_buffer(&self) {
         if let Some(ref active_buffer_view) = self.active_buffer_view {
-            if let Some(buffer_id) = active_buffer_view.map(|buffer_view| buffer_view.buffer_id()) {
-                let workspace = self.workspace.borrow();
+            active_buffer_view.map(|buffer_view| {
                 self.foreground
-                    .execute(Box::new(workspace.project().save_buffer(buffer_id).then(
-                        |result| {
-                            if let Err(error) = result {
-                                eprintln!("Error saving buffer {:?}", error);
-                                unimplemented!("Error handling for save_buffer: {:?}", error);
-                            } else {
-                                Ok(())
-                            }
-                        },
-                    )))
+                    .execute(Box::new(buffer_view.save().then(|result| {
+                        if let Err(error) = result {
+                            eprintln!("Error saving buffer {:?}", error);
+                            unimplemented!("Error handling for save_buffer: {:?}", error);
+                        } else {
+                            Ok(())
+                        }
+                    })))
                     .unwrap();
-            }
+            });
         }
     }
 }
