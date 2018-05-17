@@ -170,4 +170,10 @@ function contextMatches(context, expression) {
   return true;
 }
 
-module.exports = { KeymapProvider, ActionContext, Action, contextMatches };
+module.exports = {
+  KeymapProvider,
+  ActionContext,
+  Action,
+  keystrokeStringForEvent,
+  contextMatches
+};

@@ -3,7 +3,12 @@ const propTypes = require("prop-types");
 const React = require("react");
 const { mount } = require("./helpers/component_helpers");
 const $ = React.createElement;
-const { KeymapProvider, ActionContext, Action } = require("../lib/keymap");
+const {
+  KeymapProvider,
+  ActionContext,
+  Action,
+  keystrokeStringForEvent
+} = require("../lib/keymap");
 
 suite("Keymap", () => {
   test("dispatching an action via a keystroke", () => {
@@ -38,10 +43,10 @@ suite("Keymap", () => {
 
     let dispatchedActions;
     const keyBindings = [
-      { key: "ctrl-alt-a", context: "a b", action: "Action1" },
-      { key: "ctrl-alt-a", context: "b c", action: "Action3" },
-      { key: "ctrl-alt-b", context: "a b", action: "Action2" },
-      { key: "ctrl-alt-c", context: "a b", action: "UnregisteredAction" }
+      { key: "ctrl-a", context: "a b", action: "Action1" },
+      { key: "ctrl-a", context: "b c", action: "Action3" },
+      { key: "ctrl-b", context: "a b", action: "Action2" },
+      { key: "ctrl-c", context: "a b", action: "UnregisteredAction" }
     ];
     const component = mount($(Component, { keyBindings }), {
       context: {
@@ -52,15 +57,45 @@ suite("Keymap", () => {
     const target = component.find("#target");
 
     dispatchedActions = [];
-    target.simulate("keyDown", { ctrlKey: true, altKey: true, key: "a" });
+    target.simulate("keyDown", { ctrlKey: true, key: "a" });
     assert.deepEqual(dispatchedActions, ["Action3"]);
 
     dispatchedActions = [];
-    target.simulate("keyDown", { ctrlKey: true, altKey: true, key: "b" });
+    target.simulate("keyDown", { ctrlKey: true, key: "b" });
     assert.deepEqual(dispatchedActions, ["Action2"]);
 
     dispatchedActions = [];
-    target.simulate("keyDown", { ctrlKey: true, altKey: true, key: "c" });
+    target.simulate("keyDown", { ctrlKey: true, key: "c" });
     assert.deepEqual(dispatchedActions, []);
+  });
+
+  test("keystrokeStringForEvent", () => {
+    assert.equal(
+      keystrokeStringForEvent({ ctrlKey: true, key: "s" }),
+      "ctrl-s"
+    );
+    assert.equal(
+      keystrokeStringForEvent({ ctrlKey: true, altKey: true, key: "s" }),
+      "ctrl-alt-s"
+    );
+    assert.equal(
+      keystrokeStringForEvent({
+        ctrlKey: true,
+        altKey: true,
+        metaKey: true,
+        key: "s"
+      }),
+      "ctrl-alt-cmd-s"
+    );
+    assert.equal(
+      keystrokeStringForEvent({
+        ctrlKey: true,
+        altKey: true,
+        metaKey: true,
+        shiftKey: true,
+        key: "s"
+      }),
+      "ctrl-alt-shift-cmd-s"
+    );
   });
 });
