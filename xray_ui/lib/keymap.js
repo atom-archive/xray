@@ -35,13 +35,14 @@ class KeymapProvider extends React.Component {
       if (actionSet) {
         for (let i = keyBindings.length - 1; i >= 0; i--) {
           const keyBinding = keyBindings[i];
-          const dispatchAction = actionSet.actions.get(keyBinding.action);
+          const action = actionSet.actions.get(keyBinding.action);
           if (
             keyBinding.key === keystrokeString &&
-            dispatchAction &&
+            action &&
             contextMatches(actionSet.context, keyBinding.context)
           ) {
-            dispatchAction({ type: keyBinding.action });
+            if (action.onWillDispatch) action.onWillDispatch();
+            action.dispatch();
             return;
           }
         }
@@ -65,7 +66,7 @@ KeymapProvider.childContextTypes = {
 };
 
 class ActionContext extends React.Component {
-  constructor(props) {
+  constructor() {
     super();
     this.actionSet = new ActionSet();
   }
@@ -124,15 +125,24 @@ ActionContext.childContextTypes = {
 };
 
 class Action extends React.Component {
+  constructor() {
+    super();
+    this.dispatch = this.dispatch.bind(this);
+  }
+
   render() {
     return null;
   }
 
   componentDidMount() {
-    this.context.currentActionSet.actions.set(
-      this.props.type,
-      this.context.dispatchAction
-    );
+    this.context.currentActionSet.actions.set(this.props.type, {
+      onWillDispatch: this.props.onWillDispatch,
+      dispatch: this.dispatch
+    });
+  }
+
+  dispatch() {
+    this.context.dispatchAction({ type: this.props.type });
   }
 }
 

@@ -12,35 +12,32 @@ const {
 
 suite("Keymap", () => {
   test("dispatching an action via a keystroke", () => {
-    class Component extends React.Component {
-      render() {
-        return $(
-          KeymapProvider,
-          { keyBindings: this.props.keyBindings },
+    const Component = props =>
+      $(
+        KeymapProvider,
+        { keyBindings: props.keyBindings },
+        $(
+          "div",
+          null,
           $(
-            "div",
-            null,
+            ActionContext,
+            { add: ["a", "b"] },
+            $(Action, { type: "Action1" }),
+            $(Action, { type: "Action2" }),
+            $(Action, { type: "Action3" }),
             $(
-              ActionContext,
-              { add: ["a", "b"] },
-              $(Action, { type: "Action1" }),
-              $(Action, { type: "Action2" }),
-              $(Action, { type: "Action3" }),
+              "div",
+              null,
               $(
-                "div",
-                null,
-                $(
-                  ActionContext,
-                  { add: ["c"], remove: ["a"] },
-                  $(Action, { type: "Action4" }),
-                  $("div", { id: "target" })
-                )
+                ActionContext,
+                { add: ["c"], remove: ["a"] },
+                $(Action, { type: "Action4" }),
+                $("div", { id: "target" })
               )
             )
           )
-        );
-      }
-    }
+        )
+      );
 
     let dispatchedActions;
     const keyBindings = [
@@ -77,6 +74,40 @@ suite("Keymap", () => {
     dispatchedActions = [];
     target.simulate("keyDown", { ctrlKey: true, key: "c" });
     assert.deepEqual(dispatchedActions, []);
+  });
+
+  test("pre-dispatch hook", () => {
+    let preDispatchHooks = 0;
+    const Component = props =>
+      $(
+        KeymapProvider,
+        { keyBindings: props.keyBindings },
+        $(
+          "div",
+          null,
+          $(
+            ActionContext,
+            { add: ["some-context"] },
+            $(Action, {
+              onWillDispatch: () => preDispatchHooks++,
+              type: "Action"
+            }),
+            $("div", { id: "target" })
+          )
+        )
+      );
+
+    const component = mount(
+      $(Component, {
+        keyBindings: [{ key: "a", context: "some-context", action: "Action" }]
+      }),
+      {
+        context: { dispatchAction: () => {} },
+        childContextTypes: { dispatchAction: propTypes.func }
+      }
+    );
+    component.find("#target").simulate("keydown", { key: "a" });
+    assert.equal(preDispatchHooks, 1);
   });
 
   test("keystrokeStringForEvent", () => {
