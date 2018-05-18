@@ -66,13 +66,11 @@ class Workspace extends React.Component {
     }
 
     return $(
-      Root,
-      {
-        tabIndex: -1
-      },
+      ActionContext,
+      { context: "Workspace" },
       $(
-        ActionContext,
-        { context: "Workspace" },
+        Root,
+        { tabIndex: -1 },
         leftPanel,
         $(Pane, null, $(PaneInner, null, centerItem)),
         modal,
