@@ -5,7 +5,7 @@ const { styled } = require("styletron-react");
 const TextPlane = require("./text_plane");
 const debounce = require("../debounce");
 const $ = React.createElement;
-const { ActionContext, Action } = require("../keymap");
+const { ActionContext, Action } = require("../action_dispatcher");
 
 const CURSOR_BLINK_RESUME_DELAY = 300;
 const CURSOR_BLINK_PERIOD = 800;

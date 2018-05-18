@@ -2,7 +2,7 @@ const propTypes = require("prop-types");
 const React = require("react");
 const { Client: StyletronClient } = require("styletron-engine-atomic");
 const { Provider: StyletronProvider } = require("styletron-react");
-const { KeymapProvider } = require("./keymap");
+const { ActionDispatcher } = require("./action_dispatcher");
 const TextEditor = require("./text_editor/text_editor");
 const ThemeProvider = require("./theme_provider");
 const View = require("./view");
@@ -70,7 +70,7 @@ class App extends React.Component {
       $(
         ThemeProvider,
         { theme },
-        $(KeymapProvider, { keyBindings }, $(View, { id: 0 }))
+        $(ActionDispatcher, { keyBindings }, $(View, { id: 0 }))
       )
     );
   }

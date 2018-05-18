@@ -4,7 +4,7 @@ const ReactDOM = require("react-dom");
 const { styled } = require("styletron-react");
 const Modal = require("./modal");
 const View = require("./view");
-const { ActionContext, Action } = require("./keymap");
+const { ActionContext, Action } = require("./action_dispatcher");
 const $ = React.createElement;
 
 const Root = styled("div", {

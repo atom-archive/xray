@@ -13,7 +13,7 @@ class ActionSet {
   }
 }
 
-class KeymapProvider extends React.Component {
+class ActionDispatcher extends React.Component {
   constructor() {
     super();
     this.handleKeyDown = this.handleKeyDown.bind(this);
@@ -60,7 +60,7 @@ class KeymapProvider extends React.Component {
   }
 }
 
-KeymapProvider.childContextTypes = {
+ActionDispatcher.childContextTypes = {
   actionSets: propTypes.instanceOf(WeakMap),
   currentActionSet: propTypes.instanceOf(ActionSet)
 };
@@ -192,7 +192,7 @@ function contextMatches(context, expression) {
 }
 
 module.exports = {
-  KeymapProvider,
+  ActionDispatcher,
   ActionContext,
   Action,
   keystrokeStringForEvent,

@@ -4,17 +4,17 @@ const React = require("react");
 const { mount } = require("./helpers/component_helpers");
 const $ = React.createElement;
 const {
-  KeymapProvider,
+  ActionDispatcher,
   ActionContext,
   Action,
   keystrokeStringForEvent
-} = require("../lib/keymap");
+} = require("../lib/action_dispatcher");
 
-suite("Keymap", () => {
+suite("ActionDispatcher", () => {
   test("dispatching an action via a keystroke", () => {
     const Component = props =>
       $(
-        KeymapProvider,
+        ActionDispatcher,
         { keyBindings: props.keyBindings },
         $(
           "div",
@@ -80,7 +80,7 @@ suite("Keymap", () => {
     let preDispatchHooks = 0;
     const Component = props =>
       $(
-        KeymapProvider,
+        ActionDispatcher,
         { keyBindings: props.keyBindings },
         $(
           "div",

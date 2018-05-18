@@ -2,7 +2,7 @@ const React = require("react");
 const ReactDOM = require("react-dom");
 const { styled } = require("styletron-react");
 const $ = React.createElement;
-const { ActionContext, Action } = require("./keymap");
+const { ActionContext, Action } = require("./action_dispatcher");
 
 const Root = styled("div", {
   boxShadow: "0 6px 12px -2px rgba(0, 0, 0, 0.4)",
