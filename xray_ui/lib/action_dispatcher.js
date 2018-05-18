@@ -98,10 +98,12 @@ class ActionContext extends React.Component {
   }
 
   componentDidMount() {
-    this.context.actionSets.set(
-      ReactDOM.findDOMNode(this).parentElement,
-      this.actionSet
-    );
+    if (this.context.actionSets) {
+      this.context.actionSets.set(
+        ReactDOM.findDOMNode(this).parentElement,
+        this.actionSet
+      );
+    }
   }
 
   render() {
