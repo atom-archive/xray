@@ -82,7 +82,7 @@ class ActionContext extends React.Component {
           this.actionSet.context.add(this.props.add[i]);
         }
       } else {
-        this.actionSet.context.add(this.props.add[i]);
+        this.actionSet.context.add(this.props.add);
       }
     }
 
@@ -92,7 +92,7 @@ class ActionContext extends React.Component {
           this.actionSet.context.delete(this.props.remove[i]);
         }
       } else {
-        this.actionSet.context.delete(this.props.remove[i]);
+        this.actionSet.context.delete(this.props.remove);
       }
     }
   }

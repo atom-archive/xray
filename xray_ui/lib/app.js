@@ -30,7 +30,20 @@ const theme = {
 // TODO: Eventually, the keyBindings should be provided to the view by the server
 const keyBindings = [
   { key: "cmd-t", context: "Workspace", action: "ToggleFileFinder" },
-  { key: "cmd-s", context: "Workspace", action: "SaveActiveBuffer" }
+  { key: "ctrl-t", context: "Workspace", action: "ToggleFileFinder" },
+  { key: "cmd-s", context: "Workspace", action: "SaveActiveBuffer" },
+  { key: "alt-shift-up", context: "TextEditor", action: "AddSelectionAbove" },
+  { key: "alt-shift-down", context: "TextEditor", action: "AddSelectionBelow" },
+  { key: "shift-up", context: "TextEditor", action: "SelectUp" },
+  { key: "shift-down", context: "TextEditor", action: "SelectDown" },
+  { key: "shift-left", context: "TextEditor", action: "SelectLeft" },
+  { key: "shift-right", context: "TextEditor", action: "SelectRight" },
+  { key: "up", context: "TextEditor", action: "MoveUp" },
+  { key: "down", context: "TextEditor", action: "MoveDown" },
+  { key: "left", context: "TextEditor", action: "MoveLeft" },
+  { key: "right", context: "TextEditor", action: "MoveRight" },
+  { key: "backspace", context: "TextEditor", action: "Backspace" },
+  { key: "delete", context: "TextEditor", action: "Delete" }
 ];
 
 const styletronInstance = new StyletronClient();

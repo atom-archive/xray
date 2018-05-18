@@ -5,6 +5,7 @@ const { styled } = require("styletron-react");
 const TextPlane = require("./text_plane");
 const debounce = require("../debounce");
 const $ = React.createElement;
+const { ActionContext, Action } = require("../keymap");
 
 const CURSOR_BLINK_RESUME_DELAY = 300;
 const CURSOR_BLINK_PERIOD = 800;
@@ -38,6 +39,7 @@ class TextEditor extends React.Component {
     super(props);
     this.handleMouseWheel = this.handleMouseWheel.bind(this);
     this.handleKeyDown = this.handleKeyDown.bind(this);
+    this.pauseCursorBlinking = this.pauseCursorBlinking.bind(this);
     this.debouncedStartCursorBlinking = debounce(
       this.startCursorBlinking.bind(this),
       CURSOR_BLINK_RESUME_DELAY
@@ -89,25 +91,62 @@ class TextEditor extends React.Component {
 
   render() {
     return $(
-      Root,
-      {
-        tabIndex: -1,
-        onKeyDown: this.handleKeyDown,
-        $ref: element => {
-          this.element = element;
-        }
-      },
-      $(TextPlane, {
-        showLocalCursors: this.state.showLocalCursors,
-        lineHeight: this.props.line_height,
-        scrollTop: this.props.scroll_top,
-        paddingLeft: 5,
-        height: this.props.height,
-        width: this.props.width,
-        selections: this.props.selections,
-        firstVisibleRow: this.props.first_visible_row,
-        lines: this.props.lines,
-      })
+      ActionContext,
+      { add: "TextEditor" },
+      $(
+        Root,
+        {
+          tabIndex: -1,
+          onKeyDown: this.handleKeyDown,
+          $ref: element => {
+            this.element = element;
+          }
+        },
+        $(TextPlane, {
+          showLocalCursors: this.state.showLocalCursors,
+          lineHeight: this.props.line_height,
+          scrollTop: this.props.scroll_top,
+          paddingLeft: 5,
+          height: this.props.height,
+          width: this.props.width,
+          selections: this.props.selections,
+          firstVisibleRow: this.props.first_visible_row,
+          lines: this.props.lines
+        })
+      ),
+      $(Action, {
+        type: "AddSelectionAbove",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, {
+        type: "AddSelectionBelow",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, { type: "SelectUp", onWillDispatch: this.pauseCursorBlinking }),
+      $(Action, {
+        type: "SelectDown",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, {
+        type: "SelectLeft",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, {
+        type: "SelectRight",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, { type: "MoveUp", onWillDispatch: this.pauseCursorBlinking }),
+      $(Action, { type: "MoveDown", onWillDispatch: this.pauseCursorBlinking }),
+      $(Action, { type: "MoveLeft", onWillDispatch: this.pauseCursorBlinking }),
+      $(Action, {
+        type: "MoveRight",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, {
+        type: "Backspace",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, { type: "Delete", onWillDispatch: this.pauseCursorBlinking })
     );
   }
 
@@ -116,18 +155,11 @@ class TextEditor extends React.Component {
   }
 
   handleKeyDown(event) {
-    if (event.key.length === 1 && !event.metaKey) {
+    const hasNoModifierKeys = !event.metaKey && !event.ctrlKey && !event.altKey;
+    if (event.key.length === 1 && hasNoModifierKeys) {
       this.props.dispatch({ type: "Edit", text: event.key });
-      return;
-    } else if (event.key === 'Enter') {
-      this.props.dispatch({type: 'Edit', text: '\n'});
-      return;
-    }
-
-    const action = actionForKeyDownEvent(event);
-    if (action) {
-      this.pauseCursorBlinking();
-      this.props.dispatch({ type: action });
+    } else if (event.key === "Enter") {
+      this.props.dispatch({ type: "Edit", text: "\n" });
     }
   }
 
@@ -162,35 +194,6 @@ class TextEditor extends React.Component {
 
   focus() {
     this.element.focus();
-  }
-}
-
-function actionForKeyDownEvent(event) {
-  switch (event.key) {
-    case "ArrowUp":
-      if (event.ctrlKey && event.shiftKey) {
-        return "AddSelectionAbove";
-      } else if (event.shiftKey) {
-        return "SelectUp";
-      } else {
-        return "MoveUp";
-      }
-    case "ArrowDown":
-      if (event.ctrlKey && event.shiftKey) {
-        return "AddSelectionBelow";
-      } else if (event.shiftKey) {
-        return "SelectDown";
-      } else {
-        return "MoveDown";
-      }
-    case "ArrowLeft":
-      return event.shiftKey ? "SelectLeft" : "MoveLeft";
-    case "ArrowRight":
-      return event.shiftKey ? "SelectRight" : "MoveRight";
-    case "Backspace":
-      return "Backspace";
-    case "Delete":
-      return "Delete";
   }
 }
 
