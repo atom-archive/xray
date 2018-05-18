@@ -157,7 +157,18 @@ function keystrokeStringForEvent(event) {
   if (event.altKey) keystroke = appendKeystrokeElement(keystroke, "alt");
   if (event.shiftKey) keystroke = appendKeystrokeElement(keystroke, "shift");
   if (event.metaKey) keystroke = appendKeystrokeElement(keystroke, "cmd");
-  return appendKeystrokeElement(keystroke, event.key);
+  switch (event.key) {
+    case "ArrowDown":
+      return appendKeystrokeElement(keystroke, "down");
+    case "ArrowUp":
+      return appendKeystrokeElement(keystroke, "up");
+    case "ArrowLeft":
+      return appendKeystrokeElement(keystroke, "left");
+    case "ArrowRight":
+      return appendKeystrokeElement(keystroke, "right");
+    default:
+      return appendKeystrokeElement(keystroke, event.key.toLowerCase());
+  }
 }
 
 function appendKeystrokeElement(keyString, element) {

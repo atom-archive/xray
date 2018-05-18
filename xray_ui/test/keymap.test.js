@@ -111,6 +111,13 @@ suite("Keymap", () => {
   });
 
   test("keystrokeStringForEvent", () => {
+    assert.equal(keystrokeStringForEvent({ key: "a" }), "a");
+    assert.equal(keystrokeStringForEvent({ key: "Backspace" }), "backspace");
+    assert.equal(keystrokeStringForEvent({ key: "ArrowUp" }), "up");
+    assert.equal(keystrokeStringForEvent({ key: "ArrowDown" }), "down");
+    assert.equal(keystrokeStringForEvent({ key: "ArrowLeft" }), "left");
+    assert.equal(keystrokeStringForEvent({ key: "ArrowRight" }), "right");
+
     assert.equal(
       keystrokeStringForEvent({ ctrlKey: true, key: "s" }),
       "ctrl-s"
