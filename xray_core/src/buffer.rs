@@ -6,7 +6,7 @@ use notify_cell::{NotifyCell, NotifyCellObserver};
 use seahash::SeaHasher;
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
-use std::cmp;
+use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::BuildHasherDefault;
@@ -140,7 +140,14 @@ pub struct Deletion {
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Text {
     code_units: Vec<u16>,
-    newline_offsets: Vec<usize>,
+    nodes: Vec<LineNode>,
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+struct LineNode {
+    len: u32,
+    offset: usize,
+    rows: u32,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
@@ -822,14 +829,14 @@ impl Buffer {
                                 )
                                 .unwrap()
                             {
-                                cmp::Ordering::Less => {
+                                Ordering::Less => {
                                     selections.push(old_selections.next().unwrap());
                                 }
-                                cmp::Ordering::Equal => {
+                                Ordering::Equal => {
                                     selections.push(old_selections.next().unwrap());
                                     selections.push(new_selections.next().unwrap());
                                 }
-                                cmp::Ordering::Greater => {
+                                Ordering::Greater => {
                                     selections.push(new_selections.next().unwrap());
                                 }
                             }
@@ -873,10 +880,10 @@ impl Buffer {
             if let Some(mut prev_selection) = old_selections.next() {
                 for selection in old_selections {
                     if self.cmp_anchors(&prev_selection.end, &selection.start)
-                        .unwrap() >= cmp::Ordering::Equal
+                        .unwrap() >= Ordering::Equal
                     {
                         if self.cmp_anchors(&selection.end, &prev_selection.end)
-                            .unwrap() > cmp::Ordering::Equal
+                            .unwrap() > Ordering::Equal
                         {
                             prev_selection.end = selection.end;
                         }
@@ -1686,7 +1693,7 @@ impl Buffer {
         }
     }
 
-    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<cmp::Ordering, Error> {
+    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<Ordering, Error> {
         let a_offset = self.offset_for_anchor(a)?;
         let b_offset = self.offset_for_anchor(b)?;
         Ok(a_offset.cmp(&b_offset))
@@ -1784,23 +1791,23 @@ impl AddAssign for Point {
 }
 
 impl PartialOrd for Point {
-    fn partial_cmp(&self, other: &Point) -> Option<cmp::Ordering> {
+    fn partial_cmp(&self, other: &Point) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Point {
     #[cfg(target_pointer_width = "64")]
-    fn cmp(&self, other: &Point) -> cmp::Ordering {
+    fn cmp(&self, other: &Point) -> Ordering {
         let a = (self.row as usize) << 32 | self.column as usize;
         let b = (other.row as usize) << 32 | other.column as usize;
         a.cmp(&b)
     }
 
     #[cfg(target_pointer_width = "32")]
-    fn cmp(&self, other: &Point) -> cmp::Ordering {
+    fn cmp(&self, other: &Point) -> Ordering {
         match self.row.cmp(&other.row) {
-            cmp::Ordering::Equal => self.column.cmp(&other.column),
+            Ordering::Equal => self.column.cmp(&other.column),
             comparison @ _ => comparison,
         }
     }
@@ -1886,7 +1893,7 @@ impl Selection {
     }
 
     pub fn set_head(&mut self, buffer: &Buffer, cursor: Anchor) {
-        if buffer.cmp_anchors(&cursor, self.tail()).unwrap() < cmp::Ordering::Equal {
+        if buffer.cmp_anchors(&cursor, self.tail()).unwrap() < Ordering::Equal {
             if !self.reversed {
                 mem::swap(&mut self.start, &mut self.end);
                 self.reversed = true;
@@ -1910,7 +1917,7 @@ impl Selection {
     }
 
     pub fn is_empty(&self, buffer: &Buffer) -> bool {
-        buffer.cmp_anchors(&self.start, &self.end).unwrap() == cmp::Ordering::Equal
+        buffer.cmp_anchors(&self.start, &self.end).unwrap() == Ordering::Equal
     }
 
     pub fn anchor_range(&self) -> Range<Anchor> {
@@ -1920,22 +1927,70 @@ impl Selection {
 
 impl Text {
     fn new(code_units: Vec<u16>) -> Self {
-        let newline_offsets = code_units
-            .iter()
-            .enumerate()
-            .filter_map(|(offset, c)| {
-                if *c == u16::from(b'\n') {
-                    Some(offset)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        fn build_tree(index: usize, line_lengths: &[u32], mut tree: &mut [LineNode]) {
+            if line_lengths.is_empty() {
+                return;
+            }
 
-        Self {
-            code_units,
-            newline_offsets,
+            let mid = if line_lengths.len() == 1 {
+                0
+            } else {
+                let depth = log2_fast(line_lengths.len());
+                let max_elements = (1 << (depth)) - 1;
+                let right_subtree_elements = 1 << (depth - 1);
+                cmp::min(line_lengths.len() - right_subtree_elements, max_elements)
+            };
+            let len = line_lengths[mid];
+            let lower = &line_lengths[0..mid];
+            let upper = &line_lengths[mid + 1..];
+
+            let left_child_index = index * 2 + 1;
+            let right_child_index = index * 2 + 2;
+            build_tree(left_child_index, lower, &mut tree);
+            build_tree(right_child_index, upper, &mut tree);
+            tree[index] = {
+                let mut left_child_offset = 0;
+                let mut left_child_rows = 0;
+                if let Some(left_child) = tree.get(left_child_index) {
+                    left_child_offset = left_child.offset;
+                    left_child_rows = left_child.rows;
+                }
+                let mut right_child_offset = 0;
+                let mut right_child_rows = 0;
+                if let Some(right_child) = tree.get(right_child_index) {
+                    right_child_offset = right_child.offset;
+                    right_child_rows = right_child.rows;
+                }
+                LineNode {
+                    len,
+                    offset: left_child_offset + len as usize + right_child_offset + 1,
+                    rows: left_child_rows + right_child_rows + 1,
+                }
+            };
         }
+
+        let mut line_lengths = Vec::new();
+        let mut prev_offset = 0;
+        for (offset, code_unit) in code_units.iter().enumerate() {
+            if code_unit == &u16::from(b'\n') {
+                line_lengths.push((offset - prev_offset) as u32);
+                prev_offset = offset + 1;
+            }
+        }
+        line_lengths.push((code_units.len() - prev_offset) as u32);
+
+        let mut nodes = Vec::new();
+        nodes.resize(
+            line_lengths.len(),
+            LineNode {
+                len: 0,
+                offset: 0,
+                rows: 0,
+            },
+        );
+        build_tree(0, &line_lengths, &mut nodes);
+
+        Self { code_units, nodes }
     }
 
     fn len(&self) -> usize {
@@ -1943,42 +1998,51 @@ impl Text {
     }
 
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
-        if offset > self.len() {
-            Err(Error::OffsetOutOfRange)
-        } else {
-            let row = find_insertion_index(&self.newline_offsets, &offset);
-            let row_start_offset = if row == 0 {
-                0
+        let mut left_ancestor_offset = 0;
+        let mut left_ancestor_row = 0;
+        let mut cur_node_index = 0;
+        while let Some(cur_node) = self.nodes.get(cur_node_index) {
+            let left_child = self.nodes.get(cur_node_index * 2 + 1);
+            let cur_offset_start = left_ancestor_offset + left_child.map_or(0, |node| node.offset);
+            let cur_offset_end = cur_offset_start + cur_node.len as usize;
+            let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
+            if offset < cur_offset_start {
+                cur_node_index = cur_node_index * 2 + 1;
+            } else if offset > cur_offset_end {
+                cur_node_index = cur_node_index * 2 + 2;
+                left_ancestor_offset = cur_offset_end + 1;
+                left_ancestor_row = cur_row + 1;
             } else {
-                self.newline_offsets[row - 1] + 1
-            };
-
-            Ok(Point {
-                row: row as u32,
-                column: (offset - row_start_offset) as u32,
-            })
+                return Ok(Point::new(cur_row, (offset - cur_offset_start) as u32));
+            }
         }
+        Err(Error::OffsetOutOfRange)
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
-        let row_start_offset = if point.row == 0 {
-            0
-        } else {
-            self.newline_offsets[(point.row - 1) as usize] + 1
-        };
-
-        let row_end_offset = if self.newline_offsets.len() > point.row as usize {
-            self.newline_offsets[point.row as usize]
-        } else {
-            self.len()
-        };
-
-        let target_offset = row_start_offset + point.column as usize;
-        if target_offset <= row_end_offset {
-            Ok(target_offset)
-        } else {
-            Err(Error::OffsetOutOfRange)
+        let mut left_ancestor_offset = 0;
+        let mut left_ancestor_row = 0;
+        let mut cur_node_index = 0;
+        while let Some(cur_node) = self.nodes.get(cur_node_index) {
+            let left_child = self.nodes.get(cur_node_index * 2 + 1);
+            let cur_offset_start = left_ancestor_offset + left_child.map_or(0, |node| node.offset);
+            let cur_offset_end = cur_offset_start + cur_node.len as usize;
+            let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
+            if point.row < cur_row {
+                cur_node_index = cur_node_index * 2 + 1;
+            } else if point.row > cur_row {
+                cur_node_index = cur_node_index * 2 + 2;
+                left_ancestor_offset = cur_offset_end + 1;
+                left_ancestor_row = cur_row + 1;
+            } else {
+                if point.column > cur_node.len {
+                    return Err(Error::OffsetOutOfRange);
+                } else {
+                    return Ok(cur_offset_start + point.column as usize);
+                }
+            }
         }
+        Err(Error::OffsetOutOfRange)
     }
 }
 
@@ -1992,6 +2056,11 @@ impl<'a> From<Vec<u16>> for Text {
     fn from(s: Vec<u16>) -> Self {
         Self::new(s)
     }
+}
+
+#[inline(always)]
+fn log2_fast(x: usize) -> usize {
+    8 * mem::size_of::<usize>() - (x.leading_zeros() as usize) - 1
 }
 
 lazy_static! {
@@ -2286,22 +2355,15 @@ impl Operation {
     }
 }
 
-fn find_insertion_index<T: Ord>(v: &Vec<T>, x: &T) -> usize {
-    match v.binary_search(x) {
-        Ok(index) => index,
-        Err(index) => index,
-    }
-}
-
 fn should_insert_before(
     insertion: &Insertion,
     other_timestamp: LamportTimestamp,
     other_replica_id: ReplicaId,
 ) -> bool {
     match insertion.timestamp.cmp(&other_timestamp) {
-        cmp::Ordering::Less => true,
-        cmp::Ordering::Equal => insertion.id.replica_id < other_replica_id,
-        cmp::Ordering::Greater => false,
+        Ordering::Less => true,
+        Ordering::Equal => insertion.id.replica_id < other_replica_id,
+        Ordering::Greater => false,
     }
 }
 
@@ -2312,7 +2374,6 @@ mod tests {
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
     use rpc;
-    use std::cmp::Ordering;
     use std::time::Duration;
     use tokio_core::reactor;
     use IntoShared;
@@ -2933,7 +2994,7 @@ mod tests {
             }
         }
         selections.sort_by(|a, b| match a.0.cmp(&b.0) {
-            cmp::Ordering::Equal => a.1.cmp(&b.1),
+            Ordering::Equal => a.1.cmp(&b.1),
             comparison @ _ => comparison,
         });
 
