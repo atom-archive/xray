@@ -146,6 +146,8 @@ pub struct Text {
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 struct LineNode {
     len: u32,
+    longest_row: u32,
+    longest_row_len: u32,
     offset: usize,
     rows: u32,
 }
@@ -1949,20 +1951,46 @@ impl Text {
             build_tree(left_child_index, lower, &mut tree);
             build_tree(right_child_index, upper, &mut tree);
             tree[index] = {
+                let mut left_child_longest_row = 0;
+                let mut left_child_longest_row_len = 0;
                 let mut left_child_offset = 0;
                 let mut left_child_rows = 0;
                 if let Some(left_child) = tree.get(left_child_index) {
+                    left_child_longest_row = left_child.longest_row;
+                    left_child_longest_row_len = left_child.longest_row_len;
                     left_child_offset = left_child.offset;
                     left_child_rows = left_child.rows;
                 }
+                let mut right_child_longest_row = 0;
+                let mut right_child_longest_row_len = 0;
                 let mut right_child_offset = 0;
                 let mut right_child_rows = 0;
                 if let Some(right_child) = tree.get(right_child_index) {
+                    right_child_longest_row = right_child.longest_row;
+                    right_child_longest_row_len = right_child.longest_row_len;
                     right_child_offset = right_child.offset;
                     right_child_rows = right_child.rows;
                 }
+
+                let mut longest_row = 0;
+                let mut longest_row_len = 0;
+                if left_child_longest_row_len > longest_row_len {
+                    longest_row = left_child_longest_row;
+                    longest_row_len = left_child_longest_row_len;
+                }
+                if len > longest_row_len {
+                    longest_row = left_child_rows;
+                    longest_row_len = len;
+                }
+                if right_child_longest_row_len > longest_row_len {
+                    longest_row = left_child_rows + right_child_longest_row + 1;
+                    longest_row_len = right_child_longest_row_len;
+                }
+
                 LineNode {
                     len,
+                    longest_row,
+                    longest_row_len,
                     offset: left_child_offset + len as usize + right_child_offset + 1,
                     rows: left_child_rows + right_child_rows + 1,
                 }
@@ -1984,6 +2012,8 @@ impl Text {
             line_lengths.len(),
             LineNode {
                 len: 0,
+                longest_row_len: 0,
+                longest_row: 0,
                 offset: 0,
                 rows: 0,
             },
@@ -1995,6 +2025,109 @@ impl Text {
 
     fn len(&self) -> usize {
         self.code_units.len()
+    }
+
+    fn longest_row_in_range(&self, target_range: Range<usize>) -> Result<u32, Error> {
+        let mut longest_row = 0;
+        let mut longest_row_len = 0;
+
+        {
+            let mut left_ancestor_end_offset = 0;
+            let mut left_ancestor_row = 0;
+            let mut right_ancestor_start_offset = self.nodes[0].offset;
+            let mut cur_node_index = 0;
+            while let Some(cur_node) = self.nodes.get(cur_node_index) {
+                let left_child = self.nodes.get(cur_node_index * 2 + 1);
+                let cur_offset_range = {
+                    let start = left_ancestor_end_offset + left_child.map_or(0, |node| node.offset);
+                    let end = start + cur_node.len as usize;
+                    start..end
+                };
+                let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
+
+                if target_range.start <= cur_offset_range.end
+                    && right_ancestor_start_offset <= target_range.end
+                {
+                    if let Some(right_child) = self.nodes.get(cur_node_index * 2 + 2) {
+                        if right_child.longest_row_len >= longest_row_len {
+                            longest_row = cur_row + 1 + right_child.longest_row;
+                            longest_row_len = right_child.longest_row_len;
+                        }
+                    }
+                }
+
+                if target_range.start < cur_offset_range.start {
+                    if cur_offset_range.end < target_range.end && cur_node.len >= longest_row_len {
+                        longest_row = cur_row;
+                        longest_row_len = cur_node.len;
+                    }
+
+                    cur_node_index = cur_node_index * 2 + 1;
+                    right_ancestor_start_offset = cur_offset_range.start;
+                } else if target_range.start > cur_offset_range.end {
+                    cur_node_index = cur_node_index * 2 + 2;
+                    left_ancestor_end_offset = cur_offset_range.end + 1;
+                    left_ancestor_row = cur_row + 1;
+                } else {
+                    let node_end = cmp::min(cur_offset_range.end, target_range.end);
+                    let node_len = (node_end - target_range.start) as u32;
+                    if node_len >= longest_row_len {
+                        longest_row = cur_row;
+                        longest_row_len = node_len;
+                    }
+                    break;
+                }
+            }
+        }
+
+        {
+            let mut left_ancestor_end_offset = 0;
+            let mut left_ancestor_row = 0;
+            let mut cur_node_index = 0;
+            while let Some(cur_node) = self.nodes.get(cur_node_index) {
+                let left_child = self.nodes.get(cur_node_index * 2 + 1);
+                let cur_offset_range = {
+                    let start = left_ancestor_end_offset + left_child.map_or(0, |node| node.offset);
+                    let end = start + cur_node.len as usize;
+                    start..end
+                };
+                let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
+
+                if target_range.end >= cur_offset_range.start
+                    && left_ancestor_end_offset >= target_range.start
+                {
+                    if let Some(left_child) = left_child {
+                        if left_child.longest_row_len > longest_row_len {
+                            longest_row = left_ancestor_row + left_child.longest_row;
+                            longest_row_len = left_child.longest_row_len;
+                        }
+                    }
+                }
+
+                if target_range.end < cur_offset_range.start {
+                    cur_node_index = cur_node_index * 2 + 1;
+                } else if target_range.end > cur_offset_range.end {
+                    if target_range.start < cur_offset_range.start && cur_node.len > longest_row_len
+                    {
+                        longest_row = cur_row;
+                        longest_row_len = cur_node.len;
+                    }
+
+                    cur_node_index = cur_node_index * 2 + 2;
+                    left_ancestor_end_offset = cur_offset_range.end + 1;
+                    left_ancestor_row = cur_row + 1;
+                } else {
+                    let node_start = cmp::max(target_range.start, cur_offset_range.start);
+                    let node_len = (target_range.end - node_start) as u32;
+                    if node_len > longest_row_len {
+                        longest_row = cur_row;
+                    }
+                    break;
+                }
+            }
+        }
+
+        Ok(longest_row)
     }
 
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
@@ -2568,6 +2701,48 @@ mod tests {
     }
 
     #[test]
+    fn test_longest_row_in_range() {
+        for seed in 0..10000 {
+            println!("{:?}", seed);
+            let mut rng = StdRng::from_seed(&[seed]);
+            let string = RandomCharIter(rng)
+                .take(rng.gen_range(1, 10))
+                .collect::<String>();
+            let text = Text::from(string.as_ref());
+
+            for _i in 0..10 {
+                let end = rng.gen_range(1, string.len() + 1);
+                let start = rng.gen_range(0, end);
+
+                let mut cur_row = string[0..start].chars().filter(|c| *c == '\n').count() as u32;
+                let mut expected_longest_row = cur_row;
+                let mut cur_row_len = 0;
+                let mut longest_row_len = 0;
+                for ch in string[start..end].chars() {
+                    if ch == '\n' {
+                        if cur_row_len > longest_row_len {
+                            expected_longest_row = cur_row;
+                            longest_row_len = cur_row_len;
+                        }
+                        cur_row += 1;
+                        cur_row_len = 0;
+                    } else {
+                        cur_row_len += 1;
+                    }
+                }
+                if cur_row_len > longest_row_len {
+                    expected_longest_row = cur_row;
+                }
+
+                assert_eq!(
+                    text.longest_row_in_range(start..end),
+                    Ok(expected_longest_row)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fragment_ids() {
         for seed in 0..10 {
             use self::rand::{Rng, SeedableRng, StdRng};
@@ -2989,7 +3164,11 @@ mod tests {
         type Item = char;
 
         fn next(&mut self) -> Option<Self::Item> {
-            Some(self.0.gen_range(b'a', b'z' + 1).into())
+            if self.0.gen_weighted_bool(5) {
+                Some('\n')
+            } else {
+                Some(self.0.gen_range(b'a', b'z' + 1).into())
+            }
         }
     }
 
