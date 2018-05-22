@@ -152,6 +152,16 @@ struct LineNode {
     rows: u32,
 }
 
+struct LineNodeProbe<'a> {
+    offset_range: &'a Range<usize>,
+    row: u32,
+    left_ancestor_end_offset: usize,
+    right_ancestor_start_offset: usize,
+    node: &'a LineNode,
+    left_child: Option<&'a LineNode>,
+    right_child: Option<&'a LineNode>,
+}
+
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct EditId {
     replica_id: ReplicaId,
@@ -2031,110 +2041,79 @@ impl Text {
         let mut longest_row = 0;
         let mut longest_row_len = 0;
 
-        {
-            let mut left_ancestor_end_offset = 0;
-            let mut left_ancestor_row = 0;
-            let mut right_ancestor_start_offset = self.nodes[0].offset;
-            let mut cur_node_index = 0;
-            while let Some(cur_node) = self.nodes.get(cur_node_index) {
-                let left_child = self.nodes.get(cur_node_index * 2 + 1);
-                let cur_offset_range = {
-                    let start = left_ancestor_end_offset + left_child.map_or(0, |node| node.offset);
-                    let end = start + cur_node.len as usize;
-                    start..end
-                };
-                let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
-
-                if target_range.start <= cur_offset_range.end
-                    && right_ancestor_start_offset <= target_range.end
-                {
-                    if let Some(right_child) = self.nodes.get(cur_node_index * 2 + 2) {
-                        if right_child.longest_row_len >= longest_row_len {
-                            longest_row = cur_row + 1 + right_child.longest_row;
-                            longest_row_len = right_child.longest_row_len;
-                        }
+        self.search(|probe| {
+            if target_range.start <= probe.offset_range.end
+                && probe.right_ancestor_start_offset <= target_range.end
+            {
+                if let Some(right_child) = probe.right_child {
+                    if right_child.longest_row_len >= longest_row_len {
+                        longest_row = probe.row + 1 + right_child.longest_row;
+                        longest_row_len = right_child.longest_row_len;
                     }
-                }
-
-                if target_range.start < cur_offset_range.start {
-                    if cur_offset_range.end < target_range.end && cur_node.len >= longest_row_len {
-                        longest_row = cur_row;
-                        longest_row_len = cur_node.len;
-                    }
-
-                    cur_node_index = cur_node_index * 2 + 1;
-                    right_ancestor_start_offset = cur_offset_range.start;
-                } else if target_range.start > cur_offset_range.end {
-                    cur_node_index = cur_node_index * 2 + 2;
-                    left_ancestor_end_offset = cur_offset_range.end + 1;
-                    left_ancestor_row = cur_row + 1;
-                } else {
-                    let node_end = cmp::min(cur_offset_range.end, target_range.end);
-                    let node_len = (node_end - target_range.start) as u32;
-                    if node_len >= longest_row_len {
-                        longest_row = cur_row;
-                        longest_row_len = node_len;
-                    }
-                    break;
                 }
             }
-        }
 
-        {
-            let mut left_ancestor_end_offset = 0;
-            let mut left_ancestor_row = 0;
-            let mut cur_node_index = 0;
-            while let Some(cur_node) = self.nodes.get(cur_node_index) {
-                let left_child = self.nodes.get(cur_node_index * 2 + 1);
-                let cur_offset_range = {
-                    let start = left_ancestor_end_offset + left_child.map_or(0, |node| node.offset);
-                    let end = start + cur_node.len as usize;
-                    start..end
-                };
-                let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
-
-                if target_range.end >= cur_offset_range.start
-                    && left_ancestor_end_offset >= target_range.start
-                {
-                    if let Some(left_child) = left_child {
-                        if left_child.longest_row_len > longest_row_len {
-                            longest_row = left_ancestor_row + left_child.longest_row;
-                            longest_row_len = left_child.longest_row_len;
-                        }
-                    }
+            if target_range.start < probe.offset_range.start {
+                if probe.offset_range.end < target_range.end && probe.node.len >= longest_row_len {
+                    longest_row = probe.row;
+                    longest_row_len = probe.node.len;
                 }
 
-                if target_range.end < cur_offset_range.start {
-                    cur_node_index = cur_node_index * 2 + 1;
-                } else if target_range.end > cur_offset_range.end {
-                    if target_range.start < cur_offset_range.start && cur_node.len > longest_row_len
-                    {
-                        longest_row = cur_row;
-                        longest_row_len = cur_node.len;
-                    }
+                Ordering::Less
+            } else if target_range.start > probe.offset_range.end {
+                Ordering::Greater
+            } else {
+                let node_end = cmp::min(probe.offset_range.end, target_range.end);
+                let node_len = (node_end - target_range.start) as u32;
+                if node_len >= longest_row_len {
+                    longest_row = probe.row;
+                    longest_row_len = node_len;
+                }
+                Ordering::Equal
+            }
+        }).ok_or(Error::OffsetOutOfRange)?;
 
-                    cur_node_index = cur_node_index * 2 + 2;
-                    left_ancestor_end_offset = cur_offset_range.end + 1;
-                    left_ancestor_row = cur_row + 1;
-                } else {
-                    let node_start = cmp::max(target_range.start, cur_offset_range.start);
-                    let node_len = (target_range.end - node_start) as u32;
-                    if node_len > longest_row_len {
-                        longest_row = cur_row;
+        self.search(|probe| {
+            if target_range.end >= probe.offset_range.start
+                && probe.left_ancestor_end_offset >= target_range.start
+            {
+                if let Some(left_child) = probe.left_child {
+                    if left_child.longest_row_len > longest_row_len {
+                        let left_ancestor_row = probe.row - left_child.rows;
+                        longest_row = left_ancestor_row + left_child.longest_row;
+                        longest_row_len = left_child.longest_row_len;
                     }
-                    break;
                 }
             }
-        }
+
+            if target_range.end < probe.offset_range.start {
+                Ordering::Less
+            } else if target_range.end > probe.offset_range.end {
+                if target_range.start < probe.offset_range.start && probe.node.len > longest_row_len
+                {
+                    longest_row = probe.row;
+                    longest_row_len = probe.node.len;
+                }
+
+                Ordering::Greater
+            } else {
+                let node_start = cmp::max(target_range.start, probe.offset_range.start);
+                let node_len = (target_range.end - node_start) as u32;
+                if node_len > longest_row_len {
+                    longest_row = probe.row;
+                }
+                Ordering::Equal
+            }
+        }).ok_or(Error::OffsetOutOfRange)?;
 
         Ok(longest_row)
     }
 
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
-        let search_result = self.search(|offset_range, _| {
-            if offset < offset_range.start {
+        let search_result = self.search(|probe| {
+            if offset < probe.offset_range.start {
                 Ordering::Less
-            } else if offset > offset_range.end {
+            } else if offset > probe.offset_range.end {
                 Ordering::Greater
             } else {
                 Ordering::Equal
@@ -2148,7 +2127,7 @@ impl Text {
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
-        if let Some((offset_range, _, node)) = self.search(|_, row| point.row.cmp(&row)) {
+        if let Some((offset_range, _, node)) = self.search(|probe| point.row.cmp(&probe.row)) {
             if point.column <= node.len {
                 Ok(offset_range.start + point.column as usize)
             } else {
@@ -2161,25 +2140,38 @@ impl Text {
 
     fn search<F>(&self, mut f: F) -> Option<(Range<usize>, u32, &LineNode)>
     where
-        F: FnMut(&Range<usize>, u32) -> Ordering,
+        F: FnMut(LineNodeProbe) -> Ordering,
     {
-        let mut left_ancestor_offset = 0;
+        let mut left_ancestor_end_offset = 0;
         let mut left_ancestor_row = 0;
+        let mut right_ancestor_start_offset = self.nodes[0].offset;
         let mut cur_node_index = 0;
         while let Some(cur_node) = self.nodes.get(cur_node_index) {
             let left_child = self.nodes.get(cur_node_index * 2 + 1);
+            let right_child = self.nodes.get(cur_node_index * 2 + 2);
             let cur_offset_range = {
-                let start = left_ancestor_offset + left_child.map_or(0, |node| node.offset);
+                let start = left_ancestor_end_offset + left_child.map_or(0, |node| node.offset);
                 let end = start + cur_node.len as usize;
                 start..end
             };
             let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
-            match f(&cur_offset_range, cur_row) {
-                Ordering::Less => cur_node_index = cur_node_index * 2 + 1,
+            match f(LineNodeProbe {
+                offset_range: &cur_offset_range,
+                row: cur_row,
+                left_ancestor_end_offset,
+                right_ancestor_start_offset,
+                node: cur_node,
+                left_child,
+                right_child,
+            }) {
+                Ordering::Less => {
+                    cur_node_index = cur_node_index * 2 + 1;
+                    right_ancestor_start_offset = cur_offset_range.start;
+                }
                 Ordering::Equal => return Some((cur_offset_range, cur_row, cur_node)),
                 Ordering::Greater => {
                     cur_node_index = cur_node_index * 2 + 2;
-                    left_ancestor_offset = cur_offset_range.end + 1;
+                    left_ancestor_end_offset = cur_offset_range.end + 1;
                     left_ancestor_row = cur_row + 1;
                 }
             }
