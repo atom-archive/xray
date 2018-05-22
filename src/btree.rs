@@ -1,3 +1,4 @@
+use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::fmt;
 use std::ops::AddAssign;
@@ -12,51 +13,95 @@ pub trait Item: Clone + Eq + fmt::Debug {
     fn summarize(&self) -> Self::Summary;
 }
 
-#[derive(Clone, Debug)]
-struct Tree<T: Item> {
-    root: TreeRef<T>,
-    summary: T::Summary,
-    height: u8,
-}
+#[derive(Clone)]
+struct Tree<T: Item>(Arc<Node<T>>);
 
-#[derive(Clone, Debug)]
-enum TreeRef<T: Item> {
-    Cached(Arc<Node<T>>),
-    NotCached(NodeId),
-}
-
-#[derive(Debug)]
 enum Node<T: Item> {
     Internal {
         id: Option<NodeId>,
-        children: SmallVec<[Tree<T>; 2 * TREE_BASE]>,
+        height: u8,
+        summary: T::Summary,
+        child_summaries: SmallVec<[T::Summary; 2 * TREE_BASE]>,
+        child_trees: SmallVec<[TreeRef<T>; 2 * TREE_BASE]>,
     },
     Leaf {
         id: Option<NodeId>,
-        children: SmallVec<[T; 2 * TREE_BASE]>,
+        summary: T::Summary,
+        child_items: SmallVec<[T; 2 * TREE_BASE]>,
     },
+}
+
+struct TreeRef<T: Item>(RwLock<TreeRefState<T>>);
+
+#[derive(Clone)]
+enum TreeRefState<T: Item> {
+    Resident(Tree<T>),
+    NonResident(NodeId),
 }
 
 impl<T: Item> Tree<T> {
     pub fn new() -> Self {
-        Self::from_children(SmallVec::new())
+        Tree(Arc::new(Node::Leaf {
+            id: None,
+            summary: T::Summary::default(),
+            child_items: SmallVec::new(),
+        }))
     }
 
-    fn from_children(children: SmallVec<[Tree<T>; 2 * TREE_BASE]>) -> Self {
-        let summary = Self::summarize_children(&children);
-        let height = children.get(0).map(|c| c.height).unwrap_or(0) + 1;
-        Tree {
-            root: TreeRef::Cached(Arc::new(Node::Internal { id: None, children })),
-            summary,
+    fn from_child_trees(child_trees: SmallVec<[Tree<T>; 2 * TREE_BASE]>) -> Self {
+        let height = child_trees[0].height() + 1;
+        let child_summaries = child_trees
+            .iter()
+            .map(|child| child.summary().clone())
+            .collect::<SmallVec<[T::Summary; 2 * TREE_BASE]>>();
+        let summary = sum(&child_summaries);
+        let child_trees = child_trees
+            .into_iter()
+            .map(|tree| TreeRef::new(tree))
+            .collect::<SmallVec<[TreeRef<T>; 2 * TREE_BASE]>>();
+
+        Tree(Arc::new(Node::Internal {
+            id: None,
             height,
-        }
+            summary,
+            child_summaries,
+            child_trees,
+        }))
     }
 
-    fn summarize_children(children: &[Tree<T>]) -> T::Summary {
+    fn summarize_child_trees(child_trees: &[Tree<T>]) -> T::Summary {
         let mut summary = T::Summary::default();
-        for child in children {
-            summary += &child.summary;
+        for child in child_trees {
+            summary += &child.summary();
         }
         summary
     }
+
+    fn height(&self) -> u8 {
+        match self.0.as_ref() {
+            &Node::Internal { height, .. } => height,
+            &Node::Leaf { .. } => 0,
+        }
+    }
+
+    fn summary(&self) -> &T::Summary {
+        match self.0.as_ref() {
+            &Node::Internal { ref summary, .. } => summary,
+            &Node::Leaf { ref summary, .. } => summary,
+        }
+    }
+}
+
+impl<T: Item> TreeRef<T> {
+    fn new(tree: Tree<T>) -> Self {
+        TreeRef(RwLock::new(TreeRefState::Resident(tree)))
+    }
+}
+
+fn sum<T: Default + for<'a> AddAssign<&'a T>>(values: &[T]) -> T {
+    let mut sum = T::default();
+    for value in values {
+        sum += value;
+    }
+    sum
 }
