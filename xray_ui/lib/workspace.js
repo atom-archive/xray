@@ -4,6 +4,7 @@ const ReactDOM = require("react-dom");
 const { styled } = require("styletron-react");
 const Modal = require("./modal");
 const View = require("./view");
+const { ActionContext, Action } = require("./action_dispatcher");
 const $ = React.createElement;
 
 const Root = styled("div", {
@@ -44,7 +45,6 @@ const BackgroundTip = styled("div", {
 class Workspace extends React.Component {
   constructor() {
     super();
-    this.didKeyDown = this.didKeyDown.bind(this);
   }
 
   render() {
@@ -66,31 +66,22 @@ class Workspace extends React.Component {
     }
 
     return $(
-      Root,
-      {
-        tabIndex: -1,
-        onKeyDownCapture: this.didKeyDown
-      },
-      leftPanel,
-      $(Pane, null, $(PaneInner, null, centerItem)),
-      modal
+      ActionContext,
+      { context: "Workspace" },
+      $(
+        Root,
+        { tabIndex: -1 },
+        leftPanel,
+        $(Pane, null, $(PaneInner, null, centerItem)),
+        modal,
+        $(Action, { type: "ToggleFileFinder" }),
+        $(Action, { type: "SaveActiveBuffer" })
+      )
     );
   }
 
   componentDidMount() {
     ReactDOM.findDOMNode(this).focus();
-  }
-
-  didKeyDown(event) {
-    if (event.metaKey || event.ctrlKey) {
-      if (event.key === "t") {
-        this.props.dispatch({ type: "ToggleFileFinder" });
-        event.stopPropagation();
-      } else if (event.key === "s") {
-        this.props.dispatch({ type: "SaveActiveBuffer" });
-        event.stopPropagation();
-      }
-    }
   }
 }
 

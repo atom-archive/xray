@@ -6,6 +6,7 @@ const ViewRegistry = require("./view_registry");
 class View extends React.Component {
   constructor(props) {
     super(props);
+    this.dispatchAction = this.dispatchAction.bind(this);
     this.state = {
       version: 0,
       viewId: props.id
@@ -35,15 +36,20 @@ class View extends React.Component {
     const { id } = this.props;
     const component = viewRegistry.getComponent(id);
     const props = viewRegistry.getProps(id);
-    const dispatch = action => viewRegistry.dispatchAction(id, action);
     return $(
       component,
       Object.assign({}, props, {
         ref: component => (this.component = component),
-        dispatch,
+        dispatch: this.dispatchAction,
         key: id
       })
     );
+  }
+
+  dispatchAction(action) {
+    const { viewRegistry } = this.context;
+    const { id } = this.props;
+    viewRegistry.dispatchAction(id, action);
   }
 
   watch(props, context) {
@@ -56,7 +62,15 @@ class View extends React.Component {
       if (this.component.focus) this.component.focus();
     });
   }
+
+  getChildContext() {
+    return { dispatchAction: this.dispatchAction };
+  }
 }
+
+View.childContextTypes = {
+  dispatchAction: propTypes.func
+};
 
 View.contextTypes = {
   viewRegistry: propTypes.instanceOf(ViewRegistry)

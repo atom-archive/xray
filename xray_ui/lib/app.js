@@ -2,12 +2,14 @@ const propTypes = require("prop-types");
 const React = require("react");
 const { Client: StyletronClient } = require("styletron-engine-atomic");
 const { Provider: StyletronProvider } = require("styletron-react");
+const { ActionDispatcher } = require("./action_dispatcher");
 const TextEditor = require("./text_editor/text_editor");
 const ThemeProvider = require("./theme_provider");
 const View = require("./view");
 const ViewRegistry = require("./view_registry");
 const $ = React.createElement;
 
+// TODO: Eventually, the theme should be provided to the view by the server
 const theme = {
   editor: {
     fontFamily: "Menlo",
@@ -21,9 +23,32 @@ const theme = {
     { r: 64, g: 181, b: 87, a: 1 },
     { r: 206, g: 157, b: 59, a: 1 },
     { r: 216, g: 49, b: 176, a: 1 },
-    { r: 235, g: 221, b: 91, a: 1 },
+    { r: 235, g: 221, b: 91, a: 1 }
   ]
 };
+
+// TODO: Eventually, the keyBindings should be provided to the view by the server
+const keyBindings = [
+  { key: "cmd-t", context: "Workspace", action: "ToggleFileFinder" },
+  { key: "ctrl-t", context: "Workspace", action: "ToggleFileFinder" },
+  { key: "cmd-s", context: "Workspace", action: "SaveActiveBuffer" },
+  { key: "up", context: "FileFinder", action: "SelectPrevious" },
+  { key: "down", context: "FileFinder", action: "SelectNext" },
+  { key: "enter", context: "FileFinder", action: "Confirm" },
+  { key: "escape", context: "FileFinder", action: "Close" },
+  { key: "alt-shift-up", context: "TextEditor", action: "AddSelectionAbove" },
+  { key: "alt-shift-down", context: "TextEditor", action: "AddSelectionBelow" },
+  { key: "shift-up", context: "TextEditor", action: "SelectUp" },
+  { key: "shift-down", context: "TextEditor", action: "SelectDown" },
+  { key: "shift-left", context: "TextEditor", action: "SelectLeft" },
+  { key: "shift-right", context: "TextEditor", action: "SelectRight" },
+  { key: "up", context: "TextEditor", action: "MoveUp" },
+  { key: "down", context: "TextEditor", action: "MoveDown" },
+  { key: "left", context: "TextEditor", action: "MoveLeft" },
+  { key: "right", context: "TextEditor", action: "MoveRight" },
+  { key: "backspace", context: "TextEditor", action: "Backspace" },
+  { key: "delete", context: "TextEditor", action: "Delete" }
+];
 
 const styletronInstance = new StyletronClient();
 class App extends React.Component {
@@ -42,7 +67,11 @@ class App extends React.Component {
     return $(
       StyletronProvider,
       { value: styletronInstance },
-      $(ThemeProvider, { theme: theme }, $(View, { id: 0 }))
+      $(
+        ThemeProvider,
+        { theme },
+        $(ActionDispatcher, { keyBindings }, $(View, { id: 0 }))
+      )
     );
   }
 }
