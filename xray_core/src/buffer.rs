@@ -1998,51 +1998,60 @@ impl Text {
     }
 
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
-        let mut left_ancestor_offset = 0;
-        let mut left_ancestor_row = 0;
-        let mut cur_node_index = 0;
-        while let Some(cur_node) = self.nodes.get(cur_node_index) {
-            let left_child = self.nodes.get(cur_node_index * 2 + 1);
-            let cur_offset_start = left_ancestor_offset + left_child.map_or(0, |node| node.offset);
-            let cur_offset_end = cur_offset_start + cur_node.len as usize;
-            let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
-            if offset < cur_offset_start {
-                cur_node_index = cur_node_index * 2 + 1;
-            } else if offset > cur_offset_end {
-                cur_node_index = cur_node_index * 2 + 2;
-                left_ancestor_offset = cur_offset_end + 1;
-                left_ancestor_row = cur_row + 1;
+        let search_result = self.search(|offset_range, _| {
+            if offset < offset_range.start {
+                Ordering::Less
+            } else if offset > offset_range.end {
+                Ordering::Greater
             } else {
-                return Ok(Point::new(cur_row, (offset - cur_offset_start) as u32));
+                Ordering::Equal
             }
+        });
+        if let Some((offset_range, row, _)) = search_result {
+            Ok(Point::new(row, (offset - offset_range.start) as u32))
+        } else {
+            Err(Error::OffsetOutOfRange)
         }
-        Err(Error::OffsetOutOfRange)
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
+        if let Some((offset_range, _, node)) = self.search(|_, row| point.row.cmp(&row)) {
+            if point.column <= node.len {
+                Ok(offset_range.start + point.column as usize)
+            } else {
+                Err(Error::OffsetOutOfRange)
+            }
+        } else {
+            Err(Error::OffsetOutOfRange)
+        }
+    }
+
+    fn search<F>(&self, mut f: F) -> Option<(Range<usize>, u32, &LineNode)>
+    where
+        F: FnMut(&Range<usize>, u32) -> Ordering,
+    {
         let mut left_ancestor_offset = 0;
         let mut left_ancestor_row = 0;
         let mut cur_node_index = 0;
         while let Some(cur_node) = self.nodes.get(cur_node_index) {
             let left_child = self.nodes.get(cur_node_index * 2 + 1);
-            let cur_offset_start = left_ancestor_offset + left_child.map_or(0, |node| node.offset);
-            let cur_offset_end = cur_offset_start + cur_node.len as usize;
+            let cur_offset_range = {
+                let start = left_ancestor_offset + left_child.map_or(0, |node| node.offset);
+                let end = start + cur_node.len as usize;
+                start..end
+            };
             let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
-            if point.row < cur_row {
-                cur_node_index = cur_node_index * 2 + 1;
-            } else if point.row > cur_row {
-                cur_node_index = cur_node_index * 2 + 2;
-                left_ancestor_offset = cur_offset_end + 1;
-                left_ancestor_row = cur_row + 1;
-            } else {
-                if point.column > cur_node.len {
-                    return Err(Error::OffsetOutOfRange);
-                } else {
-                    return Ok(cur_offset_start + point.column as usize);
+            match f(&cur_offset_range, cur_row) {
+                Ordering::Less => cur_node_index = cur_node_index * 2 + 1,
+                Ordering::Equal => return Some((cur_offset_range, cur_row, cur_node)),
+                Ordering::Greater => {
+                    cur_node_index = cur_node_index * 2 + 2;
+                    left_ancestor_offset = cur_offset_range.end + 1;
+                    left_ancestor_row = cur_row + 1;
                 }
             }
         }
-        Err(Error::OffsetOutOfRange)
+        None
     }
 }
 
