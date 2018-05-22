@@ -14,7 +14,7 @@ pub trait Item: Clone + Eq + fmt::Debug {
 }
 
 #[derive(Clone)]
-struct Tree<T: Item>(Arc<Node<T>>);
+pub struct Tree<T: Item>(Arc<Node<T>>);
 
 enum Node<T: Item> {
     Internal {
@@ -22,7 +22,7 @@ enum Node<T: Item> {
         height: u8,
         summary: T::Summary,
         child_summaries: SmallVec<[T::Summary; 2 * TREE_BASE]>,
-        child_trees: SmallVec<[TreeRef<T>; 2 * TREE_BASE]>,
+        child_tree_refs: SmallVec<[TreeRef<T>; 2 * TREE_BASE]>,
     },
     Leaf {
         id: Option<NodeId>,
@@ -48,6 +48,27 @@ impl<T: Item> Tree<T> {
         }))
     }
 
+    pub fn push_item(&mut self, item: T) {
+        self.push_tree(Tree(Arc::new(Node::Leaf {
+            id: None,
+            summary: item.summarize(),
+            child_items: SmallVec::from_vec(vec![item]),
+        })))
+    }
+    
+    pub fn push_tree(&mut self, tree: Self) {
+        let tree_height = tree.height();
+        if self.height() < tree_height {
+            for tree_ref in tree.child_tree_refs().iter().cloned() {
+                self.push_tree_ref(tree_ref, tree_height - 1);
+            }
+        }
+    }
+    
+    fn push_tree_ref(&mut self, tree_ref: TreeRef<T>, tree_ref_height: u8) {
+        
+    }
+
     fn from_child_trees(child_trees: SmallVec<[Tree<T>; 2 * TREE_BASE]>) -> Self {
         let height = child_trees[0].height() + 1;
         let child_summaries = child_trees
@@ -55,7 +76,7 @@ impl<T: Item> Tree<T> {
             .map(|child| child.summary().clone())
             .collect::<SmallVec<[T::Summary; 2 * TREE_BASE]>>();
         let summary = sum(&child_summaries);
-        let child_trees = child_trees
+        let child_tree_refs = child_trees
             .into_iter()
             .map(|tree| TreeRef::new(tree))
             .collect::<SmallVec<[TreeRef<T>; 2 * TREE_BASE]>>();
@@ -65,16 +86,8 @@ impl<T: Item> Tree<T> {
             height,
             summary,
             child_summaries,
-            child_trees,
+            child_tree_refs,
         }))
-    }
-
-    fn summarize_child_trees(child_trees: &[Tree<T>]) -> T::Summary {
-        let mut summary = T::Summary::default();
-        for child in child_trees {
-            summary += &child.summary();
-        }
-        summary
     }
 
     fn height(&self) -> u8 {
@@ -90,11 +103,24 @@ impl<T: Item> Tree<T> {
             &Node::Leaf { ref summary, .. } => summary,
         }
     }
+    
+    fn child_tree_refs(&self) -> &[TreeRef<T>] {
+        match self.0.as_ref() {
+            &Node::Internal { ref child_tree_refs, .. } => child_tree_refs.as_slice(),
+            &Node::Leaf { .. } => panic!("Requested child_tree_refs of a leaf node"),
+        }
+    }    
 }
 
 impl<T: Item> TreeRef<T> {
     fn new(tree: Tree<T>) -> Self {
         TreeRef(RwLock::new(TreeRefState::Resident(tree)))
+    }
+}
+
+impl<T: Item> Clone for TreeRef<T> {
+    fn clone(&self) -> Self {
+        TreeRef(RwLock::new(self.0.read().clone()))
     }
 }
 
