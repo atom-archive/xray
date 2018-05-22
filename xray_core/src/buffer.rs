@@ -2695,7 +2695,7 @@ mod tests {
 
     #[test]
     fn test_longest_row_in_range() {
-        for seed in 0..10000 {
+        for seed in 0..100 {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
             let string = RandomCharIter(rng)
