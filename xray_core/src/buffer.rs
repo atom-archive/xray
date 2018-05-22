@@ -2037,7 +2037,7 @@ impl Text {
         self.code_units.len()
     }
 
-    fn longest_row_in_range(&self, target_range: Range<usize>) -> Result<u32, Error> {
+    fn longest_row_in_range(&self, target_range: Range<usize>) -> Result<(u32, u32), Error> {
         let mut longest_row = 0;
         let mut longest_row_len = 0;
 
@@ -2101,12 +2101,13 @@ impl Text {
                 let node_len = (target_range.end - node_start) as u32;
                 if node_len > longest_row_len {
                     longest_row = probe.row;
+                    longest_row_len = node_len;
                 }
                 Ordering::Equal
             }
         }).ok_or(Error::OffsetOutOfRange)?;
 
-        Ok(longest_row)
+        Ok((longest_row, longest_row_len))
     }
 
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
@@ -2707,14 +2708,14 @@ mod tests {
                 let start = rng.gen_range(0, end);
 
                 let mut cur_row = string[0..start].chars().filter(|c| *c == '\n').count() as u32;
-                let mut expected_longest_row = cur_row;
                 let mut cur_row_len = 0;
-                let mut longest_row_len = 0;
+                let mut expected_longest_row = cur_row;
+                let mut expected_longest_row_len = cur_row_len;
                 for ch in string[start..end].chars() {
                     if ch == '\n' {
-                        if cur_row_len > longest_row_len {
+                        if cur_row_len > expected_longest_row_len {
                             expected_longest_row = cur_row;
-                            longest_row_len = cur_row_len;
+                            expected_longest_row_len = cur_row_len;
                         }
                         cur_row += 1;
                         cur_row_len = 0;
@@ -2722,13 +2723,14 @@ mod tests {
                         cur_row_len += 1;
                     }
                 }
-                if cur_row_len > longest_row_len {
+                if cur_row_len > expected_longest_row_len {
                     expected_longest_row = cur_row;
+                    expected_longest_row_len = cur_row_len;
                 }
 
                 assert_eq!(
                     text.longest_row_in_range(start..end),
-                    Ok(expected_longest_row)
+                    Ok((expected_longest_row, expected_longest_row_len))
                 );
             }
         }
