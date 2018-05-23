@@ -89,6 +89,10 @@ class TextEditor extends React.Component {
     });
   }
 
+  componentDidUpdate() {
+    this.updateLongestLineWidth();
+  }
+
   render() {
     return $(
       ActionContext,
@@ -107,11 +111,15 @@ class TextEditor extends React.Component {
           lineHeight: this.props.line_height,
           scrollTop: this.props.scroll_top,
           paddingLeft: 5,
+          scrollLeft: this.props.scroll_left,
           height: this.props.height,
-          width: this.props.width,
+          width: Math.max(this.props.width, this.props.content_width),
           selections: this.props.selections,
           firstVisibleRow: this.props.first_visible_row,
-          lines: this.props.lines
+          lines: this.props.lines,
+          ref: textPlane => {
+            this.textPlane = textPlane;
+          }
         })
       ),
       $(Action, {
@@ -151,7 +159,11 @@ class TextEditor extends React.Component {
   }
 
   handleMouseWheel(event) {
-    this.props.dispatch({ type: "UpdateScrollTop", delta: event.deltaY });
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      this.props.dispatch({ type: "UpdateScrollLeft", delta: event.deltaX });
+    } else {
+      this.props.dispatch({ type: "UpdateScrollTop", delta: event.deltaY });
+    }
   }
 
   handleKeyDown(event) {
@@ -194,6 +206,19 @@ class TextEditor extends React.Component {
 
   focus() {
     this.element.focus();
+  }
+
+  updateLongestLineWidth() {
+    const { longest_line: longestLine } = this.props;
+    if (this.previousLongestLine != longestLine) {
+      const longestLineWidth = this.textPlane.measureLine(longestLine);
+      const cursorWidth = this.textPlane.measureLine("X");
+      this.props.dispatch({
+        type: "SetLongestLineWidth",
+        width: Math.ceil(longestLineWidth + cursorWidth)
+      });
+      this.previousLongestLine = longestLine;
+    }
   }
 }
 

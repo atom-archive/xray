@@ -5,7 +5,7 @@ exports.textBlendAttributes = {
   textColorRGBA: 3,
   atlasOrigin: 4,
   atlasSize: 5
-}
+};
 
 exports.textBlendVertex = `
   #version 300 es
@@ -18,12 +18,13 @@ exports.textBlendVertex = `
   layout (location = 5) in vec2 atlasSize;
 
   uniform vec2 viewportScale;
+  uniform float scrollLeft;
 
   flat out vec4 textColor;
   out vec2 atlasPosition;
 
   void main() {
-      vec2 targetPixelPosition = targetOrigin + unitQuadVertex * targetSize;
+      vec2 targetPixelPosition = (targetOrigin + unitQuadVertex * targetSize) - vec2(scrollLeft, 0.0);
       vec2 targetPosition = targetPixelPosition * viewportScale + vec2(-1.0, 1.0);
       gl_Position = vec4(targetPosition, 0.0, 1.0);
       textColor = textColorRGBA * vec4(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0);
@@ -32,7 +33,7 @@ exports.textBlendVertex = `
       textColor = textColorRGBA;
       atlasPosition = atlasOrigin + unitQuadVertex * atlasSize;
   }
-`.trim()
+`.trim();
 
 exports.textBlendPass1Fragment = `
   #version 300 es
@@ -51,7 +52,7 @@ exports.textBlendPass1Fragment = `
     vec3 correctedAtlasColor = mix(vec3(1.0) - atlasColor, sqrt(vec3(1.0) - atlasColor * atlasColor), textColorRGB);
     outColor = vec4(correctedAtlasColor, 1.0);
   }
-`.trim()
+`.trim();
 
 exports.textBlendPass2Fragment = `
   #version 300 es
@@ -71,14 +72,14 @@ exports.textBlendPass2Fragment = `
     vec3 adjustedForegroundColor = textColorRGB * correctedAtlasColor;
     outColor = vec4(adjustedForegroundColor, 1.0);
   }
-`.trim()
+`.trim();
 
 exports.solidAttributes = {
   unitQuadVertex: 0,
   targetOrigin: 1,
   targetSize: 2,
   colorRGBA: 3
-}
+};
 
 exports.solidVertex = `
   #version 300 es
@@ -90,14 +91,15 @@ exports.solidVertex = `
   flat out vec4 color;
 
   uniform vec2 viewportScale;
+  uniform float scrollLeft;
 
   void main() {
-      vec2 targetPixelPosition = targetOrigin + unitQuadVertex * targetSize;
+      vec2 targetPixelPosition = (targetOrigin + unitQuadVertex * targetSize) - vec2(scrollLeft, 0.0);
       vec2 targetPosition = targetPixelPosition * viewportScale + vec2(-1.0, 1.0);
       gl_Position = vec4(targetPosition, 0.0, 1.0);
       color = colorRGBA * vec4(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0);
   }
-`.trim()
+`.trim();
 
 exports.solidFragment = `
   #version 300 es
@@ -110,4 +112,4 @@ exports.solidFragment = `
   void main() {
     outColor = color;
   }
-`.trim()
+`.trim();
