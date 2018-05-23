@@ -189,13 +189,13 @@ pub struct FragmentSummary {
     extent: usize,
     extent_2d: Point,
     max_fragment_id: FragmentId,
+    first_row_len: u32,
+    longest_row: u32,
+    longest_row_len: u32,
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct CharacterCount(usize);
-
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
-struct NewlineCount(usize);
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 struct InsertionSplit {
@@ -720,6 +720,10 @@ impl Buffer {
         };
 
         Ok((row_end_offset - row_start_offset) as u32)
+    }
+
+    pub fn longest_row(&self) -> u32 {
+        self.fragments.summary().longest_row
     }
 
     pub fn max_point(&self) -> Point {
@@ -2381,16 +2385,37 @@ impl tree::Item for Fragment {
                 .text
                 .point_for_offset(self.end_offset)
                 .unwrap();
+
+            let first_row_len = if fragment_2d_start.row == fragment_2d_end.row {
+                (self.end_offset - self.start_offset) as u32
+            } else {
+                let first_row_end = self.insertion
+                    .text
+                    .offset_for_point(Point::new(fragment_2d_start.row + 1, 0))
+                    .unwrap() - 1;
+                println!("First row end {:?}.", first_row_end);
+                (first_row_end - self.start_offset) as u32
+            };
+            let (longest_row, longest_row_len) = self.insertion
+                .text
+                .longest_row_in_range(self.start_offset..self.end_offset)
+                .unwrap();
             FragmentSummary {
                 extent: self.len(),
                 extent_2d: fragment_2d_end - &fragment_2d_start,
                 max_fragment_id: self.id.clone(),
+                first_row_len,
+                longest_row: longest_row - fragment_2d_start.row,
+                longest_row_len,
             }
         } else {
             FragmentSummary {
                 extent: 0,
                 extent_2d: Point { row: 0, column: 0 },
                 max_fragment_id: self.id.clone(),
+                first_row_len: 0,
+                longest_row: 0,
+                longest_row_len: 0,
             }
         }
     }
@@ -2398,6 +2423,16 @@ impl tree::Item for Fragment {
 
 impl<'a> AddAssign<&'a FragmentSummary> for FragmentSummary {
     fn add_assign(&mut self, other: &Self) {
+        let last_row_len = self.extent_2d.column + other.first_row_len;
+        if last_row_len > self.longest_row_len {
+            self.longest_row = self.extent_2d.row;
+            self.longest_row_len = last_row_len;
+        }
+        if other.longest_row_len > self.longest_row_len {
+            self.longest_row = self.extent_2d.row + other.longest_row;
+            self.longest_row_len = other.longest_row_len;
+        }
+
         self.extent += other.extent;
         self.extent_2d += other.extent_2d;
         if self.max_fragment_id < other.max_fragment_id {
@@ -2412,6 +2447,9 @@ impl Default for FragmentSummary {
             extent: 0,
             extent_2d: Point { row: 0, column: 0 },
             max_fragment_id: FragmentId::min_value(),
+            first_row_len: 0,
+            longest_row: 0,
+            longest_row_len: 0,
         }
     }
 }
@@ -2582,6 +2620,22 @@ mod tests {
         assert_eq!(buffer.len_for_row(4), Ok(4));
         assert_eq!(buffer.len_for_row(5), Ok(0));
         assert_eq!(buffer.len_for_row(6), Err(Error::OffsetOutOfRange));
+    }
+
+    #[test]
+    fn test_longest_row() {
+        let mut buffer = Buffer::new(0);
+        assert_eq!(buffer.longest_row(), 0);
+        buffer.edit(&[0..0], "abcd\nefg\nhij");
+        assert_eq!(buffer.longest_row(), 0);
+        buffer.edit(&[12..12], "kl\nmno");
+        assert_eq!(buffer.longest_row(), 2);
+        buffer.edit(&[18..18], "\npqrs");
+        assert_eq!(buffer.longest_row(), 2);
+        buffer.edit(&[10..12], "");
+        assert_eq!(buffer.longest_row(), 0);
+        buffer.edit(&[24..24], "tuv");
+        assert_eq!(buffer.longest_row(), 4);
     }
 
     #[test]
