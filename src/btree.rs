@@ -1,4 +1,3 @@
-use parking_lot::{RwLock, RwLockReadGuard};
 use smallvec::SmallVec;
 use std::fmt;
 use std::ops::AddAssign;
@@ -62,16 +61,15 @@ impl<T: Item> Tree<T> {
         other: Self,
         db: &mut S,
     ) -> Result<(), S::ReadError> {
-        unimplemented!()
-        // let other_height = other.height(db)?;
-        // if self.height(db)? < other_height {
-        //     for tree in other.child_trees(db)?.clone() {
-        //         self.push_tree_recursive(tree, db);
-        //     }
-        // } else if let Some(split_tree) = self.push_tree_recursive(other, db)? {
-        //     *self = Self::from_child_trees(vec![self.clone(), split_tree]);
-        // }
-        // Ok(())
+        let other_height = other.height(db)?;
+        if self.height(db)? < other_height {
+            for tree in other.child_trees(db)?.clone() {
+                self.push_tree_recursive(tree, db);
+            }
+        } else if let Some(split_tree) = self.push_tree_recursive(other, db)? {
+            *self = Self::from_child_trees(vec![self.clone(), split_tree], db)?;
+        }
+        Ok(())
     }
 
     fn push_tree_recursive<S>(
@@ -156,7 +154,11 @@ impl<T: Item> Tree<T> {
                     Ok(None)
                 }
             }
-            Node::Leaf { summary, child_items, .. } => {
+            Node::Leaf {
+                summary,
+                child_items,
+                ..
+            } => {
                 let other_node = other.node(db)?;
 
                 let child_count = child_items.len() + other_node.child_items().len();
@@ -174,10 +176,9 @@ impl<T: Item> Tree<T> {
                         right_items = all_items.collect();
                     }
                     *child_items = left_items;
-                    *summary = sum(child_items.iter().map(|item| item.summarize()).by_ref());
-
+                    *summary = sum_owned(child_items.iter().map(|item| item.summarize()));
                     Ok(Some(Tree::Resident(Arc::new(Node::Leaf {
-                        summary: sum(right_items.iter().map(|item| item.summarize()).by_ref()),
+                        summary: sum_owned(right_items.iter().map(|item| item.summarize())),
                         child_items: right_items,
                     }))))
                 } else {
@@ -189,24 +190,22 @@ impl<T: Item> Tree<T> {
         }
     }
 
-    fn from_child_trees(child_trees: Vec<Tree<T>>) -> Self {
-        // let height = child_trees[0].height() + 1;
-        // let child_summaries = child_trees
-        //     .iter()
-        //     .map(|child| child.summary().clone())
-        //     .collect::<SmallVec<[T::Summary; 2 * TREE_BASE]>>();
-        // let summary = sum(child_summaries.iter());
-        //
-        // Tree(Arc::new(RwLock::new(TransientNode::Resident(
-        //     Node::Internal {
-        //         id: None,
-        //         height,
-        //         summary,
-        //         child_summaries,
-        //         child_trees: SmallVec::from_vec(child_trees),
-        //     },
-        // ))))
-        unimplemented!()
+    fn from_child_trees<S>(child_trees: Vec<Tree<T>>, db: &mut S) -> Result<Self, S::ReadError>
+    where
+        S: NodeStore<T>,
+    {
+        let height = child_trees[0].height(db)? + 1;
+        let mut child_summaries = SmallVec::new();
+        for child in &child_trees {
+            child_summaries.push(child.summary(db)?.clone());
+        }
+        let summary = sum(child_summaries.iter());
+        Ok(Tree::Resident(Arc::new(Node::Internal {
+            height,
+            summary,
+            child_summaries,
+            child_trees: SmallVec::from_vec(child_trees),
+        })))
     }
 
     fn make_mut_node<S: NodeStore<T>>(&mut self, db: &mut S) -> Result<&mut Node<T>, S::ReadError> {
@@ -216,7 +215,7 @@ impl<T: Item> Tree<T> {
 
         match self {
             Tree::Resident(node) => Ok(Arc::make_mut(node)),
-            Tree::NonResident(node_id) => unreachable!(),
+            Tree::NonResident(_) => unreachable!(),
         }
     }
 
@@ -309,6 +308,18 @@ where
     let mut sum = T::default();
     for value in iter {
         sum += value;
+    }
+    sum
+}
+
+fn sum_owned<T, I>(iter: I) -> T
+where
+    T: Default + for<'a> AddAssign<&'a T>,
+    I: Iterator<Item = T>,
+{
+    let mut sum = T::default();
+    for value in iter {
+        sum += &value;
     }
     sum
 }
