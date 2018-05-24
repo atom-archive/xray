@@ -90,6 +90,8 @@ class TextEditor extends React.Component {
   }
 
   render() {
+    this.flushHorizontalAutoscroll();
+
     return $(
       ActionContext,
       { add: "TextEditor" },
@@ -204,8 +206,46 @@ class TextEditor extends React.Component {
     this.element.focus();
   }
 
+  flushHorizontalAutoscroll() {
+    const { horizontal_autoscroll, horizontal_margin, width } = this.props;
+    if (horizontal_autoscroll && width && this.canUseTextPlane()) {
+      const desiredScrollLeft = this.textPlane.measureLine(
+        horizontal_autoscroll.start_line,
+        Math.max(0, horizontal_autoscroll.start.column - horizontal_margin)
+      );
+      const desiredScrollRight = this.textPlane.measureLine(
+        horizontal_autoscroll.end_line,
+        Math.min(
+          horizontal_autoscroll.end_line.length,
+          horizontal_autoscroll.end.column + horizontal_margin
+        )
+      );
+
+      // This function will be called during render, so we avoid calling
+      // setState and we manually manipulate this.state instead.
+      if (desiredScrollLeft < this.getScrollLeft()) {
+        this.state.scrollLeft = this.constrainScrollLeft(desiredScrollLeft);
+      }
+      if (desiredScrollRight > this.getScrollRight()) {
+        this.state.scrollLeft = this.constrainScrollLeft(
+          desiredScrollRight - width
+        );
+      }
+
+      this.props.horizontal_autoscroll = null;
+    }
+  }
+
   getScrollLeft() {
     return this.constrainScrollLeft(this.state.scrollLeft);
+  }
+
+  getScrollRight() {
+    if (this.props.width) {
+      return this.getScrollLeft() + this.props.width;
+    } else {
+      return this.getScrollLeft();
+    }
   }
 
   setScrollLeft(scrollLeft) {
@@ -227,6 +267,10 @@ class TextEditor extends React.Component {
     }
   }
 
+  getMaxScrollRight() {
+    return this.getMaxScrollLeft() + this.props.width;
+  }
+
   getContentWidth() {
     const longestLineWidth = this.getLongestLineWidth();
     const cursorWidth = this.getCursorWidth();
@@ -238,11 +282,7 @@ class TextEditor extends React.Component {
   }
 
   getCursorWidth() {
-    if (
-      this.cursorWidth == null &&
-      this.textPlane &&
-      this.textPlane.isReady()
-    ) {
+    if (this.cursorWidth == null && this.canUseTextPlane()) {
       this.cursorWidth = this.textPlane.measureLine("X");
     }
     return this.cursorWidth;
@@ -250,15 +290,15 @@ class TextEditor extends React.Component {
 
   getLongestLineWidth() {
     const { longest_line: longestLine } = this.props;
-    if (
-      this.longestLine != longestLine &&
-      this.textPlane &&
-      this.textPlane.isReady()
-    ) {
+    if (this.longestLine != longestLine && this.canUseTextPlane()) {
       this.longestLine = longestLine;
       this.longestLineWidth = this.textPlane.measureLine(longestLine);
     }
     return this.longestLineWidth;
+  }
+
+  canUseTextPlane() {
+    return this.textPlane && this.textPlane.isReady();
   }
 }
 

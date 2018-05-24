@@ -3,8 +3,7 @@ use futures::{Future, Poll, Stream};
 use movement;
 use notify_cell::NotifyCell;
 use serde_json;
-use std::cell::Ref;
-use std::cell::RefCell;
+use std::cell::{Cell, Ref, RefCell};
 use std::cmp::{self, Ordering};
 use std::ops::Range;
 use std::rc::Rc;
@@ -27,7 +26,9 @@ pub struct BufferView {
     line_height: f64,
     scroll_top: f64,
     vertical_margin: u32,
-    pending_autoscroll: Option<AutoScrollRequest>,
+    horizontal_margin: u32,
+    vertical_autoscroll: Option<AutoScrollRequest>,
+    horizontal_autoscroll: Cell<Option<Range<buffer::Anchor>>>,
     delegate: Option<WeakViewHandle<BufferViewDelegate>>,
 }
 
@@ -101,7 +102,9 @@ impl BufferView {
             line_height: 10.0,
             scroll_top: 0.0,
             vertical_margin: 2,
-            pending_autoscroll: None,
+            horizontal_margin: 4,
+            vertical_autoscroll: None,
+            horizontal_autoscroll: Cell::new(None),
             delegate,
         }
     }
@@ -133,7 +136,8 @@ impl BufferView {
     pub fn set_scroll_top(&mut self, scroll_top: f64) -> &mut Self {
         debug_assert!(scroll_top >= 0_f64);
         self.scroll_top = scroll_top;
-        self.pending_autoscroll = None;
+        self.vertical_autoscroll = None;
+        self.horizontal_autoscroll.replace(None);
         self.updated();
         self
     }
@@ -641,8 +645,8 @@ impl BufferView {
         self.autoscroll_to_range(range, center).unwrap();
     }
 
-    fn flush_pending_autoscroll_to_selection(&mut self) {
-        if let Some(request) = self.pending_autoscroll.take() {
+    fn flush_vertical_autoscroll_to_selection(&mut self) {
+        if let Some(request) = self.vertical_autoscroll.take() {
             self.autoscroll_to_range(request.range, request.center)
                 .unwrap();
         }
@@ -654,7 +658,7 @@ impl BufferView {
         center: bool,
     ) -> Result<(), buffer::Error> {
         // Ensure points are valid even if we can't autoscroll immediately because
-        // flush_pending_autoscroll_to_selection unwraps.
+        // flush_vertical_autoscroll_to_selection unwraps.
         let (start, end) = {
             let buffer = self.buffer.borrow();
             let start = buffer.point_for_anchor(&range.start)?;
@@ -680,8 +684,11 @@ impl BufferView {
             } else if self.scroll_bottom() < desired_bottom {
                 self.set_scroll_top(desired_bottom - height);
             }
+
+            self.horizontal_autoscroll.replace(Some(range));
         } else {
-            self.pending_autoscroll = Some(AutoScrollRequest { range, center });
+            self.vertical_autoscroll = Some(AutoScrollRequest { range, center });
+            self.horizontal_autoscroll.replace(None);
         }
 
         Ok(())
@@ -699,7 +706,7 @@ impl View for BufferView {
 
     fn will_mount(&mut self, window: &mut Window, self_handle: WeakViewHandle<Self>) {
         self.height = Some(window.height());
-        self.flush_pending_autoscroll_to_selection();
+        self.flush_vertical_autoscroll_to_selection();
         if let Some(ref delegate) = self.delegate {
             delegate.map(|delegate| delegate.set_active_buffer_view(self_handle));
         }
@@ -729,20 +736,42 @@ impl View for BufferView {
             lines.push(String::from_utf16_lossy(&cur_line));
         }
 
-        let mut longest_line = Vec::new();
-        for c in buffer.iter_starting_at_row(buffer.longest_row()) {
-            if c == u16::from(b'\n') {
-                break;
+        let longest_row = buffer.longest_row();
+        let longest_line = if start.row <= longest_row && longest_row <= end.row {
+            lines[(longest_row - start.row) as usize].clone()
+        } else {
+            String::from_utf16_lossy(&buffer.line(buffer.longest_row()).unwrap())
+        };
+
+        let horizontal_autoscroll = self.horizontal_autoscroll.take().map(|range| {
+            let scroll_start = buffer.point_for_anchor(&range.start).unwrap();
+            let scroll_end = buffer.point_for_anchor(&range.end).unwrap();
+            let start_line = if start.row <= scroll_start.row && scroll_start.row <= end.row {
+                lines[(scroll_start.row - start.row) as usize].clone()
             } else {
-                longest_line.push(c);
-            }
-        }
+                String::from_utf16_lossy(&buffer.line(scroll_start.row).unwrap())
+            };
+            let end_line = if start.row <= scroll_end.row && scroll_end.row <= end.row {
+                lines[(scroll_end.row - start.row) as usize].clone()
+            } else {
+                String::from_utf16_lossy(&buffer.line(scroll_end.row).unwrap())
+            };
+
+            json!({
+                "start": scroll_start,
+                "start_line": start_line,
+                "end": scroll_end,
+                "end_line": end_line,
+            })
+        });
 
         json!({
             "first_visible_row": start.row,
             "lines": lines,
-            "longest_line": String::from_utf16_lossy(&longest_line),
+            "longest_line": longest_line,
             "scroll_top": self.scroll_top(),
+            "horizontal_autoscroll": horizontal_autoscroll,
+            "horizontal_margin": self.horizontal_margin,
             "height": self.height,
             "width": self.width,
             "line_height": self.line_height,

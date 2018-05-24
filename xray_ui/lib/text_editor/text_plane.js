@@ -74,8 +74,8 @@ class TextPlane extends React.Component {
     });
   }
 
-  measureLine(line) {
-    return this.renderer.measureLine(line);
+  measureLine(line, column) {
+    return this.renderer.measureLine(line, column);
   }
 
   isReady() {
@@ -342,9 +342,9 @@ class Renderer {
     return vao;
   }
 
-  measureLine(line) {
+  measureLine(line, column = line.length) {
     let x = 0;
-    for (let i = 0; i < line.length; i++) {
+    for (let i = 0; i < column; i++) {
       const variantIndex = Math.round(x * SUBPIXEL_DIVISOR) % SUBPIXEL_DIVISOR;
       const glyph = this.atlas.getGlyph(line[i], variantIndex);
       x += glyph.subpixelWidth;
