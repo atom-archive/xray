@@ -14,31 +14,26 @@ pub trait Item: Clone + Eq + fmt::Debug {
 }
 
 pub trait NodeStore<T: Item> {
-    type ReadError;
+    type ReadError: fmt::Debug;
 
-    fn read(&self, id: NodeId) -> Result<Node<T>, Self::ReadError>;
-    fn write(&mut self, id: NodeId, node: &Node<T>);
+    fn get(&mut self, id: NodeId) -> Result<&Node<T>, Self::ReadError>;
 }
 
 #[derive(Clone)]
-pub struct Tree<T: Item>(Arc<RwLock<TransientNode<T>>>);
-
-enum TransientNode<T: Item> {
-    Resident(Node<T>),
+pub enum Tree<T: Item> {
+    Resident(Arc<Node<T>>),
     NonResident(NodeId),
 }
 
 #[derive(Clone)]
 enum Node<T: Item> {
     Internal {
-        id: Option<NodeId>,
         height: u8,
         summary: T::Summary,
         child_summaries: SmallVec<[T::Summary; 2 * TREE_BASE]>,
         child_trees: SmallVec<[Tree<T>; 2 * TREE_BASE]>,
     },
     Leaf {
-        id: Option<NodeId>,
         summary: T::Summary,
         child_items: SmallVec<[T; 2 * TREE_BASE]>,
     },
@@ -46,148 +41,152 @@ enum Node<T: Item> {
 
 impl<T: Item> Tree<T> {
     pub fn new() -> Self {
-        Tree(Arc::new(RwLock::new(TransientNode::Resident(Node::Leaf {
-            id: None,
+        Tree::Resident(Arc::new(Node::Leaf {
             summary: T::Summary::default(),
             child_items: SmallVec::new(),
-        }))))
+        }))
     }
 
-    pub fn push_item<S: NodeStore<T>>(&mut self, item: T, db: &S) -> Result<(), S::ReadError> {
+    pub fn push_item<S: NodeStore<T>>(&mut self, item: T, db: &mut S) -> Result<(), S::ReadError> {
         self.push_tree(
-            Tree(Arc::new(RwLock::new(TransientNode::Resident(Node::Leaf {
-                id: None,
+            Tree::Resident(Arc::new(Node::Leaf {
                 summary: item.summarize(),
                 child_items: SmallVec::from_vec(vec![item]),
-            })))),
+            })),
             db,
         )
     }
 
-    pub fn push_tree<S: NodeStore<T>>(&mut self, other: Self, db: &S) -> Result<(), S::ReadError> {
-        // let other_height = other.height();
-        // if self.height() < other_height {
-        //     for tree in other.child_trees().iter().cloned() {
+    pub fn push_tree<S: NodeStore<T>>(
+        &mut self,
+        other: Self,
+        db: &mut S,
+    ) -> Result<(), S::ReadError> {
+        unimplemented!()
+        // let other_height = other.height(db)?;
+        // if self.height(db)? < other_height {
+        //     for tree in other.child_trees(db)?.clone() {
         //         self.push_tree_recursive(tree, db);
         //     }
         // } else if let Some(split_tree) = self.push_tree_recursive(other, db)? {
         //     *self = Self::from_child_trees(vec![self.clone(), split_tree]);
         // }
         // Ok(())
-        unimplemented!()
     }
 
     fn push_tree_recursive<S>(
         &mut self,
         mut other: Tree<T>,
-        db: &S,
+        db: &mut S,
     ) -> Result<Option<Tree<T>>, S::ReadError>
     where
         S: NodeStore<T>,
     {
-        self.update_node(db, |self_node| {
-            other.read_node(db, |other_node| match self_node {
-                Node::Internal {
-                    height,
-                    summary,
-                    child_summaries,
-                    child_trees,
-                    ..
-                } => {
+        match self.make_mut_node(db)? {
+            Node::Internal {
+                height,
+                summary,
+                child_summaries,
+                child_trees,
+            } => {
+                let height_delta;
+                let mut summaries_to_append = SmallVec::<[T::Summary; 2 * TREE_BASE]>::new();
+                let mut trees_to_append = SmallVec::<[Tree<T>; 2 * TREE_BASE]>::new();
+
+                {
+                    let other_node = other.node(db)?;
                     *summary += other_node.summary();
-                    match *height - other_node.height() {
-                        0 => {
-
-                        }
-                        1 => {
-
-                        }
-                        _ => {
-
-                        }
+                    height_delta = *height - other_node.height();
+                    if height_delta == 0 {
+                        summaries_to_append.extend(other_node.child_summaries().iter().cloned());
+                        trees_to_append.extend(other_node.child_trees().iter().cloned());
+                    } else if height_delta == 1 {
+                        summaries_to_append.push(other_node.summary().clone());
                     }
-
-                    unimplemented!()
                 }
-                Node::Leaf { child_items, .. } => unimplemented!(),
-            })?
-        })?
 
-        // *self.summary_mut() += other.summary();
-        //
-        // let self_height = self.height();
-        // let other_height = other.height();
-        //
-        // if other_height == self_height {
-        //     if self_height == 0 {
-        //         // self.append_child_items(other.child_items())
-        //     } else {
-        //         other.read_node(db, |other_node| {
-        //             self.append_child_trees(other_node.child_summaries(), other_node.child_trees())
-        //         })
-        //     }
-        // } else if other_height == self_height - 1 && !other.is_underflowing() {
-        //     self.append_child_trees(&[other.summary().clone()], &[other])
-        // } else {
-        //     if let Some(split) = self.last_child_tree_mut().push_tree_recursive(other) {
-        //         self.append_child_trees(&[split.summary().clone()], &[split])
-        //     } else {
-        //         Ok(None)
-        //     }
-        // }
-    }
+                if height_delta == 1 {
+                    trees_to_append.push(other)
+                } else if height_delta > 1 {
+                    let tree_to_append = child_trees
+                        .last_mut()
+                        .unwrap()
+                        .push_tree_recursive(other, db)?;
 
-    fn append_child_trees(
-        &mut self,
-        summaries: &[T::Summary],
-        tree_refs: &[Tree<T>],
-    ) -> Option<Tree<T>> {
-        // let height = self.height();
-        // match Arc::make_mut(&mut self.0) {
-        //     &mut Node::Internal {
-        //         ref mut summary,
-        //         ref mut child_summaries,
-        //         ref mut child_trees,
-        //         ..
-        //     } => {
-        //         let child_count = child_trees.len() + tree_refs.len();
-        //         if child_count > 2 * TREE_BASE {
-        //             let left_summaries: SmallVec<_>;
-        //             let right_summaries: SmallVec<_>;
-        //             let left_tree_refs;
-        //             let right_tree_refs;
-        //
-        //             let midpoint = (child_count + child_count % 2) / 2;
-        //             {
-        //                 let mut all_summaries =
-        //                     child_summaries.iter().chain(summaries.iter()).cloned();
-        //                 left_summaries = all_summaries.by_ref().take(midpoint).collect();
-        //                 right_summaries = all_summaries.collect();
-        //                 let mut all_tree_refs = child_trees.iter().chain(tree_refs.iter()).cloned();
-        //                 left_tree_refs = all_tree_refs.by_ref().take(midpoint).collect();
-        //                 right_tree_refs = all_tree_refs.collect();
-        //             }
-        //             *summary = sum(left_summaries.iter());
-        //             *child_summaries = left_summaries;
-        //             *child_trees = left_tree_refs;
-        //
-        //             Some(Tree(Arc::new(Node::Internal {
-        //                 id: None,
-        //                 height,
-        //                 summary: sum(right_summaries.iter()),
-        //                 child_summaries: right_summaries,
-        //                 child_trees: right_tree_refs,
-        //             })))
-        //         } else {
-        //             *summary += &sum(summaries.iter());
-        //             child_summaries.extend(summaries.iter().cloned());
-        //             child_trees.extend(tree_refs.iter().cloned());
-        //             None
-        //         }
-        //     }
-        //     &mut Node::Leaf { .. } => panic!("Cannot append child tree refs to a leaf node"),
-        // }
-        unimplemented!()
+                    if let Some(tree) = tree_to_append {
+                        summaries_to_append.push(tree.summary(db).unwrap().clone());
+                        trees_to_append.push(tree);
+                    }
+                }
+
+                let child_count = child_trees.len() + trees_to_append.len();
+                if child_count > 2 * TREE_BASE {
+                    let left_summaries;
+                    let right_summaries: SmallVec<_>;
+                    let left_trees;
+                    let right_trees;
+
+                    let midpoint = (child_count + child_count % 2) / 2;
+                    {
+                        let mut all_summaries = child_summaries
+                            .iter()
+                            .chain(summaries_to_append.iter())
+                            .cloned();
+                        left_summaries = all_summaries.by_ref().take(midpoint).collect();
+                        right_summaries = all_summaries.collect();
+                        let mut all_trees =
+                            child_trees.iter().chain(trees_to_append.iter()).cloned();
+                        left_trees = all_trees.by_ref().take(midpoint).collect();
+                        right_trees = all_trees.collect();
+                    }
+                    *child_summaries = left_summaries;
+                    *child_trees = left_trees;
+                    *summary = sum(child_summaries.iter());
+
+                    Ok(Some(Tree::Resident(Arc::new(Node::Internal {
+                        height: *height,
+                        summary: sum(right_summaries.iter()),
+                        child_summaries: right_summaries,
+                        child_trees: right_trees,
+                    }))))
+                } else {
+                    *summary += &sum(summaries_to_append.iter());
+                    child_summaries.extend(summaries_to_append);
+                    child_trees.extend(trees_to_append);
+                    Ok(None)
+                }
+            }
+            Node::Leaf { summary, child_items, .. } => {
+                let other_node = other.node(db)?;
+
+                let child_count = child_items.len() + other_node.child_items().len();
+                if child_count > 2 * TREE_BASE {
+                    let left_items;
+                    let right_items: SmallVec<[T; 2 * TREE_BASE]>;
+
+                    let midpoint = (child_count + child_count % 2) / 2;
+                    {
+                        let mut all_items = child_items
+                            .iter()
+                            .chain(other_node.child_items().iter())
+                            .cloned();
+                        left_items = all_items.by_ref().take(midpoint).collect();
+                        right_items = all_items.collect();
+                    }
+                    *child_items = left_items;
+                    *summary = sum(child_items.iter().map(|item| item.summarize()).by_ref());
+
+                    Ok(Some(Tree::Resident(Arc::new(Node::Leaf {
+                        summary: sum(right_items.iter().map(|item| item.summarize()).by_ref()),
+                        child_items: right_items,
+                    }))))
+                } else {
+                    *summary += other_node.summary();
+                    child_items.extend(other_node.child_items().iter().cloned());
+                    Ok(None)
+                }
+            }
+        }
     }
 
     fn from_child_trees(child_trees: Vec<Tree<T>>) -> Self {
@@ -210,90 +209,53 @@ impl<T: Item> Tree<T> {
         unimplemented!()
     }
 
-    // TODO: Make this method more readable when non-lexical lifetimes are supported.
-    fn read_node<S, F, U>(&mut self, db: &S, f: F) -> Result<U, S::ReadError>
-    where
-        S: NodeStore<T>,
-        F: FnOnce(&Node<T>) -> U,
-    {
-        // Bypass lock acqusition if we hold a unique reference.
-        {
-            if let Some(lock) = Arc::get_mut(&mut self.0) {
-                return Ok(f(lock.get_mut().read_node(db)?))
-            }
+    fn make_mut_node<S: NodeStore<T>>(&mut self, db: &mut S) -> Result<&mut Node<T>, S::ReadError> {
+        if let Tree::NonResident(node_id) = self {
+            *self = Tree::Resident(Arc::new(db.get(*node_id)?.clone()));
         }
-        // If there is more than one reference:
-        let guard = self.0.upgradable_read();
-        {
-            // First see if the node is already loaded from the database with a read lock.
-            if let Some(node) = guard.try_read_node() {
-                return Ok(f(node))
-            }
-        }
-        // If the node was not loaded from the database, upgrade to the write lock and load it.
-        Ok(f(guard.upgrade().read_node(db)?))
-    }
 
-    // TODO: Make this method more readable when non-lexical lifetimes are supported.
-    fn update_node<S, F, U>(&mut self, db: &S, f: F) -> Result<U, S::ReadError>
-    where
-        S: NodeStore<T>,
-        F: FnOnce(&mut Node<T>) -> U,
-    {
-        // Bypass lock acqusition and grab a mutable Node reference if we hold a unique reference.
-        {
-            if let Some(lock) = Arc::get_mut(&mut self.0) {
-                return Ok(f(lock.get_mut().read_node(db)?))
-            }
-        }
-        // If there is more than one reference we need to clone our node in order to mutate it.
-        let mut new_node = self.clone_node(db)?;
-        new_node.clear_id();
-        let result = f(&mut new_node);
-        *self = Tree(Arc::new(RwLock::new(TransientNode::Resident(new_node))));
-        Ok(result)
-    }
-
-    // TODO: Inline this method when non-lexical lifetimes are supported.
-    fn clone_node<S: NodeStore<T>>(&self, db: &S) -> Result<Node<T>, S::ReadError> {
-        let guard = self.0.upgradable_read();
-        {
-            if let Some(node) = guard.try_read_node() {
-                return Ok(node.clone());
-            }
-        }
-        Ok(guard.upgrade().read_node(db)?.clone())
-    }
-}
-
-impl<T: Item> TransientNode<T> {
-    fn read_node<S: NodeStore<T>>(&mut self, db: &S) -> Result<&mut Node<T>, S::ReadError> {
         match self {
-            TransientNode::Resident(ref mut node) => return Ok(node),
-            TransientNode::NonResident(id) => *self = TransientNode::Resident(db.read(*id)?),
-        }
-        match self {
-            TransientNode::Resident(node) => Ok(node),
-            TransientNode::NonResident(_) => unreachable!(),
+            Tree::Resident(node) => Ok(Arc::make_mut(node)),
+            Tree::NonResident(node_id) => unreachable!(),
         }
     }
 
-    fn try_read_node(&self) -> Option<&Node<T>> {
+    fn node<'a, S: NodeStore<T>>(&'a self, db: &'a mut S) -> Result<&'a Node<T>, S::ReadError> {
         match self {
-            TransientNode::Resident(node) => Some(node),
-            TransientNode::NonResident(_) => None,
+            Tree::Resident(node) => Ok(node),
+            Tree::NonResident(node_id) => db.get(*node_id),
+        }
+    }
+
+    fn height<S: NodeStore<T>>(&self, db: &mut S) -> Result<u8, S::ReadError> {
+        match self {
+            Tree::Resident(node) => Ok(node.height()),
+            Tree::NonResident(node_id) => Ok(db.get(*node_id)?.height()),
+        }
+    }
+
+    fn summary<'a, S: NodeStore<T>>(
+        &'a self,
+        db: &'a mut S,
+    ) -> Result<&'a T::Summary, S::ReadError> {
+        match self {
+            Tree::Resident(node) => Ok(node.summary()),
+            Tree::NonResident(node_id) => Ok(db.get(*node_id)?.summary()),
+        }
+    }
+
+    fn child_trees<'a, S: NodeStore<T>>(
+        &'a self,
+        db: &'a mut S,
+    ) -> Result<&'a SmallVec<[Tree<T>; 2 * TREE_BASE]>, S::ReadError> {
+        match self {
+            Tree::Resident(node) => Ok(node.child_trees()),
+            Tree::NonResident(node_id) => Ok(db.get(*node_id)?.child_trees()),
         }
     }
 }
 
 impl<T: Item> Node<T> {
-    fn clear_id(&mut self) {
-        match self {
-            Node::Internal { id, .. } => *id = None,
-            Node::Leaf { id, .. } => *id = None,
-        }
-    }
-
     fn height(&self) -> u8 {
         match self {
             Node::Internal { height, .. } => *height,
@@ -317,9 +279,9 @@ impl<T: Item> Node<T> {
         }
     }
 
-    fn child_trees(&self) -> &[Tree<T>] {
+    fn child_trees(&self) -> &SmallVec<[Tree<T>; 2 * TREE_BASE]> {
         match self {
-            Node::Internal { child_trees, .. } => child_trees.as_slice(),
+            Node::Internal { child_trees, .. } => child_trees,
             Node::Leaf { .. } => panic!("Leaf nodes have no child trees"),
         }
     }

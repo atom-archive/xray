@@ -4,5 +4,5 @@ version = "0.1.0"
 authors = ["Antonio Scandurra <as-cii@github.com>", "Nathan Sobo <nathan@github.com>"]
 
 [dependencies]
-smallvec = "0.6"
+smallvec = "0.6.1"
 parking_lot = "0.5"
