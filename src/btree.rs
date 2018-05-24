@@ -1,8 +1,8 @@
 use smallvec::SmallVec;
 use std::fmt;
-use std::ops::AddAssign;
-use std::sync::Arc;
 use std::marker::PhantomData;
+use std::ops::{Add, AddAssign};
+use std::sync::Arc;
 
 const TREE_BASE: usize = 16;
 type NodeId = usize;
@@ -11,6 +11,16 @@ pub trait Item: Clone + Eq {
     type Summary: for<'a> AddAssign<&'a Self::Summary> + Default + Clone;
 
     fn summarize(&self) -> Self::Summary;
+}
+
+pub trait Dimension: for<'a> Add<&'a Self, Output = Self> + Ord + Clone + fmt::Debug {
+    type Summary: Default;
+
+    fn from_summary(summary: &Self::Summary) -> Self;
+
+    fn default() -> Self {
+        Self::from_summary(&Self::Summary::default())
+    }
 }
 
 pub trait NodeStore<T: Item> {
@@ -37,6 +47,19 @@ enum Node<T: Item> {
         summary: T::Summary,
         items: SmallVec<[T; 2 * TREE_BASE]>,
     },
+}
+
+pub struct Cursor<T: Item> {
+    tree: Tree<T>,
+    stack: SmallVec<[(Tree<T>, usize); 16]>,
+    summary: T::Summary,
+    did_seek: bool,
+}
+
+#[derive(Eq, PartialEq)]
+pub enum SeekBias {
+    Left,
+    Right,
 }
 
 #[derive(Debug)]
@@ -83,7 +106,7 @@ impl<T: Item> Tree<T> {
 
     pub fn push<S: NodeStore<T>>(&mut self, item: T, db: &mut S) -> Result<(), S::ReadError> {
         self.push_tree(
-            Tree::Resident(Arc::new(Node::Leaf {
+            Treefrom_child_trees(child_trees, db)Resident(Arc::new(Node::Leaf {
                 summary: item.summarize(),
                 items: SmallVec::from_vec(vec![item]),
             })),
@@ -332,6 +355,89 @@ impl<T: Item> Node<T> {
             Node::Internal { child_trees, .. } => child_trees.len() < TREE_BASE,
             Node::Leaf { items, .. } => items.len() < TREE_BASE,
         }
+    }
+}
+
+impl<T: Item> Cursor<T> {
+    fn new(tree: Tree<T>) -> Self {
+        Self {
+            tree,
+            stack: SmallVec::new(),
+            summary: T::Summary::default(),
+            did_seek: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.did_seek = false;
+        self.stack.truncate(0);
+        self.summary = T::Summary::default();
+    }
+
+    pub fn seek<D, S>(&mut self, pos: &D, bias: SeekBias, db: &mut S) -> Result<(), S::ReadError>
+    where
+        D: Dimension<Summary = T::Summary>,
+        S: NodeStore<T>,
+    {
+        self.reset();
+        self.descend(pos, bias, db, None)
+    }
+
+    fn descend<D, S>(
+        &mut self,
+        pos: &D,
+        bias: SeekBias,
+        db: &mut S,
+        mut slice: Option<&mut Tree<T>>,
+    ) -> Result<(), S::ReadError>
+    where
+        D: Dimension<Summary = T::Summary>,
+        S: NodeStore<T>,
+    {
+        let mut subtree = self.tree.clone();
+
+        loop {
+            match subtree.node(db)? {
+                Node::Internal {
+                    child_summaries,
+                    child_trees,
+                    ..
+                } => {
+                    for (index, child_summary) in child_summaries.iter().enumerate() {
+                        let child_end =
+                            D::from_summary(&self.summary) + &D::from_summary(child_summary);
+                        if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
+                            self.summary += child_summary;
+                            if let Some(slice) = slice.as_mut() {
+                                slice.push_tree(child_trees[index].clone(), db)?;
+                            }
+                        } else {
+                            self.stack.push((subtree.clone(), index));
+                            subtree = child_trees[index].clone();
+                            break;
+                        }
+                    }
+                }
+                Node::Leaf { items, .. } => {
+                    for (index, item) in items.iter().enumerate() {
+                        let item_summary = item.summarize();
+                        let child_end =
+                            D::from_summary(&self.summary) + &D::from_summary(&item_summary);
+                        if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
+                            self.summary += &item_summary;
+                            if let Some(slice) = slice.as_mut() {
+                                slice.push(item.clone(), db)?;
+                            }
+                        } else {
+                            self.stack.push((subtree.clone(), index));
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
