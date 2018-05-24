@@ -45,7 +45,7 @@ class TextEditor extends React.Component {
       CURSOR_BLINK_RESUME_DELAY
     );
 
-    this.state = { showLocalCursors: true };
+    this.state = { scrollLeft: 0, showLocalCursors: true };
   }
 
   componentDidMount() {
@@ -89,10 +89,6 @@ class TextEditor extends React.Component {
     });
   }
 
-  componentDidUpdate() {
-    this.updateLongestLineWidth();
-  }
-
   render() {
     return $(
       ActionContext,
@@ -111,9 +107,9 @@ class TextEditor extends React.Component {
           lineHeight: this.props.line_height,
           scrollTop: this.props.scroll_top,
           paddingLeft: 5,
-          scrollLeft: this.props.scroll_left,
+          scrollLeft: this.getScrollLeft(),
           height: this.props.height,
-          width: Math.max(this.props.width, this.props.content_width),
+          width: Math.max(this.props.width, this.getContentWidth()),
           selections: this.props.selections,
           firstVisibleRow: this.props.first_visible_row,
           lines: this.props.lines,
@@ -160,7 +156,7 @@ class TextEditor extends React.Component {
 
   handleMouseWheel(event) {
     if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
-      this.props.dispatch({ type: "UpdateScrollLeft", delta: event.deltaX });
+      this.setScrollLeft(this.state.scrollLeft + event.deltaX);
     } else {
       this.props.dispatch({ type: "UpdateScrollTop", delta: event.deltaY });
     }
@@ -208,17 +204,61 @@ class TextEditor extends React.Component {
     this.element.focus();
   }
 
-  updateLongestLineWidth() {
-    const { longest_line: longestLine } = this.props;
-    if (this.previousLongestLine != longestLine) {
-      const longestLineWidth = this.textPlane.measureLine(longestLine);
-      const cursorWidth = this.textPlane.measureLine("X");
-      this.props.dispatch({
-        type: "SetLongestLineWidth",
-        width: Math.ceil(longestLineWidth + cursorWidth)
-      });
-      this.previousLongestLine = longestLine;
+  getScrollLeft() {
+    return this.constrainScrollLeft(this.state.scrollLeft);
+  }
+
+  setScrollLeft(scrollLeft) {
+    this.setState({
+      scrollLeft: this.constrainScrollLeft(scrollLeft)
+    });
+  }
+
+  constrainScrollLeft(scrollLeft) {
+    return Math.max(0, Math.min(scrollLeft, this.getMaxScrollLeft()));
+  }
+
+  getMaxScrollLeft() {
+    const contentWidth = this.getContentWidth();
+    if (contentWidth != null && this.props.width != null) {
+      return Math.max(0, contentWidth - this.props.width);
+    } else {
+      return Infinity;
     }
+  }
+
+  getContentWidth() {
+    const longestLineWidth = this.getLongestLineWidth();
+    const cursorWidth = this.getCursorWidth();
+    if (longestLineWidth != null && cursorWidth != null) {
+      return Math.ceil(longestLineWidth + cursorWidth);
+    } else {
+      return null;
+    }
+  }
+
+  getCursorWidth() {
+    if (
+      this.cursorWidth == null &&
+      this.textPlane &&
+      this.textPlane.isReady()
+    ) {
+      this.cursorWidth = this.textPlane.measureLine("X");
+    }
+    return this.cursorWidth;
+  }
+
+  getLongestLineWidth() {
+    const { longest_line: longestLine } = this.props;
+    if (
+      this.longestLine != longestLine &&
+      this.textPlane &&
+      this.textPlane.isReady()
+    ) {
+      this.longestLine = longestLine;
+      this.longestLineWidth = this.textPlane.measureLine(longestLine);
+    }
+    return this.longestLineWidth;
   }
 }
 

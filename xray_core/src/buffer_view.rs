@@ -25,9 +25,7 @@ pub struct BufferView {
     height: Option<f64>,
     width: Option<f64>,
     line_height: f64,
-    longest_line_width: Option<f64>,
     scroll_top: f64,
-    scroll_left: f64,
     vertical_margin: u32,
     pending_autoscroll: Option<AutoScrollRequest>,
     delegate: Option<WeakViewHandle<BufferViewDelegate>>,
@@ -46,7 +44,6 @@ struct SelectionProps {
 #[serde(tag = "type")]
 enum BufferViewAction {
     UpdateScrollTop { delta: f64 },
-    UpdateScrollLeft { delta: f64 },
     SetDimensions { width: u64, height: u64 },
     SetLongestLineWidth { width: f64 },
     Edit { text: String },
@@ -102,9 +99,7 @@ impl BufferView {
             height: None,
             width: None,
             line_height: 10.0,
-            longest_line_width: None,
             scroll_top: 0.0,
-            scroll_left: 0.0,
             vertical_margin: 2,
             pending_autoscroll: None,
             delegate,
@@ -135,14 +130,6 @@ impl BufferView {
         self
     }
 
-    pub fn set_longest_line_width(&mut self, width: f64) {
-        if self.longest_line_width.is_none() || width != self.longest_line_width.unwrap() {
-            self.longest_line_width = Some(width);
-            self.autoscroll_to_cursor(false);
-            self.updated();
-        }
-    }
-
     pub fn set_scroll_top(&mut self, scroll_top: f64) -> &mut Self {
         debug_assert!(scroll_top >= 0_f64);
         self.scroll_top = scroll_top;
@@ -158,23 +145,6 @@ impl BufferView {
 
     fn scroll_bottom(&self) -> f64 {
         self.scroll_top() + self.height.unwrap_or(0.0)
-    }
-
-    pub fn set_scroll_left(&mut self, scroll_left: f64) -> &mut Self {
-        debug_assert!(scroll_left >= 0_f64);
-        self.scroll_left = scroll_left;
-        self.pending_autoscroll = None;
-        self.updated();
-        self
-    }
-
-    fn scroll_left(&self) -> f64 {
-        if self.longest_line_width.is_some() && self.width.is_some() {
-            let max_scroll_left = (self.longest_line_width.unwrap() - self.width.unwrap()).max(0.0);
-            self.scroll_left.min(max_scroll_left)
-        } else {
-            self.scroll_left
-        }
     }
 
     pub fn save(&self) -> Option<Box<Future<Item = (), Error = buffer::Error>>> {
@@ -773,10 +743,8 @@ impl View for BufferView {
             "lines": lines,
             "longest_line": String::from_utf16_lossy(&longest_line),
             "scroll_top": self.scroll_top(),
-            "scroll_left": self.scroll_left(),
             "height": self.height,
             "width": self.width,
-            "content_width": self.longest_line_width.or(self.width),
             "line_height": self.line_height,
             "selections": self.render_selections(start..end),
         })
@@ -791,19 +759,9 @@ impl View for BufferView {
                 }
                 self.set_scroll_top(scroll_top);
             }
-            Ok(BufferViewAction::UpdateScrollLeft { delta }) => {
-                let mut scroll_left = self.scroll_left() + delta;
-                if scroll_left < 0.0 {
-                    scroll_left = 0.0;
-                }
-                self.set_scroll_left(scroll_left);
-            }
             Ok(BufferViewAction::SetDimensions { width, height }) => {
                 self.set_width(width as f64);
                 self.set_height(height as f64);
-            }
-            Ok(BufferViewAction::SetLongestLineWidth { width }) => {
-                self.set_longest_line_width(width);
             }
             Ok(BufferViewAction::Edit { text }) => self.edit(text.as_str()),
             Ok(BufferViewAction::Backspace) => self.backspace(),

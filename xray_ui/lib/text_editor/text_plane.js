@@ -77,6 +77,10 @@ class TextPlane extends React.Component {
   measureLine(line) {
     return this.renderer.measureLine(line);
   }
+
+  isReady() {
+    return this.renderer != null;
+  }
 }
 
 TextPlane.contextTypes = {
