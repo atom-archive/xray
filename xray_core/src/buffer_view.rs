@@ -46,7 +46,6 @@ struct SelectionProps {
 enum BufferViewAction {
     UpdateScrollTop { delta: f64 },
     SetDimensions { width: u64, height: u64 },
-    SetLongestLineWidth { width: f64 },
     Edit { text: String },
     Backspace,
     Delete,
@@ -805,7 +804,7 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectRight) => self.select_right(),
             Ok(BufferViewAction::AddSelectionAbove) => self.add_selection_above(),
             Ok(BufferViewAction::AddSelectionBelow) => self.add_selection_below(),
-            action @ _ => eprintln!("Unrecognized action {:?}", action),
+            Err(action) => eprintln!("Unrecognized action {:?}", action),
         }
     }
 }
