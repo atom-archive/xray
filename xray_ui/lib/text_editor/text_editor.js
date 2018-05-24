@@ -111,7 +111,7 @@ class TextEditor extends React.Component {
           paddingLeft: 5,
           scrollLeft: this.getScrollLeft(),
           height: this.props.height,
-          width: Math.max(this.props.width, this.getContentWidth()),
+          width: this.getScrollWidth(),
           selections: this.props.selections,
           firstVisibleRow: this.props.first_visible_row,
           lines: this.props.lines,
@@ -263,12 +263,17 @@ class TextEditor extends React.Component {
     if (contentWidth != null && this.props.width != null) {
       return Math.max(0, contentWidth - this.props.width);
     } else {
-      return Infinity;
+      return 0;
     }
   }
 
-  getMaxScrollRight() {
-    return this.getMaxScrollLeft() + this.props.width;
+  getScrollWidth() {
+    const contentWidth = this.getContentWidth();
+    if (contentWidth != null && this.props.width != null) {
+      return Math.max(contentWidth, this.props.width);
+    } else {
+      return 0;
+    }
   }
 
   getContentWidth() {
