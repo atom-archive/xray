@@ -2,12 +2,13 @@ use smallvec::SmallVec;
 use std::fmt;
 use std::ops::AddAssign;
 use std::sync::Arc;
+use std::marker::PhantomData;
 
 const TREE_BASE: usize = 16;
 type NodeId = usize;
 
-pub trait Item: Clone + Eq + fmt::Debug {
-    type Summary: for<'a> AddAssign<&'a Self::Summary> + Default + Eq + Clone + fmt::Debug;
+pub trait Item: Clone + Eq {
+    type Summary: for<'a> AddAssign<&'a Self::Summary> + Default + Clone;
 
     fn summarize(&self) -> Self::Summary;
 }
@@ -34,23 +35,57 @@ enum Node<T: Item> {
     },
     Leaf {
         summary: T::Summary,
-        child_items: SmallVec<[T; 2 * TREE_BASE]>,
+        items: SmallVec<[T; 2 * TREE_BASE]>,
     },
 }
+
+#[derive(Debug)]
+pub struct NullNodeStoreReadError;
+
+pub struct NullNodeStore<T: Item>(PhantomData<T>);
 
 impl<T: Item> Tree<T> {
     pub fn new() -> Self {
         Tree::Resident(Arc::new(Node::Leaf {
             summary: T::Summary::default(),
-            child_items: SmallVec::new(),
+            items: SmallVec::new(),
         }))
     }
 
-    pub fn push_item<S: NodeStore<T>>(&mut self, item: T, db: &mut S) -> Result<(), S::ReadError> {
+    fn extend<I, S>(&mut self, iter: I, db: &mut S) -> Result<(), S::ReadError>
+    where
+        I: IntoIterator<Item = T>,
+        S: NodeStore<T>,
+    {
+        let mut leaf: Option<Node<T>> = None;
+
+        for item in iter {
+            if leaf.is_some() && leaf.as_ref().unwrap().items().len() == 2 * TREE_BASE {
+                self.push_tree(Tree::Resident(Arc::new(leaf.take().unwrap())), db);
+            }
+
+            if leaf.is_none() {
+                leaf = Some(Node::Leaf::<T> {
+                    summary: T::Summary::default(),
+                    items: SmallVec::new(),
+                });
+            }
+
+            leaf.as_mut().unwrap().items_mut().push(item);
+        }
+
+        if leaf.is_some() {
+            self.push_tree(Tree::Resident(Arc::new(leaf.take().unwrap())), db);
+        }
+
+        Ok(())
+    }
+
+    pub fn push<S: NodeStore<T>>(&mut self, item: T, db: &mut S) -> Result<(), S::ReadError> {
         self.push_tree(
             Tree::Resident(Arc::new(Node::Leaf {
                 summary: item.summarize(),
-                child_items: SmallVec::from_vec(vec![item]),
+                items: SmallVec::from_vec(vec![item]),
             })),
             db,
         )
@@ -154,36 +189,29 @@ impl<T: Item> Tree<T> {
                     Ok(None)
                 }
             }
-            Node::Leaf {
-                summary,
-                child_items,
-                ..
-            } => {
+            Node::Leaf { summary, items, .. } => {
                 let other_node = other.node(db)?;
 
-                let child_count = child_items.len() + other_node.child_items().len();
+                let child_count = items.len() + other_node.items().len();
                 if child_count > 2 * TREE_BASE {
                     let left_items;
                     let right_items: SmallVec<[T; 2 * TREE_BASE]>;
 
                     let midpoint = (child_count + child_count % 2) / 2;
                     {
-                        let mut all_items = child_items
-                            .iter()
-                            .chain(other_node.child_items().iter())
-                            .cloned();
+                        let mut all_items = items.iter().chain(other_node.items().iter()).cloned();
                         left_items = all_items.by_ref().take(midpoint).collect();
                         right_items = all_items.collect();
                     }
-                    *child_items = left_items;
-                    *summary = sum_owned(child_items.iter().map(|item| item.summarize()));
+                    *items = left_items;
+                    *summary = sum_owned(items.iter().map(|item| item.summarize()));
                     Ok(Some(Tree::Resident(Arc::new(Node::Leaf {
                         summary: sum_owned(right_items.iter().map(|item| item.summarize())),
-                        child_items: right_items,
+                        items: right_items,
                     }))))
                 } else {
                     *summary += other_node.summary();
-                    child_items.extend(other_node.child_items().iter().cloned());
+                    items.extend(other_node.items().iter().cloned());
                     Ok(None)
                 }
             }
@@ -285,18 +313,39 @@ impl<T: Item> Node<T> {
         }
     }
 
-    fn child_items(&self) -> &[T] {
+    fn items(&self) -> &SmallVec<[T; 2 * TREE_BASE]> {
         match self {
-            Node::Leaf { child_items, .. } => child_items.as_slice(),
-            Node::Internal { .. } => panic!("Internal nodes have no child items"),
+            Node::Leaf { items, .. } => items,
+            Node::Internal { .. } => panic!("Internal nodes have no items"),
+        }
+    }
+
+    fn items_mut(&mut self) -> &mut SmallVec<[T; 2 * TREE_BASE]> {
+        match self {
+            Node::Leaf { items, .. } => items,
+            Node::Internal { .. } => panic!("Internal nodes have no items"),
         }
     }
 
     fn is_underflowing(&self) -> bool {
         match self {
             Node::Internal { child_trees, .. } => child_trees.len() < TREE_BASE,
-            Node::Leaf { child_items, .. } => child_items.len() < TREE_BASE,
+            Node::Leaf { items, .. } => items.len() < TREE_BASE,
         }
+    }
+}
+
+impl<T: Item> NullNodeStore<T> {
+    fn new() -> Self {
+        NullNodeStore(PhantomData)
+    }
+}
+
+impl<T: Item> NodeStore<T> for NullNodeStore<T> {
+    type ReadError = NullNodeStoreReadError;
+
+    fn get(&mut self, node_id: NodeId) -> Result<&Node<T>, Self::ReadError> {
+        Err(NullNodeStoreReadError)
     }
 }
 
@@ -322,4 +371,46 @@ where
         sum += &value;
     }
     sum
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extend_and_push_tree() {
+        let mut db = NullNodeStore::new();
+
+        let mut tree1 = Tree::new();
+        tree1.extend(1..20, &mut db);
+
+        let mut tree2 = Tree::new();
+        tree2.extend(1..50, &mut db);
+
+        tree1.push_tree(tree2, &mut db);
+    }
+
+    #[derive(Clone, Default)]
+    pub struct IntegersSummary {
+        count: usize,
+        sum: usize,
+    }
+
+    impl Item for u16 {
+        type Summary = IntegersSummary;
+
+        fn summarize(&self) -> Self::Summary {
+            IntegersSummary {
+                count: 1,
+                sum: *self as usize,
+            }
+        }
+    }
+
+    impl<'a> AddAssign<&'a Self> for IntegersSummary {
+        fn add_assign(&mut self, other: &Self) {
+            self.count += other.count;
+            self.sum += other.sum;
+        }
+    }
 }
