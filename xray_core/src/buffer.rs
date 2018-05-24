@@ -730,6 +730,15 @@ impl Buffer {
         self.fragments.len::<Point>()
     }
 
+    pub fn line(&self, row: u32) -> Result<Vec<u16>, Error> {
+        let mut iterator = self.iter_starting_at_row(row).peekable();
+        if iterator.peek().is_none() {
+            Err(Error::OffsetOutOfRange)
+        } else {
+            Ok(iterator.take_while(|c| *c != u16::from(b'\n')).collect())
+        }
+    }
+
     pub fn snapshot(&self) -> BufferSnapshot {
         BufferSnapshot {
             fragments: self.fragments.clone(),
