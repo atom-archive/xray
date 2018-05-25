@@ -403,7 +403,6 @@ impl<T: Item> Cursor<T> {
     ) -> Result<Option<&'a T>, S::ReadError> {
         assert!(self.did_seek, "Must seek before calling this method");
         if let Some((subtree, index)) = self.stack.last() {
-
             eprintln!("item {} {:#?} ", index, subtree);
 
             match subtree.node(db)? {
@@ -475,10 +474,25 @@ impl<T: Item> Cursor<T> {
         S: NodeStore<T>,
     {
         self.reset();
-        self.descend(pos, bias, db, None)
+        self.seek_internal(pos, bias, db, None)
     }
 
-    fn descend<D, S>(
+    pub fn slice<D, S>(
+        &mut self,
+        end: &D,
+        bias: SeekBias,
+        db: &mut S,
+    ) -> Result<Tree<T>, S::ReadError>
+    where
+        D: Dimension<Summary = T::Summary>,
+        S: NodeStore<T>,
+    {
+        let mut slice = Tree::new();
+        self.seek_internal(end, bias, db, Some(&mut slice));
+        Ok(slice)
+    }
+
+    fn seek_internal<D, S>(
         &mut self,
         pos: &D,
         bias: SeekBias,
@@ -489,72 +503,143 @@ impl<T: Item> Cursor<T> {
         D: Dimension<Summary = T::Summary>,
         S: NodeStore<T>,
     {
-        let mut subtree = self.tree.clone();
+        let mut containing_subtree = None;
+        let mut slice_subtrees = SmallVec::<[Tree<T>; 2 * TREE_BASE]>::new();
 
-        loop {
-            let mut next_subtree = None;
-            let mut subtrees_to_push = SmallVec::<[Tree<T>; 2 * TREE_BASE]>::new();
+        if self.did_seek {
+            'outer: while self.stack.len() > 0 {
+                {
+                    let (parent_subtree, index) = self.stack.last_mut().unwrap();
+                    match parent_subtree.node(db)? {
+                        Node::Internal {
+                            child_summaries,
+                            child_trees,
+                            ..
+                        } => {
+                            *index += 1;
+                            while *index < child_summaries.len() {
+                                let child_tree = &child_trees[*index];
+                                let child_summary = &child_summaries[*index];
+                                let child_end = D::from_summary(&self.summary)
+                                    + &D::from_summary(&child_summary);
 
-            match subtree.node(db)? {
-                Node::Internal {
-                    child_summaries,
-                    child_trees,
-                    ..
-                } => {
-                    for (index, child_summary) in child_summaries.iter().enumerate() {
-                        let child_end =
-                            D::from_summary(&self.summary) + &D::from_summary(child_summary);
-                        if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
-                            self.summary += child_summary;
-                            if slice.is_some() {
-                                subtrees_to_push.push(child_trees[index].clone());
+                                if *pos > child_end
+                                    || (*pos == child_end && bias == SeekBias::Right)
+                                {
+                                    self.summary += child_summary;
+                                    slice_subtrees.push(child_tree.clone());
+                                    *index += 1;
+                                } else {
+                                    containing_subtree = Some(child_tree.clone());
+                                }
                             }
-                        } else {
-                            self.stack.push((subtree.clone(), index));
-                            next_subtree = Some(child_trees[index].clone());
-                            break;
+                        }
+                        Node::Leaf { items, .. } => {
+                            let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
+                            let mut slice_items_summary = T::Summary::default();
+
+                            while *index < items.len() {
+                                let item = &items[*index];
+                                let item_summary = item.summarize();
+                                let item_end = D::from_summary(&self.summary)
+                                    + &D::from_summary(&item_summary);
+
+                                if *pos > item_end || (*pos == item_end && bias == SeekBias::Right)
+                                {
+                                    self.summary += &item_summary;
+                                    slice_items.push(item.clone());
+                                    slice_items_summary += &item_summary;
+                                    *index += 1;
+                                } else {
+                                    slice_subtrees.push(Tree::Resident(Arc::new(Node::Leaf {
+                                        summary: slice_items_summary,
+                                        items: slice_items,
+                                    })));
+                                    break 'outer;
+                                }
+                            }
+
+                            slice_subtrees.push(Tree::Resident(Arc::new(Node::Leaf {
+                                summary: slice_items_summary,
+                                items: slice_items,
+                            })));
                         }
                     }
                 }
-                Node::Leaf { items, .. } => {
-                    let mut items_to_push = SmallVec::<[T; 2 * TREE_BASE]>::new();
-                    let mut items_to_push_summary = T::Summary::default();
-
-                    for (index, item) in items.iter().enumerate() {
-                        let item_summary = item.summarize();
-                        let child_end =
-                            D::from_summary(&self.summary) + &D::from_summary(&item_summary);
-                        if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
-                            if slice.is_some() {
-                                items_to_push.push(item.clone());
-                                items_to_push_summary += &item_summary;
-                            }
-                            self.summary += &item_summary;
-                        } else {
-                            if slice.is_some() {
-                                subtrees_to_push.push(Tree::Resident(Arc::new(Node::Leaf {
-                                    summary: items_to_push_summary,
-                                    items: items_to_push,
-                                })));
-                            }
-
-                            self.stack.push((subtree.clone(), index));
-                            break;
-                        }
-                    }
-                }
-            };
-
-            if let Some(slice) = slice.as_mut() {
-                for subtree in subtrees_to_push {
-                    slice.push_tree(subtree, db)?;
+                if containing_subtree.is_some() {
+                    break;
+                } else {
+                    self.stack.pop();
                 }
             }
+        } else {
+            containing_subtree = Some(self.tree.clone());
+        }
 
-            if let Some(next_subtree) = next_subtree {
-                subtree = next_subtree;
-            } else {
-                break;
+        if let Some (mut subtree) = containing_subtree {
+            loop {
+                let mut next_subtree = None;
+                match subtree.node(db)? {
+                    Node::Internal {
+                        child_summaries,
+                        child_trees,
+                        ..
+                    } => {
+                        for (index, child_summary) in child_summaries.iter().enumerate() {
+                            let child_end =
+                                D::from_summary(&self.summary) + &D::from_summary(child_summary);
+                            if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
+                                self.summary += child_summary;
+                                if slice.is_some() {
+                                    slice_subtrees.push(child_trees[index].clone());
+                                }
+                            } else {
+                                self.stack.push((subtree.clone(), index));
+                                next_subtree = Some(child_trees[index].clone());
+                                break;
+                            }
+                        }
+                    }
+                    Node::Leaf { items, .. } => {
+                        let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
+                        let mut slice_items_summary = T::Summary::default();
+
+                        for (index, item) in items.iter().enumerate() {
+                            let item_summary = item.summarize();
+                            let child_end =
+                                D::from_summary(&self.summary) + &D::from_summary(&item_summary);
+                            if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
+                                if slice.is_some() {
+                                    slice_items.push(item.clone());
+                                    slice_items_summary += &item_summary;
+                                }
+                                self.summary += &item_summary;
+                            } else {
+                                if slice.is_some() {
+                                    slice_subtrees.push(Tree::Resident(Arc::new(Node::Leaf {
+                                        summary: slice_items_summary,
+                                        items: slice_items,
+                                    })));
+                                }
+
+                                self.stack.push((subtree.clone(), index));
+                                break;
+                            }
+                        }
+                    }
+                };
+
+                if let Some(next_subtree) = next_subtree {
+                    subtree = next_subtree;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if let Some(slice) = slice.as_mut() {
+            for subtree in slice_subtrees {
+                slice.push_tree(subtree, db)?;
             }
         }
 
@@ -616,7 +701,10 @@ mod tests {
         tree2.extend(50..100, db).unwrap();
 
         tree1.push_tree(tree2, db).unwrap();
-        assert_eq!(tree1.items(db).unwrap(), (0..20).chain(50..100).collect::<Vec<u16>>());
+        assert_eq!(
+            tree1.items(db).unwrap(),
+            (0..20).chain(50..100).collect::<Vec<u16>>()
+        );
     }
 
     #[derive(Clone, Default, Debug)]
