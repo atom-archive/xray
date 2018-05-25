@@ -6,7 +6,7 @@ use notify_cell::{NotifyCell, NotifyCellObserver};
 use seahash::SeaHasher;
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
-use std::cmp;
+use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::BuildHasherDefault;
@@ -140,7 +140,26 @@ pub struct Deletion {
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Text {
     code_units: Vec<u16>,
-    newline_offsets: Vec<usize>,
+    nodes: Vec<LineNode>,
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+struct LineNode {
+    len: u32,
+    longest_row: u32,
+    longest_row_len: u32,
+    offset: usize,
+    rows: u32,
+}
+
+struct LineNodeProbe<'a> {
+    offset_range: &'a Range<usize>,
+    row: u32,
+    left_ancestor_end_offset: usize,
+    right_ancestor_start_offset: usize,
+    node: &'a LineNode,
+    left_child: Option<&'a LineNode>,
+    right_child: Option<&'a LineNode>,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
@@ -170,13 +189,13 @@ pub struct FragmentSummary {
     extent: usize,
     extent_2d: Point,
     max_fragment_id: FragmentId,
+    first_row_len: u32,
+    longest_row: u32,
+    longest_row_len: u32,
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct CharacterCount(usize);
-
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
-struct NewlineCount(usize);
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 struct InsertionSplit {
@@ -703,8 +722,21 @@ impl Buffer {
         Ok((row_end_offset - row_start_offset) as u32)
     }
 
+    pub fn longest_row(&self) -> u32 {
+        self.fragments.summary().longest_row
+    }
+
     pub fn max_point(&self) -> Point {
         self.fragments.len::<Point>()
+    }
+
+    pub fn line(&self, row: u32) -> Result<Vec<u16>, Error> {
+        let mut iterator = self.iter_starting_at_row(row).peekable();
+        if iterator.peek().is_none() {
+            Err(Error::OffsetOutOfRange)
+        } else {
+            Ok(iterator.take_while(|c| *c != u16::from(b'\n')).collect())
+        }
     }
 
     pub fn snapshot(&self) -> BufferSnapshot {
@@ -822,14 +854,14 @@ impl Buffer {
                                 )
                                 .unwrap()
                             {
-                                cmp::Ordering::Less => {
+                                Ordering::Less => {
                                     selections.push(old_selections.next().unwrap());
                                 }
-                                cmp::Ordering::Equal => {
+                                Ordering::Equal => {
                                     selections.push(old_selections.next().unwrap());
                                     selections.push(new_selections.next().unwrap());
                                 }
-                                cmp::Ordering::Greater => {
+                                Ordering::Greater => {
                                     selections.push(new_selections.next().unwrap());
                                 }
                             }
@@ -873,10 +905,10 @@ impl Buffer {
             if let Some(mut prev_selection) = old_selections.next() {
                 for selection in old_selections {
                     if self.cmp_anchors(&prev_selection.end, &selection.start)
-                        .unwrap() >= cmp::Ordering::Equal
+                        .unwrap() >= Ordering::Equal
                     {
                         if self.cmp_anchors(&selection.end, &prev_selection.end)
-                            .unwrap() > cmp::Ordering::Equal
+                            .unwrap() > Ordering::Equal
                         {
                             prev_selection.end = selection.end;
                         }
@@ -1686,7 +1718,7 @@ impl Buffer {
         }
     }
 
-    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<cmp::Ordering, Error> {
+    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Result<Ordering, Error> {
         let a_offset = self.offset_for_anchor(a)?;
         let b_offset = self.offset_for_anchor(b)?;
         Ok(a_offset.cmp(&b_offset))
@@ -1784,23 +1816,23 @@ impl AddAssign for Point {
 }
 
 impl PartialOrd for Point {
-    fn partial_cmp(&self, other: &Point) -> Option<cmp::Ordering> {
+    fn partial_cmp(&self, other: &Point) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Point {
     #[cfg(target_pointer_width = "64")]
-    fn cmp(&self, other: &Point) -> cmp::Ordering {
+    fn cmp(&self, other: &Point) -> Ordering {
         let a = (self.row as usize) << 32 | self.column as usize;
         let b = (other.row as usize) << 32 | other.column as usize;
         a.cmp(&b)
     }
 
     #[cfg(target_pointer_width = "32")]
-    fn cmp(&self, other: &Point) -> cmp::Ordering {
+    fn cmp(&self, other: &Point) -> Ordering {
         match self.row.cmp(&other.row) {
-            cmp::Ordering::Equal => self.column.cmp(&other.column),
+            Ordering::Equal => self.column.cmp(&other.column),
             comparison @ _ => comparison,
         }
     }
@@ -1886,7 +1918,7 @@ impl Selection {
     }
 
     pub fn set_head(&mut self, buffer: &Buffer, cursor: Anchor) {
-        if buffer.cmp_anchors(&cursor, self.tail()).unwrap() < cmp::Ordering::Equal {
+        if buffer.cmp_anchors(&cursor, self.tail()).unwrap() < Ordering::Equal {
             if !self.reversed {
                 mem::swap(&mut self.start, &mut self.end);
                 self.reversed = true;
@@ -1910,7 +1942,7 @@ impl Selection {
     }
 
     pub fn is_empty(&self, buffer: &Buffer) -> bool {
-        buffer.cmp_anchors(&self.start, &self.end).unwrap() == cmp::Ordering::Equal
+        buffer.cmp_anchors(&self.start, &self.end).unwrap() == Ordering::Equal
     }
 
     pub fn anchor_range(&self) -> Range<Anchor> {
@@ -1920,65 +1952,245 @@ impl Selection {
 
 impl Text {
     fn new(code_units: Vec<u16>) -> Self {
-        let newline_offsets = code_units
-            .iter()
-            .enumerate()
-            .filter_map(|(offset, c)| {
-                if *c == u16::from(b'\n') {
-                    Some(offset)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        fn build_tree(index: usize, line_lengths: &[u32], mut tree: &mut [LineNode]) {
+            if line_lengths.is_empty() {
+                return;
+            }
 
-        Self {
-            code_units,
-            newline_offsets,
+            let mid = if line_lengths.len() == 1 {
+                0
+            } else {
+                let depth = log2_fast(line_lengths.len());
+                let max_elements = (1 << (depth)) - 1;
+                let right_subtree_elements = 1 << (depth - 1);
+                cmp::min(line_lengths.len() - right_subtree_elements, max_elements)
+            };
+            let len = line_lengths[mid];
+            let lower = &line_lengths[0..mid];
+            let upper = &line_lengths[mid + 1..];
+
+            let left_child_index = index * 2 + 1;
+            let right_child_index = index * 2 + 2;
+            build_tree(left_child_index, lower, &mut tree);
+            build_tree(right_child_index, upper, &mut tree);
+            tree[index] = {
+                let mut left_child_longest_row = 0;
+                let mut left_child_longest_row_len = 0;
+                let mut left_child_offset = 0;
+                let mut left_child_rows = 0;
+                if let Some(left_child) = tree.get(left_child_index) {
+                    left_child_longest_row = left_child.longest_row;
+                    left_child_longest_row_len = left_child.longest_row_len;
+                    left_child_offset = left_child.offset;
+                    left_child_rows = left_child.rows;
+                }
+                let mut right_child_longest_row = 0;
+                let mut right_child_longest_row_len = 0;
+                let mut right_child_offset = 0;
+                let mut right_child_rows = 0;
+                if let Some(right_child) = tree.get(right_child_index) {
+                    right_child_longest_row = right_child.longest_row;
+                    right_child_longest_row_len = right_child.longest_row_len;
+                    right_child_offset = right_child.offset;
+                    right_child_rows = right_child.rows;
+                }
+
+                let mut longest_row = 0;
+                let mut longest_row_len = 0;
+                if left_child_longest_row_len > longest_row_len {
+                    longest_row = left_child_longest_row;
+                    longest_row_len = left_child_longest_row_len;
+                }
+                if len > longest_row_len {
+                    longest_row = left_child_rows;
+                    longest_row_len = len;
+                }
+                if right_child_longest_row_len > longest_row_len {
+                    longest_row = left_child_rows + right_child_longest_row + 1;
+                    longest_row_len = right_child_longest_row_len;
+                }
+
+                LineNode {
+                    len,
+                    longest_row,
+                    longest_row_len,
+                    offset: left_child_offset + len as usize + right_child_offset + 1,
+                    rows: left_child_rows + right_child_rows + 1,
+                }
+            };
         }
+
+        let mut line_lengths = Vec::new();
+        let mut prev_offset = 0;
+        for (offset, code_unit) in code_units.iter().enumerate() {
+            if code_unit == &u16::from(b'\n') {
+                line_lengths.push((offset - prev_offset) as u32);
+                prev_offset = offset + 1;
+            }
+        }
+        line_lengths.push((code_units.len() - prev_offset) as u32);
+
+        let mut nodes = Vec::new();
+        nodes.resize(
+            line_lengths.len(),
+            LineNode {
+                len: 0,
+                longest_row_len: 0,
+                longest_row: 0,
+                offset: 0,
+                rows: 0,
+            },
+        );
+        build_tree(0, &line_lengths, &mut nodes);
+
+        Self { code_units, nodes }
     }
 
     fn len(&self) -> usize {
         self.code_units.len()
     }
 
-    fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
-        if offset > self.len() {
-            Err(Error::OffsetOutOfRange)
-        } else {
-            let row = find_insertion_index(&self.newline_offsets, &offset);
-            let row_start_offset = if row == 0 {
-                0
-            } else {
-                self.newline_offsets[row - 1] + 1
-            };
+    fn longest_row_in_range(&self, target_range: Range<usize>) -> Result<(u32, u32), Error> {
+        let mut longest_row = 0;
+        let mut longest_row_len = 0;
 
-            Ok(Point {
-                row: row as u32,
-                column: (offset - row_start_offset) as u32,
-            })
+        self.search(|probe| {
+            if target_range.start <= probe.offset_range.end
+                && probe.right_ancestor_start_offset <= target_range.end
+            {
+                if let Some(right_child) = probe.right_child {
+                    if right_child.longest_row_len >= longest_row_len {
+                        longest_row = probe.row + 1 + right_child.longest_row;
+                        longest_row_len = right_child.longest_row_len;
+                    }
+                }
+            }
+
+            if target_range.start < probe.offset_range.start {
+                if probe.offset_range.end < target_range.end && probe.node.len >= longest_row_len {
+                    longest_row = probe.row;
+                    longest_row_len = probe.node.len;
+                }
+
+                Ordering::Less
+            } else if target_range.start > probe.offset_range.end {
+                Ordering::Greater
+            } else {
+                let node_end = cmp::min(probe.offset_range.end, target_range.end);
+                let node_len = (node_end - target_range.start) as u32;
+                if node_len >= longest_row_len {
+                    longest_row = probe.row;
+                    longest_row_len = node_len;
+                }
+                Ordering::Equal
+            }
+        }).ok_or(Error::OffsetOutOfRange)?;
+
+        self.search(|probe| {
+            if target_range.end >= probe.offset_range.start
+                && probe.left_ancestor_end_offset >= target_range.start
+            {
+                if let Some(left_child) = probe.left_child {
+                    if left_child.longest_row_len > longest_row_len {
+                        let left_ancestor_row = probe.row - left_child.rows;
+                        longest_row = left_ancestor_row + left_child.longest_row;
+                        longest_row_len = left_child.longest_row_len;
+                    }
+                }
+            }
+
+            if target_range.end < probe.offset_range.start {
+                Ordering::Less
+            } else if target_range.end > probe.offset_range.end {
+                if target_range.start < probe.offset_range.start && probe.node.len > longest_row_len
+                {
+                    longest_row = probe.row;
+                    longest_row_len = probe.node.len;
+                }
+
+                Ordering::Greater
+            } else {
+                let node_start = cmp::max(target_range.start, probe.offset_range.start);
+                let node_len = (target_range.end - node_start) as u32;
+                if node_len > longest_row_len {
+                    longest_row = probe.row;
+                    longest_row_len = node_len;
+                }
+                Ordering::Equal
+            }
+        }).ok_or(Error::OffsetOutOfRange)?;
+
+        Ok((longest_row, longest_row_len))
+    }
+
+    fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
+        let search_result = self.search(|probe| {
+            if offset < probe.offset_range.start {
+                Ordering::Less
+            } else if offset > probe.offset_range.end {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        });
+        if let Some((offset_range, row, _)) = search_result {
+            Ok(Point::new(row, (offset - offset_range.start) as u32))
+        } else {
+            Err(Error::OffsetOutOfRange)
         }
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
-        let row_start_offset = if point.row == 0 {
-            0
-        } else {
-            self.newline_offsets[(point.row - 1) as usize] + 1
-        };
-
-        let row_end_offset = if self.newline_offsets.len() > point.row as usize {
-            self.newline_offsets[point.row as usize]
-        } else {
-            self.len()
-        };
-
-        let target_offset = row_start_offset + point.column as usize;
-        if target_offset <= row_end_offset {
-            Ok(target_offset)
+        if let Some((offset_range, _, node)) = self.search(|probe| point.row.cmp(&probe.row)) {
+            if point.column <= node.len {
+                Ok(offset_range.start + point.column as usize)
+            } else {
+                Err(Error::OffsetOutOfRange)
+            }
         } else {
             Err(Error::OffsetOutOfRange)
         }
+    }
+
+    fn search<F>(&self, mut f: F) -> Option<(Range<usize>, u32, &LineNode)>
+    where
+        F: FnMut(LineNodeProbe) -> Ordering,
+    {
+        let mut left_ancestor_end_offset = 0;
+        let mut left_ancestor_row = 0;
+        let mut right_ancestor_start_offset = self.nodes[0].offset;
+        let mut cur_node_index = 0;
+        while let Some(cur_node) = self.nodes.get(cur_node_index) {
+            let left_child = self.nodes.get(cur_node_index * 2 + 1);
+            let right_child = self.nodes.get(cur_node_index * 2 + 2);
+            let cur_offset_range = {
+                let start = left_ancestor_end_offset + left_child.map_or(0, |node| node.offset);
+                let end = start + cur_node.len as usize;
+                start..end
+            };
+            let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
+            match f(LineNodeProbe {
+                offset_range: &cur_offset_range,
+                row: cur_row,
+                left_ancestor_end_offset,
+                right_ancestor_start_offset,
+                node: cur_node,
+                left_child,
+                right_child,
+            }) {
+                Ordering::Less => {
+                    cur_node_index = cur_node_index * 2 + 1;
+                    right_ancestor_start_offset = cur_offset_range.start;
+                }
+                Ordering::Equal => return Some((cur_offset_range, cur_row, cur_node)),
+                Ordering::Greater => {
+                    cur_node_index = cur_node_index * 2 + 2;
+                    left_ancestor_end_offset = cur_offset_range.end + 1;
+                    left_ancestor_row = cur_row + 1;
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1992,6 +2204,11 @@ impl<'a> From<Vec<u16>> for Text {
     fn from(s: Vec<u16>) -> Self {
         Self::new(s)
     }
+}
+
+#[inline(always)]
+fn log2_fast(x: usize) -> usize {
+    8 * mem::size_of::<usize>() - (x.leading_zeros() as usize) - 1
 }
 
 lazy_static! {
@@ -2177,16 +2394,37 @@ impl tree::Item for Fragment {
                 .text
                 .point_for_offset(self.end_offset)
                 .unwrap();
+
+            let first_row_len = if fragment_2d_start.row == fragment_2d_end.row {
+                (self.end_offset - self.start_offset) as u32
+            } else {
+                let first_row_end = self.insertion
+                    .text
+                    .offset_for_point(Point::new(fragment_2d_start.row + 1, 0))
+                    .unwrap() - 1;
+                println!("First row end {:?}.", first_row_end);
+                (first_row_end - self.start_offset) as u32
+            };
+            let (longest_row, longest_row_len) = self.insertion
+                .text
+                .longest_row_in_range(self.start_offset..self.end_offset)
+                .unwrap();
             FragmentSummary {
                 extent: self.len(),
                 extent_2d: fragment_2d_end - &fragment_2d_start,
                 max_fragment_id: self.id.clone(),
+                first_row_len,
+                longest_row: longest_row - fragment_2d_start.row,
+                longest_row_len,
             }
         } else {
             FragmentSummary {
                 extent: 0,
                 extent_2d: Point { row: 0, column: 0 },
                 max_fragment_id: self.id.clone(),
+                first_row_len: 0,
+                longest_row: 0,
+                longest_row_len: 0,
             }
         }
     }
@@ -2194,6 +2432,16 @@ impl tree::Item for Fragment {
 
 impl<'a> AddAssign<&'a FragmentSummary> for FragmentSummary {
     fn add_assign(&mut self, other: &Self) {
+        let last_row_len = self.extent_2d.column + other.first_row_len;
+        if last_row_len > self.longest_row_len {
+            self.longest_row = self.extent_2d.row;
+            self.longest_row_len = last_row_len;
+        }
+        if other.longest_row_len > self.longest_row_len {
+            self.longest_row = self.extent_2d.row + other.longest_row;
+            self.longest_row_len = other.longest_row_len;
+        }
+
         self.extent += other.extent;
         self.extent_2d += other.extent_2d;
         if self.max_fragment_id < other.max_fragment_id {
@@ -2208,6 +2456,9 @@ impl Default for FragmentSummary {
             extent: 0,
             extent_2d: Point { row: 0, column: 0 },
             max_fragment_id: FragmentId::min_value(),
+            first_row_len: 0,
+            longest_row: 0,
+            longest_row_len: 0,
         }
     }
 }
@@ -2286,22 +2537,15 @@ impl Operation {
     }
 }
 
-fn find_insertion_index<T: Ord>(v: &Vec<T>, x: &T) -> usize {
-    match v.binary_search(x) {
-        Ok(index) => index,
-        Err(index) => index,
-    }
-}
-
 fn should_insert_before(
     insertion: &Insertion,
     other_timestamp: LamportTimestamp,
     other_replica_id: ReplicaId,
 ) -> bool {
     match insertion.timestamp.cmp(&other_timestamp) {
-        cmp::Ordering::Less => true,
-        cmp::Ordering::Equal => insertion.id.replica_id < other_replica_id,
-        cmp::Ordering::Greater => false,
+        Ordering::Less => true,
+        Ordering::Equal => insertion.id.replica_id < other_replica_id,
+        Ordering::Greater => false,
     }
 }
 
@@ -2312,7 +2556,6 @@ mod tests {
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
     use rpc;
-    use std::cmp::Ordering;
     use std::time::Duration;
     use tokio_core::reactor;
     use IntoShared;
@@ -2386,6 +2629,22 @@ mod tests {
         assert_eq!(buffer.len_for_row(4), Ok(4));
         assert_eq!(buffer.len_for_row(5), Ok(0));
         assert_eq!(buffer.len_for_row(6), Err(Error::OffsetOutOfRange));
+    }
+
+    #[test]
+    fn test_longest_row() {
+        let mut buffer = Buffer::new(0);
+        assert_eq!(buffer.longest_row(), 0);
+        buffer.edit(&[0..0], "abcd\nefg\nhij");
+        assert_eq!(buffer.longest_row(), 0);
+        buffer.edit(&[12..12], "kl\nmno");
+        assert_eq!(buffer.longest_row(), 2);
+        buffer.edit(&[18..18], "\npqrs");
+        assert_eq!(buffer.longest_row(), 2);
+        buffer.edit(&[10..12], "");
+        assert_eq!(buffer.longest_row(), 0);
+        buffer.edit(&[24..24], "tuv");
+        assert_eq!(buffer.longest_row(), 4);
     }
 
     #[test]
@@ -2495,6 +2754,49 @@ mod tests {
             text.offset_for_point(Point { row: 0, column: 4 }),
             Err(Error::OffsetOutOfRange)
         );
+    }
+
+    #[test]
+    fn test_longest_row_in_range() {
+        for seed in 0..100 {
+            println!("{:?}", seed);
+            let mut rng = StdRng::from_seed(&[seed]);
+            let string = RandomCharIter(rng)
+                .take(rng.gen_range(1, 10))
+                .collect::<String>();
+            let text = Text::from(string.as_ref());
+
+            for _i in 0..10 {
+                let end = rng.gen_range(1, string.len() + 1);
+                let start = rng.gen_range(0, end);
+
+                let mut cur_row = string[0..start].chars().filter(|c| *c == '\n').count() as u32;
+                let mut cur_row_len = 0;
+                let mut expected_longest_row = cur_row;
+                let mut expected_longest_row_len = cur_row_len;
+                for ch in string[start..end].chars() {
+                    if ch == '\n' {
+                        if cur_row_len > expected_longest_row_len {
+                            expected_longest_row = cur_row;
+                            expected_longest_row_len = cur_row_len;
+                        }
+                        cur_row += 1;
+                        cur_row_len = 0;
+                    } else {
+                        cur_row_len += 1;
+                    }
+                }
+                if cur_row_len > expected_longest_row_len {
+                    expected_longest_row = cur_row;
+                    expected_longest_row_len = cur_row_len;
+                }
+
+                assert_eq!(
+                    text.longest_row_in_range(start..end),
+                    Ok((expected_longest_row, expected_longest_row_len))
+                );
+            }
+        }
     }
 
     #[test]
@@ -2919,7 +3221,11 @@ mod tests {
         type Item = char;
 
         fn next(&mut self) -> Option<Self::Item> {
-            Some(self.0.gen_range(b'a', b'z' + 1).into())
+            if self.0.gen_weighted_bool(5) {
+                Some('\n')
+            } else {
+                Some(self.0.gen_range(b'a', b'z' + 1).into())
+            }
         }
     }
 
@@ -2933,7 +3239,7 @@ mod tests {
             }
         }
         selections.sort_by(|a, b| match a.0.cmp(&b.0) {
-            cmp::Ordering::Equal => a.1.cmp(&b.1),
+            Ordering::Equal => a.1.cmp(&b.1),
             comparison @ _ => comparison,
         });
 

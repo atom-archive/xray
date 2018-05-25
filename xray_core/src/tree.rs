@@ -276,7 +276,7 @@ impl<'a, T: Item> Tree<T> {
         }
     }
 
-    fn summary(&self) -> &T::Summary {
+    pub fn summary(&self) -> &T::Summary {
         match self.0.as_ref() {
             &Node::Internal { ref summary, .. } => summary,
             &Node::Leaf { ref summary, .. } => summary,

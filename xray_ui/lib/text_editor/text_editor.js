@@ -45,7 +45,7 @@ class TextEditor extends React.Component {
       CURSOR_BLINK_RESUME_DELAY
     );
 
-    this.state = { showLocalCursors: true };
+    this.state = { scrollLeft: 0, showLocalCursors: true };
   }
 
   componentDidMount() {
@@ -90,6 +90,8 @@ class TextEditor extends React.Component {
   }
 
   render() {
+    this.flushHorizontalAutoscroll();
+
     return $(
       ActionContext,
       { add: "TextEditor" },
@@ -107,11 +109,15 @@ class TextEditor extends React.Component {
           lineHeight: this.props.line_height,
           scrollTop: this.props.scroll_top,
           paddingLeft: 5,
+          scrollLeft: this.getScrollLeft(),
           height: this.props.height,
-          width: this.props.width,
+          width: this.getScrollWidth(),
           selections: this.props.selections,
           firstVisibleRow: this.props.first_visible_row,
-          lines: this.props.lines
+          lines: this.props.lines,
+          ref: textPlane => {
+            this.textPlane = textPlane;
+          }
         })
       ),
       $(Action, {
@@ -151,7 +157,11 @@ class TextEditor extends React.Component {
   }
 
   handleMouseWheel(event) {
-    this.props.dispatch({ type: "UpdateScrollTop", delta: event.deltaY });
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      this.setScrollLeft(this.state.scrollLeft + event.deltaX);
+    } else {
+      this.props.dispatch({ type: "UpdateScrollTop", delta: event.deltaY });
+    }
   }
 
   handleKeyDown(event) {
@@ -194,6 +204,106 @@ class TextEditor extends React.Component {
 
   focus() {
     this.element.focus();
+  }
+
+  flushHorizontalAutoscroll() {
+    const { horizontal_autoscroll, horizontal_margin, width } = this.props;
+    if (horizontal_autoscroll && width && this.canUseTextPlane()) {
+      const desiredScrollLeft = this.textPlane.measureLine(
+        horizontal_autoscroll.start_line,
+        Math.max(0, horizontal_autoscroll.start.column - horizontal_margin)
+      );
+      const desiredScrollRight = this.textPlane.measureLine(
+        horizontal_autoscroll.end_line,
+        Math.min(
+          horizontal_autoscroll.end_line.length,
+          horizontal_autoscroll.end.column + horizontal_margin
+        )
+      );
+
+      // This function will be called during render, so we avoid calling
+      // setState and we manually manipulate this.state instead.
+      if (desiredScrollLeft < this.getScrollLeft()) {
+        this.state.scrollLeft = this.constrainScrollLeft(desiredScrollLeft);
+      }
+      if (desiredScrollRight > this.getScrollRight()) {
+        this.state.scrollLeft = this.constrainScrollLeft(
+          desiredScrollRight - width
+        );
+      }
+
+      this.props.horizontal_autoscroll = null;
+    }
+  }
+
+  getScrollLeft() {
+    return this.constrainScrollLeft(this.state.scrollLeft);
+  }
+
+  getScrollRight() {
+    if (this.props.width) {
+      return this.getScrollLeft() + this.props.width;
+    } else {
+      return this.getScrollLeft();
+    }
+  }
+
+  setScrollLeft(scrollLeft) {
+    this.setState({
+      scrollLeft: this.constrainScrollLeft(scrollLeft)
+    });
+  }
+
+  constrainScrollLeft(scrollLeft) {
+    return Math.max(0, Math.min(scrollLeft, this.getMaxScrollLeft()));
+  }
+
+  getMaxScrollLeft() {
+    const contentWidth = this.getContentWidth();
+    if (contentWidth != null && this.props.width != null) {
+      return Math.max(0, contentWidth - this.props.width);
+    } else {
+      return 0;
+    }
+  }
+
+  getScrollWidth() {
+    const contentWidth = this.getContentWidth();
+    if (contentWidth != null && this.props.width != null) {
+      return Math.max(contentWidth, this.props.width);
+    } else {
+      return 0;
+    }
+  }
+
+  getContentWidth() {
+    const longestLineWidth = this.getLongestLineWidth();
+    const cursorWidth = this.getCursorWidth();
+    if (longestLineWidth != null && cursorWidth != null) {
+      return Math.ceil(longestLineWidth + cursorWidth);
+    } else {
+      return null;
+    }
+  }
+
+  getCursorWidth() {
+    if (this.cursorWidth == null && this.canUseTextPlane()) {
+      this.cursorWidth = this.textPlane.measureLine("X");
+    }
+    return this.cursorWidth;
+  }
+
+  getLongestLineWidth() {
+    const { longest_line: longestLine } = this.props;
+    if (this.longestLine != longestLine && this.canUseTextPlane()) {
+      this.longestLine = longestLine;
+      this.longestLineWidth = this.textPlane.measureLine(longestLine);
+    }
+    return this.longestLineWidth;
+  }
+
+  canUseTextPlane() {
+    return this.textPlane && this.textPlane.isReady();
   }
 }
 

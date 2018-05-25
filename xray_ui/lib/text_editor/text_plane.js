@@ -62,6 +62,7 @@ class TextPlane extends React.Component {
       canvasWidth: this.props.width * window.devicePixelRatio,
       canvasHeight: this.props.height * window.devicePixelRatio,
       scrollTop: this.props.scrollTop,
+      scrollLeft: this.props.scrollLeft,
       paddingLeft: this.props.paddingLeft || 0,
       firstVisibleRow: this.props.firstVisibleRow,
       lines: this.props.lines,
@@ -71,6 +72,14 @@ class TextPlane extends React.Component {
       cursorColors,
       computedLineHeight
     });
+  }
+
+  measureLine(line, column) {
+    return this.renderer.measureLine(line, column);
+  }
+
+  isReady() {
+    return this.renderer != null;
   }
 }
 
@@ -137,13 +146,25 @@ class Renderer {
       this.textBlendPass1Program,
       "viewportScale"
     );
+    this.textBlendPass1ScrollLeftLocation = this.gl.getUniformLocation(
+      this.textBlendPass1Program,
+      "scrollLeft"
+    );
     this.textBlendPass2ViewportScaleLocation = this.gl.getUniformLocation(
       this.textBlendPass2Program,
       "viewportScale"
     );
+    this.textBlendPass2ScrollLeftLocation = this.gl.getUniformLocation(
+      this.textBlendPass2Program,
+      "scrollLeft"
+    );
     this.solidViewportScaleLocation = this.gl.getUniformLocation(
       this.solidProgram,
       "viewportScale"
+    );
+    this.solidScrollLeftLocation = this.gl.getUniformLocation(
+      this.solidProgram,
+      "scrollLeft"
     );
 
     this.createBuffers();
@@ -321,10 +342,21 @@ class Renderer {
     return vao;
   }
 
+  measureLine(line, column = line.length) {
+    let x = 0;
+    for (let i = 0; i < column; i++) {
+      const variantIndex = Math.round(x * SUBPIXEL_DIVISOR) % SUBPIXEL_DIVISOR;
+      const glyph = this.atlas.getGlyph(line[i], variantIndex);
+      x += glyph.subpixelWidth;
+    }
+    return x / this.style.dpiScale;
+  }
+
   draw({
     canvasHeight,
     canvasWidth,
     scrollTop,
+    scrollLeft,
     paddingLeft,
     firstVisibleRow,
     lines,
@@ -336,6 +368,7 @@ class Renderer {
     const { dpiScale } = this.style;
     const viewportScaleX = 2 / canvasWidth;
     const viewportScaleY = -2 / canvasHeight;
+    scrollLeft = Math.round(scrollLeft * dpiScale);
 
     const textColor = { r: 0, g: 0, b: 0, a: 255 };
     const cursorWidth = 2;
@@ -377,12 +410,27 @@ class Renderer {
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
     this.gl.viewport(0, 0, canvasWidth, canvasHeight);
 
-    this.drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY);
-    this.drawText(glyphCount, viewportScaleX, viewportScaleY);
-    this.drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY);
+    this.drawSelections(
+      selectionSolidCount,
+      scrollLeft,
+      viewportScaleX,
+      viewportScaleY
+    );
+    this.drawText(glyphCount, scrollLeft, viewportScaleX, viewportScaleY);
+    this.drawCursors(
+      cursorSolidCount,
+      scrollLeft,
+      viewportScaleX,
+      viewportScaleY
+    );
   }
 
-  drawSelections(selectionSolidCount, viewportScaleX, viewportScaleY) {
+  drawSelections(
+    selectionSolidCount,
+    scrollLeft,
+    viewportScaleX,
+    viewportScaleY
+  ) {
     this.gl.bindVertexArray(this.solidVAO);
     this.gl.enable(this.gl.BLEND);
     this.gl.useProgram(this.solidProgram);
@@ -391,6 +439,7 @@ class Renderer {
       viewportScaleX,
       viewportScaleY
     );
+    this.gl.uniform1f(this.solidScrollLeftLocation, scrollLeft);
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.solidInstancesBuffer);
     this.gl.bufferData(
       this.gl.ARRAY_BUFFER,
@@ -412,7 +461,7 @@ class Renderer {
     );
   }
 
-  drawText(glyphCount, viewportScaleX, viewportScaleY) {
+  drawText(glyphCount, scrollLeft, viewportScaleX, viewportScaleY) {
     this.gl.bindVertexArray(this.textBlendVAO);
     this.gl.enable(this.gl.BLEND);
     this.gl.useProgram(this.textBlendPass1Program);
@@ -421,6 +470,7 @@ class Renderer {
       viewportScaleX,
       viewportScaleY
     );
+    this.gl.uniform1f(this.textBlendPass1ScrollLeftLocation, scrollLeft);
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.glyphInstancesBuffer);
     this.gl.bufferData(
       this.gl.ARRAY_BUFFER,
@@ -453,6 +503,7 @@ class Renderer {
       viewportScaleX,
       viewportScaleY
     );
+    this.gl.uniform1f(this.textBlendPass2ScrollLeftLocation, scrollLeft);
     this.gl.drawElementsInstanced(
       this.gl.TRIANGLES,
       6,
@@ -462,7 +513,7 @@ class Renderer {
     );
   }
 
-  drawCursors(cursorSolidCount, viewportScaleX, viewportScaleY) {
+  drawCursors(cursorSolidCount, scrollLeft, viewportScaleX, viewportScaleY) {
     this.gl.bindVertexArray(this.solidVAO);
     this.gl.disable(this.gl.BLEND);
     this.gl.useProgram(this.solidProgram);
@@ -471,6 +522,7 @@ class Renderer {
       viewportScaleX,
       viewportScaleY
     );
+    this.gl.uniform1f(this.solidScrollLeftLocation, scrollLeft);
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.solidInstancesBuffer);
     this.gl.bufferData(
       this.gl.ARRAY_BUFFER,
