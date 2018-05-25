@@ -164,31 +164,40 @@ By May 1, we'd like it to be possible for multiple Xray clients to connect to a 
 * [x] Cursors, selections, and editing
 * [x] Client/server architecture
 * [x] File finder
-* [ ] Load and save buffers
-* [ ] Key bindings system
-* [ ] Remote headless workspace
+* [x] Load and save buffers
+* [x] Remote headless workspace
   * [x] File finder
   * [x] Loading a buffer
   * [x] Editing can be shared between multiple participants
-  * [ ] Saving
+  * [x] Saving
   * [x] Discussions
-  * [ ] Following
-* [ ] Flesh out basic editor experience
-  * [ ] Gutter with line numbers
+* [x] Flesh out basic editor experience
   * [x] Autoscroll
   * [x] Easy movement and editing operations
-  * [ ] Mouse interaction
 
 ## Q2 2018
 
 Once we get the basic collaboration experience down, we'll be looking to expand on it by adding the basic features that developers expect from a text editor. This list is incomplete and will likely evolve as this time approaches.
 
+* [x] Key bindings system
+* [x] Horizontal scrolling
+* [ ] Word- and line-based cursor movements
+* [ ] Gutter with line numbers
+* [ ] Mouse interaction
+* [ ] Workspace tabs
+* [ ] Split panes
+* [ ] Undo history
+* [ ] Syntax highlighting
+* [ ] Diagnostics
+* [ ] Autocomplete
+* [ ] Symbolic navigation
 * [ ] Find and replace in a buffer
 * [ ] Local project-wide search
 * [ ] Remote project-wide search
-* [ ] Undo history
-* [ ] Syntax highlighting
 * [ ] Project browser
-* [ ] Peer-to-peer workspace sharing
 * [ ] Code folding
 * [ ] Soft wrapping
+* [ ] Clarify theming
+* [ ] Following
+* [ ] JS extensions
+* [ ] Further optimize multi-cursor editing
