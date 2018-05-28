@@ -63,8 +63,9 @@ class TextPlane extends React.Component {
       canvasHeight: this.props.height * window.devicePixelRatio,
       scrollTop: this.props.scrollTop,
       scrollLeft: this.props.scrollLeft,
-      paddingLeft: this.props.paddingLeft || 0,
+      paddingLeft: this.props.paddingLeft * window.devicePixelRatio || 0,
       firstVisibleRow: this.props.firstVisibleRow,
+      totalRowCount: this.props.totalRowCount,
       lines: this.props.lines,
       selections: this.props.selections,
       showLocalCursors: this.props.showLocalCursors,
@@ -76,6 +77,10 @@ class TextPlane extends React.Component {
 
   measureLine(line, column) {
     return this.renderer.measureLine(line, column);
+  }
+
+  getGutterWidth(totalRowCount) {
+    return this.renderer.getGutterWidth(totalRowCount);
   }
 
   isReady() {
@@ -192,7 +197,12 @@ class Renderer {
       this.gl.STATIC_DRAW
     );
 
-    this.glyphInstances = new Float32Array(MAX_INSTANCES * GLYPH_INSTANCE_SIZE);
+    this.lineGlyphInstances = new Float32Array(
+      MAX_INSTANCES * GLYPH_INSTANCE_SIZE
+    );
+    this.gutterGlyphInstances = new Float32Array(
+      MAX_INSTANCES * GLYPH_INSTANCE_SIZE
+    );
     this.glyphInstancesBuffer = this.gl.createBuffer();
 
     this.selectionSolidInstances = new Float32Array(
@@ -201,6 +211,7 @@ class Renderer {
     this.cursorSolidInstances = new Float32Array(
       MAX_INSTANCES * SOLID_INSTANCE_SIZE
     );
+    this.opaqueRectangleInstances = new Float32Array(1 * SOLID_INSTANCE_SIZE);
     this.solidInstancesBuffer = this.gl.createBuffer();
   }
 
@@ -359,6 +370,7 @@ class Renderer {
     scrollLeft,
     paddingLeft,
     firstVisibleRow,
+    totalRowCount,
     lines,
     selections,
     showLocalCursors,
@@ -372,6 +384,7 @@ class Renderer {
 
     const textColor = { r: 0, g: 0, b: 0, a: 255 };
     const cursorWidth = 2;
+    const gutterWidth = this.getGutterWidth(totalRowCount);
 
     const xPositions = new Map();
     for (let i = 0; i < selections.length; i++) {
@@ -380,23 +393,29 @@ class Renderer {
       xPositions.set(keyForPoint(end), 0);
     }
 
-    const glyphCount = this.populateGlyphInstances(
+    const gutterGlyphCount = this.populateGutterGlyphInstances(
       scrollTop,
       firstVisibleRow,
-      paddingLeft,
+      firstVisibleRow + lines.length,
+      totalRowCount,
+      textColor
+    );
+    const lineGlyphCount = this.populateLineGlyphInstances(
+      scrollTop,
+      firstVisibleRow,
+      gutterWidth + paddingLeft,
       lines,
       selections,
       textColor,
       xPositions
     );
-
     const {
       selectionSolidCount,
       cursorSolidCount
     } = this.populateSelectionSolidInstances(
       scrollTop,
       canvasWidth,
-      paddingLeft,
+      gutterWidth + paddingLeft,
       selections,
       xPositions,
       selectionColors,
@@ -416,12 +435,68 @@ class Renderer {
       viewportScaleX,
       viewportScaleY
     );
-    this.drawText(glyphCount, scrollLeft, viewportScaleX, viewportScaleY);
+    this.drawText(
+      this.lineGlyphInstances,
+      lineGlyphCount,
+      scrollLeft,
+      viewportScaleX,
+      viewportScaleY
+    );
     this.drawCursors(
       cursorSolidCount,
       scrollLeft,
       viewportScaleX,
       viewportScaleY
+    );
+
+    this.clearRectangle(
+      0,
+      0,
+      gutterWidth,
+      canvasHeight,
+      viewportScaleX,
+      viewportScaleY
+    );
+    this.drawText(
+      this.gutterGlyphInstances,
+      gutterGlyphCount,
+      0,
+      viewportScaleX,
+      viewportScaleY
+    );
+  }
+
+  clearRectangle(x, y, width, height, viewportScaleX, viewportScaleY) {
+    this.gl.bindVertexArray(this.solidVAO);
+    this.gl.disable(this.gl.BLEND);
+    this.gl.useProgram(this.solidProgram);
+    this.gl.uniform2f(
+      this.solidViewportScaleLocation,
+      viewportScaleX,
+      viewportScaleY
+    );
+    this.gl.uniform1f(this.solidScrollLeftLocation, 0);
+    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.solidInstancesBuffer);
+    this.updateSolidInstance(
+      this.opaqueRectangleInstances,
+      0,
+      x,
+      y,
+      width,
+      height,
+      { r: 255, g: 255, b: 255, a: 1 }
+    );
+    this.gl.bufferData(
+      this.gl.ARRAY_BUFFER,
+      this.opaqueRectangleInstances,
+      this.gl.STREAM_DRAW
+    );
+    this.gl.drawElementsInstanced(
+      this.gl.TRIANGLES,
+      6,
+      this.gl.UNSIGNED_BYTE,
+      0,
+      1
     );
   }
 
@@ -461,7 +536,13 @@ class Renderer {
     );
   }
 
-  drawText(glyphCount, scrollLeft, viewportScaleX, viewportScaleY) {
+  drawText(
+    glyphInstances,
+    glyphCount,
+    scrollLeft,
+    viewportScaleX,
+    viewportScaleY
+  ) {
     this.gl.bindVertexArray(this.textBlendVAO);
     this.gl.enable(this.gl.BLEND);
     this.gl.useProgram(this.textBlendPass1Program);
@@ -474,7 +555,7 @@ class Renderer {
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.glyphInstancesBuffer);
     this.gl.bufferData(
       this.gl.ARRAY_BUFFER,
-      this.glyphInstances,
+      glyphInstances,
       this.gl.STREAM_DRAW
     );
     this.gl.blendFuncSeparate(
@@ -538,7 +619,50 @@ class Renderer {
     );
   }
 
-  populateGlyphInstances(
+  populateGutterGlyphInstances(
+    scrollTop,
+    firstVisibleRow,
+    lastVisibleRow,
+    totalRowCount,
+    textColor
+  ) {
+    const firstVisibleRowY = firstVisibleRow * this.style.computedLineHeight;
+    let glyphCount = 0;
+    let y = Math.round((firstVisibleRowY - scrollTop) * this.style.dpiScale);
+
+    for (let row = firstVisibleRow; row < lastVisibleRow; row++) {
+      const text = (row + 1).toString();
+      let x = 0;
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        const variantIndex =
+          Math.round(x * SUBPIXEL_DIVISOR) % SUBPIXEL_DIVISOR;
+        const glyph = this.atlas.getGlyph(char, variantIndex);
+        this.updateGlyphInstance(
+          this.gutterGlyphInstances,
+          glyphCount++,
+          Math.round(x - glyph.variantOffset),
+          y,
+          glyph,
+          textColor
+        );
+
+        x += glyph.subpixelWidth;
+      }
+
+      y += Math.round(this.style.computedLineHeight * this.style.dpiScale);
+    }
+
+    if (glyphCount > MAX_INSTANCES) {
+      console.error(
+        `glyphCount of ${glyphCount} exceeds MAX_INSTANCES of ${MAX_INSTANCES}`
+      );
+    }
+
+    return glyphCount;
+  }
+
+  populateLineGlyphInstances(
     scrollTop,
     firstVisibleRow,
     paddingLeft,
@@ -576,6 +700,7 @@ class Renderer {
           const glyph = this.atlas.getGlyph(char, variantIndex);
 
           this.updateGlyphInstance(
+            this.lineGlyphInstances,
             glyphCount++,
             Math.round(x - glyph.variantOffset),
             y,
@@ -599,25 +724,25 @@ class Renderer {
     return glyphCount;
   }
 
-  updateGlyphInstance(i, x, y, glyph, color) {
+  updateGlyphInstance(glyphInstances, i, x, y, glyph, color) {
     const startOffset = 12 * i;
     // targetOrigin
-    this.glyphInstances[0 + startOffset] = x;
-    this.glyphInstances[1 + startOffset] = y;
+    glyphInstances[0 + startOffset] = x;
+    glyphInstances[1 + startOffset] = y;
     // targetSize
-    this.glyphInstances[2 + startOffset] = glyph.width;
-    this.glyphInstances[3 + startOffset] = glyph.height;
+    glyphInstances[2 + startOffset] = glyph.width;
+    glyphInstances[3 + startOffset] = glyph.height;
     // textColorRGBA
-    this.glyphInstances[4 + startOffset] = color.r;
-    this.glyphInstances[5 + startOffset] = color.g;
-    this.glyphInstances[6 + startOffset] = color.b;
-    this.glyphInstances[7 + startOffset] = color.a;
+    glyphInstances[4 + startOffset] = color.r;
+    glyphInstances[5 + startOffset] = color.g;
+    glyphInstances[6 + startOffset] = color.b;
+    glyphInstances[7 + startOffset] = color.a;
     // atlasOrigin
-    this.glyphInstances[8 + startOffset] = glyph.textureU;
-    this.glyphInstances[9 + startOffset] = glyph.textureV;
+    glyphInstances[8 + startOffset] = glyph.textureU;
+    glyphInstances[9 + startOffset] = glyph.textureV;
     // atlasSize
-    this.glyphInstances[10 + startOffset] = glyph.textureWidth;
-    this.glyphInstances[11 + startOffset] = glyph.textureHeight;
+    glyphInstances[10 + startOffset] = glyph.textureWidth;
+    glyphInstances[11 + startOffset] = glyph.textureHeight;
   }
 
   populateSelectionSolidInstances(
@@ -744,6 +869,11 @@ class Renderer {
     arrayBuffer[5 + startOffset] = color.g;
     arrayBuffer[6 + startOffset] = color.b;
     arrayBuffer[7 + startOffset] = color.a;
+  }
+
+  getGutterWidth(totalRowCount) {
+    const digitsCount = Math.floor(Math.log10(totalRowCount)) + 1;
+    return Math.ceil(digitsCount * this.atlas.getGlyph("9", 0).subpixelWidth);
   }
 
   createProgram(vertexShader, fragmentShader) {
