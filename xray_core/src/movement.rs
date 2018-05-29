@@ -77,3 +77,13 @@ pub fn end_of_word(buffer: &Buffer, mut point: Point) -> Point {
     }
     point
 }
+
+pub fn beginning_of_line(mut point: Point) -> Point {
+    point.column = 0;
+    point
+}
+
+pub fn end_of_line(buffer: &Buffer, mut point: Point) -> Point {
+    point.column = buffer.len_for_row(point.row).unwrap();
+    point
+}

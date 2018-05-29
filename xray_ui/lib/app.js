@@ -58,6 +58,8 @@ const keyBindings = [
   { key: "right", context: "TextEditor", action: "MoveRight" },
   { key: "alt-left", context: "TextEditor", action: "MoveToBeginningOfWord" },
   { key: "alt-right", context: "TextEditor", action: "MoveToEndOfWord" },
+  { key: "cmd-left", context: "TextEditor", action: "MoveToBeginningOfLine" },
+  { key: "cmd-right", context: "TextEditor", action: "MoveToEndOfLine" },
   { key: "backspace", context: "TextEditor", action: "Backspace" },
   { key: "delete", context: "TextEditor", action: "Delete" }
 ];

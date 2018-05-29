@@ -55,6 +55,8 @@ enum BufferViewAction {
     MoveRight,
     MoveToBeginningOfWord,
     MoveToEndOfWord,
+    MoveToBeginningOfLine,
+    MoveToEndOfLine,
     SelectUp,
     SelectDown,
     SelectLeft,
@@ -611,6 +613,42 @@ impl BufferView {
         self.autoscroll_to_cursor(false);
     }
 
+    pub fn move_to_beginning_of_line(&mut self) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                for selection in selections.iter_mut() {
+                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
+                    let new_head = movement::beginning_of_line(old_head);
+                    let anchor = buffer.anchor_before_point(new_head).unwrap();
+                    selection.start = anchor.clone();
+                    selection.end = anchor;
+                    selection.goal_column = None;
+                    selection.reversed = false;
+                }
+            })
+            .unwrap();
+        self.autoscroll_to_cursor(false);
+    }
+
+    pub fn move_to_end_of_line(&mut self) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                for selection in selections.iter_mut() {
+                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
+                    let new_head = movement::end_of_line(buffer, old_head);
+                    let anchor = buffer.anchor_before_point(new_head).unwrap();
+                    selection.start = anchor.clone();
+                    selection.end = anchor;
+                    selection.goal_column = None;
+                    selection.reversed = false;
+                }
+            })
+            .unwrap();
+        self.autoscroll_to_cursor(false);
+    }
+
     pub fn selections(&self) -> Ref<[Selection]> {
         Ref::map(self.buffer.borrow(), |buffer| {
             buffer.selections(self.selection_set_id).unwrap()
@@ -873,6 +911,8 @@ impl View for BufferView {
             Ok(BufferViewAction::MoveRight) => self.move_right(),
             Ok(BufferViewAction::MoveToBeginningOfWord) => self.move_to_beginning_of_word(),
             Ok(BufferViewAction::MoveToEndOfWord) => self.move_to_end_of_word(),
+            Ok(BufferViewAction::MoveToBeginningOfLine) => self.move_to_beginning_of_line(),
+            Ok(BufferViewAction::MoveToEndOfLine) => self.move_to_end_of_line(),
             Ok(BufferViewAction::SelectUp) => self.select_up(),
             Ok(BufferViewAction::SelectDown) => self.select_down(),
             Ok(BufferViewAction::SelectLeft) => self.select_left(),
@@ -1189,6 +1229,32 @@ mod tests {
             render_selections(&editor),
             vec![rev_selection((0, 0), (1, 7))]
         );
+    }
+
+    #[test]
+    fn test_move_to_beginning_or_end_of_line() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor
+            .buffer
+            .borrow_mut()
+            .edit(&[0..0], "abcdef\nghijklmno");
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        editor.move_to_end_of_line();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 6)]);
+        editor.move_to_end_of_line();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 6)]);
+        editor.move_right();
+        editor.move_to_end_of_line();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 9)]);
+
+        editor.move_to_beginning_of_line();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_to_beginning_of_line();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_left();
+        editor.move_to_beginning_of_line();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
     }
 
     #[test]
