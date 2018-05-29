@@ -719,7 +719,7 @@ impl View for BufferView {
         let mut lines = Vec::new();
         let mut cur_line = Vec::new();
         let mut cur_row = start.row;
-        for c in buffer.iter_starting_at_row(start.row) {
+        for c in buffer.iter_starting_at_point(start) {
             if c == u16::from(b'\n') {
                 lines.push(String::from_utf16_lossy(&cur_line));
                 cur_line = Vec::new();
