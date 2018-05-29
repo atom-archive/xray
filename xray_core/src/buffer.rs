@@ -2402,7 +2402,6 @@ impl tree::Item for Fragment {
                     .text
                     .offset_for_point(Point::new(fragment_2d_start.row + 1, 0))
                     .unwrap() - 1;
-                println!("First row end {:?}.", first_row_end);
                 (first_row_end - self.start_offset) as u32
             };
             let (longest_row, longest_row_len) = self.insertion
