@@ -154,6 +154,10 @@ class TextEditor extends React.Component {
         onWillDispatch: this.pauseCursorBlinking
       }),
       $(Action, {
+        type: "MoveToEndOfWord",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, {
         type: "Backspace",
         onWillDispatch: this.pauseCursorBlinking
       }),
