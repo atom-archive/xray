@@ -158,6 +158,14 @@ class TextEditor extends React.Component {
         type: "SelectToEndOfLine",
         onWillDispatch: this.pauseCursorBlinking
       }),
+      $(Action, {
+        type: "SelectToTop",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, {
+        type: "SelectToBottom",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
       $(Action, { type: "MoveUp", onWillDispatch: this.pauseCursorBlinking }),
       $(Action, { type: "MoveDown", onWillDispatch: this.pauseCursorBlinking }),
       $(Action, { type: "MoveLeft", onWillDispatch: this.pauseCursorBlinking }),
@@ -179,6 +187,14 @@ class TextEditor extends React.Component {
       }),
       $(Action, {
         type: "MoveToEndOfLine",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, {
+        type: "MoveToTop",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, {
+        type: "MoveToBottom",
         onWillDispatch: this.pauseCursorBlinking
       }),
       $(Action, {

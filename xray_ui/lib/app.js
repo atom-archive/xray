@@ -62,6 +62,16 @@ const keyBindings = [
     context: "TextEditor",
     action: "SelectToEndOfLine"
   },
+  {
+    key: "shift-cmd-up",
+    context: "TextEditor",
+    action: "SelectToTop"
+  },
+  {
+    key: "shift-cmd-down",
+    context: "TextEditor",
+    action: "SelectToBottom"
+  },
   { key: "up", context: "TextEditor", action: "MoveUp" },
   { key: "down", context: "TextEditor", action: "MoveDown" },
   { key: "left", context: "TextEditor", action: "MoveLeft" },
@@ -70,6 +80,8 @@ const keyBindings = [
   { key: "alt-right", context: "TextEditor", action: "MoveToEndOfWord" },
   { key: "cmd-left", context: "TextEditor", action: "MoveToBeginningOfLine" },
   { key: "cmd-right", context: "TextEditor", action: "MoveToEndOfLine" },
+  { key: "cmd-up", context: "TextEditor", action: "MoveToTop" },
+  { key: "cmd-down", context: "TextEditor", action: "MoveToBottom" },
   { key: "backspace", context: "TextEditor", action: "Backspace" },
   { key: "delete", context: "TextEditor", action: "Delete" }
 ];
