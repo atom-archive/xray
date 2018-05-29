@@ -53,6 +53,7 @@ enum BufferViewAction {
     MoveDown,
     MoveLeft,
     MoveRight,
+    MoveToBeginningOfWord,
     SelectUp,
     SelectDown,
     SelectLeft,
@@ -539,6 +540,38 @@ impl BufferView {
         self.autoscroll_to_cursor(false);
     }
 
+    pub fn move_to_beginning_of_word(&mut self) {
+        use std::char::decode_utf16;
+
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                for selection in selections.iter_mut() {
+                    let mut head = buffer.point_for_anchor(selection.head()).unwrap();
+                    // TODO: remove this once the iterator returns char instances.
+                    let mut char_iter = decode_utf16(buffer.backward_iter_starting_at_point(head))
+                        .map(|c| c.unwrap());
+                    let skip_alphanumeric = char_iter.next().map_or(false, |c| c.is_alphanumeric());
+                    head = movement::left(buffer, head);
+                    for character in char_iter {
+                        if skip_alphanumeric == character.is_alphanumeric() {
+                            head = movement::left(buffer, head);
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let anchor = buffer.anchor_before_point(head).unwrap();
+                    selection.start = anchor.clone();
+                    selection.end = anchor;
+                    selection.goal_column = None;
+                    selection.reversed = false;
+                }
+            })
+            .unwrap();
+        self.autoscroll_to_cursor(false);
+    }
+
     pub fn selections(&self) -> Ref<[Selection]> {
         Ref::map(self.buffer.borrow(), |buffer| {
             buffer.selections(self.selection_set_id).unwrap()
@@ -799,6 +832,7 @@ impl View for BufferView {
             Ok(BufferViewAction::MoveDown) => self.move_down(),
             Ok(BufferViewAction::MoveLeft) => self.move_left(),
             Ok(BufferViewAction::MoveRight) => self.move_right(),
+            Ok(BufferViewAction::MoveToBeginningOfWord) => self.move_to_beginning_of_word(),
             Ok(BufferViewAction::SelectUp) => self.select_up(),
             Ok(BufferViewAction::SelectDown) => self.select_down(),
             Ok(BufferViewAction::SelectLeft) => self.select_left(),

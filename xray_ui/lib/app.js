@@ -46,6 +46,7 @@ const keyBindings = [
   { key: "down", context: "TextEditor", action: "MoveDown" },
   { key: "left", context: "TextEditor", action: "MoveLeft" },
   { key: "right", context: "TextEditor", action: "MoveRight" },
+  { key: "alt-left", context: "TextEditor", action: "MoveToBeginningOfWord" },
   { key: "backspace", context: "TextEditor", action: "Backspace" },
   { key: "delete", context: "TextEditor", action: "Delete" }
 ];
