@@ -4,7 +4,6 @@ use movement;
 use notify_cell::NotifyCell;
 use serde_json;
 use std::cell::{Cell, Ref, RefCell};
-use std::char::decode_utf16;
 use std::cmp::{self, Ordering};
 use std::ops::Range;
 use std::rc::Rc;
@@ -547,21 +546,9 @@ impl BufferView {
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
                 for selection in selections.iter_mut() {
-                    let mut head = buffer.point_for_anchor(selection.head()).unwrap();
-                    // TODO: remove this once the iterator returns char instances.
-                    let mut char_iter = decode_utf16(buffer.backward_iter_starting_at_point(head))
-                        .map(|c| c.unwrap());
-                    let skip_alphanumeric = char_iter.next().map_or(false, |c| c.is_alphanumeric());
-                    head = movement::left(buffer, head);
-                    for character in char_iter {
-                        if skip_alphanumeric == character.is_alphanumeric() {
-                            head = movement::left(buffer, head);
-                        } else {
-                            break;
-                        }
-                    }
-
-                    let anchor = buffer.anchor_before_point(head).unwrap();
+                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
+                    let new_head = movement::beginning_of_word(buffer, old_head);
+                    let anchor = buffer.anchor_before_point(new_head).unwrap();
                     selection.start = anchor.clone();
                     selection.end = anchor;
                     selection.goal_column = None;
@@ -577,21 +564,9 @@ impl BufferView {
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
                 for selection in selections.iter_mut() {
-                    let mut head = buffer.point_for_anchor(selection.head()).unwrap();
-                    // TODO: remove this once the iterator returns char instances.
-                    let mut char_iter =
-                        decode_utf16(buffer.iter_starting_at_point(head)).map(|c| c.unwrap());
-                    let skip_alphanumeric = char_iter.next().map_or(false, |c| c.is_alphanumeric());
-                    head = movement::right(buffer, head);
-                    for character in char_iter {
-                        if skip_alphanumeric == character.is_alphanumeric() {
-                            head = movement::right(buffer, head);
-                        } else {
-                            break;
-                        }
-                    }
-
-                    let anchor = buffer.anchor_before_point(head).unwrap();
+                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
+                    let new_head = movement::end_of_word(buffer, old_head);
+                    let anchor = buffer.anchor_before_point(new_head).unwrap();
                     selection.start = anchor.clone();
                     selection.end = anchor;
                     selection.goal_column = None;
@@ -1069,6 +1044,47 @@ mod tests {
         editor.move_up();
         editor.move_up();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+    }
+
+    #[test]
+    fn test_move_to_beginning_or_end_of_word() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor.buffer.borrow_mut().edit(&[0..0], "abc def\nghi.jkl");
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        editor.move_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+        editor.move_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 4)]);
+        editor.move_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 7)]);
+        editor.move_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 3)]);
+        editor.move_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 4)]);
+        editor.move_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 7)]);
+        editor.move_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 7)]);
+
+        editor.move_to_beginning_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 4)]);
+        editor.move_to_beginning_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 3)]);
+        editor.move_to_beginning_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_to_beginning_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 7)]);
+        editor.move_to_beginning_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 4)]);
+        editor.move_to_beginning_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+        editor.move_to_beginning_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+        editor.move_to_beginning_of_word();
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
     }
 
     #[test]
