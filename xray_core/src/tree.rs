@@ -49,7 +49,7 @@ pub struct Iter<'a, T: 'a + Item> {
 pub struct Cursor<'a, T: 'a + Item> {
     tree: &'a Tree<T>,
     did_seek: bool,
-    stack: Vec<(&'a Tree<T>, usize)>,
+    stack: Vec<(&'a Tree<T>, usize, T::Summary)>,
     prev_leaf: Option<&'a Tree<T>>,
     summary: T::Summary,
 }
@@ -427,7 +427,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         assert!(self.did_seek, "Must seek before reading cursor position");
         self.stack
             .last()
-            .map(|&(subtree, index)| &subtree.children()[index])
+            .map(|&(subtree, index, _)| &subtree.children()[index])
     }
 
     pub fn next(&mut self) {
@@ -435,7 +435,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
 
         while self.stack.len() > 0 {
             let (prev_subtree, index) = {
-                let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
+                let &mut (prev_subtree, ref mut index, _) = self.stack.last_mut().unwrap();
                 if prev_subtree.height() == 1 {
                     let prev_leaf = &prev_subtree.children()[*index];
                     self.prev_leaf = Some(prev_leaf);
@@ -453,14 +453,83 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
         }
     }
 
+    pub fn prev(&mut self) {
+        assert!(self.did_seek, "Must seek before calling prev");
+
+        if self.stack.is_empty() && self.prev_leaf.is_some() {
+            self.summary = T::Summary::default();
+            self.seek_to_last_item(self.tree);
+        } else {
+            while self.stack.len() > 0 {
+                let subtree = {
+                    let (parent, index, summary) = self.stack.last_mut().unwrap();
+                    if *index == 0 {
+                        None
+                    } else {
+                        *index -= 1;
+                        self.summary = summary.clone();
+                        for child in &parent.children()[0..*index] {
+                            self.summary += child.summary();
+                        }
+                        parent.children().get(*index)
+                    }
+                };
+                if let Some(subtree) = subtree {
+                    self.seek_to_last_item(subtree);
+                    break;
+                } else {
+                    self.stack.pop();
+                }
+            }
+        }
+
+        self.prev_leaf = if self.stack.is_empty() {
+            None
+        } else {
+            let mut stack_index = self.stack.len() - 1;
+            loop {
+                let (ancestor, index, _) = &self.stack[stack_index];
+                if *index == 0 {
+                    if stack_index == 0 {
+                        break None;
+                    } else {
+                        stack_index -= 1;
+                    }
+                } else {
+                    break ancestor.children()[index - 1].rightmost_leaf();
+                }
+            }
+        };
+    }
+
     fn seek_to_first_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) {
         self.did_seek = true;
 
         loop {
             match tree.0.as_ref() {
                 &Node::Internal { ref children, .. } => {
-                    self.stack.push((tree, 0));
+                    self.stack.push((tree, 0, self.summary.clone()));
                     tree = &children[0];
+                }
+                &Node::Leaf { .. } => {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn seek_to_last_item<'a>(&'a mut self, mut tree: &'tree Tree<T>) {
+        self.did_seek = true;
+
+        loop {
+            match tree.0.as_ref() {
+                &Node::Internal { ref children, .. } => {
+                    self.stack
+                        .push((tree, children.len() - 1, self.summary.clone()));
+                    for child in &tree.children()[0..children.len() - 1] {
+                        self.summary += child.summary();
+                    }
+                    tree = children.last().unwrap();
                 }
                 &Node::Leaf { .. } => {
                     break;
@@ -495,7 +564,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
             debug_assert!(*pos >= D::from_summary(&self.summary));
             while self.stack.len() > 0 {
                 {
-                    let &mut (prev_subtree, ref mut index) = self.stack.last_mut().unwrap();
+                    let &mut (prev_subtree, ref mut index, _) = self.stack.last_mut().unwrap();
                     if prev_subtree.height() > 1 {
                         *index += 1;
                     }
@@ -552,7 +621,7 @@ impl<'tree, T: 'tree + Item> Cursor<'tree, T> {
                                 self.prev_leaf = child.rightmost_leaf();
                                 slice.as_mut().map(|slice| slice.push_tree(child.clone()));
                             } else {
-                                self.stack.push((subtree, index));
+                                self.stack.push((subtree, index, self.summary.clone()));
                                 cur_subtree = Some(child);
                                 break;
                             }
@@ -749,6 +818,12 @@ mod tests {
         assert_eq!(cursor.start::<Count>(), Count(1));
         assert_eq!(cursor.start::<Sum>(), Sum(1));
 
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(&1));
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
         cursor.reset();
         assert_eq!(cursor.slice(&Sum(1), SeekBias::Right).items(), [1]);
         assert_eq!(cursor.item(), None);
@@ -801,6 +876,48 @@ mod tests {
         assert_eq!(cursor.prev_item(), Some(&6));
         assert_eq!(cursor.start::<Count>(), Count(6));
         assert_eq!(cursor.start::<Sum>(), Sum(21));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(&6));
+        assert_eq!(cursor.prev_item(), Some(&5));
+        assert_eq!(cursor.start::<Count>(), Count(5));
+        assert_eq!(cursor.start::<Sum>(), Sum(15));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(&5));
+        assert_eq!(cursor.prev_item(), Some(&4));
+        assert_eq!(cursor.start::<Count>(), Count(4));
+        assert_eq!(cursor.start::<Sum>(), Sum(10));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(&4));
+        assert_eq!(cursor.prev_item(), Some(&3));
+        assert_eq!(cursor.start::<Count>(), Count(3));
+        assert_eq!(cursor.start::<Sum>(), Sum(6));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(&3));
+        assert_eq!(cursor.prev_item(), Some(&2));
+        assert_eq!(cursor.start::<Count>(), Count(2));
+        assert_eq!(cursor.start::<Sum>(), Sum(3));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(&2));
+        assert_eq!(cursor.prev_item(), Some(&1));
+        assert_eq!(cursor.start::<Count>(), Count(1));
+        assert_eq!(cursor.start::<Sum>(), Sum(1));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(&1));
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
 
         cursor.reset();
         assert_eq!(
