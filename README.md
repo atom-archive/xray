@@ -182,16 +182,16 @@ Once we get the basic collaboration experience down, we'll be looking to expand 
 * [x] Key bindings system
 * [x] Horizontal scrolling
 * [ ] Word- and line-based cursor movements
-  * [ ] Move To Beginning Of Line
+  * [x] Move To Beginning Of Line
   * [x] Move To Beginning Of Word
   * [ ] Move To Bottom
-  * [ ] Move To End Of Line
+  * [x] Move To End Of Line
   * [x] Move To End Of Word
   * [ ] Move To Top
-  * [ ] Select To Beginning Of Line
+  * [x] Select To Beginning Of Line
   * [x] Select To Beginning Of Word
   * [ ] Select To Bottom
-  * [ ] Select To End Of Line
+  * [x] Select To End Of Line
   * [x] Select To End Of Word
   * [ ] Select To Top
 * [x] Gutter with line numbers
