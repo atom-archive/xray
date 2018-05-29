@@ -52,6 +52,16 @@ const keyBindings = [
     context: "TextEditor",
     action: "SelectToEndOfWord"
   },
+  {
+    key: "shift-cmd-left",
+    context: "TextEditor",
+    action: "SelectToBeginningOfLine"
+  },
+  {
+    key: "shift-cmd-right",
+    context: "TextEditor",
+    action: "SelectToEndOfLine"
+  },
   { key: "up", context: "TextEditor", action: "MoveUp" },
   { key: "down", context: "TextEditor", action: "MoveDown" },
   { key: "left", context: "TextEditor", action: "MoveLeft" },
