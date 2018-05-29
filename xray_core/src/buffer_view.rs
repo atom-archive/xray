@@ -59,6 +59,8 @@ enum BufferViewAction {
     SelectDown,
     SelectLeft,
     SelectRight,
+    SelectToBeginningOfWord,
+    SelectToEndOfWord,
     AddSelectionAbove,
     AddSelectionBelow,
 }
@@ -577,6 +579,38 @@ impl BufferView {
         self.autoscroll_to_cursor(false);
     }
 
+    pub fn select_to_beginning_of_word(&mut self) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                for selection in selections.iter_mut() {
+                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
+                    let new_head = movement::beginning_of_word(buffer, old_head);
+                    let anchor = buffer.anchor_before_point(new_head).unwrap();
+                    selection.set_head(buffer, anchor);
+                    selection.goal_column = None;
+                }
+            })
+            .unwrap();
+        self.autoscroll_to_cursor(false);
+    }
+
+    pub fn select_to_end_of_word(&mut self) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                for selection in selections.iter_mut() {
+                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
+                    let new_head = movement::end_of_word(buffer, old_head);
+                    let anchor = buffer.anchor_before_point(new_head).unwrap();
+                    selection.set_head(buffer, anchor);
+                    selection.goal_column = None;
+                }
+            })
+            .unwrap();
+        self.autoscroll_to_cursor(false);
+    }
+
     pub fn selections(&self) -> Ref<[Selection]> {
         Ref::map(self.buffer.borrow(), |buffer| {
             buffer.selections(self.selection_set_id).unwrap()
@@ -843,6 +877,8 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectDown) => self.select_down(),
             Ok(BufferViewAction::SelectLeft) => self.select_left(),
             Ok(BufferViewAction::SelectRight) => self.select_right(),
+            Ok(BufferViewAction::SelectToBeginningOfWord) => self.select_to_beginning_of_word(),
+            Ok(BufferViewAction::SelectToEndOfWord) => self.select_to_end_of_word(),
             Ok(BufferViewAction::AddSelectionAbove) => self.add_selection_above(),
             Ok(BufferViewAction::AddSelectionBelow) => self.add_selection_below(),
             Err(action) => eprintln!("Unrecognized action {:?}", action),
@@ -1085,6 +1121,74 @@ mod tests {
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
         editor.move_to_beginning_of_word();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+    }
+
+    #[test]
+    fn test_select_to_beginning_or_end_of_word() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor.buffer.borrow_mut().edit(&[0..0], "abc def\nghi.jkl");
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        editor.select_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 3))]);
+        editor.select_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 4))]);
+        editor.select_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 7))]);
+        editor.select_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
+        editor.select_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 3))]);
+        editor.select_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 4))]);
+        editor.select_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 7))]);
+        editor.select_to_end_of_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 7))]);
+
+        editor.move_right();
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 7)]);
+
+        editor.select_to_beginning_of_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((1, 4), (1, 7))]
+        );
+        editor.select_to_beginning_of_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((1, 3), (1, 7))]
+        );
+        editor.select_to_beginning_of_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((1, 0), (1, 7))]
+        );
+        editor.select_to_beginning_of_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 7), (1, 7))]
+        );
+        editor.select_to_beginning_of_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 4), (1, 7))]
+        );
+        editor.select_to_beginning_of_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 3), (1, 7))]
+        );
+        editor.select_to_beginning_of_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 0), (1, 7))]
+        );
+        editor.select_to_beginning_of_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 0), (1, 7))]
+        );
     }
 
     #[test]

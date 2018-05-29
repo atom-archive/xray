@@ -142,6 +142,14 @@ class TextEditor extends React.Component {
         type: "SelectRight",
         onWillDispatch: this.pauseCursorBlinking
       }),
+      $(Action, {
+        type: "SelectToBeginningOfWord",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
+      $(Action, {
+        type: "SelectToEndOfWord",
+        onWillDispatch: this.pauseCursorBlinking
+      }),
       $(Action, { type: "MoveUp", onWillDispatch: this.pauseCursorBlinking }),
       $(Action, { type: "MoveDown", onWillDispatch: this.pauseCursorBlinking }),
       $(Action, { type: "MoveLeft", onWillDispatch: this.pauseCursorBlinking }),

@@ -189,10 +189,10 @@ Once we get the basic collaboration experience down, we'll be looking to expand 
   * [x] Move To End Of Word
   * [ ] Move To Top
   * [ ] Select To Beginning Of Line
-  * [ ] Select To Beginning Of Word
+  * [x] Select To Beginning Of Word
   * [ ] Select To Bottom
   * [ ] Select To End Of Line
-  * [ ] Select To End Of Word
+  * [x] Select To End Of Word
   * [ ] Select To Top
 * [x] Gutter with line numbers
 * [ ] Mouse interaction

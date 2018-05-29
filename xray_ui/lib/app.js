@@ -42,6 +42,16 @@ const keyBindings = [
   { key: "shift-down", context: "TextEditor", action: "SelectDown" },
   { key: "shift-left", context: "TextEditor", action: "SelectLeft" },
   { key: "shift-right", context: "TextEditor", action: "SelectRight" },
+  {
+    key: "alt-shift-left",
+    context: "TextEditor",
+    action: "SelectToBeginningOfWord"
+  },
+  {
+    key: "alt-shift-right",
+    context: "TextEditor",
+    action: "SelectToEndOfWord"
+  },
   { key: "up", context: "TextEditor", action: "MoveUp" },
   { key: "down", context: "TextEditor", action: "MoveDown" },
   { key: "left", context: "TextEditor", action: "MoveLeft" },
