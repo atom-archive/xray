@@ -114,6 +114,7 @@ class TextEditor extends React.Component {
           width: this.getScrollWidth(),
           selections: this.props.selections,
           firstVisibleRow: this.props.first_visible_row,
+          totalRowCount: this.props.total_row_count,
           lines: this.props.lines,
           ref: textPlane => {
             this.textPlane = textPlane;
@@ -208,18 +209,25 @@ class TextEditor extends React.Component {
 
   flushHorizontalAutoscroll() {
     const { horizontal_autoscroll, horizontal_margin, width } = this.props;
-    if (horizontal_autoscroll && width && this.canUseTextPlane()) {
+    const gutterWidth = this.getGutterWidth();
+    if (
+      horizontal_autoscroll &&
+      width &&
+      gutterWidth &&
+      this.canUseTextPlane()
+    ) {
       const desiredScrollLeft = this.textPlane.measureLine(
         horizontal_autoscroll.start_line,
         Math.max(0, horizontal_autoscroll.start.column - horizontal_margin)
       );
-      const desiredScrollRight = this.textPlane.measureLine(
-        horizontal_autoscroll.end_line,
-        Math.min(
-          horizontal_autoscroll.end_line.length,
-          horizontal_autoscroll.end.column + horizontal_margin
-        )
-      );
+      const desiredScrollRight =
+        this.textPlane.measureLine(
+          horizontal_autoscroll.end_line,
+          Math.min(
+            horizontal_autoscroll.end_line.length,
+            horizontal_autoscroll.end.column + horizontal_margin
+          )
+        ) + gutterWidth;
 
       // This function will be called during render, so we avoid calling
       // setState and we manually manipulate this.state instead.
@@ -279,8 +287,13 @@ class TextEditor extends React.Component {
   getContentWidth() {
     const longestLineWidth = this.getLongestLineWidth();
     const cursorWidth = this.getCursorWidth();
-    if (longestLineWidth != null && cursorWidth != null) {
-      return Math.ceil(longestLineWidth + cursorWidth);
+    const gutterWidth = this.getGutterWidth();
+    if (
+      longestLineWidth != null &&
+      cursorWidth != null &&
+      gutterWidth != null
+    ) {
+      return Math.ceil(gutterWidth + longestLineWidth + cursorWidth);
     } else {
       return null;
     }
@@ -300,6 +313,14 @@ class TextEditor extends React.Component {
       this.longestLineWidth = this.textPlane.measureLine(longestLine);
     }
     return this.longestLineWidth;
+  }
+
+  getGutterWidth() {
+    if (this.canUseTextPlane()) {
+      return this.textPlane.getGutterWidth(this.props.total_row_count);
+    } else {
+      return null;
+    }
   }
 
   canUseTextPlane() {

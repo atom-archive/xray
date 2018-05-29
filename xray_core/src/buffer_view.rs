@@ -766,6 +766,7 @@ impl View for BufferView {
 
         json!({
             "first_visible_row": start.row,
+            "total_row_count": buffer.max_point().row + 1,
             "lines": lines,
             "longest_line": longest_line,
             "scroll_top": self.scroll_top(),
