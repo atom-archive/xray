@@ -44,7 +44,7 @@ class TextEditor extends React.Component {
       this.startCursorBlinking.bind(this),
       CURSOR_BLINK_RESUME_DELAY
     );
-
+    this.paddingLeft = 5;
     this.state = { scrollLeft: 0, showLocalCursors: true };
   }
 
@@ -108,7 +108,7 @@ class TextEditor extends React.Component {
           showLocalCursors: this.state.showLocalCursors,
           lineHeight: this.props.line_height,
           scrollTop: this.props.scroll_top,
-          paddingLeft: 5,
+          paddingLeft: this.paddingLeft,
           scrollLeft: this.getScrollLeft(),
           height: this.props.height,
           width: this.getScrollWidth(),
@@ -258,24 +258,27 @@ class TextEditor extends React.Component {
   flushHorizontalAutoscroll() {
     const { horizontal_autoscroll, horizontal_margin, width } = this.props;
     const gutterWidth = this.getGutterWidth();
+    const baseCharWidth = this.getBaseCharacterWidth();
     if (
       horizontal_autoscroll &&
       width &&
       gutterWidth &&
+      baseCharWidth &&
       this.canUseTextPlane()
     ) {
-      const desiredScrollLeft = this.textPlane.measureLine(
-        horizontal_autoscroll.start_line,
-        Math.max(0, horizontal_autoscroll.start.column - horizontal_margin)
-      );
+      const horizontalMarginInPixels = baseCharWidth * horizontal_margin;
+      const desiredScrollLeft =
+        this.textPlane.measureLine(
+          horizontal_autoscroll.start_line,
+          horizontal_autoscroll.start.column
+        ) - horizontalMarginInPixels;
       const desiredScrollRight =
         this.textPlane.measureLine(
           horizontal_autoscroll.end_line,
-          Math.min(
-            horizontal_autoscroll.end_line.length,
-            horizontal_autoscroll.end.column + horizontal_margin
-          )
-        ) + gutterWidth;
+          horizontal_autoscroll.end.column
+        ) +
+        gutterWidth +
+        horizontalMarginInPixels;
 
       // This function will be called during render, so we avoid calling
       // setState and we manually manipulate this.state instead.
@@ -334,24 +337,24 @@ class TextEditor extends React.Component {
 
   getContentWidth() {
     const longestLineWidth = this.getLongestLineWidth();
-    const cursorWidth = this.getCursorWidth();
+    const baseCharWidth = this.getBaseCharacterWidth();
     const gutterWidth = this.getGutterWidth();
     if (
       longestLineWidth != null &&
-      cursorWidth != null &&
+      baseCharWidth != null &&
       gutterWidth != null
     ) {
-      return Math.ceil(gutterWidth + longestLineWidth + cursorWidth);
+      return Math.ceil(gutterWidth + longestLineWidth + baseCharWidth);
     } else {
       return null;
     }
   }
 
-  getCursorWidth() {
-    if (this.cursorWidth == null && this.canUseTextPlane()) {
-      this.cursorWidth = this.textPlane.measureLine("X");
+  getBaseCharacterWidth() {
+    if (this.baseCharWidth == null && this.canUseTextPlane()) {
+      this.baseCharWidth = this.textPlane.measureLine("X");
     }
-    return this.cursorWidth;
+    return this.baseCharWidth;
   }
 
   getLongestLineWidth() {
@@ -365,7 +368,10 @@ class TextEditor extends React.Component {
 
   getGutterWidth() {
     if (this.canUseTextPlane()) {
-      return this.textPlane.getGutterWidth(this.props.total_row_count);
+      return (
+        this.textPlane.getGutterWidth(this.props.total_row_count) +
+        this.paddingLeft
+      );
     } else {
       return null;
     }
