@@ -37,6 +37,7 @@ class TextEditor extends React.Component {
 
   constructor(props) {
     super(props);
+    this.handleMouseDown = this.handleMouseDown.bind(this);
     this.handleMouseWheel = this.handleMouseWheel.bind(this);
     this.handleKeyDown = this.handleKeyDown.bind(this);
     this.pauseCursorBlinking = this.pauseCursorBlinking.bind(this);
@@ -68,6 +69,9 @@ class TextEditor extends React.Component {
     }
 
     element.addEventListener("wheel", this.handleMouseWheel, { passive: true });
+    element.addEventListener("mousedown", this.handleMouseDown, {
+      passive: true
+    });
 
     this.startCursorBlinking();
   }
@@ -203,6 +207,35 @@ class TextEditor extends React.Component {
       }),
       $(Action, { type: "Delete", onWillDispatch: this.pauseCursorBlinking })
     );
+  }
+
+  handleMouseDown({ clientX, clientY }) {
+    if (this.canUseTextPlane()) {
+      const { scroll_top, line_height, first_visible_row, lines } = this.props;
+      const { scrollLeft } = this.state;
+      const targetX =
+        clientX - this.element.offsetLeft + scrollLeft - this.getGutterWidth();
+      const targetY = clientY - this.element.offsetTop + scroll_top;
+      const row = Math.max(0, Math.floor(targetY / line_height));
+      const line = lines[row - first_visible_row];
+      if (line != null) {
+        const glyphWidths = this.textPlane.layoutLine(line);
+        let column = 0;
+        let x = 0;
+        while (x < targetX && column < line.length) {
+          const glyphWidth = glyphWidths[column];
+          if (targetX > x + glyphWidth / 2) {
+            column++;
+            x += glyphWidth;
+          } else {
+            break;
+          }
+        }
+
+        this.pauseCursorBlinking();
+        this.props.dispatch({ type: "SetCursorPosition", row, column });
+      }
+    }
   }
 
   handleMouseWheel(event) {

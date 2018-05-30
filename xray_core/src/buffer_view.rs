@@ -71,6 +71,7 @@ enum BufferViewAction {
     SelectToBottom,
     AddSelectionAbove,
     AddSelectionBelow,
+    SetCursorPosition { row: u32, column: u32 },
 }
 
 struct AutoScrollRequest {
@@ -253,6 +254,24 @@ impl BufferView {
         self.autoscroll_to_selection(true);
         self.updated();
         Ok(())
+    }
+
+    pub fn set_cursor_position(&mut self, position: Point) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                // TODO: Clip point or return a result.
+                let anchor = buffer.anchor_before_point(position).unwrap();
+                selections.clear();
+                selections.push(Selection {
+                    start: anchor.clone(),
+                    end: anchor,
+                    reversed: false,
+                    goal_column: None,
+                });
+            })
+            .unwrap();
+        self.autoscroll_to_cursor(false);
     }
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
@@ -1025,6 +1044,9 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectToBottom) => self.select_to_bottom(),
             Ok(BufferViewAction::AddSelectionAbove) => self.add_selection_above(),
             Ok(BufferViewAction::AddSelectionBelow) => self.add_selection_below(),
+            Ok(BufferViewAction::SetCursorPosition { row, column }) => {
+                self.set_cursor_position(Point::new(row, column))
+            }
             Err(action) => eprintln!("Unrecognized action {:?}", action),
         }
     }
@@ -1632,6 +1654,25 @@ mod tests {
                 selection((4, 4), (4, 8)),
             ]
         );
+    }
+
+    #[test]
+    fn test_set_cursor_position() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
+        editor.add_selection_below();
+        editor.add_selection_below();
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                empty_selection(0, 0),
+                empty_selection(1, 0),
+                empty_selection(2, 0),
+            ]
+        );
+
+        editor.set_cursor_position(Point::new(1, 2));
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 2)]);
     }
 
     #[test]
