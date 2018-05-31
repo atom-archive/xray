@@ -44,9 +44,16 @@ struct SelectionProps {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum BufferViewAction {
-    UpdateScrollTop { delta: f64 },
-    SetDimensions { width: u64, height: u64 },
-    Edit { text: String },
+    UpdateScrollTop {
+        delta: f64,
+    },
+    SetDimensions {
+        width: u64,
+        height: u64,
+    },
+    Edit {
+        text: String,
+    },
     Backspace,
     Delete,
     MoveUp,
@@ -69,9 +76,15 @@ enum BufferViewAction {
     SelectToEndOfLine,
     SelectToTop,
     SelectToBottom,
+    SelectWord,
+    SelectLine,
     AddSelectionAbove,
     AddSelectionBelow,
-    SetCursorPosition { row: u32, column: u32 },
+    SetCursorPosition {
+        row: u32,
+        column: u32,
+        autoscroll: bool,
+    },
 }
 
 struct AutoScrollRequest {
@@ -256,7 +269,7 @@ impl BufferView {
         Ok(())
     }
 
-    pub fn set_cursor_position(&mut self, position: Point) {
+    pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool) {
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
@@ -271,7 +284,9 @@ impl BufferView {
                 });
             })
             .unwrap();
-        self.autoscroll_to_cursor(false);
+        if autoscroll {
+            self.autoscroll_to_cursor(false);
+        }
     }
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
@@ -638,6 +653,23 @@ impl BufferView {
         self.autoscroll_to_cursor(false);
     }
 
+    pub fn select_word(&mut self) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                for selection in selections.iter_mut() {
+                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
+                    let new_start = movement::beginning_of_word(buffer, old_head);
+                    let new_end = movement::end_of_word(buffer, new_start);
+                    selection.start = buffer.anchor_before_point(new_start).unwrap();
+                    selection.end = buffer.anchor_before_point(new_end).unwrap();
+                    selection.reversed = false;
+                    selection.goal_column = None;
+                }
+            })
+            .unwrap();
+    }
+
     pub fn move_to_beginning_of_line(&mut self) {
         self.buffer
             .borrow_mut()
@@ -704,6 +736,24 @@ impl BufferView {
             })
             .unwrap();
         self.autoscroll_to_cursor(false);
+    }
+
+    pub fn select_line(&mut self) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                let max_point = buffer.max_point();
+                for selection in selections.iter_mut() {
+                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
+                    let new_start = movement::beginning_of_line(old_head);
+                    let new_end = cmp::min(Point::new(new_start.row + 1, 0), max_point);
+                    selection.start = buffer.anchor_before_point(new_start).unwrap();
+                    selection.end = buffer.anchor_before_point(new_end).unwrap();
+                    selection.reversed = false;
+                    selection.goal_column = None;
+                }
+            })
+            .unwrap();
     }
 
     pub fn move_to_top(&mut self) {
@@ -1042,11 +1092,15 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectToEndOfLine) => self.select_to_end_of_line(),
             Ok(BufferViewAction::SelectToTop) => self.select_to_top(),
             Ok(BufferViewAction::SelectToBottom) => self.select_to_bottom(),
+            Ok(BufferViewAction::SelectWord) => self.select_word(),
+            Ok(BufferViewAction::SelectLine) => self.select_line(),
             Ok(BufferViewAction::AddSelectionAbove) => self.add_selection_above(),
             Ok(BufferViewAction::AddSelectionBelow) => self.add_selection_below(),
-            Ok(BufferViewAction::SetCursorPosition { row, column }) => {
-                self.set_cursor_position(Point::new(row, column))
-            }
+            Ok(BufferViewAction::SetCursorPosition {
+                row,
+                column,
+                autoscroll,
+            }) => self.set_cursor_position(Point::new(row, column), autoscroll),
             Err(action) => eprintln!("Unrecognized action {:?}", action),
         }
     }
@@ -1421,6 +1475,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_select_word() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor.buffer.borrow_mut().edit(&[0..0], "abc.def---ghi");
+
+        editor.set_cursor_position(Point::new(0, 5), false);
+        editor.select_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 4), (0, 7))]);
+
+        editor.set_cursor_position(Point::new(0, 8), false);
+        editor.select_word();
+        assert_eq!(render_selections(&editor), vec![selection((0, 7), (0, 10))]);
+    }
+
+    #[test]
+    fn test_select_line() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
+
+        editor.set_cursor_position(Point::new(0, 2), false);
+        editor.select_line();
+        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
+
+        editor.set_cursor_position(Point::new(2, 1), false);
+        editor.select_line();
+        assert_eq!(render_selections(&editor), vec![selection((2, 0), (2, 3))]);
+    }
+
+    #[test]
     fn test_move_to_top_or_bottom() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
@@ -1671,7 +1754,7 @@ mod tests {
             ]
         );
 
-        editor.set_cursor_position(Point::new(1, 2));
+        editor.set_cursor_position(Point::new(1, 2), false);
         assert_eq!(render_selections(&editor), vec![empty_selection(1, 2)]);
     }
 

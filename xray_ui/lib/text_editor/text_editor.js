@@ -209,33 +209,60 @@ class TextEditor extends React.Component {
     );
   }
 
-  handleMouseDown({ clientX, clientY }) {
+  handleMouseDown(event) {
     if (this.canUseTextPlane()) {
-      const { scroll_top, line_height, first_visible_row, lines } = this.props;
-      const { scrollLeft } = this.state;
-      const targetX =
-        clientX - this.element.offsetLeft + scrollLeft - this.getGutterWidth();
-      const targetY = clientY - this.element.offsetTop + scroll_top;
-      const row = Math.max(0, Math.floor(targetY / line_height));
-      const line = lines[row - first_visible_row];
-      if (line != null) {
-        const glyphWidths = this.textPlane.layoutLine(line);
-        let column = 0;
-        let x = 0;
-        while (x < targetX && column < line.length) {
-          const glyphWidth = glyphWidths[column];
-          if (targetX > x + glyphWidth / 2) {
-            column++;
-            x += glyphWidth;
-          } else {
-            break;
-          }
-        }
-
-        this.pauseCursorBlinking();
-        this.props.dispatch({ type: "SetCursorPosition", row, column });
+      this.handleClick(event);
+      switch (event.detail) {
+        case 2:
+          this.handleDoubleClick();
+          break;
+        case 3:
+          this.handleTripleClick();
+          break;
       }
     }
+  }
+
+  handleClick({ clientX, clientY }) {
+    const { scroll_top, line_height, first_visible_row, lines } = this.props;
+    const { scrollLeft } = this.state;
+    const targetX =
+      clientX - this.element.offsetLeft + scrollLeft - this.getGutterWidth();
+    const targetY = clientY - this.element.offsetTop + scroll_top;
+    const row = Math.max(0, Math.floor(targetY / line_height));
+    const line = lines[row - first_visible_row];
+    if (line != null) {
+      const glyphWidths = this.textPlane.layoutLine(line);
+      let column = 0;
+      let x = 0;
+      while (x < targetX && column < line.length) {
+        const glyphWidth = glyphWidths[column];
+        if (targetX > x + glyphWidth / 2) {
+          column++;
+          x += glyphWidth;
+        } else {
+          break;
+        }
+      }
+
+      this.pauseCursorBlinking();
+      this.props.dispatch({
+        type: "SetCursorPosition",
+        row,
+        column,
+        autoscroll: false
+      });
+    }
+  }
+
+  handleDoubleClick() {
+    this.pauseCursorBlinking();
+    this.props.dispatch({ type: "SelectWord" });
+  }
+
+  handleTripleClick() {
+    this.pauseCursorBlinking();
+    this.props.dispatch({ type: "SelectLine" });
   }
 
   handleMouseWheel(event) {
