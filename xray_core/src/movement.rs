@@ -1,5 +1,6 @@
-use std::cmp;
 use buffer::{Buffer, Point};
+use std::char::decode_utf16;
+use std::cmp;
 
 pub fn left(buffer: &Buffer, mut point: Point) -> Point {
     if point.column > 0 {
@@ -45,4 +46,44 @@ pub fn down(buffer: &Buffer, mut point: Point, goal_column: Option<u32>) -> (Poi
     }
 
     (point, goal_column)
+}
+
+pub fn beginning_of_word(buffer: &Buffer, mut point: Point) -> Point {
+    // TODO: remove this once the iterator returns char instances.
+    let mut iter = decode_utf16(buffer.backward_iter_starting_at_point(point)).map(|c| c.unwrap());
+    let skip_alphanumeric = iter.next().map_or(false, |c| c.is_alphanumeric());
+    point = left(buffer, point);
+    for character in iter {
+        if skip_alphanumeric == character.is_alphanumeric() {
+            point = left(buffer, point);
+        } else {
+            break;
+        }
+    }
+    point
+}
+
+pub fn end_of_word(buffer: &Buffer, mut point: Point) -> Point {
+    // TODO: remove this once the iterator returns char instances.
+    let mut iter = decode_utf16(buffer.iter_starting_at_point(point)).map(|c| c.unwrap());
+    let skip_alphanumeric = iter.next().map_or(false, |c| c.is_alphanumeric());
+    point = right(buffer, point);
+    for character in iter {
+        if skip_alphanumeric == character.is_alphanumeric() {
+            point = right(buffer, point);
+        } else {
+            break;
+        }
+    }
+    point
+}
+
+pub fn beginning_of_line(mut point: Point) -> Point {
+    point.column = 0;
+    point
+}
+
+pub fn end_of_line(buffer: &Buffer, mut point: Point) -> Point {
+    point.column = buffer.len_for_row(point.row).unwrap();
+    point
 }

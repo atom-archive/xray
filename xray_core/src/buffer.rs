@@ -117,6 +117,11 @@ pub struct Iter<'a> {
     fragment_offset: usize,
 }
 
+pub struct BackwardIter<'a> {
+    fragment_cursor: tree::Cursor<'a, Fragment>,
+    fragment_offset: usize,
+}
+
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Insertion {
     id: EditId,
@@ -731,7 +736,7 @@ impl Buffer {
     }
 
     pub fn line(&self, row: u32) -> Result<Vec<u16>, Error> {
-        let mut iterator = self.iter_starting_at_row(row).peekable();
+        let mut iterator = self.iter_starting_at_point(Point::new(row, 0)).peekable();
         if iterator.peek().is_none() {
             Err(Error::OffsetOutOfRange)
         } else {
@@ -760,8 +765,12 @@ impl Buffer {
         Iter::new(self)
     }
 
-    pub fn iter_starting_at_row(&self, row: u32) -> Iter {
-        Iter::starting_at_row(self, row)
+    pub fn iter_starting_at_point(&self, point: Point) -> Iter {
+        Iter::starting_at_point(self, point)
+    }
+
+    pub fn backward_iter_starting_at_point(&self, point: Point) -> BackwardIter {
+        BackwardIter::starting_at_point(self, point)
     }
 
     pub fn edit<'a, I, T>(&mut self, old_ranges: I, new_text: T) -> Vec<Arc<Operation>>
@@ -1857,18 +1866,11 @@ impl<'a> Iter<'a> {
         }
     }
 
-    fn starting_at_row(buffer: &'a Buffer, target_row: u32) -> Self {
+    fn starting_at_point(buffer: &'a Buffer, point: Point) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
-        fragment_cursor.seek(
-            &Point {
-                row: target_row,
-                column: 0,
-            },
-            SeekBias::Right,
-        );
-
+        fragment_cursor.seek(&point, SeekBias::Right);
         let fragment_offset = if let Some(fragment) = fragment_cursor.item() {
-            let point_in_fragment = Point::new(target_row, 0) - &fragment_cursor.start::<Point>();
+            let point_in_fragment = point - &fragment_cursor.start::<Point>();
             fragment.offset_for_point(point_in_fragment).unwrap()
         } else {
             0
@@ -1898,6 +1900,53 @@ impl<'a> Iterator for Iter<'a> {
                 if let Some(c) = fragment.get_code_unit(0) {
                     self.fragment_offset = 1;
                     return Some(c);
+                }
+            } else {
+                break;
+            }
+        }
+
+        None
+    }
+}
+
+impl<'a> BackwardIter<'a> {
+    fn starting_at_point(buffer: &'a Buffer, point: Point) -> Self {
+        let mut fragment_cursor = buffer.fragments.cursor();
+        fragment_cursor.seek(&point, SeekBias::Left);
+        let fragment_offset = if let Some(fragment) = fragment_cursor.item() {
+            let point_in_fragment = point - &fragment_cursor.start::<Point>();
+            fragment.offset_for_point(point_in_fragment).unwrap()
+        } else {
+            0
+        };
+
+        Self {
+            fragment_cursor,
+            fragment_offset,
+        }
+    }
+}
+
+impl<'a> Iterator for BackwardIter<'a> {
+    type Item = u16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(fragment) = self.fragment_cursor.item() {
+            if self.fragment_offset > 0 {
+                self.fragment_offset -= 1;
+                if let Some(c) = fragment.get_code_unit(self.fragment_offset) {
+                    return Some(c);
+                }
+            }
+        }
+
+        loop {
+            self.fragment_cursor.prev();
+            if let Some(fragment) = self.fragment_cursor.item() {
+                if fragment.len() > 0 {
+                    self.fragment_offset = fragment.len() - 1;
+                    return fragment.get_code_unit(self.fragment_offset);
                 }
             } else {
                 break;
@@ -2647,44 +2696,44 @@ mod tests {
     }
 
     #[test]
-    fn iter_starting_at_row() {
+    fn iter_starting_at_point() {
         let mut buffer = Buffer::new(0);
         buffer.edit(&[0..0], "abcd\nefgh\nij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs");
         buffer.edit(&[18..21], "\nPQ");
 
-        let iter = buffer.iter_starting_at_row(0);
+        let iter = buffer.iter_starting_at_point(Point::new(0, 0));
         assert_eq!(
             String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
             "abcd\nefgh\nijkl\nmno\nPQrs"
         );
 
-        let iter = buffer.iter_starting_at_row(1);
+        let iter = buffer.iter_starting_at_point(Point::new(1, 0));
         assert_eq!(
             String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
             "efgh\nijkl\nmno\nPQrs"
         );
 
-        let iter = buffer.iter_starting_at_row(2);
+        let iter = buffer.iter_starting_at_point(Point::new(2, 0));
         assert_eq!(
             String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
             "ijkl\nmno\nPQrs"
         );
 
-        let iter = buffer.iter_starting_at_row(3);
+        let iter = buffer.iter_starting_at_point(Point::new(3, 0));
         assert_eq!(
             String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
             "mno\nPQrs"
         );
 
-        let iter = buffer.iter_starting_at_row(4);
+        let iter = buffer.iter_starting_at_point(Point::new(4, 0));
         assert_eq!(
             String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
             "PQrs"
         );
 
-        let iter = buffer.iter_starting_at_row(5);
+        let iter = buffer.iter_starting_at_point(Point::new(5, 0));
         assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "");
 
         // Regression test:
@@ -2692,10 +2741,49 @@ mod tests {
         buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
         buffer.edit(&[60..60], "\n");
 
-        let iter = buffer.iter_starting_at_row(6);
+        let iter = buffer.iter_starting_at_point(Point::new(6, 0));
         assert_eq!(
             String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
             "    \"xray_wasm\",\n]\n"
+        );
+    }
+
+    #[test]
+    fn backward_iter_starting_at_point() {
+        let mut buffer = Buffer::new(0);
+        buffer.edit(&[0..0], "abcd\nefgh\nij");
+        buffer.edit(&[12..12], "kl\nmno");
+        buffer.edit(&[18..18], "\npqrs");
+        buffer.edit(&[18..21], "\nPQ");
+
+        let iter = buffer.backward_iter_starting_at_point(Point::new(0, 0));
+        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "");
+
+        let iter = buffer.backward_iter_starting_at_point(Point::new(0, 3));
+        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "cba");
+
+        let iter = buffer.backward_iter_starting_at_point(Point::new(1, 4));
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "hgfe\ndcba"
+        );
+
+        let iter = buffer.backward_iter_starting_at_point(Point::new(3, 2));
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "nm\nlkji\nhgfe\ndcba"
+        );
+
+        let iter = buffer.backward_iter_starting_at_point(Point::new(4, 4));
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "srQP\nonm\nlkji\nhgfe\ndcba"
+        );
+
+        let iter = buffer.backward_iter_starting_at_point(Point::new(5, 0));
+        assert_eq!(
+            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
+            "srQP\nonm\nlkji\nhgfe\ndcba"
         );
     }
 

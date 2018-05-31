@@ -42,10 +42,46 @@ const keyBindings = [
   { key: "shift-down", context: "TextEditor", action: "SelectDown" },
   { key: "shift-left", context: "TextEditor", action: "SelectLeft" },
   { key: "shift-right", context: "TextEditor", action: "SelectRight" },
+  {
+    key: "alt-shift-left",
+    context: "TextEditor",
+    action: "SelectToBeginningOfWord"
+  },
+  {
+    key: "alt-shift-right",
+    context: "TextEditor",
+    action: "SelectToEndOfWord"
+  },
+  {
+    key: "shift-cmd-left",
+    context: "TextEditor",
+    action: "SelectToBeginningOfLine"
+  },
+  {
+    key: "shift-cmd-right",
+    context: "TextEditor",
+    action: "SelectToEndOfLine"
+  },
+  {
+    key: "shift-cmd-up",
+    context: "TextEditor",
+    action: "SelectToTop"
+  },
+  {
+    key: "shift-cmd-down",
+    context: "TextEditor",
+    action: "SelectToBottom"
+  },
   { key: "up", context: "TextEditor", action: "MoveUp" },
   { key: "down", context: "TextEditor", action: "MoveDown" },
   { key: "left", context: "TextEditor", action: "MoveLeft" },
   { key: "right", context: "TextEditor", action: "MoveRight" },
+  { key: "alt-left", context: "TextEditor", action: "MoveToBeginningOfWord" },
+  { key: "alt-right", context: "TextEditor", action: "MoveToEndOfWord" },
+  { key: "cmd-left", context: "TextEditor", action: "MoveToBeginningOfLine" },
+  { key: "cmd-right", context: "TextEditor", action: "MoveToEndOfLine" },
+  { key: "cmd-up", context: "TextEditor", action: "MoveToTop" },
+  { key: "cmd-down", context: "TextEditor", action: "MoveToBottom" },
   { key: "backspace", context: "TextEditor", action: "Backspace" },
   { key: "delete", context: "TextEditor", action: "Delete" }
 ];
