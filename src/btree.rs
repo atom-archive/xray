@@ -115,6 +115,7 @@ impl<T: Item> Tree<T> {
         }
 
         if leaf.is_some() {
+            // eprintln!("About to push last tree");
             self.push_tree(Tree::Resident(Arc::new(leaf.take().unwrap())), db)?;
         }
 
@@ -139,13 +140,17 @@ impl<T: Item> Tree<T> {
         other: Self,
         db: &mut S,
     ) -> Result<(), S::ReadError> {
+        // eprintln!("Pushing tree {:?}", other);
+
         let other_height = other.height(db)?;
         if self.height(db)? < other_height {
             for tree in other.child_trees(db)?.clone() {
-                self.push_tree_recursive(tree, db)?;
+                self.push_tree(tree, db)?;
             }
-        } else if let Some(split_tree) = self.push_tree_recursive(other, db)? {
+        } else if let Some((_, split_tree)) = self.push_tree_recursive(other, db)? {
+            // println!("Pushing recursive");
             *self = Self::from_child_trees(vec![self.clone(), split_tree], db)?;
+            // println!("Tree after pushing recursive {:?}", self);
         }
         Ok(())
     }
@@ -154,7 +159,7 @@ impl<T: Item> Tree<T> {
         &mut self,
         other: Tree<T>,
         db: &mut S,
-    ) -> Result<Option<Tree<T>>, S::ReadError>
+    ) -> Result<Option<(T::Summary, Tree<T>)>, S::ReadError>
     where
         S: NodeStore<T>,
     {
@@ -166,6 +171,7 @@ impl<T: Item> Tree<T> {
                 child_trees,
             } => {
                 let height_delta;
+                let other_is_underflowing;
                 let mut summaries_to_append = SmallVec::<[T::Summary; 2 * TREE_BASE]>::new();
                 let mut trees_to_append = SmallVec::<[Tree<T>; 2 * TREE_BASE]>::new();
 
@@ -173,26 +179,28 @@ impl<T: Item> Tree<T> {
                     let other_node = other.node(db)?;
                     *summary += other_node.summary();
                     height_delta = *height - other_node.height();
+                    other_is_underflowing = other_node.is_underflowing();
                     if height_delta == 0 {
                         summaries_to_append.extend(other_node.child_summaries().iter().cloned());
                         trees_to_append.extend(other_node.child_trees().iter().cloned());
-                    } else if height_delta == 1 && !other_node.is_underflowing() {
+                    } else if height_delta == 1 && !other_is_underflowing {
                         summaries_to_append.push(other_node.summary().clone());
                     }
                 }
 
-                if height_delta == 1 && summaries_to_append.len() > 0 {
-                    trees_to_append.push(other)
-                } else if height_delta > 1 {
+                if height_delta > 1 || other_is_underflowing {
                     let tree_to_append = child_trees
                         .last_mut()
                         .unwrap()
                         .push_tree_recursive(other, db)?;
 
-                    if let Some(tree) = tree_to_append {
-                        summaries_to_append.push(tree.summary(db).unwrap().clone());
-                        trees_to_append.push(tree);
+                    if let Some((last_summary, split_tree)) = tree_to_append {
+                        *child_summaries.last_mut().unwrap() = last_summary;
+                        summaries_to_append.push(split_tree.summary(db).unwrap().clone());
+                        trees_to_append.push(split_tree);
                     }
+                } else if height_delta == 1 {
+                    trees_to_append.push(other)
                 }
 
                 let child_count = child_trees.len() + trees_to_append.len();
@@ -217,16 +225,17 @@ impl<T: Item> Tree<T> {
                     }
                     *child_summaries = left_summaries;
                     *child_trees = left_trees;
-                    *summary = sum(child_summaries.iter());
 
-                    Ok(Some(Tree::Resident(Arc::new(Node::Internal {
-                        height: *height,
-                        summary: sum(right_summaries.iter()),
-                        child_summaries: right_summaries,
-                        child_trees: right_trees,
-                    }))))
+                    Ok(Some((
+                        summary.clone(),
+                        Tree::Resident(Arc::new(Node::Internal {
+                            height: *height,
+                            summary: sum(right_summaries.iter()),
+                            child_summaries: right_summaries,
+                            child_trees: right_trees,
+                        })),
+                    )))
                 } else {
-                    *summary += &sum(summaries_to_append.iter());
                     child_summaries.extend(summaries_to_append);
                     child_trees.extend(trees_to_append);
                     Ok(None)
@@ -248,10 +257,13 @@ impl<T: Item> Tree<T> {
                     }
                     *items = left_items;
                     *summary = sum_owned(items.iter().map(|item| item.summarize()));
-                    Ok(Some(Tree::Resident(Arc::new(Node::Leaf {
-                        summary: sum_owned(right_items.iter().map(|item| item.summarize())),
-                        items: right_items,
-                    }))))
+                    Ok(Some((
+                        summary.clone(),
+                        Tree::Resident(Arc::new(Node::Leaf {
+                            summary: sum_owned(right_items.iter().map(|item| item.summarize())),
+                            items: right_items,
+                        })),
+                    )))
                 } else {
                     *summary += other_node.summary();
                     items.extend(other_node.items().iter().cloned());
@@ -385,7 +397,7 @@ impl<T: Item> Node<T> {
             Node::Internal { .. } => panic!("Internal nodes have no items"),
         }
     }
-    
+
     fn summary_mut(&mut self) -> &mut T::Summary {
         match self {
             Node::Internal { summary, .. } => summary,
@@ -533,8 +545,8 @@ impl<T: Item> Cursor<T> {
         let mut slice_subtrees = SmallVec::<[Tree<T>; 2 * TREE_BASE]>::new();
 
         if self.did_seek {
-            eprintln!("in climbing mode");
-            
+            // eprintln!("in climbing mode");
+
             'outer: while self.stack.len() > 0 {
                 {
                     let (parent_subtree, index) = self.stack.last_mut().unwrap();
@@ -563,9 +575,8 @@ impl<T: Item> Cursor<T> {
                             }
                         }
                         Node::Leaf { items, .. } => {
-                            
-                            eprintln!("in leaf {:?}", items);
-                            
+                            // eprintln!("in leaf {:?}", items);
+
                             let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
                             let mut slice_items_summary = T::Summary::default();
 
@@ -633,8 +644,8 @@ impl<T: Item> Cursor<T> {
                         }
                     }
                     Node::Leaf { items, .. } => {
-                        eprintln!("seek items! {:?}", items);
-                        
+                        // eprintln!("seek items! {:?}", items);
+
                         let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
                         let mut slice_items_summary = T::Summary::default();
 
@@ -642,29 +653,29 @@ impl<T: Item> Cursor<T> {
                             let item_summary = item.summarize();
                             let child_end =
                                 D::from_summary(&self.summary) + &D::from_summary(&item_summary);
-                                
-                            eprintln!("position is {:?} child end is {:?}", pos, child_end);
-                            
+
+                            // eprintln!("position is {:?} child end is {:?}", pos, child_end);
+
                             if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
                                 if slice.is_some() {
-                                    eprintln!("push slice item {:?}", item);
+                                    // eprintln!("push slice item {:?}", item);
                                     slice_items.push(item.clone());
                                     slice_items_summary += &item_summary;
                                 }
                                 self.summary += &item_summary;
                             } else {
-                                eprintln!("OVER!");
+                                // eprintln!("OVER!");
                                 self.stack.push((subtree.clone(), index));
                                 break;
                             }
                         }
-                        
+
                         if slice.is_some() && slice_items.len() > 0 {
                             slice_subtrees.push(Tree::Resident(Arc::new(Node::Leaf {
                                 summary: slice_items_summary,
                                 items: slice_items,
                             })));
-                        }                        
+                        }
                     }
                 };
 
@@ -744,72 +755,82 @@ mod tests {
         tree1.push_tree(tree2, db).unwrap();
         assert_eq!(
             tree1.items(db).unwrap(),
-            (0..20).chain(50..100).collect::<Vec<u16>>()
+            (0..20).chain(50..100).collect::<Vec<u8>>()
         );
     }
 
     #[test]
     fn test_random() {
-        for seed in 1..10 {
-            eprintln!("SEED IS {}", seed);
+        for seed in 0..10000 {
+            eprintln!("!!!!!!!!!!!!!!!! SEED {}", seed);
+            // let seed = 31;
             use self::rand::{Rng, SeedableRng, StdRng};
 
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut db = NullNodeStore::new();
             let db = &mut db;
-            let mut tree = Tree::<u16>::new();
+            let mut tree = Tree::<u8>::new();
             let count = rng.gen_range(0, 10);
+            println!("Count {:?}", count);
             tree.extend(rng.gen_iter().take(count), db).unwrap();
 
-            eprintln!("{:?}", tree.items(db).unwrap());
+            eprintln!("Original tree {:#?}", tree);
 
-            for _i in 0..3 {
+            for _i in 0..1 {
                 eprintln!("------------");
-                
-                let end = rng.gen_range(0, tree.extent::<Count, _>(db).unwrap().0 + 1);
-                let start = rng.gen_range(0, end + 1);
-                let count = rng.gen_range(0, 3);
-                let old_tree_extent = tree.extent::<Count, _>(db).unwrap();
-                
-                eprintln!("old extent {:?}", old_tree_extent);
 
-                let new_items = rng.gen_iter().take(count).collect::<Vec<u16>>();
+                let splice_end = rng.gen_range(0, tree.extent::<Count, _>(db).unwrap().0 + 1);
+                let splice_start = rng.gen_range(0, splice_end + 1);
+                let count = rng.gen_range(0, 3);
+                let tree_end = tree.extent::<Count, _>(db).unwrap();
+
+                // eprintln!("old extent {:?}", tree_end);
+
+                let new_items = rng.gen_iter().take(count).collect::<Vec<u8>>();
+
+                println!("Original Tree {:?}", tree);
                 let mut reference_items = tree.items(db).unwrap();
 
-                eprintln!(
-                    "start {:?} end {:?} new {:?}",
-                    start, end, new_items
-                );
+                // eprintln!(
+                //     "splice_start {:?} splice_end {:?} new {:?}",
+                //     splice_start, splice_end, new_items
+                // );
 
                 let mut cursor = tree.cursor();
 
-                tree = cursor.slice(&Count(start), SeekBias::Right, db).unwrap();
+                tree = cursor
+                    .slice(&Count(splice_start), SeekBias::Right, db)
+                    .unwrap();
 
-                eprintln!("initial items {:?}", tree.items(db).unwrap());
+                eprintln!("Items preceding splice {:?}", tree.items(db).unwrap());
 
                 tree.extend(new_items.clone(), db).unwrap();
 
-                eprintln!("seek to end of splice {:?}", &Count(end));
-                cursor.seek(&Count(end), SeekBias::Right, db).unwrap();
+                eprintln!("seek to end of splice {:?}", &Count(splice_end));
+                cursor
+                    .seek(&Count(splice_end), SeekBias::Right, db)
+                    .unwrap();
 
-                eprintln!("slice to end of tree {:?}", old_tree_extent);
-                
-                let slice = cursor.slice(&old_tree_extent, SeekBias::Right, db).unwrap();
-                
-                eprintln!("slice {:?}", slice.items(db).unwrap());
-                
-                tree.push_tree(
-                    slice,
-                    db,
-                ).unwrap();
+                // eprintln!("slice to end of tree {:?}", tree_end);
 
-                reference_items.splice(start..end, new_items);
+                let slice = cursor.slice(&tree_end, SeekBias::Right, db).unwrap();
+
+                eprintln!("slice {:?}", slice);
+
+                // println!("Tree before push_tree: {:?}", tree);
+                tree.push_tree(slice, db).unwrap();
+
+                // println!("Tree after push_tree: {:?}", tree);
+                
+                eprintln!("splicing {}, {}, {:?}", splice_start, splice_end, new_items);
+
+                reference_items.splice(splice_start..splice_end, new_items);
 
                 assert_eq!(tree.items(db).unwrap(), reference_items);
-                
-                eprintln!("items {:?}", tree.items(db).unwrap());
-                eprintln!("tree {:?}", tree);
+
+                // eprintln!("items {:?}", tree.items(db).unwrap());
+                // eprintln!("tree {:?}", tree);
             }
         }
     }
@@ -823,7 +844,7 @@ mod tests {
     #[derive(Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
     struct Count(usize);
 
-    impl Item for u16 {
+    impl Item for u8 {
         type Summary = IntegersSummary;
 
         fn summarize(&self) -> Self::Summary {
