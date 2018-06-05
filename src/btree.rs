@@ -115,7 +115,6 @@ impl<T: Item> Tree<T> {
         }
 
         if leaf.is_some() {
-            // eprintln!("About to push last tree");
             self.push_tree(Tree::Resident(Arc::new(leaf.take().unwrap())), db)?;
         }
 
@@ -140,17 +139,13 @@ impl<T: Item> Tree<T> {
         other: Self,
         db: &mut S,
     ) -> Result<(), S::ReadError> {
-        // eprintln!("Pushing tree {:?}", other);
-
         let other_height = other.height(db)?;
         if self.height(db)? < other_height {
             for tree in other.child_trees(db)?.clone() {
                 self.push_tree(tree, db)?;
             }
         } else if let Some(split_tree) = self.push_tree_recursive(other, db)? {
-            // println!("Pushing recursive");
             *self = Self::from_child_trees(vec![self.clone(), split_tree], db)?;
-            // println!("Tree after pushing recursive {:?}", self);
         }
         Ok(())
     }
@@ -431,8 +426,6 @@ impl<T: Item> Cursor<T> {
     ) -> Result<Option<&'a T>, S::ReadError> {
         assert!(self.did_seek, "Must seek before calling this method");
         if let Some((subtree, index)) = self.stack.last() {
-            // eprintln!("item {} {:#?} ", index, subtree);
-
             match subtree.node(db)? {
                 Node::Leaf { items, .. } => {
                     if *index == items.len() {
@@ -461,10 +454,8 @@ impl<T: Item> Cursor<T> {
                     }
                     Node::Leaf { items, .. } => {
                         self.summary += &items[*index].summarize();
-                        // eprintln!("incrementing index on leaf {:?}", index);
                         *index += 1;
                         if *index < items.len() {
-                            // eprintln!("stop");
                             return Ok(());
                         } else {
                             None
@@ -474,11 +465,9 @@ impl<T: Item> Cursor<T> {
             };
 
             if let Some(subtree) = new_subtree {
-                // eprintln!("descend to start");
                 self.descend_to_start(subtree, db)?;
                 break;
             } else {
-                // eprintln!("pop stack");
                 self.stack.pop();
             }
         }
@@ -541,8 +530,6 @@ impl<T: Item> Cursor<T> {
         let mut slice_subtrees = SmallVec::<[Tree<T>; 2 * TREE_BASE]>::new();
 
         if self.did_seek {
-            // eprintln!("in climbing mode");
-
             'outer: while self.stack.len() > 0 {
                 {
                     let (parent_subtree, index) = self.stack.last_mut().unwrap();
@@ -571,8 +558,6 @@ impl<T: Item> Cursor<T> {
                             }
                         }
                         Node::Leaf { items, .. } => {
-                            // eprintln!("in leaf {:?}", items);
-
                             let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
                             let mut slice_items_summary = T::Summary::default();
 
@@ -640,8 +625,6 @@ impl<T: Item> Cursor<T> {
                         }
                     }
                     Node::Leaf { items, .. } => {
-                        // eprintln!("seek items! {:?}", items);
-
                         let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
                         let mut slice_items_summary = T::Summary::default();
 
@@ -650,17 +633,13 @@ impl<T: Item> Cursor<T> {
                             let child_end =
                                 D::from_summary(&self.summary) + &D::from_summary(&item_summary);
 
-                            // eprintln!("position is {:?} child end is {:?}", pos, child_end);
-
                             if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
                                 if slice.is_some() {
-                                    // eprintln!("push slice item {:?}", item);
                                     slice_items.push(item.clone());
                                     slice_items_summary += &item_summary;
                                 }
                                 self.summary += &item_summary;
                             } else {
-                                // eprintln!("OVER!");
                                 self.stack.push((subtree.clone(), index));
                                 break;
                             }
@@ -757,8 +736,7 @@ mod tests {
 
     #[test]
     fn test_random() {
-        for seed in 0..10000 {
-            eprintln!("!!!!!!!!!!!!!!!! SEED {}", seed);
+        for seed in 0..100 {
             use self::rand::{Rng, SeedableRng, StdRng};
 
             let mut rng = StdRng::from_seed(&[seed]);
@@ -767,65 +745,30 @@ mod tests {
             let db = &mut db;
             let mut tree = Tree::<u8>::new();
             let count = rng.gen_range(0, 10);
-            println!("Count {:?}", count);
             tree.extend(rng.gen_iter().take(count), db).unwrap();
 
-            eprintln!("Original tree {:#?}", tree);
-
-            for _i in 0..2 {
-                eprintln!("------------");
-
+            for _i in 0..10 {
                 let splice_end = rng.gen_range(0, tree.extent::<Count, _>(db).unwrap().0 + 1);
                 let splice_start = rng.gen_range(0, splice_end + 1);
                 let count = rng.gen_range(0, 3);
                 let tree_end = tree.extent::<Count, _>(db).unwrap();
-
-                // eprintln!("old extent {:?}", tree_end);
-
                 let new_items = rng.gen_iter().take(count).collect::<Vec<u8>>();
 
-                println!("Original Tree {:?}", tree);
                 let mut reference_items = tree.items(db).unwrap();
-
-                // eprintln!(
-                //     "splice_start {:?} splice_end {:?} new {:?}",
-                //     splice_start, splice_end, new_items
-                // );
+                reference_items.splice(splice_start..splice_end, new_items.clone());
 
                 let mut cursor = tree.cursor();
-
                 tree = cursor
                     .slice(&Count(splice_start), SeekBias::Right, db)
                     .unwrap();
-
-                eprintln!("Items preceding splice {:?}", tree.items(db).unwrap());
-
-                tree.extend(new_items.clone(), db).unwrap();
-
-                eprintln!("seek to end of splice {:?}", &Count(splice_end));
+                tree.extend(new_items, db).unwrap();
                 cursor
                     .seek(&Count(splice_end), SeekBias::Right, db)
                     .unwrap();
-
-                // eprintln!("slice to end of tree {:?}", tree_end);
-
-                let slice = cursor.slice(&tree_end, SeekBias::Right, db).unwrap();
-
-                eprintln!("slice {:?}", slice);
-
-                // println!("Tree before push_tree: {:?}", tree);
-                tree.push_tree(slice, db).unwrap();
-
-                // println!("Tree after push_tree: {:?}", tree);
-                
-                eprintln!("splicing {}, {}, {:?}", splice_start, splice_end, new_items);
-
-                reference_items.splice(splice_start..splice_end, new_items);
+                tree.push_tree(cursor.slice(&tree_end, SeekBias::Right, db).unwrap(), db)
+                    .unwrap();
 
                 assert_eq!(tree.items(db).unwrap(), reference_items);
-
-                // eprintln!("items {:?}", tree.items(db).unwrap());
-                // eprintln!("tree {:?}", tree);
             }
         }
     }
