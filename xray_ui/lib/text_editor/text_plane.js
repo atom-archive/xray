@@ -75,12 +75,26 @@ class TextPlane extends React.Component {
     });
   }
 
-  measureLine(line, column) {
-    return this.renderer.measureLine(line, column);
+  measureLine(line, column = line.length) {
+    column = Math.min(line.length, column);
+    const glyphWidths = this.layoutLine(line);
+    let x = 0;
+    for (let i = 0; i < column; i++) {
+      x += glyphWidths[i];
+    }
+    return x;
+  }
+
+  layoutLine(line) {
+    return this.renderer
+      .layoutLine(line)
+      .map(width => width / window.devicePixelRatio);
   }
 
   getGutterWidth(totalRowCount) {
-    return this.renderer.getGutterWidth(totalRowCount);
+    return (
+      this.renderer.getGutterWidth(totalRowCount) / window.devicePixelRatio
+    );
   }
 
   isReady() {
@@ -353,14 +367,16 @@ class Renderer {
     return vao;
   }
 
-  measureLine(line, column = line.length) {
+  layoutLine(line) {
     let x = 0;
-    for (let i = 0; i < column; i++) {
+    const glyphWidths = new Array(line.length);
+    for (let i = 0; i < line.length; i++) {
       const variantIndex = Math.round(x * SUBPIXEL_DIVISOR) % SUBPIXEL_DIVISOR;
       const glyph = this.atlas.getGlyph(line[i], variantIndex);
+      glyphWidths[i] = glyph.subpixelWidth;
       x += glyph.subpixelWidth;
     }
-    return x / this.style.dpiScale;
+    return glyphWidths;
   }
 
   draw({
