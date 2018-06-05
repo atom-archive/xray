@@ -147,7 +147,7 @@ impl<T: Item> Tree<T> {
             for tree in other.child_trees(db)?.clone() {
                 self.push_tree(tree, db)?;
             }
-        } else if let Some((_, split_tree)) = self.push_tree_recursive(other, db)? {
+        } else if let Some(split_tree) = self.push_tree_recursive(other, db)? {
             // println!("Pushing recursive");
             *self = Self::from_child_trees(vec![self.clone(), split_tree], db)?;
             // println!("Tree after pushing recursive {:?}", self);
@@ -159,7 +159,7 @@ impl<T: Item> Tree<T> {
         &mut self,
         other: Tree<T>,
         db: &mut S,
-    ) -> Result<Option<(T::Summary, Tree<T>)>, S::ReadError>
+    ) -> Result<Option<Tree<T>>, S::ReadError>
     where
         S: NodeStore<T>,
     {
@@ -171,15 +171,13 @@ impl<T: Item> Tree<T> {
                 child_trees,
             } => {
                 let height_delta;
-                let other_node_summary;
                 let other_is_underflowing;
                 let mut summaries_to_append = SmallVec::<[T::Summary; 2 * TREE_BASE]>::new();
                 let mut trees_to_append = SmallVec::<[Tree<T>; 2 * TREE_BASE]>::new();
 
                 {
                     let other_node = other.node(db)?;
-                    other_node_summary = other_node.summary().clone();
-                    *summary += &other_node_summary;
+                    *summary += other_node.summary();
                     height_delta = *height - other_node.height();
                     other_is_underflowing = other_node.is_underflowing();
                     if height_delta == 0 {
@@ -195,13 +193,12 @@ impl<T: Item> Tree<T> {
                         .last_mut()
                         .unwrap()
                         .push_tree_recursive(other, db)?;
+                    *child_summaries.last_mut().unwrap() =
+                        child_trees.last().unwrap().summary(db).unwrap().clone();
 
-                    if let Some((last_summary, split_tree)) = tree_to_append {
-                        *child_summaries.last_mut().unwrap() = last_summary;
+                    if let Some(split_tree) = tree_to_append {
                         summaries_to_append.push(split_tree.summary(db).unwrap().clone());
                         trees_to_append.push(split_tree);
-                    } else {
-                        *child_summaries.last_mut().unwrap() += &other_node_summary;
                     }
                 } else if height_delta == 1 {
                     trees_to_append.push(other)
@@ -230,15 +227,12 @@ impl<T: Item> Tree<T> {
                     *child_summaries = left_summaries;
                     *child_trees = left_trees;
 
-                    Ok(Some((
-                        summary.clone(),
-                        Tree::Resident(Arc::new(Node::Internal {
-                            height: *height,
-                            summary: sum(right_summaries.iter()),
-                            child_summaries: right_summaries,
-                            child_trees: right_trees,
-                        })),
-                    )))
+                    Ok(Some(Tree::Resident(Arc::new(Node::Internal {
+                        height: *height,
+                        summary: sum(right_summaries.iter()),
+                        child_summaries: right_summaries,
+                        child_trees: right_trees,
+                    }))))
                 } else {
                     child_summaries.extend(summaries_to_append);
                     child_trees.extend(trees_to_append);
@@ -261,13 +255,10 @@ impl<T: Item> Tree<T> {
                     }
                     *items = left_items;
                     *summary = sum_owned(items.iter().map(|item| item.summarize()));
-                    Ok(Some((
-                        summary.clone(),
-                        Tree::Resident(Arc::new(Node::Leaf {
-                            summary: sum_owned(right_items.iter().map(|item| item.summarize())),
-                            items: right_items,
-                        })),
-                    )))
+                    Ok(Some(Tree::Resident(Arc::new(Node::Leaf {
+                        summary: sum_owned(right_items.iter().map(|item| item.summarize())),
+                        items: right_items,
+                    }))))
                 } else {
                     *summary += other_node.summary();
                     items.extend(other_node.items().iter().cloned());
