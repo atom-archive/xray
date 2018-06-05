@@ -171,13 +171,15 @@ impl<T: Item> Tree<T> {
                 child_trees,
             } => {
                 let height_delta;
+                let other_node_summary;
                 let other_is_underflowing;
                 let mut summaries_to_append = SmallVec::<[T::Summary; 2 * TREE_BASE]>::new();
                 let mut trees_to_append = SmallVec::<[Tree<T>; 2 * TREE_BASE]>::new();
 
                 {
                     let other_node = other.node(db)?;
-                    *summary += other_node.summary();
+                    other_node_summary = other_node.summary().clone();
+                    *summary += &other_node_summary;
                     height_delta = *height - other_node.height();
                     other_is_underflowing = other_node.is_underflowing();
                     if height_delta == 0 {
@@ -198,6 +200,8 @@ impl<T: Item> Tree<T> {
                         *child_summaries.last_mut().unwrap() = last_summary;
                         summaries_to_append.push(split_tree.summary(db).unwrap().clone());
                         trees_to_append.push(split_tree);
+                    } else {
+                        *child_summaries.last_mut().unwrap() += &other_node_summary;
                     }
                 } else if height_delta == 1 {
                     trees_to_append.push(other)
@@ -763,7 +767,6 @@ mod tests {
     fn test_random() {
         for seed in 0..10000 {
             eprintln!("!!!!!!!!!!!!!!!! SEED {}", seed);
-            // let seed = 31;
             use self::rand::{Rng, SeedableRng, StdRng};
 
             let mut rng = StdRng::from_seed(&[seed]);
@@ -777,7 +780,7 @@ mod tests {
 
             eprintln!("Original tree {:#?}", tree);
 
-            for _i in 0..1 {
+            for _i in 0..2 {
                 eprintln!("------------");
 
                 let splice_end = rng.gen_range(0, tree.extent::<Count, _>(db).unwrap().0 + 1);
