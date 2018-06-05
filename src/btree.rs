@@ -206,7 +206,7 @@ impl<T: Item> Tree<T> {
 
                 let child_count = child_trees.len() + trees_to_append.len();
                 if child_count > 2 * TREE_BASE {
-                    let left_summaries;
+                    let left_summaries: SmallVec<_>;
                     let right_summaries: SmallVec<_>;
                     let left_trees;
                     let right_trees;
@@ -224,6 +224,7 @@ impl<T: Item> Tree<T> {
                         left_trees = all_trees.by_ref().take(midpoint).collect();
                         right_trees = all_trees.collect();
                     }
+                    *summary = sum(left_summaries.iter());
                     *child_summaries = left_summaries;
                     *child_trees = left_trees;
 
