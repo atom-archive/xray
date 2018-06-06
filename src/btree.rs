@@ -1,13 +1,13 @@
 use smallvec::SmallVec;
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::{Add, AddAssign, Range};
+use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 
 const TREE_BASE: usize = 2;
 type NodeId = usize;
 
-pub trait Item: Clone + Eq + fmt::Debug {
+pub trait Item: Eq + fmt::Debug {
     type Summary: for<'a> AddAssign<&'a Self::Summary> + Default + Clone + fmt::Debug;
 
     fn summarize(&self) -> Self::Summary;
@@ -26,16 +26,16 @@ pub trait Dimension: for<'a> Add<&'a Self, Output = Self> + Ord + Clone + fmt::D
 pub trait NodeStore<T: Item> {
     type ReadError: fmt::Debug;
 
-    fn get(&mut self, id: NodeId) -> Result<&Node<T>, Self::ReadError>;
+    fn get(&self, id: NodeId) -> Result<Arc<Node<T>>, Self::ReadError>;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Tree<T: Item> {
     Resident(Arc<Node<T>>),
     NonResident(NodeId),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Node<T: Item> {
     Internal {
         height: u8,
@@ -45,7 +45,7 @@ pub enum Node<T: Item> {
     },
     Leaf {
         summary: T::Summary,
-        items: SmallVec<[T; 2 * TREE_BASE]>,
+        items: SmallVec<[Arc<T>; 2 * TREE_BASE]>,
     },
 }
 
@@ -79,18 +79,18 @@ impl<T: Item> Tree<T> {
         Cursor::new(self.clone())
     }
 
-    pub fn extent<D, S>(&self, db: &mut S) -> Result<D, S::ReadError>
+    pub fn extent<D, S>(&self, db: &S) -> Result<D, S::ReadError>
     where
         S: NodeStore<T>,
         D: Dimension<Summary = T::Summary>,
     {
-        match self.node(db)? {
-            Node::Internal { summary, .. } => Ok(D::from_summary(summary)),
-            Node::Leaf { summary, .. } => Ok(D::from_summary(summary)),
+        match *self.node(db)? {
+            Node::Internal { ref summary, .. } => Ok(D::from_summary(summary)),
+            Node::Leaf { ref summary, .. } => Ok(D::from_summary(summary)),
         }
     }
 
-    fn extend<I, S>(&mut self, iter: I, db: &mut S) -> Result<(), S::ReadError>
+    fn extend<I, S>(&mut self, iter: I, db: &S) -> Result<(), S::ReadError>
     where
         I: IntoIterator<Item = T>,
         S: NodeStore<T>,
@@ -111,7 +111,7 @@ impl<T: Item> Tree<T> {
 
             let leaf = leaf.as_mut().unwrap();
             *leaf.summary_mut() += &item.summarize();
-            leaf.items_mut().push(item);
+            leaf.items_mut().push(Arc::new(item));
         }
 
         if leaf.is_some() {
@@ -121,12 +121,12 @@ impl<T: Item> Tree<T> {
         Ok(())
     }
 
-    pub fn push<S: NodeStore<T>>(&mut self, item: T, db: &mut S) -> Result<(), S::ReadError> {
+    pub fn push<S: NodeStore<T>>(&mut self, item: T, db: &S) -> Result<(), S::ReadError> {
         self.push_tree(
             Tree::from_child_trees(
                 vec![Tree::Resident(Arc::new(Node::Leaf {
                     summary: item.summarize(),
-                    items: SmallVec::from_vec(vec![item]),
+                    items: SmallVec::from_vec(vec![Arc::new(item)]),
                 }))],
                 db,
             )?,
@@ -134,15 +134,11 @@ impl<T: Item> Tree<T> {
         )
     }
 
-    pub fn push_tree<S: NodeStore<T>>(
-        &mut self,
-        other: Self,
-        db: &mut S,
-    ) -> Result<(), S::ReadError> {
-        let other_height = other.height(db)?;
-        if self.height(db)? < other_height {
-            for tree in other.child_trees(db)?.clone() {
-                self.push_tree(tree, db)?;
+    pub fn push_tree<S: NodeStore<T>>(&mut self, other: Self, db: &S) -> Result<(), S::ReadError> {
+        let other_node = other.node(db)?;
+        if self.node(db)?.height() < other_node.height() {
+            for tree in other_node.child_trees() {
+                self.push_tree(tree.clone(), db)?;
             }
         } else if let Some(split_tree) = self.push_tree_recursive(other, db)? {
             *self = Self::from_child_trees(vec![self.clone(), split_tree], db)?;
@@ -153,7 +149,7 @@ impl<T: Item> Tree<T> {
     fn push_tree_recursive<S>(
         &mut self,
         other: Tree<T>,
-        db: &mut S,
+        db: &S,
     ) -> Result<Option<Tree<T>>, S::ReadError>
     where
         S: NodeStore<T>,
@@ -188,11 +184,16 @@ impl<T: Item> Tree<T> {
                         .last_mut()
                         .unwrap()
                         .push_tree_recursive(other, db)?;
-                    *child_summaries.last_mut().unwrap() =
-                        child_trees.last().unwrap().summary(db).unwrap().clone();
+                    *child_summaries.last_mut().unwrap() = child_trees
+                        .last()
+                        .unwrap()
+                        .node(db)
+                        .unwrap()
+                        .summary()
+                        .clone();
 
                     if let Some(split_tree) = tree_to_append {
-                        summaries_to_append.push(split_tree.summary(db).unwrap().clone());
+                        summaries_to_append.push(split_tree.node(db).unwrap().summary().clone());
                         trees_to_append.push(split_tree);
                     }
                 } else if height_delta == 1 {
@@ -241,7 +242,7 @@ impl<T: Item> Tree<T> {
                 let child_count = items.len() + other_node.items().len();
                 if child_count > 2 * TREE_BASE {
                     let left_items;
-                    let right_items: SmallVec<[T; 2 * TREE_BASE]>;
+                    let right_items: SmallVec<[Arc<T>; 2 * TREE_BASE]>;
 
                     let midpoint = (child_count + child_count % 2) / 2;
                     {
@@ -264,14 +265,14 @@ impl<T: Item> Tree<T> {
         }
     }
 
-    fn from_child_trees<S>(child_trees: Vec<Tree<T>>, db: &mut S) -> Result<Self, S::ReadError>
+    fn from_child_trees<S>(child_trees: Vec<Tree<T>>, db: &S) -> Result<Self, S::ReadError>
     where
         S: NodeStore<T>,
     {
-        let height = child_trees[0].height(db)? + 1;
+        let height = child_trees[0].node(db)?.height() + 1;
         let mut child_summaries = SmallVec::new();
         for child in &child_trees {
-            child_summaries.push(child.summary(db)?.clone());
+            child_summaries.push(child.node(db)?.summary().clone());
         }
         let summary = sum(child_summaries.iter());
         Ok(Tree::Resident(Arc::new(Node::Internal {
@@ -282,9 +283,9 @@ impl<T: Item> Tree<T> {
         })))
     }
 
-    fn make_mut_node<S: NodeStore<T>>(&mut self, db: &mut S) -> Result<&mut Node<T>, S::ReadError> {
+    fn make_mut_node<S: NodeStore<T>>(&mut self, db: &S) -> Result<&mut Node<T>, S::ReadError> {
         if let Tree::NonResident(node_id) = self {
-            *self = Tree::Resident(Arc::new(db.get(*node_id)?.clone()));
+            *self = Tree::Resident(db.get(*node_id)?);
         }
 
         match self {
@@ -293,54 +294,20 @@ impl<T: Item> Tree<T> {
         }
     }
 
-    fn node<'a, S: NodeStore<T>>(&'a self, db: &'a mut S) -> Result<&'a Node<T>, S::ReadError> {
+    fn node<S: NodeStore<T>>(&self, db: &S) -> Result<Arc<Node<T>>, S::ReadError> {
         match self {
-            Tree::Resident(node) => Ok(node),
+            Tree::Resident(node) => Ok(node.clone()),
             Tree::NonResident(node_id) => db.get(*node_id),
         }
     }
+}
 
-    fn height<S: NodeStore<T>>(&self, db: &mut S) -> Result<u8, S::ReadError> {
+impl<T: Item> Clone for Tree<T> {
+    fn clone(&self) -> Self {
         match self {
-            Tree::Resident(node) => Ok(node.height()),
-            Tree::NonResident(node_id) => Ok(db.get(*node_id)?.height()),
+            Tree::Resident(node) => Tree::Resident(node.clone()),
+            Tree::NonResident(id) => Tree::NonResident(*id),
         }
-    }
-
-    fn summary<'a, S: NodeStore<T>>(
-        &'a self,
-        db: &'a mut S,
-    ) -> Result<&'a T::Summary, S::ReadError> {
-        match self {
-            Tree::Resident(node) => Ok(node.summary()),
-            Tree::NonResident(node_id) => Ok(db.get(*node_id)?.summary()),
-        }
-    }
-
-    fn child_trees<'a, S: NodeStore<T>>(
-        &'a self,
-        db: &'a mut S,
-    ) -> Result<&'a SmallVec<[Tree<T>; 2 * TREE_BASE]>, S::ReadError> {
-        match self {
-            Tree::Resident(node) => Ok(node.child_trees()),
-            Tree::NonResident(node_id) => Ok(db.get(*node_id)?.child_trees()),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn items<S: NodeStore<T>>(&self, db: &mut S) -> Result<Vec<T>, S::ReadError> {
-        let mut items = Vec::new();
-        let mut cursor = self.cursor();
-        cursor.descend_to_start(self.clone(), db)?;
-        loop {
-            if let Some(item) = cursor.item(db)? {
-                items.push(item.clone());
-            } else {
-                break;
-            }
-            cursor.next(db)?;
-        }
-        Ok(items)
     }
 }
 
@@ -375,14 +342,14 @@ impl<T: Item> Node<T> {
         }
     }
 
-    fn items(&self) -> &SmallVec<[T; 2 * TREE_BASE]> {
+    fn items(&self) -> &SmallVec<[Arc<T>; 2 * TREE_BASE]> {
         match self {
             Node::Leaf { items, .. } => items,
             Node::Internal { .. } => panic!("Internal nodes have no items"),
         }
     }
 
-    fn items_mut(&mut self) -> &mut SmallVec<[T; 2 * TREE_BASE]> {
+    fn items_mut(&mut self) -> &mut SmallVec<[Arc<T>; 2 * TREE_BASE]> {
         match self {
             Node::Leaf { items, .. } => items,
             Node::Internal { .. } => panic!("Internal nodes have no items"),
@@ -404,6 +371,28 @@ impl<T: Item> Node<T> {
     }
 }
 
+impl<T: Item> Clone for Node<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Node::Internal {
+                height,
+                summary,
+                child_summaries,
+                child_trees,
+            } => Node::Internal {
+                height: *height,
+                summary: summary.clone(),
+                child_summaries: child_summaries.clone(),
+                child_trees: child_trees.clone(),
+            },
+            Node::Leaf { summary, items } => Node::Leaf {
+                summary: summary.clone(),
+                items: items.clone(),
+            },
+        }
+    }
+}
+
 impl<T: Item> Cursor<T> {
     fn new(tree: Tree<T>) -> Self {
         Self {
@@ -420,18 +409,15 @@ impl<T: Item> Cursor<T> {
         self.summary = T::Summary::default();
     }
 
-    pub fn item<'a, S: 'a + NodeStore<T>>(
-        &'a self,
-        db: &'a mut S,
-    ) -> Result<Option<&'a T>, S::ReadError> {
+    pub fn item<S: NodeStore<T>>(&self, db: &S) -> Result<Option<Arc<T>>, S::ReadError> {
         assert!(self.did_seek, "Must seek before calling this method");
         if let Some((subtree, index)) = self.stack.last() {
-            match subtree.node(db)? {
-                Node::Leaf { items, .. } => {
+            match *subtree.node(db)? {
+                Node::Leaf { ref items, .. } => {
                     if *index == items.len() {
                         Ok(None)
                     } else {
-                        Ok(Some(&items[*index]))
+                        Ok(Some(items[*index].clone()))
                     }
                 }
                 _ => unreachable!(),
@@ -441,18 +427,20 @@ impl<T: Item> Cursor<T> {
         }
     }
 
-    pub fn next<S: NodeStore<T>>(&mut self, db: &mut S) -> Result<(), S::ReadError> {
+    pub fn next<S: NodeStore<T>>(&mut self, db: &S) -> Result<(), S::ReadError> {
         assert!(self.did_seek, "Must seek before calling this method");
 
         while self.stack.len() > 0 {
             let new_subtree = {
                 let (subtree, index) = self.stack.last_mut().unwrap();
-                match subtree.node(db)? {
-                    Node::Internal { child_trees, .. } => {
+                match *subtree.node(db)? {
+                    Node::Internal {
+                        ref child_trees, ..
+                    } => {
                         *index += 1;
                         child_trees.get(*index).cloned()
                     }
-                    Node::Leaf { items, .. } => {
+                    Node::Leaf { ref items, .. } => {
                         self.summary += &items[*index].summarize();
                         *index += 1;
                         if *index < items.len() {
@@ -475,15 +463,17 @@ impl<T: Item> Cursor<T> {
         Ok(())
     }
 
-    fn descend_to_start<S>(&mut self, mut subtree: Tree<T>, db: &mut S) -> Result<(), S::ReadError>
+    fn descend_to_start<S>(&mut self, mut subtree: Tree<T>, db: &S) -> Result<(), S::ReadError>
     where
         S: NodeStore<T>,
     {
         self.did_seek = true;
         loop {
             self.stack.push((subtree.clone(), 0));
-            subtree = match subtree.node(db)? {
-                Node::Internal { child_trees, .. } => child_trees[0].clone(),
+            subtree = match *subtree.node(db)? {
+                Node::Internal {
+                    ref child_trees, ..
+                } => child_trees[0].clone(),
                 Node::Leaf { .. } => {
                     return Ok(());
                 }
@@ -491,7 +481,7 @@ impl<T: Item> Cursor<T> {
         }
     }
 
-    pub fn seek<D, S>(&mut self, pos: &D, bias: SeekBias, db: &mut S) -> Result<(), S::ReadError>
+    pub fn seek<D, S>(&mut self, pos: &D, bias: SeekBias, db: &S) -> Result<(), S::ReadError>
     where
         D: Dimension<Summary = T::Summary>,
         S: NodeStore<T>,
@@ -500,12 +490,7 @@ impl<T: Item> Cursor<T> {
         self.seek_internal(pos, bias, db, None)
     }
 
-    pub fn slice<D, S>(
-        &mut self,
-        end: &D,
-        bias: SeekBias,
-        db: &mut S,
-    ) -> Result<Tree<T>, S::ReadError>
+    pub fn slice<D, S>(&mut self, end: &D, bias: SeekBias, db: &S) -> Result<Tree<T>, S::ReadError>
     where
         D: Dimension<Summary = T::Summary>,
         S: NodeStore<T>,
@@ -519,7 +504,7 @@ impl<T: Item> Cursor<T> {
         &mut self,
         pos: &D,
         bias: SeekBias,
-        db: &mut S,
+        db: &S,
         mut slice: Option<&mut Tree<T>>,
     ) -> Result<(), S::ReadError>
     where
@@ -533,10 +518,10 @@ impl<T: Item> Cursor<T> {
             'outer: while self.stack.len() > 0 {
                 {
                     let (parent_subtree, index) = self.stack.last_mut().unwrap();
-                    match parent_subtree.node(db)? {
+                    match *parent_subtree.node(db)? {
                         Node::Internal {
-                            child_summaries,
-                            child_trees,
+                            ref child_summaries,
+                            ref child_trees,
                             ..
                         } => {
                             *index += 1;
@@ -557,8 +542,8 @@ impl<T: Item> Cursor<T> {
                                 }
                             }
                         }
-                        Node::Leaf { items, .. } => {
-                            let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
+                        Node::Leaf { ref items, .. } => {
+                            let mut slice_items = SmallVec::<[Arc<T>; 2 * TREE_BASE]>::new();
                             let mut slice_items_summary = T::Summary::default();
 
                             while *index < items.len() {
@@ -603,10 +588,10 @@ impl<T: Item> Cursor<T> {
         if let Some(mut subtree) = containing_subtree {
             loop {
                 let mut next_subtree = None;
-                match subtree.node(db)? {
+                match *subtree.node(db)? {
                     Node::Internal {
-                        child_summaries,
-                        child_trees,
+                        ref child_summaries,
+                        ref child_trees,
                         ..
                     } => {
                         for (index, child_summary) in child_summaries.iter().enumerate() {
@@ -624,8 +609,8 @@ impl<T: Item> Cursor<T> {
                             }
                         }
                     }
-                    Node::Leaf { items, .. } => {
-                        let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
+                    Node::Leaf { ref items, .. } => {
+                        let mut slice_items = SmallVec::<[Arc<T>; 2 * TREE_BASE]>::new();
                         let mut slice_items_summary = T::Summary::default();
 
                         for (index, item) in items.iter().enumerate() {
@@ -681,7 +666,7 @@ impl<T: Item> NullNodeStore<T> {
 impl<T: Item> NodeStore<T> for NullNodeStore<T> {
     type ReadError = NullNodeStoreReadError;
 
-    fn get(&mut self, _: NodeId) -> Result<&Node<T>, Self::ReadError> {
+    fn get(&self, _: NodeId) -> Result<Arc<Node<T>>, Self::ReadError> {
         Err(NullNodeStoreReadError)
     }
 }
@@ -814,6 +799,23 @@ mod tests {
         fn add(mut self, other: &Self) -> Self {
             self.0 += other.0;
             self
+        }
+    }
+
+    impl<T: Clone + Item> Tree<T> {
+        pub fn items<S: NodeStore<T>>(&self, db: &S) -> Result<Vec<T>, S::ReadError> {
+            let mut items = Vec::new();
+            let mut cursor = self.cursor();
+            cursor.descend_to_start(self.clone(), db)?;
+            loop {
+                if let Some(item) = cursor.item(db)? {
+                    items.push(item.as_ref().clone());
+                } else {
+                    break;
+                }
+                cursor.next(db)?;
+            }
+            Ok(items)
         }
     }
 }
