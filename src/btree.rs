@@ -1,4 +1,5 @@
 use smallvec::SmallVec;
+use std::cell::{Ref, RefCell};
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Add, AddAssign};
@@ -75,8 +76,12 @@ impl<T: Item> Tree<T> {
         }))
     }
 
-    fn cursor(&self) -> Cursor<T> {
+    pub fn cursor(&self) -> Cursor<T> {
         Cursor::new(self.clone())
+    }
+
+    pub fn last<S: NodeStore<T>>(&self, db: &S) -> Result<Option<Arc<T>>, S::ReadError> {
+        Ok(self.rightmost_leaf(db)?.node(db)?.items().last().cloned())
     }
 
     pub fn extent<D, S>(&self, db: &S) -> Result<D, S::ReadError>
@@ -292,6 +297,15 @@ impl<T: Item> Tree<T> {
             Tree::NonResident(node_id) => db.get(*node_id),
         }
     }
+
+    fn rightmost_leaf<S: NodeStore<T>>(&self, db: &S) -> Result<Tree<T>, S::ReadError> {
+        match *self.node(db)? {
+            Node::Leaf { .. } => Ok(self.clone()),
+            Node::Internal {
+                ref child_trees, ..
+            } => child_trees.last().unwrap().rightmost_leaf(db),
+        }
+    }
 }
 
 impl<T: Item> Clone for Tree<T> {
@@ -417,6 +431,41 @@ impl<T: Item> Cursor<T> {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn prev_item<S: NodeStore<T>>(&self, db: &S) -> Result<Option<Arc<T>>, S::ReadError> {
+        assert!(self.did_seek, "Must seek before calling this method");
+        if let Some((cur_leaf, index)) = self.stack.last() {
+            if *index == 0 {
+                if let Some(prev_leaf) = self.prev_leaf(db)? {
+                    let prev_leaf = prev_leaf.node(db)?;
+                    Ok(Some(prev_leaf.items().last().unwrap().clone()))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                match *cur_leaf.node(db)? {
+                    Node::Leaf { ref items, .. } => Ok(Some(items[index - 1].clone())),
+                    _ => unreachable!(),
+                }
+            }
+        } else {
+            self.tree.last(db)
+        }
+    }
+
+    fn prev_leaf<S: NodeStore<T>>(&self, db: &S) -> Result<Option<Tree<T>>, S::ReadError> {
+        for (ancestor, index) in self.stack.iter().rev().skip(1) {
+            if *index != 0 {
+                match *ancestor.node(db)? {
+                    Node::Internal {
+                        ref child_trees, ..
+                    } => return Ok(Some(child_trees[index - 1].rightmost_leaf(db)?)),
+                    Node::Leaf { .. } => unreachable!(),
+                };
+            }
+        }
+        Ok(None)
     }
 
     pub fn next<S: NodeStore<T>>(&mut self, db: &S) -> Result<(), S::ReadError> {
@@ -750,6 +799,32 @@ mod tests {
                     .unwrap();
 
                 assert_eq!(tree.items(db).unwrap(), reference_items);
+
+                let mut pos = rng.gen_range(0, tree.extent::<Count, _>(db).unwrap().0 + 1);
+                let mut cursor = tree.cursor();
+                cursor.seek(&Count(pos), SeekBias::Right, db).unwrap();
+
+                for _i in 0..5 {
+                    if pos > 0 {
+                        assert_eq!(
+                            *cursor.prev_item(db).unwrap().unwrap(),
+                            reference_items[pos - 1]
+                        );
+                    } else {
+                        assert_eq!(cursor.prev_item(db).unwrap(), None);
+                    }
+
+                    if pos < reference_items.len() {
+                        assert_eq!(*cursor.item(db).unwrap().unwrap(), reference_items[pos]);
+                    } else {
+                        assert_eq!(cursor.item(db).unwrap(), None);
+                    }
+
+                    cursor.next(db);
+                    if pos < reference_items.len() {
+                        pos += 1;
+                    }
+                }
             }
         }
     }
