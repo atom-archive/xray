@@ -8,7 +8,7 @@ use std::sync::Arc;
 const TREE_BASE: usize = 2;
 type NodeId = usize;
 
-pub trait Item: Eq + fmt::Debug {
+pub trait Item: Clone + Eq + fmt::Debug {
     type Summary: for<'a> AddAssign<&'a Self::Summary> + Default + Clone + fmt::Debug;
 
     fn summarize(&self) -> Self::Summary;
@@ -46,7 +46,7 @@ pub enum Node<T: Item> {
     },
     Leaf {
         summary: T::Summary,
-        items: SmallVec<[Arc<T>; 2 * TREE_BASE]>,
+        items: SmallVec<[T; 2 * TREE_BASE]>,
     },
 }
 
@@ -80,7 +80,7 @@ impl<T: Item> Tree<T> {
         Cursor::new(self.clone())
     }
 
-    pub fn last<S: NodeStore<T>>(&self, db: &S) -> Result<Option<Arc<T>>, S::ReadError> {
+    pub fn last<S: NodeStore<T>>(&self, db: &S) -> Result<Option<T>, S::ReadError> {
         Ok(self.rightmost_leaf(db)?.node(db)?.items().last().cloned())
     }
 
@@ -116,7 +116,7 @@ impl<T: Item> Tree<T> {
 
             let leaf = leaf.as_mut().unwrap();
             *leaf.summary_mut() += &item.summarize();
-            leaf.items_mut().push(Arc::new(item));
+            leaf.items_mut().push(item);
         }
 
         if leaf.is_some() {
@@ -131,7 +131,7 @@ impl<T: Item> Tree<T> {
             Tree::from_child_trees(
                 vec![Tree::Resident(Arc::new(Node::Leaf {
                     summary: item.summarize(),
-                    items: SmallVec::from_vec(vec![Arc::new(item)]),
+                    items: SmallVec::from_vec(vec![item]),
                 }))],
                 db,
             )?,
@@ -239,7 +239,7 @@ impl<T: Item> Tree<T> {
                 let child_count = items.len() + other_node.items().len();
                 if child_count > 2 * TREE_BASE {
                     let left_items;
-                    let right_items: SmallVec<[Arc<T>; 2 * TREE_BASE]>;
+                    let right_items: SmallVec<[T; 2 * TREE_BASE]>;
 
                     let midpoint = (child_count + child_count % 2) / 2;
                     {
@@ -281,8 +281,8 @@ impl<T: Item> Tree<T> {
     }
 
     fn make_mut_node<S: NodeStore<T>>(&mut self, db: &S) -> Result<&mut Node<T>, S::ReadError> {
-        if let Tree::NonResident(node_id) = self {
-            *self = Tree::Resident(db.get(*node_id)?);
+        if let Tree::NonResident(node_id) = *self {
+            *self = Tree::Resident(db.get(node_id)?);
         }
 
         match self {
@@ -348,14 +348,14 @@ impl<T: Item> Node<T> {
         }
     }
 
-    fn items(&self) -> &SmallVec<[Arc<T>; 2 * TREE_BASE]> {
+    fn items(&self) -> &SmallVec<[T; 2 * TREE_BASE]> {
         match self {
             Node::Leaf { items, .. } => items,
             Node::Internal { .. } => panic!("Internal nodes have no items"),
         }
     }
 
-    fn items_mut(&mut self) -> &mut SmallVec<[Arc<T>; 2 * TREE_BASE]> {
+    fn items_mut(&mut self) -> &mut SmallVec<[T; 2 * TREE_BASE]> {
         match self {
             Node::Leaf { items, .. } => items,
             Node::Internal { .. } => panic!("Internal nodes have no items"),
@@ -415,7 +415,7 @@ impl<T: Item> Cursor<T> {
         self.summary = T::Summary::default();
     }
 
-    pub fn item<S: NodeStore<T>>(&self, db: &S) -> Result<Option<Arc<T>>, S::ReadError> {
+    pub fn item<S: NodeStore<T>>(&self, db: &S) -> Result<Option<T>, S::ReadError> {
         assert!(self.did_seek, "Must seek before calling this method");
         if let Some((subtree, index)) = self.stack.last() {
             match *subtree.node(db)? {
@@ -433,7 +433,7 @@ impl<T: Item> Cursor<T> {
         }
     }
 
-    pub fn prev_item<S: NodeStore<T>>(&self, db: &S) -> Result<Option<Arc<T>>, S::ReadError> {
+    pub fn prev_item<S: NodeStore<T>>(&self, db: &S) -> Result<Option<T>, S::ReadError> {
         assert!(self.did_seek, "Must seek before calling this method");
         if let Some((cur_leaf, index)) = self.stack.last() {
             if *index == 0 {
@@ -583,7 +583,7 @@ impl<T: Item> Cursor<T> {
                             }
                         }
                         Node::Leaf { ref items, .. } => {
-                            let mut slice_items = SmallVec::<[Arc<T>; 2 * TREE_BASE]>::new();
+                            let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
                             let mut slice_items_summary = T::Summary::default();
 
                             while *index < items.len() {
@@ -656,7 +656,7 @@ impl<T: Item> Cursor<T> {
                         }
                     }
                     Node::Leaf { ref items, .. } => {
-                        let mut slice_items = SmallVec::<[Arc<T>; 2 * TREE_BASE]>::new();
+                        let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
                         let mut slice_items_summary = T::Summary::default();
 
                         for (index, item) in items.iter().enumerate() {
