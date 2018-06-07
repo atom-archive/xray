@@ -26,7 +26,7 @@ Later versions may work, but you should ideally run the build with the same vers
 
 #### Install Rust
 
-You can install Rust via [`rustup`](https://www.rustup.rs/). We currently require building on the nightly channel in order to use `wasm_bindgen` for browser support.
+You can install Rust via [`rustup`](https://www.rustup.rs/). We currently require building on the nightly channel in order to use `wasm_bindgen` for browser support. To accomplish this, run `rustup default nightly`. Finally, you'll also need to install `wasm-bindgen-cli` which you can do by running `cargo install wasm-bindgen-cli`.
 
 #### Install Yarn
 
