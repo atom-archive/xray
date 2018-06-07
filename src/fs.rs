@@ -21,7 +21,6 @@ pub trait Store {
 pub struct Tree {
     entries: btree::Tree<Entry>,
     positions_by_entry_id: btree::Tree<EntryIdToPosition>,
-    inodes_by_file_id: HashMap<id::Unique, u64>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -33,8 +32,8 @@ pub struct Entry {
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd)]
 pub enum PathComponent {
-    File { name: OsString },
-    Dir { name: OsString },
+    File { name: OsString, inode: Option<u64> },
+    Dir { name: OsString, inode: Option<u64> },
     ParentDir,
 }
 
@@ -59,54 +58,60 @@ enum Error<S: Store> {
 }
 
 impl Tree {
-    fn insert_file<S>(
-        &mut self,
-        path: RelativePath,
-        entry: PathComponent,
-        db: &S,
-    ) -> Result<(), Error<S>>
+    fn insert<I, S>(&mut self, path: RelativePath, iter: I, db: &S) -> Result<(), Error<S>>
     where
+        I: IntoIterator<Item = PathComponent>,
         S: Store,
     {
         self.validate_path(&path, db)?;
 
         let entry_db = db.entry_store();
         let mut cursor = self.entries.cursor();
-
         let mut new_entries = cursor
             .slice(&path, SeekBias::Left, entry_db)
             .map_err(|error| Error::StoreReadError(error))?;
-
-        (|| {
-            let position = id::Ordered::between(
-                &new_entries.last(entry_db)?.unwrap().position,
-                &cursor.item(entry_db)?.unwrap().position,
-            );
-            let entry_id = db.gen_id();
-            new_entries.push(
+        let prev_position = new_entries
+            .last(entry_db)
+            .map_err(|error| Error::StoreReadError(error))?
+            .unwrap()
+            .position;
+        let next_position = cursor
+            .item(entry_db)
+            .map_err(|error| Error::StoreReadError(error))?
+            .unwrap()
+            .position;
+        let position = id::Ordered::between(&prev_position, &next_position);
+        let entry_id = db.gen_id();
+        new_entries
+            .push(
                 Entry {
                     id: entry_id,
                     position: position.clone(),
                     component: Arc::new(entry),
                 },
                 entry_db,
-            )?;
+            )
+            .map_err(|error| Error::StoreReadError(error))?;
 
-            let suffix = cursor.slice(
-                &self.entries.extent::<id::Ordered, _>(entry_db)?,
-                SeekBias::Right,
-                entry_db,
-            )?;
-            new_entries.push_tree(suffix, entry_db)?;
-            self.entries = new_entries;
+        let old_extent = self.entries
+            .extent::<id::Ordered, _>(entry_db)
+            .map_err(|error| Error::StoreReadError(error))?;
+        let suffix = cursor
+            .slice(&old_extent, SeekBias::Right, entry_db)
+            .map_err(|error| Error::StoreReadError(error))?;
+        new_entries
+            .push_tree(suffix, entry_db)
+            .map_err(|error| Error::StoreReadError(error))?;
+        self.entries = new_entries;
 
-            self.positions_by_entry_id.insert(
+        self.positions_by_entry_id
+            .insert(
                 &entry_id,
                 SeekBias::Left,
                 EntryIdToPosition { entry_id, position },
                 db.position_store(),
             )
-        })().map_err(|err| Error::StoreReadError(err))?;
+            .map_err(|error| Error::StoreReadError(error))?;
 
         Ok(())
     }
