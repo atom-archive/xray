@@ -1,6 +1,6 @@
 # Xray
 
-[![Build Status](https://travis-ci.org/atom/xray.svg?branch=master)](https://travis-ci.org/atom/xray)
+[![Build Status](https://travis-ci.org/pranaygp/xray.svg?branch=master)](https://travis-ci.org/pranaygp/xray)
 
 Xray is an experimental Electron-based text editor informed by what we've learned in the four years since the launch of Atom. In the short term, this project is a testbed for rapidly iterating on several radical ideas without risking the stability of Atom. The longer term future of the code in this repository will become clearer after a few months of progress. For now, our primary goal is to iterate rapidly and learn as much as possible.
 
