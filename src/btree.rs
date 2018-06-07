@@ -1,5 +1,4 @@
 use smallvec::SmallVec;
-use std::cell::{Ref, RefCell};
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Add, AddAssign};
@@ -80,6 +79,10 @@ impl<T: Item> Tree<T> {
         Cursor::new(self.clone())
     }
 
+    pub fn first<S: NodeStore<T>>(&self, db: &S) -> Result<Option<T>, S::ReadError> {
+        Ok(self.leftmost_leaf(db)?.node(db)?.items().first().cloned())
+    }
+
     pub fn last<S: NodeStore<T>>(&self, db: &S) -> Result<Option<T>, S::ReadError> {
         Ok(self.rightmost_leaf(db)?.node(db)?.items().last().cloned())
     }
@@ -93,6 +96,26 @@ impl<T: Item> Tree<T> {
             Node::Internal { ref summary, .. } => Ok(D::from_summary(summary)),
             Node::Leaf { ref summary, .. } => Ok(D::from_summary(summary)),
         }
+    }
+
+    pub fn insert<D, S>(
+        &mut self,
+        position: &D,
+        bias: SeekBias,
+        item: T,
+        db: &S,
+    ) -> Result<(), S::ReadError>
+    where
+        D: Dimension<Summary = T::Summary>,
+        S: NodeStore<T>,
+    {
+        let mut cursor = self.cursor();
+        let mut new_tree = cursor.slice(position, bias, db)?;
+        new_tree.push(item, db)?;
+        let suffix = cursor.slice(&self.extent::<D, _>(db)?, SeekBias::Right, db)?;
+        new_tree.push_tree(suffix, db)?;
+        *self = new_tree;
+        Ok(())
     }
 
     fn extend<I, S>(&mut self, iter: I, db: &S) -> Result<(), S::ReadError>
@@ -298,6 +321,15 @@ impl<T: Item> Tree<T> {
         }
     }
 
+    fn leftmost_leaf<S: NodeStore<T>>(&self, db: &S) -> Result<Tree<T>, S::ReadError> {
+        match *self.node(db)? {
+            Node::Leaf { .. } => Ok(self.clone()),
+            Node::Internal {
+                ref child_trees, ..
+            } => child_trees.first().unwrap().leftmost_leaf(db),
+        }
+    }
+
     fn rightmost_leaf<S: NodeStore<T>>(&self, db: &S) -> Result<Tree<T>, S::ReadError> {
         match *self.node(db)? {
             Node::Leaf { .. } => Ok(self.clone()),
@@ -413,6 +445,10 @@ impl<T: Item> Cursor<T> {
         self.did_seek = false;
         self.stack.truncate(0);
         self.summary = T::Summary::default();
+    }
+
+    pub fn start<D: Dimension<Summary = T::Summary>>(&self) -> D {
+        D::from_summary(&self.summary)
     }
 
     pub fn item<S: NodeStore<T>>(&self, db: &S) -> Result<Option<T>, S::ReadError> {
