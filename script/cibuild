@@ -2,6 +2,7 @@
 
 set -e
 
+cargo install wasm-bindgen-cli
 script/build
 script/test
 script/bench
