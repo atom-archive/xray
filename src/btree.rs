@@ -118,7 +118,7 @@ impl<T: Item> Tree<T> {
         Ok(())
     }
 
-    fn extend<I, S>(&mut self, iter: I, db: &S) -> Result<(), S::ReadError>
+    pub fn extend<I, S>(&mut self, iter: I, db: &S) -> Result<(), S::ReadError>
     where
         I: IntoIterator<Item = T>,
         S: NodeStore<T>,
@@ -843,7 +843,7 @@ mod tests {
                 for _i in 0..5 {
                     if pos > 0 {
                         assert_eq!(
-                            *cursor.prev_item(db).unwrap().unwrap(),
+                            cursor.prev_item(db).unwrap().unwrap(),
                             reference_items[pos - 1]
                         );
                     } else {
@@ -851,7 +851,7 @@ mod tests {
                     }
 
                     if pos < reference_items.len() {
-                        assert_eq!(*cursor.item(db).unwrap().unwrap(), reference_items[pos]);
+                        assert_eq!(cursor.item(db).unwrap().unwrap(), reference_items[pos]);
                     } else {
                         assert_eq!(cursor.item(db).unwrap(), None);
                     }
@@ -916,7 +916,7 @@ mod tests {
             cursor.descend_to_start(self.clone(), db)?;
             loop {
                 if let Some(item) = cursor.item(db)? {
-                    items.push(item.as_ref().clone());
+                    items.push(item.clone());
                 } else {
                     break;
                 }

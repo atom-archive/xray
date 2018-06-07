@@ -70,6 +70,12 @@ impl Tree {
         let mut new_entries = cursor
             .slice(&path, SeekBias::Left, entry_db)
             .map_err(|error| Error::StoreReadError(error))?;
+
+        // TODO: Couldn't the prev and next positions be gotten from the cursor if we had
+        // `start` and `end` methods that returned a generic dimension, something like:
+        // prev_position = cursor.start()
+        // next_position = cursor.end()
+
         let prev_position = new_entries
             .last(entry_db)
             .map_err(|error| Error::StoreReadError(error))?
@@ -80,20 +86,36 @@ impl Tree {
             .map_err(|error| Error::StoreReadError(error))?
             .unwrap()
             .position;
-        let position = id::Ordered::between(&prev_position, &next_position);
-        let entry_id = db.gen_id();
+
+        let positions = id::Ordered::between(&prev_position, &next_position);
+
         new_entries
-            .push(
-                Entry {
-                    id: entry_id,
-                    position: position.clone(),
-                    component: Arc::new(entry),
-                },
+            .extend(
+                iter.into_iter()
+                    .zip(positions)
+                    .map(|(component, position)| Entry {
+                        id: db.gen_id(),
+                        position,
+                        component: Arc::new(component),
+                    }),
                 entry_db,
             )
             .map_err(|error| Error::StoreReadError(error))?;
 
-        let old_extent = self.entries
+        // let entry_id = db.gen_id();
+        // new_entries
+        //     .push(
+        //         Entry {
+        //             id: entry_id,
+        //             position: position.clone(),
+        //             component: Arc::new(entry),
+        //         },
+        //         entry_db,
+        //     )
+        //     .map_err(|error| Error::StoreReadError(error))?;
+
+        let old_extent = self
+            .entries
             .extent::<id::Ordered, _>(entry_db)
             .map_err(|error| Error::StoreReadError(error))?;
         let suffix = cursor
@@ -104,14 +126,14 @@ impl Tree {
             .map_err(|error| Error::StoreReadError(error))?;
         self.entries = new_entries;
 
-        self.positions_by_entry_id
-            .insert(
-                &entry_id,
-                SeekBias::Left,
-                EntryIdToPosition { entry_id, position },
-                db.position_store(),
-            )
-            .map_err(|error| Error::StoreReadError(error))?;
+        // self.positions_by_entry_id
+        //     .insert(
+        //         &entry_id,
+        //         SeekBias::Left,
+        //         EntryIdToPosition { entry_id, position },
+        //         db.position_store(),
+        //     )
+        //     .map_err(|error| Error::StoreReadError(error))?;
 
         Ok(())
     }
@@ -120,7 +142,8 @@ impl Tree {
     where
         S: Store,
     {
-        let root_entry = self.entries
+        let root_entry = self
+            .entries
             .first(db.entry_store())
             .map_err(|err| Error::StoreReadError(err))?
             .unwrap();
@@ -290,7 +313,8 @@ impl<'a> AddAssign<&'a Self> for RelativePath {
                     self.0.push(other_entry.clone());
                 }
                 PathComponent::ParentDir => {
-                    if self.0
+                    if self
+                        .0
                         .last()
                         .map(|e| e.is_file() || e.is_dir())
                         .unwrap_or(false)

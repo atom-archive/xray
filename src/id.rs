@@ -4,6 +4,8 @@ use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 use uuid::Uuid;
 
+type OrderedEntry = u16;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Unique {
     replica_id: Uuid,
@@ -11,13 +13,12 @@ pub struct Unique {
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
-pub struct Ordered(Arc<Vec<u16>>);
+pub struct Ordered(Arc<Vec<OrderedEntry>>);
 
 pub struct OrderedGenerator {
-    prefix: Vec<u16>,
-    step: u16,
-    index: usize,
-    count: usize,
+    prev_entries: Vec<OrderedEntry>,
+    next: Ordered,
+    max_entry: OrderedEntry,
 }
 
 impl Default for Unique {
@@ -46,8 +47,8 @@ impl<'a> AddAssign<&'a Unique> for Unique {
 }
 
 lazy_static! {
-    static ref ORDERED_ID_MIN_VALUE: Ordered = Ordered(Arc::new(vec![0 as u16]));
-    static ref ORDERED_ID_MAX_VALUE: Ordered = Ordered(Arc::new(vec![u16::max_value()]));
+    static ref ORDERED_ID_MIN_VALUE: Ordered = Ordered(Arc::new(vec![0 as OrderedEntry]));
+    static ref ORDERED_ID_MAX_VALUE: Ordered = Ordered(Arc::new(vec![OrderedEntry::max_value()]));
 }
 
 impl Ordered {
@@ -59,17 +60,12 @@ impl Ordered {
         ORDERED_ID_MAX_VALUE.clone()
     }
 
-    pub fn between(left: &Self, right: &Self, count: usize) -> OrderedGenerator {
-        Self::between_with_max(left, right, count, u16::max_value())
+    pub fn between(prev: &Self, next: &Self) -> OrderedGenerator {
+        Self::between_with_max(prev, next, OrderedEntry::max_value())
     }
 
-    fn between_with_max(
-        left: &Self,
-        right: &Self,
-        count: usize,
-        max_value: u16,
-    ) -> OrderedGenerator {
-        OrderedGenerator::new(left, right, count, max_value)
+    fn between_with_max(prev: &Self, next: &Self, max_value: OrderedEntry) -> OrderedGenerator {
+        OrderedGenerator::new(prev, next, max_value)
     }
 }
 
@@ -96,42 +92,47 @@ impl<'a> AddAssign<&'a Self> for Ordered {
 }
 
 impl OrderedGenerator {
-    fn new(left: &Ordered, right: &Ordered, count: usize, max_value: u16) -> Self {
-        let step;
-        let prefix = Vec::new();
-        let left_entries = left.0.iter().cloned().chain(iter::repeat(0));
-        let right_entries = right.0.iter().cloned().chain(iter::repeat(max_value));
-        for (left, right) in left_entries.zip(right_entries) {
-            let interval = right - left;
-            if interval as u16 > count {
-                step = interval / count;
-                prefix.push(left);
+    fn new(prev: &Ordered, next: &Ordered, max_entry: OrderedEntry) -> Self {
+        let prev_iter = prev.0.iter().cloned().chain(iter::repeat(0));
+        let next_iter = next.0.iter().cloned().chain(iter::repeat(max_entry));
+        let mut iter = prev_iter.zip(next_iter);
+        let mut prev_entries = Vec::new();
+        loop {
+            let (prev, next) = iter.next().unwrap();
+            prev_entries.push(prev);
+            if next - prev >= 2 {
                 break;
-            } else {
-                prefix.push(left);
             }
         }
 
         OrderedGenerator {
-            prefix,
-            index: 0,
-            count,
-            step,
+            max_entry,
+            prev_entries,
+            next: next.clone(),
         }
     }
 }
 
-impl<'a> Iterator for OrderedGenerator<'a> {
+impl Iterator for OrderedGenerator {
     type Item = Ordered;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.count {
-            self.index += 1;
-            let entries = self.prefix.clone();
-            *entries.last_mut().unwrap() += self.index * self.step;
-            Some(Ordered(Arc::new(entries)))
+        let prev_entry = *self.prev_entries.last().unwrap();
+        let next_entry = *self
+            .next
+            .0
+            .get(self.prev_entries.len() - 1)
+            .unwrap_or(&self.max_entry);
+
+        let interval = next_entry - prev_entry;
+
+        if interval >= 2 {
+            const MAX_STEP: OrderedEntry = 32;
+            *self.prev_entries.last_mut().unwrap() += cmp::min(interval / 2, MAX_STEP);
+            Some(Ordered(Arc::new(self.prev_entries.clone())))
         } else {
-            None
+            self.prev_entries.push(0);
+            self.next()
         }
     }
 }
