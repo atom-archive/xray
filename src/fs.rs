@@ -88,31 +88,27 @@ impl Tree {
             .position;
 
         let positions = id::Ordered::between(&prev_position, &next_position);
+        let entry_ids_to_positions = Vec::new();
 
         new_entries
             .extend(
                 iter.into_iter()
                     .zip(positions)
-                    .map(|(component, position)| Entry {
-                        id: db.gen_id(),
-                        position,
-                        component: Arc::new(component),
+                    .map(|(component, position)| {
+                        let id = db.gen_id();
+                        entry_ids_to_positions.push(EntryIdToPosition {
+                            entry_id: id,
+                            position: position.clone(),
+                        });
+                        Entry {
+                            id,
+                            position,
+                            component: Arc::new(component),
+                        }
                     }),
                 entry_db,
             )
             .map_err(|error| Error::StoreReadError(error))?;
-
-        // let entry_id = db.gen_id();
-        // new_entries
-        //     .push(
-        //         Entry {
-        //             id: entry_id,
-        //             position: position.clone(),
-        //             component: Arc::new(entry),
-        //         },
-        //         entry_db,
-        //     )
-        //     .map_err(|error| Error::StoreReadError(error))?;
 
         let old_extent = self
             .entries
@@ -126,14 +122,16 @@ impl Tree {
             .map_err(|error| Error::StoreReadError(error))?;
         self.entries = new_entries;
 
-        // self.positions_by_entry_id
-        //     .insert(
-        //         &entry_id,
-        //         SeekBias::Left,
-        //         EntryIdToPosition { entry_id, position },
-        //         db.position_store(),
-        //     )
-        //     .map_err(|error| Error::StoreReadError(error))?;
+        for mapping in entry_ids_to_positions {
+            self.positions_by_entry_id
+                .insert(
+                    &entry_id,
+                    SeekBias::Left,
+                    entry_ids_to_positions.iter(),
+                    db.position_store(),
+                )
+                .map_err(|error| Error::StoreReadError(error))?;            
+        }
 
         Ok(())
     }
