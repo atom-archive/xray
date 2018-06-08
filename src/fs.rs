@@ -51,6 +51,7 @@ pub struct EntryIdToPosition {
     position: id::Ordered,
 }
 
+#[derive(Debug)]
 enum Error<S: Store> {
     InvalidPath,
     DuplicatePath,
@@ -58,6 +59,55 @@ enum Error<S: Store> {
 }
 
 impl Tree {
+    fn new<S: Store>(root: PathComponent, db: &S) -> Result<Self, Error<S>> {
+        let entry_db = db.entry_store();
+        let position_db = db.position_store();
+        let mut tree = Self {
+            entries: btree::Tree::new(),
+            positions_by_entry_id: btree::Tree::new(),
+        };
+
+        let root_entry_id = db.gen_id();
+        let root_entry = Entry {
+            id: root_entry_id,
+            position: id::Ordered::min_value(),
+            component: Arc::new(root),
+        };
+        tree.entries
+            .push(root_entry, entry_db)
+            .map_err(|err| Error::StoreReadError(err))?;
+        let root_parent_entry_id = db.gen_id();
+        let root_parent_entry = Entry {
+            id: root_parent_entry_id,
+            position: id::Ordered::max_value(),
+            component: Arc::new(PathComponent::ParentDir),
+        };
+        tree.entries
+            .push(root_parent_entry, entry_db)
+            .map_err(|err| Error::StoreReadError(err))?;
+
+        tree.positions_by_entry_id
+            .push(
+                EntryIdToPosition {
+                    entry_id: root_entry_id,
+                    position: id::Ordered::min_value(),
+                },
+                position_db,
+            )
+            .map_err(|err| Error::StoreReadError(err))?;
+        tree.positions_by_entry_id
+            .push(
+                EntryIdToPosition {
+                    entry_id: root_parent_entry_id,
+                    position: id::Ordered::max_value(),
+                },
+                position_db,
+            )
+            .map_err(|err| Error::StoreReadError(err))?;
+
+        Ok(tree)
+    }
+
     fn insert<I, S>(&mut self, path: RelativePath, iter: I, db: &S) -> Result<(), Error<S>>
     where
         I: IntoIterator<Item = PathComponent>,
@@ -80,6 +130,8 @@ impl Tree {
             let next_entry = cursor
                 .item(entry_db)
                 .map_err(|error| Error::StoreReadError(error))?;
+
+            println!("{:?} {:?}", prev_entry, next_entry);
 
             let positions =
                 id::Ordered::between(&prev_entry.unwrap().position, &next_entry.unwrap().position);
@@ -286,5 +338,127 @@ impl btree::Dimension for id::Ordered {
 
     fn from_summary(summary: &Self::Summary) -> Self {
         summary.position.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::path::{Component, PathBuf};
+
+    #[test]
+    fn test_insert() {
+        let db = NullStore::new();
+        let mut tree = Tree::new(PathComponent::dir("root", None), &db).unwrap();
+
+        assert!(
+            tree.insert(RelativePath::from("not-root/foo"), None, &db)
+                .is_err()
+        );
+        tree.insert(
+            RelativePath::from("root/foo"),
+            Some(PathComponent::file("foo", None)),
+            &db,
+        ).unwrap();
+    }
+
+    #[derive(Debug)]
+    struct NullStore {
+        next_id: RefCell<id::Unique>,
+    }
+
+    impl NullStore {
+        fn new() -> Self {
+            Self {
+                next_id: RefCell::new(id::Unique::random()),
+            }
+        }
+    }
+
+    impl Store for NullStore {
+        type ReadError = ();
+        type EntryStore = NullStore;
+        type PositionStore = NullStore;
+
+        fn gen_id(&self) -> id::Unique {
+            let next_id = self.next_id.borrow().clone();
+            self.next_id.borrow_mut().inc();
+            next_id
+        }
+
+        fn entry_store(&self) -> &Self::EntryStore {
+            self
+        }
+
+        fn position_store(&self) -> &Self::PositionStore {
+            self
+        }
+    }
+
+    impl btree::NodeStore<Entry> for NullStore {
+        type ReadError = ();
+
+        fn get(&self, id: btree::NodeId) -> Result<Arc<btree::Node<Entry>>, Self::ReadError> {
+            panic!("get should never be called on a null store")
+        }
+    }
+
+    impl btree::NodeStore<EntryIdToPosition> for NullStore {
+        type ReadError = ();
+
+        fn get(
+            &self,
+            id: btree::NodeId,
+        ) -> Result<Arc<btree::Node<EntryIdToPosition>>, Self::ReadError> {
+            panic!("get should never be called on a null store")
+        }
+    }
+
+    impl PathComponent {
+        fn dir<P: Into<OsString>>(name: P, inode: Option<u64>) -> Self {
+            PathComponent::Dir {
+                name: name.into(),
+                inode,
+            }
+        }
+
+        fn file<P: Into<OsString>>(name: P, inode: Option<u64>) -> Self {
+            PathComponent::File {
+                name: name.into(),
+                inode,
+            }
+        }
+
+        fn parent() -> Self {
+            PathComponent::ParentDir
+        }
+    }
+
+    impl<'a> From<&'a str> for RelativePath {
+        fn from(path: &'a str) -> Self {
+            let path = PathBuf::from(path.to_string());
+            let mut iter = path.components().peekable();
+            let mut components = SmallVec::new();
+
+            while let Some(component) = iter.next() {
+                match component {
+                    Component::Normal(name) => if iter.peek().is_some() {
+                        components.push(Arc::new(PathComponent::Dir {
+                            name: name.to_owned(),
+                            inode: None,
+                        }));
+                    } else {
+                        components.push(Arc::new(PathComponent::File {
+                            name: name.to_owned(),
+                            inode: None,
+                        }));
+                    },
+                    _ => panic!("Unexpected component: {:?}", component),
+                }
+            }
+
+            RelativePath(components)
+        }
     }
 }

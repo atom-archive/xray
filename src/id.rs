@@ -2,7 +2,7 @@ use std::cmp;
 use std::iter;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
-use uuid::Uuid;
+use uuid::{Uuid, UuidVersion};
 
 type OrderedEntry = u16;
 
@@ -19,6 +19,19 @@ pub struct OrderedGenerator {
     prev_entries: Vec<OrderedEntry>,
     next: Ordered,
     max_entry: OrderedEntry,
+}
+
+impl Unique {
+    pub fn random() -> Self {
+        Self {
+            replica_id: Uuid::new(UuidVersion::Random).unwrap(),
+            seq: 0,
+        }
+    }
+
+    pub fn inc(&mut self) {
+        self.seq += 1;
+    }
 }
 
 impl Default for Unique {
@@ -118,8 +131,7 @@ impl Iterator for OrderedGenerator {
 
     fn next(&mut self) -> Option<Self::Item> {
         let prev_entry = *self.prev_entries.last().unwrap();
-        let next_entry = *self
-            .next
+        let next_entry = *self.next
             .0
             .get(self.prev_entries.len() - 1)
             .unwrap_or(&self.max_entry);

@@ -5,7 +5,7 @@ use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 
 const TREE_BASE: usize = 2;
-type NodeId = usize;
+pub type NodeId = usize;
 
 pub trait Item: Clone + Eq + fmt::Debug {
     type Summary: for<'a> AddAssign<&'a Self::Summary> + Default + Clone + fmt::Debug;
