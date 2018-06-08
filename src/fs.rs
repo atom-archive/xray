@@ -1,10 +1,10 @@
 use btree::{self, SeekBias};
 use id;
 use std::cmp::{self, Ord, Ordering};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::ops::{Add, AddAssign};
-use std::path::{self, Path};
+use std::path::{self, Path, PathBuf};
 use std::sync::Arc;
 
 pub trait Store {
@@ -34,6 +34,12 @@ pub struct Tree {
     positions_by_entry_id: btree::Tree<EntryIdToPosition>,
 }
 
+pub struct Cursor {
+    tree_cursor: btree::Cursor<TreeEntry>,
+    walk: Walk,
+    path: PathBuf,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Walk(Vec<Step>);
 
@@ -45,7 +51,7 @@ enum Step {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd)]
-pub enum TreeEntry {
+enum TreeEntry {
     File {
         id: id::Unique,
         name: Arc<OsString>,
@@ -70,7 +76,7 @@ pub struct EntrySummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EntryIdToPosition {
+struct EntryIdToPosition {
     entry_id: id::Unique,
     position: id::Ordered,
 }
@@ -123,6 +129,33 @@ impl Tree {
         Ok(tree)
     }
 
+    fn cursor<S: Store>(&self, db: &S) -> Result<Cursor, Error<S>> {
+        let entry_store = db.entry_store();
+
+        let mut tree_cursor = self.entries.cursor();
+        tree_cursor
+            .seek(&id::Ordered::min_value(), SeekBias::Left, entry_store)
+            .map_err(|error| Error::StoreReadError(error))?;
+
+        let mut walk: Walk = tree_cursor.start();
+        walk.0.push(
+            tree_cursor
+                .item(entry_store)
+                .map_err(|error| Error::StoreReadError(error))?
+                .unwrap()
+                .into(),
+        );
+
+        let mut path = PathBuf::new();
+        path.extend(walk.0.iter().filter_map(|step| step.name()));
+
+        Ok(Cursor {
+            tree_cursor,
+            walk,
+            path,
+        })
+    }
+
     fn insert_dir<'a, I, P, S>(&mut self, path: P, iter: I, db: &S) -> Result<(), Error<S>>
     where
         P: Into<&'a Path>,
@@ -132,7 +165,8 @@ impl Tree {
         let path = path.into();
 
         let entry_db = db.entry_store();
-        let root = self.entries
+        let root = self
+            .entries
             .first(entry_db)
             .map_err(|error| Error::StoreReadError(error))?
             .unwrap();
@@ -211,7 +245,8 @@ impl Tree {
                     .map_err(|error| Error::StoreReadError(error))?;
             }
 
-            let old_tree_extent = self.entries
+            let old_tree_extent = self
+                .entries
                 .extent::<id::Ordered, _>(entry_db)
                 .map_err(|error| Error::StoreReadError(error))?;
             let suffix = cursor
@@ -223,6 +258,51 @@ impl Tree {
             self.entries = new_entries;
 
             Ok(())
+        }
+    }
+}
+
+impl Cursor {
+    pub fn path(&mut self) -> &Path {
+        &self.path
+    }
+
+    pub fn descend<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
+        let db = db.entry_store();
+
+        let entry = self.tree_cursor.item(db)?.unwrap();
+        if entry.is_dir() {
+            self.tree_cursor.next(db)?;
+            let descended = self
+                .tree_cursor
+                .item(db)?
+                .map(|item| self.push_entry(&item))
+                .unwrap_or(false);
+
+            if descended {
+                Ok(true)
+            } else {
+                // self.tree_cursor.prev(db)?;
+                // Ok(false)
+                unimplemented!()
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn next_sibling<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
+        unimplemented!()
+    }
+
+    fn push_entry(&mut self, entry: &TreeEntry) -> bool {
+        match entry {
+            TreeEntry::File { name, .. } | TreeEntry::Dir { name, .. } => {
+                self.path.push(name.as_ref());
+                self.walk.0.push(entry.into());
+                true
+            }
+            TreeEntry::ParentDir { .. } => false,
         }
     }
 }
@@ -242,7 +322,8 @@ impl<'a> AddAssign<&'a Self> for Walk {
                 self.0.pop();
             }
 
-            if self.0.len() >= 2 && !self.0[self.0.len() - 2].is_parent_visit()
+            if self.0.len() >= 2
+                && !self.0[self.0.len() - 2].is_parent_visit()
                 && self.0[self.0.len() - 1].is_parent_visit()
             {
                 self.0.pop();
@@ -328,6 +409,14 @@ impl Step {
             _ => false,
         }
     }
+
+    fn name(&self) -> Option<&OsStr> {
+        match self {
+            Step::VisitFile(name) => Some(name.as_ref()),
+            Step::VisitDir(name) => Some(name.as_ref()),
+            Step::VisitParent => None,
+        }
+    }
 }
 
 impl From<TreeEntry> for Step {
@@ -356,6 +445,13 @@ impl TreeEntry {
             TreeEntry::Dir { position, .. } => position,
             TreeEntry::File { position, .. } => position,
             TreeEntry::ParentDir { position, .. } => position,
+        }
+    }
+
+    fn is_dir(&self) -> bool {
+        match self {
+            TreeEntry::Dir { .. } => true,
+            _ => false,
         }
     }
 }
@@ -422,30 +518,29 @@ mod tests {
         let db = NullStore::new();
         let mut tree = Tree::new("root", &db).unwrap();
 
-        println!("==============================");
         tree.insert_dir(
-            Path::new("foo"),
+            Path::new("a"),
             vec![
                 Entry {
-                    name: "foo".into(),
+                    name: "a".into(),
                     depth: 0,
                     inode: 0,
                     kind: EntryKind::Dir,
                 },
                 Entry {
-                    name: "bar".into(),
+                    name: "b".into(),
                     depth: 1,
                     inode: 1,
                     kind: EntryKind::Dir,
                 },
                 Entry {
-                    name: "baz".into(),
+                    name: "c".into(),
                     depth: 2,
                     inode: 2,
                     kind: EntryKind::File,
                 },
                 Entry {
-                    name: "abc".into(),
+                    name: "d".into(),
                     depth: 1,
                     inode: 3,
                     kind: EntryKind::File,
@@ -455,9 +550,9 @@ mod tests {
         ).unwrap();
 
         tree.insert_dir(
-            Path::new("foo/bar/paz"),
+            Path::new("a/b/ca"),
             vec![Entry {
-                name: "paz".into(),
+                name: "ca".into(),
                 depth: 0,
                 inode: 4,
                 kind: EntryKind::Dir,
@@ -466,9 +561,9 @@ mod tests {
         ).unwrap();
 
         tree.insert_dir(
-            Path::new("foo/bar/taz"),
+            Path::new("a/b/cb"),
             vec![Entry {
-                name: "taz".into(),
+                name: "cb".into(),
                 depth: 0,
                 inode: 5,
                 kind: EntryKind::Dir,
@@ -476,8 +571,16 @@ mod tests {
             &db,
         ).unwrap();
 
-        println!("{:?}", tree.entries);
-        println!("\n\n{:?}", tree.entries.items(&db));
+        let mut cursor = tree.cursor(&db).unwrap();
+        assert_eq!(cursor.path(), PathBuf::from("root"));
+        assert_eq!(cursor.descend(&db).unwrap(), true);
+        assert_eq!(cursor.path(), PathBuf::from("root/a"));
+        assert_eq!(cursor.descend(&db).unwrap(), true);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/b"));
+        assert_eq!(cursor.descend(&db).unwrap(), true);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
+        // assert_eq!(cursor.descend(&db).unwrap(), false);
+        // assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
     }
 
     #[derive(Debug)]
