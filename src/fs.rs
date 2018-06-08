@@ -1,15 +1,15 @@
 use btree::{self, SeekBias};
 use id;
-use smallvec::SmallVec;
 use std::cmp::{Ord, Ordering};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::ops::{Add, AddAssign};
+use std::path::{self, Path};
 use std::sync::Arc;
 
 pub trait Store {
     type ReadError: fmt::Debug;
-    type EntryStore: btree::NodeStore<Entry, ReadError = Self::ReadError>;
+    type EntryStore: btree::NodeStore<TreeEntry, ReadError = Self::ReadError>;
     type PositionStore: btree::NodeStore<EntryIdToPosition, ReadError = Self::ReadError>;
 
     fn gen_id(&self) -> id::Unique;
@@ -17,33 +17,57 @@ pub trait Store {
     fn position_store(&self) -> &Self::PositionStore;
 }
 
+pub struct Entry {
+    name: OsString,
+    depth: usize,
+    inode: u64,
+    kind: EntryKind,
+}
+
+pub enum EntryKind {
+    Dir,
+    File,
+}
+
 pub struct Tree {
-    entries: btree::Tree<Entry>,
+    entries: btree::Tree<TreeEntry>,
     positions_by_entry_id: btree::Tree<EntryIdToPosition>,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct Entry {
-    id: id::Unique,
-    position: id::Ordered,
-    component: Arc<PathComponent>,
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Walk(Vec<Step>);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Step {
+    VisitFile(Arc<OsString>),
+    VisitDir(Arc<OsString>),
+    VisitParent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd)]
-pub enum PathComponent {
-    File { name: OsString, inode: Option<u64> },
-    Dir { name: OsString, inode: Option<u64> },
-    ParentDir,
+pub enum TreeEntry {
+    File {
+        id: id::Unique,
+        name: Arc<OsString>,
+        inode: Option<u64>,
+        position: id::Ordered,
+    },
+    Dir {
+        id: id::Unique,
+        name: Arc<OsString>,
+        inode: Option<u64>,
+        position: id::Ordered,
+    },
+    ParentDir {
+        position: id::Ordered,
+    },
 }
 
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct EntrySummary {
     position: id::Ordered,
-    path: RelativePath,
+    walk: Walk,
 }
-
-#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct RelativePath(SmallVec<[Arc<PathComponent>; 1]>);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EntryIdToPosition {
@@ -59,69 +83,77 @@ enum Error<S: Store> {
 }
 
 impl Tree {
-    fn new<S: Store>(root: PathComponent, db: &S) -> Result<Self, Error<S>> {
+    fn new<N: Into<OsString>, S: Store>(root_name: N, db: &S) -> Result<Self, Error<S>> {
         let entry_db = db.entry_store();
-        let position_db = db.position_store();
         let mut tree = Self {
             entries: btree::Tree::new(),
             positions_by_entry_id: btree::Tree::new(),
         };
 
         let root_entry_id = db.gen_id();
-        let root_entry = Entry {
-            id: root_entry_id,
-            position: id::Ordered::min_value(),
-            component: Arc::new(root),
-        };
         tree.entries
-            .push(root_entry, entry_db)
+            .push(
+                TreeEntry::Dir {
+                    id: root_entry_id,
+                    name: Arc::new(root_name.into()),
+                    inode: None,
+                    position: id::Ordered::min_value(),
+                },
+                entry_db,
+            )
             .map_err(|err| Error::StoreReadError(err))?;
-        let root_parent_entry_id = db.gen_id();
-        let root_parent_entry = Entry {
-            id: root_parent_entry_id,
-            position: id::Ordered::max_value(),
-            component: Arc::new(PathComponent::ParentDir),
-        };
         tree.entries
-            .push(root_parent_entry, entry_db)
+            .push(
+                TreeEntry::ParentDir {
+                    position: id::Ordered::max_value(),
+                },
+                entry_db,
+            )
             .map_err(|err| Error::StoreReadError(err))?;
-
         tree.positions_by_entry_id
             .push(
                 EntryIdToPosition {
                     entry_id: root_entry_id,
                     position: id::Ordered::min_value(),
                 },
-                position_db,
-            )
-            .map_err(|err| Error::StoreReadError(err))?;
-        tree.positions_by_entry_id
-            .push(
-                EntryIdToPosition {
-                    entry_id: root_parent_entry_id,
-                    position: id::Ordered::max_value(),
-                },
-                position_db,
+                db.position_store(),
             )
             .map_err(|err| Error::StoreReadError(err))?;
 
         Ok(tree)
     }
 
-    fn insert<I, S>(&mut self, path: RelativePath, iter: I, db: &S) -> Result<(), Error<S>>
+    fn insert_dir<'a, I, P, S>(&mut self, path: P, iter: I, db: &S) -> Result<(), Error<S>>
     where
-        I: IntoIterator<Item = PathComponent>,
+        P: Into<&'a Path>,
+        I: IntoIterator<Item = Entry>,
         S: Store,
     {
-        self.validate_path(&path, db)?;
+        let path = path.into();
 
         let entry_db = db.entry_store();
+        let root = self.entries
+            .first(entry_db)
+            .map_err(|error| Error::StoreReadError(error))?
+            .unwrap();
+
+        let mut walk = Walk(Vec::new());
+        walk.0.push(root.into());
+        for component in path.components() {
+            match component {
+                path::Component::Normal(name) => {
+                    walk.0.push(Step::VisitDir(Arc::new(name.to_owned())));
+                }
+                _ => return Err(Error::InvalidPath),
+            }
+        }
+
         let mut cursor = self.entries.cursor();
         let mut new_entries = cursor
-            .slice(&path, SeekBias::Left, entry_db)
+            .slice(&walk, SeekBias::Left, entry_db)
             .map_err(|error| Error::StoreReadError(error))?;
 
-        if cursor.start::<RelativePath>() == path {
+        if cursor.start::<Walk>() == walk {
             Err(Error::DuplicatePath)
         } else {
             let prev_entry = new_entries
@@ -130,32 +162,52 @@ impl Tree {
             let next_entry = cursor
                 .item(entry_db)
                 .map_err(|error| Error::StoreReadError(error))?;
+            let mut position_generator = id::Ordered::between(
+                prev_entry.unwrap().position(),
+                next_entry.unwrap().position(),
+            );
+            let mut prev_depth = None;
+            for entry in iter {
+                if prev_depth.map_or(false, |prev_depth| prev_depth != entry.depth) {
+                    let mut prev_depth = prev_depth.unwrap();
+                    while prev_depth != entry.depth {
+                        let position = position_generator.next().unwrap();
+                        new_entries
+                            .push(TreeEntry::ParentDir { position }, entry_db)
+                            .map_err(|error| Error::StoreReadError(error))?;
+                        prev_depth -= 1;
+                    }
+                }
+                prev_depth = Some(entry.depth);
 
-            println!("{:?} {:?}", prev_entry, next_entry);
+                let entry_id = db.gen_id();
+                let entry_position = position_generator.next().unwrap();
+                let new_entry = match entry.kind {
+                    EntryKind::File => TreeEntry::File {
+                        id: entry_id,
+                        name: Arc::new(entry.name),
+                        inode: Some(entry.inode),
+                        position: entry_position.clone(),
+                    },
+                    EntryKind::Dir => TreeEntry::Dir {
+                        id: entry_id,
+                        name: Arc::new(entry.name),
+                        inode: Some(entry.inode),
+                        position: entry_position.clone(),
+                    },
+                };
+                new_entries
+                    .push(new_entry, entry_db)
+                    .map_err(|error| Error::StoreReadError(error))?;
 
-            let positions =
-                id::Ordered::between(&prev_entry.unwrap().position, &next_entry.unwrap().position);
-            let mut entry_ids_to_positions = Vec::new();
-
-            new_entries
-                .extend(
-                    iter.into_iter()
-                        .zip(positions)
-                        .map(|(component, position)| {
-                            let id = db.gen_id();
-                            entry_ids_to_positions.push(EntryIdToPosition {
-                                entry_id: id,
-                                position: position.clone(),
-                            });
-                            Entry {
-                                id,
-                                position,
-                                component: Arc::new(component),
-                            }
-                        }),
-                    entry_db,
-                )
-                .map_err(|error| Error::StoreReadError(error))?;
+                let mapping = EntryIdToPosition {
+                    entry_id,
+                    position: entry_position,
+                };
+                self.positions_by_entry_id
+                    .insert(&entry_id, SeekBias::Left, mapping, db.position_store())
+                    .map_err(|error| Error::StoreReadError(error))?;
+            }
 
             let old_tree_extent = self.entries
                 .extent::<id::Ordered, _>(entry_db)
@@ -168,64 +220,139 @@ impl Tree {
                 .map_err(|error| Error::StoreReadError(error))?;
             self.entries = new_entries;
 
-            for mapping in entry_ids_to_positions {
-                let entry_id = mapping.entry_id;
-                self.positions_by_entry_id
-                    .insert(&entry_id, SeekBias::Left, mapping, db.position_store())
-                    .map_err(|error| Error::StoreReadError(error))?;
+            Ok(())
+        }
+    }
+}
+
+impl btree::Dimension for Walk {
+    type Summary = EntrySummary;
+
+    fn from_summary(summary: &Self::Summary) -> Self {
+        summary.walk.clone()
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for Walk {
+    fn add_assign(&mut self, other: &Self) {
+        for other_step in &other.0 {
+            match other_step {
+                Step::VisitDir(_) | Step::VisitFile(_) => self.0.push(other_step.clone()),
+                Step::VisitParent => {
+                    if self.0
+                        .last()
+                        .map(|step| step.is_parent_visit())
+                        .unwrap_or(true)
+                    {
+                        self.0.push(other_step.clone());
+                    } else {
+                        self.0.pop();
+                    }
+                }
             }
-
-            Ok(())
-        }
-    }
-
-    fn validate_path<S>(&self, path: &RelativePath, db: &S) -> Result<(), Error<S>>
-    where
-        S: Store,
-    {
-        let root_entry = self.entries
-            .first(db.entry_store())
-            .map_err(|err| Error::StoreReadError(err))?
-            .unwrap();
-        if path.0.is_empty() || path.0.first().unwrap().name() != root_entry.component.name() {
-            Err(Error::InvalidPath)
-        } else {
-            Ok(())
         }
     }
 }
 
-impl PathComponent {
-    fn is_file(&self) -> bool {
-        match self {
-            PathComponent::File { .. } => true,
-            _ => false,
-        }
-    }
+impl<'a> Add<&'a Self> for Walk {
+    type Output = Self;
 
-    fn is_dir(&self) -> bool {
-        match self {
-            PathComponent::Dir { .. } => true,
-            _ => false,
-        }
+    fn add(mut self, other: &Self) -> Self {
+        self += other;
+        self
     }
+}
 
-    fn name(&self) -> &OsStr {
-        match self {
-            PathComponent::Dir { ref name, .. } => name,
-            PathComponent::File { ref name, .. } => name,
-            PathComponent::ParentDir => panic!("ParentDir does not have a name"),
+impl PartialOrd for Walk {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Walk {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let mut self_iter = self.0.iter();
+        let mut other_iter = other.0.iter();
+        loop {
+            if let Some(self_step) = self_iter.next() {
+                if let Some(other_step) = other_iter.next() {
+                    let ordering = match self_step {
+                        Step::VisitFile(self_name) => match other_step {
+                            Step::VisitFile(other_name) => self_name.cmp(other_name),
+                            Step::VisitDir(_) => Ordering::Greater,
+                            Step::VisitParent => panic!("Can't compare walks with parent entries"),
+                        },
+                        Step::VisitDir(self_name) => match other_step {
+                            Step::VisitFile(_) => Ordering::Less,
+                            Step::VisitDir(other_name) => self_name.cmp(other_name),
+                            Step::VisitParent => panic!("Can't compare walks with parent entries"),
+                        },
+                        Step::VisitParent => panic!("Can't compare walks with parent entries"),
+                    };
+
+                    if ordering != Ordering::Equal {
+                        return ordering;
+                    }
+                } else {
+                    return Ordering::Greater;
+                }
+            } else {
+                if other_iter.next().is_some() {
+                    return Ordering::Less;
+                } else {
+                    return Ordering::Equal;
+                }
+            }
         }
     }
 }
 
-impl btree::Item for Entry {
+impl Step {
+    fn is_parent_visit(&self) -> bool {
+        match self {
+            Step::VisitParent => true,
+            _ => false,
+        }
+    }
+}
+
+impl From<TreeEntry> for Step {
+    fn from(entry: TreeEntry) -> Self {
+        match entry {
+            TreeEntry::Dir { name, .. } => Step::VisitDir(name),
+            TreeEntry::File { name, .. } => Step::VisitFile(name),
+            TreeEntry::ParentDir { .. } => Step::VisitParent,
+        }
+    }
+}
+
+impl<'a> From<&'a TreeEntry> for Step {
+    fn from(entry: &'a TreeEntry) -> Self {
+        match entry {
+            TreeEntry::Dir { name, .. } => Step::VisitDir(name.clone()),
+            TreeEntry::File { name, .. } => Step::VisitFile(name.clone()),
+            TreeEntry::ParentDir { .. } => Step::VisitParent,
+        }
+    }
+}
+
+impl TreeEntry {
+    fn position(&self) -> &id::Ordered {
+        match self {
+            TreeEntry::Dir { position, .. } => position,
+            TreeEntry::File { position, .. } => position,
+            TreeEntry::ParentDir { position, .. } => position,
+        }
+    }
+}
+
+impl btree::Item for TreeEntry {
     type Summary = EntrySummary;
 
     fn summarize(&self) -> Self::Summary {
         EntrySummary {
-            position: self.position.clone(),
-            path: RelativePath(SmallVec::from_vec(vec![self.component.clone()])),
+            position: self.position().clone(),
+            walk: Walk(vec![self.into()]),
         }
     }
 }
@@ -233,7 +360,7 @@ impl btree::Item for Entry {
 impl<'a> AddAssign<&'a Self> for EntrySummary {
     fn add_assign(&mut self, other: &Self) {
         self.position += &other.position;
-        self.path += &other.path;
+        self.walk += &other.walk;
     }
 }
 
@@ -243,77 +370,6 @@ impl<'a> Add<&'a Self> for EntrySummary {
     fn add(mut self, other: &Self) -> Self {
         self += other;
         self
-    }
-}
-
-impl btree::Dimension for RelativePath {
-    type Summary = EntrySummary;
-
-    fn from_summary(summary: &Self::Summary) -> Self {
-        summary.path.clone()
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for RelativePath {
-    fn add_assign(&mut self, other: &Self) {
-        for other_entry in &other.0 {
-            match other_entry.as_ref() {
-                PathComponent::File { .. } | PathComponent::Dir { .. } => {
-                    if self.0.last().map(|e| e.is_file()).unwrap_or(false) {
-                        self.0.pop();
-                    }
-                    self.0.push(other_entry.clone());
-                }
-                PathComponent::ParentDir => {
-                    if self.0
-                        .last()
-                        .map(|e| e.is_file() || e.is_dir())
-                        .unwrap_or(false)
-                    {
-                        self.0.pop();
-                    } else {
-                        self.0.push(other_entry.clone());
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<'a> Add<&'a Self> for RelativePath {
-    type Output = Self;
-
-    fn add(mut self, other: &Self) -> Self {
-        self += other;
-        self
-    }
-}
-
-impl Ord for PathComponent {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match self {
-            PathComponent::File {
-                name: self_name, ..
-            } => match other {
-                PathComponent::File {
-                    name: other_name, ..
-                } => self_name.cmp(other_name),
-                PathComponent::Dir { .. } => Ordering::Greater,
-                PathComponent::ParentDir { .. } => {
-                    panic!("Can't compare paths with parent entries")
-                }
-            },
-            PathComponent::Dir {
-                name: self_name, ..
-            } => match other {
-                PathComponent::File { .. } => Ordering::Less,
-                PathComponent::Dir {
-                    name: other_name, ..
-                } => self_name.cmp(other_name),
-                PathComponent::ParentDir => panic!("Can't compare paths with parent entries"),
-            },
-            PathComponent::ParentDir => panic!("Can't compare paths with parent entries"),
-        }
     }
 }
 
@@ -350,15 +406,12 @@ mod tests {
     #[test]
     fn test_insert() {
         let db = NullStore::new();
-        let mut tree = Tree::new(PathComponent::dir("root", None), &db).unwrap();
+        let mut tree = Tree::new("root", &db).unwrap();
 
-        assert!(
-            tree.insert(RelativePath::from("not-root/foo"), None, &db)
-                .is_err()
-        );
+        assert!(tree.insert(Walk::from("not-root/foo"), None, &db).is_err());
         tree.insert(
-            RelativePath::from("root/foo"),
-            Some(PathComponent::file("foo", None)),
+            Walk::from("root/foo"),
+            Some(TreeEntry::file("foo", None)),
             &db,
         ).unwrap();
     }
@@ -396,10 +449,10 @@ mod tests {
         }
     }
 
-    impl btree::NodeStore<Entry> for NullStore {
+    impl btree::NodeStore<TreeEntry> for NullStore {
         type ReadError = ();
 
-        fn get(&self, id: btree::NodeId) -> Result<Arc<btree::Node<Entry>>, Self::ReadError> {
+        fn get(&self, id: btree::NodeId) -> Result<Arc<btree::Node<TreeEntry>>, Self::ReadError> {
             panic!("get should never be called on a null store")
         }
     }
@@ -415,27 +468,27 @@ mod tests {
         }
     }
 
-    impl PathComponent {
+    impl TreeEntry {
         fn dir<P: Into<OsString>>(name: P, inode: Option<u64>) -> Self {
-            PathComponent::Dir {
+            TreeEntry::Dir {
                 name: name.into(),
                 inode,
             }
         }
 
         fn file<P: Into<OsString>>(name: P, inode: Option<u64>) -> Self {
-            PathComponent::File {
+            TreeEntry::File {
                 name: name.into(),
                 inode,
             }
         }
 
         fn parent() -> Self {
-            PathComponent::ParentDir
+            TreeEntry::ParentDir
         }
     }
 
-    impl<'a> From<&'a str> for RelativePath {
+    impl<'a> From<&'a str> for Walk {
         fn from(path: &'a str) -> Self {
             let path = PathBuf::from(path.to_string());
             let mut iter = path.components().peekable();
@@ -444,12 +497,12 @@ mod tests {
             while let Some(component) = iter.next() {
                 match component {
                     Component::Normal(name) => if iter.peek().is_some() {
-                        components.push(Arc::new(PathComponent::Dir {
+                        components.push(Arc::new(TreeEntry::Dir {
                             name: name.to_owned(),
                             inode: None,
                         }));
                     } else {
-                        components.push(Arc::new(PathComponent::File {
+                        components.push(Arc::new(TreeEntry::File {
                             name: name.to_owned(),
                             inode: None,
                         }));
@@ -458,7 +511,7 @@ mod tests {
                 }
             }
 
-            RelativePath(components)
+            Walk(components)
         }
     }
 }
