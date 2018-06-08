@@ -1,6 +1,6 @@
 use btree::{self, SeekBias};
 use id;
-use std::cmp::{Ord, Ordering};
+use std::cmp::{self, Ord, Ordering};
 use std::ffi::OsString;
 use std::fmt;
 use std::ops::{Add, AddAssign};
@@ -168,15 +168,11 @@ impl Tree {
             );
             let mut prev_depth = None;
             for entry in iter {
-                if prev_depth.map_or(false, |prev_depth| prev_depth != entry.depth) {
-                    let mut prev_depth = prev_depth.unwrap();
-                    while prev_depth != entry.depth {
-                        let position = position_generator.next().unwrap();
-                        new_entries
-                            .push(TreeEntry::ParentDir { position }, entry_db)
-                            .map_err(|error| Error::StoreReadError(error))?;
-                        prev_depth -= 1;
-                    }
+                for _ in entry.depth..prev_depth.unwrap_or(entry.depth) {
+                    let position = position_generator.next().unwrap();
+                    new_entries
+                        .push(TreeEntry::ParentDir { position }, entry_db)
+                        .map_err(|error| Error::StoreReadError(error))?;
                 }
                 prev_depth = Some(entry.depth);
 
@@ -208,6 +204,12 @@ impl Tree {
                     .insert(&entry_id, SeekBias::Left, mapping, db.position_store())
                     .map_err(|error| Error::StoreReadError(error))?;
             }
+            for _ in 0..cmp::max(1, prev_depth.unwrap()) {
+                let position = position_generator.next().unwrap();
+                new_entries
+                    .push(TreeEntry::ParentDir { position }, entry_db)
+                    .map_err(|error| Error::StoreReadError(error))?;
+            }
 
             let old_tree_extent = self.entries
                 .extent::<id::Ordered, _>(entry_db)
@@ -236,19 +238,20 @@ impl btree::Dimension for Walk {
 impl<'a> AddAssign<&'a Self> for Walk {
     fn add_assign(&mut self, other: &Self) {
         for other_step in &other.0 {
+            if self.0.last().map_or(false, |last| last.is_file_visit()) {
+                self.0.pop();
+            }
+
+            if self.0.len() >= 2 && !self.0[self.0.len() - 2].is_parent_visit()
+                && self.0[self.0.len() - 1].is_parent_visit()
+            {
+                self.0.pop();
+                self.0.pop();
+            }
+
             match other_step {
                 Step::VisitDir(_) | Step::VisitFile(_) => self.0.push(other_step.clone()),
-                Step::VisitParent => {
-                    if self.0
-                        .last()
-                        .map(|step| step.is_parent_visit())
-                        .unwrap_or(true)
-                    {
-                        self.0.push(other_step.clone());
-                    } else {
-                        self.0.pop();
-                    }
-                }
+                Step::VisitParent => self.0.push(other_step.clone()),
             }
         }
     }
@@ -280,14 +283,18 @@ impl Ord for Walk {
                         Step::VisitFile(self_name) => match other_step {
                             Step::VisitFile(other_name) => self_name.cmp(other_name),
                             Step::VisitDir(_) => Ordering::Greater,
-                            Step::VisitParent => panic!("Can't compare walks with parent entries"),
+                            Step::VisitParent => Ordering::Less,
                         },
                         Step::VisitDir(self_name) => match other_step {
                             Step::VisitFile(_) => Ordering::Less,
                             Step::VisitDir(other_name) => self_name.cmp(other_name),
-                            Step::VisitParent => panic!("Can't compare walks with parent entries"),
+                            Step::VisitParent => Ordering::Less,
                         },
-                        Step::VisitParent => panic!("Can't compare walks with parent entries"),
+                        Step::VisitParent => match other_step {
+                            Step::VisitFile(_) => Ordering::Greater,
+                            Step::VisitDir(_) => Ordering::Greater,
+                            Step::VisitParent => Ordering::Equal,
+                        },
                     };
 
                     if ordering != Ordering::Equal {
@@ -311,6 +318,13 @@ impl Step {
     fn is_parent_visit(&self) -> bool {
         match self {
             Step::VisitParent => true,
+            _ => false,
+        }
+    }
+
+    fn is_file_visit(&self) -> bool {
+        match self {
+            Step::VisitFile(_) => true,
             _ => false,
         }
     }
@@ -408,12 +422,62 @@ mod tests {
         let db = NullStore::new();
         let mut tree = Tree::new("root", &db).unwrap();
 
-        assert!(tree.insert(Walk::from("not-root/foo"), None, &db).is_err());
-        tree.insert(
-            Walk::from("root/foo"),
-            Some(TreeEntry::file("foo", None)),
+        println!("==============================");
+        tree.insert_dir(
+            Path::new("foo"),
+            vec![
+                Entry {
+                    name: "foo".into(),
+                    depth: 0,
+                    inode: 0,
+                    kind: EntryKind::Dir,
+                },
+                Entry {
+                    name: "bar".into(),
+                    depth: 1,
+                    inode: 1,
+                    kind: EntryKind::Dir,
+                },
+                Entry {
+                    name: "baz".into(),
+                    depth: 2,
+                    inode: 2,
+                    kind: EntryKind::File,
+                },
+                Entry {
+                    name: "abc".into(),
+                    depth: 1,
+                    inode: 3,
+                    kind: EntryKind::File,
+                },
+            ],
             &db,
         ).unwrap();
+
+        tree.insert_dir(
+            Path::new("foo/bar/paz"),
+            vec![Entry {
+                name: "paz".into(),
+                depth: 0,
+                inode: 4,
+                kind: EntryKind::Dir,
+            }],
+            &db,
+        ).unwrap();
+
+        tree.insert_dir(
+            Path::new("foo/bar/taz"),
+            vec![Entry {
+                name: "taz".into(),
+                depth: 0,
+                inode: 5,
+                kind: EntryKind::Dir,
+            }],
+            &db,
+        ).unwrap();
+
+        println!("{:?}", tree.entries);
+        println!("\n\n{:?}", tree.entries.items(&db));
     }
 
     #[derive(Debug)]
@@ -465,53 +529,6 @@ mod tests {
             id: btree::NodeId,
         ) -> Result<Arc<btree::Node<EntryIdToPosition>>, Self::ReadError> {
             panic!("get should never be called on a null store")
-        }
-    }
-
-    impl TreeEntry {
-        fn dir<P: Into<OsString>>(name: P, inode: Option<u64>) -> Self {
-            TreeEntry::Dir {
-                name: name.into(),
-                inode,
-            }
-        }
-
-        fn file<P: Into<OsString>>(name: P, inode: Option<u64>) -> Self {
-            TreeEntry::File {
-                name: name.into(),
-                inode,
-            }
-        }
-
-        fn parent() -> Self {
-            TreeEntry::ParentDir
-        }
-    }
-
-    impl<'a> From<&'a str> for Walk {
-        fn from(path: &'a str) -> Self {
-            let path = PathBuf::from(path.to_string());
-            let mut iter = path.components().peekable();
-            let mut components = SmallVec::new();
-
-            while let Some(component) = iter.next() {
-                match component {
-                    Component::Normal(name) => if iter.peek().is_some() {
-                        components.push(Arc::new(TreeEntry::Dir {
-                            name: name.to_owned(),
-                            inode: None,
-                        }));
-                    } else {
-                        components.push(Arc::new(TreeEntry::File {
-                            name: name.to_owned(),
-                            inode: None,
-                        }));
-                    },
-                    _ => panic!("Unexpected component: {:?}", component),
-                }
-            }
-
-            Walk(components)
         }
     }
 }
