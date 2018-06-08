@@ -2,7 +2,6 @@ use btree::{self, SeekBias};
 use id;
 use smallvec::SmallVec;
 use std::cmp::{Ord, Ordering};
-use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::ops::{Add, AddAssign};
@@ -54,6 +53,7 @@ pub struct EntryIdToPosition {
 
 enum Error<S: Store> {
     InvalidPath,
+    DuplicatePath,
     StoreReadError(S::ReadError),
 }
 
@@ -71,77 +71,67 @@ impl Tree {
             .slice(&path, SeekBias::Left, entry_db)
             .map_err(|error| Error::StoreReadError(error))?;
 
-        // TODO: Couldn't the prev and next positions be gotten from the cursor if we had
-        // `start` and `end` methods that returned a generic dimension, something like:
-        // prev_position = cursor.start()
-        // next_position = cursor.end()
+        if cursor.start::<RelativePath>() == path {
+            Err(Error::DuplicatePath)
+        } else {
+            let prev_entry = new_entries
+                .last(entry_db)
+                .map_err(|error| Error::StoreReadError(error))?;
+            let next_entry = cursor
+                .item(entry_db)
+                .map_err(|error| Error::StoreReadError(error))?;
 
-        let prev_position = new_entries
-            .last(entry_db)
-            .map_err(|error| Error::StoreReadError(error))?
-            .unwrap()
-            .position;
-        let next_position = cursor
-            .item(entry_db)
-            .map_err(|error| Error::StoreReadError(error))?
-            .unwrap()
-            .position;
+            let positions =
+                id::Ordered::between(&prev_entry.unwrap().position, &next_entry.unwrap().position);
+            let mut entry_ids_to_positions = Vec::new();
 
-        let positions = id::Ordered::between(&prev_position, &next_position);
-        let entry_ids_to_positions = Vec::new();
-
-        new_entries
-            .extend(
-                iter.into_iter()
-                    .zip(positions)
-                    .map(|(component, position)| {
-                        let id = db.gen_id();
-                        entry_ids_to_positions.push(EntryIdToPosition {
-                            entry_id: id,
-                            position: position.clone(),
-                        });
-                        Entry {
-                            id,
-                            position,
-                            component: Arc::new(component),
-                        }
-                    }),
-                entry_db,
-            )
-            .map_err(|error| Error::StoreReadError(error))?;
-
-        let old_extent = self
-            .entries
-            .extent::<id::Ordered, _>(entry_db)
-            .map_err(|error| Error::StoreReadError(error))?;
-        let suffix = cursor
-            .slice(&old_extent, SeekBias::Right, entry_db)
-            .map_err(|error| Error::StoreReadError(error))?;
-        new_entries
-            .push_tree(suffix, entry_db)
-            .map_err(|error| Error::StoreReadError(error))?;
-        self.entries = new_entries;
-
-        for mapping in entry_ids_to_positions {
-            self.positions_by_entry_id
-                .insert(
-                    &entry_id,
-                    SeekBias::Left,
-                    entry_ids_to_positions.iter(),
-                    db.position_store(),
+            new_entries
+                .extend(
+                    iter.into_iter()
+                        .zip(positions)
+                        .map(|(component, position)| {
+                            let id = db.gen_id();
+                            entry_ids_to_positions.push(EntryIdToPosition {
+                                entry_id: id,
+                                position: position.clone(),
+                            });
+                            Entry {
+                                id,
+                                position,
+                                component: Arc::new(component),
+                            }
+                        }),
+                    entry_db,
                 )
-                .map_err(|error| Error::StoreReadError(error))?;            
-        }
+                .map_err(|error| Error::StoreReadError(error))?;
 
-        Ok(())
+            let old_tree_extent = self.entries
+                .extent::<id::Ordered, _>(entry_db)
+                .map_err(|error| Error::StoreReadError(error))?;
+            let suffix = cursor
+                .slice(&old_tree_extent, SeekBias::Right, entry_db)
+                .map_err(|error| Error::StoreReadError(error))?;
+            new_entries
+                .push_tree(suffix, entry_db)
+                .map_err(|error| Error::StoreReadError(error))?;
+            self.entries = new_entries;
+
+            for mapping in entry_ids_to_positions {
+                let entry_id = mapping.entry_id;
+                self.positions_by_entry_id
+                    .insert(&entry_id, SeekBias::Left, mapping, db.position_store())
+                    .map_err(|error| Error::StoreReadError(error))?;
+            }
+
+            Ok(())
+        }
     }
 
     fn validate_path<S>(&self, path: &RelativePath, db: &S) -> Result<(), Error<S>>
     where
         S: Store,
     {
-        let root_entry = self
-            .entries
+        let root_entry = self.entries
             .first(db.entry_store())
             .map_err(|err| Error::StoreReadError(err))?
             .unwrap();
@@ -151,94 +141,6 @@ impl Tree {
             Ok(())
         }
     }
-
-    // fn insert_dir<I: IntoIterator<PathComponent>>(&mut self, path: RelativePath, entries: I) {}
-
-    // fn insert_dir<S>(
-    //     &mut self,
-    //     parent_id: id::Unique,
-    //     new_dir_id: id::Unique,
-    //     new_dir_name: PathComponent,
-    //     db: &S,
-    // ) -> Result<(), S::ReadError>
-    // where
-    //     S: Store,
-    // {
-    //     let position_db = db.position_store();
-    //     let mut cursor = self.positions_by_entry_id.cursor();
-    //     cursor.seek(&parent_id, SeekBias::Left, position_db)?;
-    //     if let Some(EntryIdToPosition { position, .. }) = cursor.item(position_db)? {
-    //         let entry_db = db.entry_store();
-    //         let mut cursor = self.entries.cursor();
-    //
-    //         let mut new_entries = cursor.slice(&position, SeekBias::Right, entry_db)?;
-    //
-    //         let mut successor_position = id::Ordered::max_value();
-    //         while let Some(item) = cursor.item(entry_db)? {
-    //             match *item.state {
-    //                 PathComponent::File { ref name } => if new_dir_name < *name {
-    //                     successor_position = item.position.clone();
-    //                     break;
-    //                 },
-    //                 PathComponent::Dir { ref name } => if new_dir_name < *name {
-    //                     successor_position = item.position.clone();
-    //                     break;
-    //                 },
-    //                 PathComponent::ParentDir => break,
-    //             }
-    //
-    //             if item.is_file() {
-    //                 new_entries.push(item, entry_db)?;
-    //                 cursor.next(entry_db)?;
-    //             } else {
-    //                 let dir_path = cursor.start::<RelativePath>();
-    //                 new_entries.push(item, entry_db)?;
-    //                 new_entries.push_tree(
-    //                     cursor.slice(&dir_path, SeekBias::Right, entry_db)?,
-    //                     entry_db,
-    //                 )?;
-    //             }
-    //         }
-    //
-    //         let new_entry_position = id::Ordered::between(
-    //             &new_entries.last(entry_db)?.unwrap().position,
-    //             &successor_position,
-    //         );
-    //         new_entries.push(
-    //             Entry {
-    //                 id: new_dir_id.clone(),
-    //                 position: new_entry_position.clone(),
-    //                 state: Arc::new(PathComponent::Dir { name: new_dir_name }),
-    //             },
-    //             entry_db,
-    //         )?;
-    //         new_entries.push(
-    //             Entry {
-    //                 id: new_dir_id.clone(),
-    //                 position: id::Ordered::between(&new_entry_position, &successor_position),
-    //                 state: Arc::new(PathComponent::ParentDir),
-    //             },
-    //             entry_db,
-    //         )?;
-    //         new_entries.push_tree(
-    //             cursor.slice(
-    //                 &self.entries.extent::<id::Ordered, _>(entry_db)?,
-    //                 SeekBias::Right,
-    //                 entry_db,
-    //             )?,
-    //             entry_db,
-    //         )?;
-    //
-    //         // let mut cursor = self.positions_by_entry_id.cursor();
-    //         // let new_positions_by_entry_id = cursor.slice()
-    //
-    //         self.entries = new_entries;
-    //
-    //         Ok(())
-    //     } else {
-    //         unimplemented!("Return an Err indicating the parent does not exist")
-    //     }
-    // }
 }
 
 impl PathComponent {
@@ -311,8 +213,7 @@ impl<'a> AddAssign<&'a Self> for RelativePath {
                     self.0.push(other_entry.clone());
                 }
                 PathComponent::ParentDir => {
-                    if self
-                        .0
+                    if self.0
                         .last()
                         .map(|e| e.is_file() || e.is_dir())
                         .unwrap_or(false)
