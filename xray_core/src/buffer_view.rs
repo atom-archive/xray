@@ -1527,11 +1527,11 @@ mod tests {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(&[0..0], "abc.def---ghi");
 
-        editor.set_cursor_position(Point::new(0, 5), false);
+        editor.set_cursor_position(Point::new(0, 5), false, false);
         editor.select_word();
         assert_eq!(render_selections(&editor), vec![selection((0, 4), (0, 7))]);
 
-        editor.set_cursor_position(Point::new(0, 8), false);
+        editor.set_cursor_position(Point::new(0, 8), false, false);
         editor.select_word();
         assert_eq!(render_selections(&editor), vec![selection((0, 7), (0, 10))]);
     }
@@ -1541,11 +1541,11 @@ mod tests {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
 
-        editor.set_cursor_position(Point::new(0, 2), false);
+        editor.set_cursor_position(Point::new(0, 2), false, false);
         editor.select_line();
         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
 
-        editor.set_cursor_position(Point::new(2, 1), false);
+        editor.set_cursor_position(Point::new(2, 1), false, false);
         editor.select_line();
         assert_eq!(render_selections(&editor), vec![selection((2, 0), (2, 3))]);
     }
@@ -1801,7 +1801,7 @@ mod tests {
             ]
         );
 
-        editor.set_cursor_position(Point::new(1, 2), false);
+        editor.set_cursor_position(Point::new(1, 2), false, false);
         assert_eq!(render_selections(&editor), vec![empty_selection(1, 2)]);
     }
 
