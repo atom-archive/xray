@@ -70,6 +70,10 @@ enum BufferViewAction {
     SelectDown,
     SelectLeft,
     SelectRight,
+    SelectTo {
+        row: u32,
+        column: u32,
+    },
     SelectToBeginningOfWord,
     SelectToEndOfWord,
     SelectToBeginningOfLine,
@@ -502,6 +506,42 @@ impl BufferView {
                         .anchor_before_point(movement::right(&buffer, head))
                         .unwrap();
                     selection.set_head(&buffer, cursor);
+                    selection.goal_column = None;
+                }
+            })
+            .unwrap();
+        self.autoscroll_to_cursor(false);
+    }
+
+
+    // pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool) {
+    //     self.buffer
+    //         .borrow_mut()
+    //         .mutate_selections(self.selection_set_id, |buffer, selections| {
+    //             // TODO: Clip point or return a result.
+    //             let anchor = buffer.anchor_before_point(position).unwrap();
+    //             selections.clear();
+    //             selections.push(Selection {
+    //                 start: anchor.clone(),
+    //                 end: anchor,
+    //                 reversed: false,
+    //                 goal_column: None,
+    //             });
+    //         })
+    //         .unwrap();
+    //     if autoscroll {
+    //         self.autoscroll_to_cursor(false);
+    //     }
+    // }
+
+    pub fn select_to(&mut self, position: Point) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                for selection in selections.iter_mut() {
+                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
+                    let anchor = buffer.anchor_before_point(position).unwrap();
+                    selection.set_head(buffer, anchor);
                     selection.goal_column = None;
                 }
             })
@@ -1086,6 +1126,10 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectDown) => self.select_down(),
             Ok(BufferViewAction::SelectLeft) => self.select_left(),
             Ok(BufferViewAction::SelectRight) => self.select_right(),
+            Ok(BufferViewAction::SelectTo {
+                row,
+                column
+            }) => self.select_to(Point::new(row, column)),
             Ok(BufferViewAction::SelectToBeginningOfWord) => self.select_to_beginning_of_word(),
             Ok(BufferViewAction::SelectToEndOfWord) => self.select_to_end_of_word(),
             Ok(BufferViewAction::SelectToBeginningOfLine) => self.select_to_beginning_of_line(),

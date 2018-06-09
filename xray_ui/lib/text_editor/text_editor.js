@@ -38,6 +38,8 @@ class TextEditor extends React.Component {
 
   constructor(props) {
     super(props);
+    this.handleMouseMove = this.handleMouseMove.bind(this);
+    this.handleMouseUp = this.handleMouseUp.bind(this);
     this.handleMouseDown = this.handleMouseDown.bind(this);
     this.handleMouseWheel = this.handleMouseWheel.bind(this);
     this.handleKeyDown = this.handleKeyDown.bind(this);
@@ -47,7 +49,7 @@ class TextEditor extends React.Component {
       CURSOR_BLINK_RESUME_DELAY
     );
     this.paddingLeft = 5;
-    this.state = { scrollLeft: 0, showLocalCursors: true };
+    this.state = { scrollLeft: 0, showLocalCursors: true, mouseDown: false };
   }
 
   componentDidMount() {
@@ -70,6 +72,12 @@ class TextEditor extends React.Component {
     }
 
     element.addEventListener("wheel", this.handleMouseWheel, { passive: true });
+    element.addEventListener("mousemove", this.handleMouseMove, {
+      passive: true
+    });
+    element.addEventListener("mouseup", this.handleMouseUp, {
+      passive: true
+    });
     element.addEventListener("mousedown", this.handleMouseDown, {
       passive: true
     });
@@ -210,21 +218,7 @@ class TextEditor extends React.Component {
     );
   }
 
-  handleMouseDown(event) {
-    if (this.canUseTextPlane()) {
-      this.handleClick(event);
-      switch (event.detail) {
-        case 2:
-          this.handleDoubleClick();
-          break;
-        case 3:
-          this.handleTripleClick();
-          break;
-      }
-    }
-  }
-
-  handleClick({ clientX, clientY }) {
+  getPositionFromMouseEvent({ clientX, clientY}) {
     const { scroll_top, line_height, first_visible_row, lines } = this.props;
     const { scrollLeft } = this.state;
     const targetX =
@@ -245,15 +239,45 @@ class TextEditor extends React.Component {
           break;
         }
       }
-
-      this.pauseCursorBlinking();
-      this.props.dispatch({
-        type: "SetCursorPosition",
-        row,
-        column,
-        autoscroll: false
-      });
+      return { row, column }
+    } else {
+      return null;
     }
+  }
+
+  handleMouseMove(event) {
+    if (this.canUseTextPlane() && this.state.mouseDown) {
+      this.props.dispatch(Object.assign({
+        type: "SelectTo",
+      }, this.getPositionFromMouseEvent(event)));
+    }
+  }
+
+  handleMouseUp(ecent) {
+    this.setState({mouseDown: false})
+  }
+
+  handleMouseDown(event) {
+    this.setState({mouseDown: true})
+    if (this.canUseTextPlane()) {
+      this.handleClick(event);
+      switch (event.detail) {
+        case 2:
+          this.handleDoubleClick();
+          break;
+        case 3:
+          this.handleTripleClick();
+          break;
+      }
+    }
+  }
+
+  handleClick(event) {
+    this.pauseCursorBlinking();
+      this.props.dispatch(Object.assign({
+        type: "SetCursorPosition",
+        autoscroll: false
+      }, this.getPositionFromMouseEvent(event)));
   }
 
   handleDoubleClick() {
