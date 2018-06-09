@@ -518,7 +518,6 @@ impl BufferView {
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
                 for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
                     let anchor = buffer.anchor_before_point(position).unwrap();
                     selection.set_head(buffer, anchor);
                     selection.goal_column = None;
@@ -1323,6 +1322,27 @@ mod tests {
         editor.move_up();
         editor.move_up();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+
+        // Select to a direct point work in front of cursor position
+        editor.select_to(Point::new(1, 0));
+        assert_eq!(render_selections(&editor), vec![selection((0, 1), (1, 0))]);
+        editor.move_right(); // cancel selection
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_right();
+        editor.move_right();
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 1)]);
+
+        // Selection can go to a point before the cursor
+        editor.select_to(Point::new(0, 0));
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 0), (2, 1))]);
+
+        // A selection can switch to a new point and the selection will update
+        editor.select_to(Point::new(0, 3));
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 3), (2, 1))]);
+
+        // A selection can even swing around the cursor without having to unselect
+        editor.select_to(Point::new(2, 3));
+        assert_eq!(render_selections(&editor), vec![selection((2, 1), (2, 3))]);
     }
 
     #[test]

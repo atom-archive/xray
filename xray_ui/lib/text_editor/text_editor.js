@@ -247,9 +247,12 @@ class TextEditor extends React.Component {
 
   handleMouseMove(event) {
     if (this.canUseTextPlane() && this.state.mouseDown) {
-      this.props.dispatch(Object.assign({
-        type: "SelectTo",
-      }, this.getPositionFromMouseEvent(event)));
+      const pos = this.getPositionFromMouseEvent(event);
+      if (pos) {
+        this.props.dispatch(Object.assign({
+          type: "SelectTo",
+        }, pos));
+      }
     }
   }
 
@@ -274,10 +277,13 @@ class TextEditor extends React.Component {
 
   handleClick(event) {
     this.pauseCursorBlinking();
+    const pos = this.getPositionFromMouseEvent(event);
+    if (pos) {
       this.props.dispatch(Object.assign({
         type: "SetCursorPosition",
         autoscroll: false
-      }, this.getPositionFromMouseEvent(event)));
+      }, pos));
+    }
   }
 
   handleDoubleClick() {
