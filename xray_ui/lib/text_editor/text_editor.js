@@ -286,7 +286,8 @@ class TextEditor extends React.Component {
       } else {
         this.props.dispatch(Object.assign({
           type: "SetCursorPosition",
-          autoscroll: false
+          autoscroll: false,
+          add: event.altKey
         }, pos));
       }
     }

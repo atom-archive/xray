@@ -88,6 +88,7 @@ enum BufferViewAction {
         row: u32,
         column: u32,
         autoscroll: bool,
+        add: bool
     },
 }
 
@@ -273,13 +274,15 @@ impl BufferView {
         Ok(())
     }
 
-    pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool) {
+    pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool, add: bool) {
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
                 // TODO: Clip point or return a result.
                 let anchor = buffer.anchor_before_point(position).unwrap();
-                selections.clear();
+                if !add {
+                    selections.clear();
+                }
                 selections.push(Selection {
                     start: anchor.clone(),
                     end: anchor,
@@ -517,7 +520,7 @@ impl BufferView {
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
+                if let Some(selection) = selections.last_mut() {
                     let anchor = buffer.anchor_before_point(position).unwrap();
                     selection.set_head(buffer, anchor);
                     selection.goal_column = None;
@@ -675,7 +678,7 @@ impl BufferView {
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
+                if let Some(selection) = selections.last_mut() {
                     let old_head = buffer.point_for_anchor(selection.head()).unwrap();
                     let new_start = movement::beginning_of_word(buffer, old_head);
                     let new_end = movement::end_of_word(buffer, new_start);
@@ -761,7 +764,7 @@ impl BufferView {
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
                 let max_point = buffer.max_point();
-                for selection in selections.iter_mut() {
+                if let Some(selection) = selections.last_mut() {
                     let old_head = buffer.point_for_anchor(selection.head()).unwrap();
                     let new_start = movement::beginning_of_line(old_head);
                     let new_end = cmp::min(Point::new(new_start.row + 1, 0), max_point);
@@ -1122,7 +1125,8 @@ impl View for BufferView {
                 row,
                 column,
                 autoscroll,
-            }) => self.set_cursor_position(Point::new(row, column), autoscroll),
+                add
+            }) => self.set_cursor_position(Point::new(row, column), autoscroll, add),
             Err(action) => eprintln!("Unrecognized action {:?}", action),
         }
     }
