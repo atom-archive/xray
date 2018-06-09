@@ -279,10 +279,16 @@ class TextEditor extends React.Component {
     this.pauseCursorBlinking();
     const pos = this.getPositionFromMouseEvent(event);
     if (pos) {
-      this.props.dispatch(Object.assign({
-        type: "SetCursorPosition",
-        autoscroll: false
-      }, pos));
+      if (event.shiftKey) {
+        this.props.dispatch(Object.assign({
+          type: "SelectTo"
+        }, pos));
+      } else {
+        this.props.dispatch(Object.assign({
+          type: "SetCursorPosition",
+          autoscroll: false
+        }, pos));
+      }
     }
   }
 
