@@ -1323,7 +1323,7 @@ mod tests {
         editor.move_up();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
 
-        // Select to a direct point work in front of cursor position
+        // Select to a direct point in front of cursor position
         editor.select_to(Point::new(1, 0));
         assert_eq!(render_selections(&editor), vec![selection((0, 1), (1, 0))]);
         editor.move_right(); // cancel selection
@@ -1332,7 +1332,7 @@ mod tests {
         editor.move_right();
         assert_eq!(render_selections(&editor), vec![empty_selection(2, 1)]);
 
-        // Selection can go to a point before the cursor
+        // Selection can even go to a point before the cursor (with reverse)
         editor.select_to(Point::new(0, 0));
         assert_eq!(render_selections(&editor), vec![rev_selection((0, 0), (2, 1))]);
 
