@@ -1806,6 +1806,54 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_cursor_selections() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor
+            .buffer
+            .borrow_mut()
+            .edit(&[0..0], "abcd\nefgh\nijkl\nmnop");
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        editor.move_right();
+        editor.move_right();
+
+        // Add a second cursor
+        editor.set_cursor_position(Point::new(1, 2), false, true);
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                empty_selection(0, 2),
+                empty_selection(1, 2),
+            ]
+        );
+
+        // Add a third cursor and select the work
+        editor.set_cursor_position(Point::new(2, 2), false, true);
+        editor.select_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                empty_selection(0, 2),
+                empty_selection(1, 2),
+                selection((2, 0), (2, 4)),
+            ]
+        );
+
+        // Add a fourth cursor and select the line
+        editor.set_cursor_position(Point::new(3, 2), false, true);
+        editor.select_line();
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                empty_selection(0, 2),
+                empty_selection(1, 2),
+                selection((2, 0), (2, 4)),
+                selection((3, 0), (3, 4)),
+            ]
+        );
+    }
+
+    #[test]
     fn test_edit() {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
 
