@@ -513,27 +513,6 @@ impl BufferView {
         self.autoscroll_to_cursor(false);
     }
 
-
-    // pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool) {
-    //     self.buffer
-    //         .borrow_mut()
-    //         .mutate_selections(self.selection_set_id, |buffer, selections| {
-    //             // TODO: Clip point or return a result.
-    //             let anchor = buffer.anchor_before_point(position).unwrap();
-    //             selections.clear();
-    //             selections.push(Selection {
-    //                 start: anchor.clone(),
-    //                 end: anchor,
-    //                 reversed: false,
-    //                 goal_column: None,
-    //             });
-    //         })
-    //         .unwrap();
-    //     if autoscroll {
-    //         self.autoscroll_to_cursor(false);
-    //     }
-    // }
-
     pub fn select_to(&mut self, position: Point) {
         self.buffer
             .borrow_mut()
