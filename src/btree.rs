@@ -573,7 +573,7 @@ impl<T: Item> Cursor<T> {
         S: NodeStore<T>,
     {
         let mut slice = Tree::new();
-        self.seek_internal(end, bias, db, Some(&mut slice));
+        self.seek_internal(end, bias, db, Some(&mut slice))?;
         Ok(slice)
     }
 
@@ -856,7 +856,7 @@ mod tests {
                         assert_eq!(cursor.item(db).unwrap(), None);
                     }
 
-                    cursor.next(db);
+                    cursor.next(db).unwrap();
                     if pos < reference_items.len() {
                         pos += 1;
                     }

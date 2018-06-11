@@ -50,7 +50,7 @@ enum Step {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd)]
-enum TreeEntry {
+pub enum TreeEntry {
     File {
         id: id::Unique,
         name: Arc<OsString>,
@@ -75,7 +75,7 @@ pub struct EntrySummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct EntryIdToPosition {
+pub struct EntryIdToPosition {
     entry_id: id::Unique,
     position: id::Ordered,
 }
@@ -471,13 +471,6 @@ impl TreeEntry {
         }
     }
 
-    fn is_dir(&self) -> bool {
-        match self {
-            TreeEntry::Dir { .. } => true,
-            _ => false,
-        }
-    }
-
     fn is_parent_dir(&self) -> bool {
         match self {
             TreeEntry::ParentDir { .. } => true,
@@ -541,7 +534,7 @@ impl btree::Dimension for id::Ordered {
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::path::{Component, PathBuf};
+    use std::path::PathBuf;
 
     #[test]
     fn test_insert() {
@@ -657,7 +650,7 @@ mod tests {
     impl btree::NodeStore<TreeEntry> for NullStore {
         type ReadError = ();
 
-        fn get(&self, id: btree::NodeId) -> Result<Arc<btree::Node<TreeEntry>>, Self::ReadError> {
+        fn get(&self, _id: btree::NodeId) -> Result<Arc<btree::Node<TreeEntry>>, Self::ReadError> {
             panic!("get should never be called on a null store")
         }
     }
@@ -667,7 +660,7 @@ mod tests {
 
         fn get(
             &self,
-            id: btree::NodeId,
+            _id: btree::NodeId,
         ) -> Result<Arc<btree::Node<EntryIdToPosition>>, Self::ReadError> {
             panic!("get should never be called on a null store")
         }
