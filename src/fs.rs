@@ -282,17 +282,49 @@ impl Cursor {
     }
 
     pub fn next_sibling<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
-        unimplemented!()
-    }
+        let db = db.entry_store();
 
-    fn push_entry(&mut self, entry: &TreeEntry) -> bool {
-        match entry {
-            TreeEntry::File { name, .. } | TreeEntry::Dir { name, .. } => {
-                self.path.push(name.as_ref());
-                self.walk.0.push(entry.into());
-                true
+        let prev_position = self.tree_cursor.start::<id::Ordered>();
+        match self.tree_cursor.item(db)?.unwrap() {
+            TreeEntry::File { .. } => self.tree_cursor.next(db)?,
+            TreeEntry::Dir { name, .. } => {
+                let mut dir_end = self.tree_cursor.start::<Walk>();
+                dir_end.push(Step::VisitDir(name.clone()));
+                dir_end.push(Step::VisitParent);
+                self.tree_cursor.seek(&dir_end, SeekBias::Right, db)?;
             }
-            TreeEntry::ParentDir { .. } => false,
+            TreeEntry::ParentDir { .. } => unreachable!("Cursor must be parked at Dir or File"),
+        }
+
+        let sibling = self.tree_cursor.item(db)?;
+        if sibling.as_ref().map_or(true, |s| s.is_parent_dir()) {
+            self.tree_cursor.seek(&prev_position, SeekBias::Right, db)?;
+            Ok(false)
+        } else {
+            self.path.pop();
+            self.path.push(sibling.unwrap().name());
+            Ok(true)
+        }
+    }
+}
+
+impl Walk {
+    fn push(&mut self, step: Step) {
+        if self.0.last().map_or(false, |last| last.is_file_visit()) {
+            self.0.pop();
+        }
+
+        if self.0.len() >= 2
+            && !self.0[self.0.len() - 2].is_parent_visit()
+            && self.0[self.0.len() - 1].is_parent_visit()
+        {
+            self.0.pop();
+            self.0.pop();
+        }
+
+        match step {
+            Step::VisitDir(_) | Step::VisitFile(_) => self.0.push(step),
+            Step::VisitParent => self.0.push(step),
         }
     }
 }
@@ -308,22 +340,7 @@ impl btree::Dimension for Walk {
 impl<'a> AddAssign<&'a Self> for Walk {
     fn add_assign(&mut self, other: &Self) {
         for other_step in &other.0 {
-            if self.0.last().map_or(false, |last| last.is_file_visit()) {
-                self.0.pop();
-            }
-
-            if self.0.len() >= 2
-                && !self.0[self.0.len() - 2].is_parent_visit()
-                && self.0[self.0.len() - 1].is_parent_visit()
-            {
-                self.0.pop();
-                self.0.pop();
-            }
-
-            match other_step {
-                Step::VisitDir(_) | Step::VisitFile(_) => self.0.push(other_step.clone()),
-                Step::VisitParent => self.0.push(other_step.clone()),
-            }
+            self.push(other_step.clone());
         }
     }
 }
@@ -438,9 +455,24 @@ impl TreeEntry {
         }
     }
 
+    fn name(&self) -> &OsStr {
+        match self {
+            TreeEntry::Dir { name, .. } => name,
+            TreeEntry::File { name, .. } => name,
+            TreeEntry::ParentDir { .. } => panic!("This method can't be called on ParentDir"),
+        }
+    }
+
     fn is_dir(&self) -> bool {
         match self {
             TreeEntry::Dir { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn is_parent_dir(&self) -> bool {
+        match self {
+            TreeEntry::ParentDir { .. } => true,
             _ => false,
         }
     }
@@ -571,6 +603,12 @@ mod tests {
         assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
         assert_eq!(cursor.descend(&db).unwrap(), false);
         assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
+        assert_eq!(cursor.next_sibling(&db).unwrap(), true);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/b/cb"));
+        assert_eq!(cursor.next_sibling(&db).unwrap(), true);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/b/c"));
+        assert_eq!(cursor.next_sibling(&db).unwrap(), false);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/b/c"));
     }
 
     #[derive(Debug)]
