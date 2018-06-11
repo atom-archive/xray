@@ -260,24 +260,32 @@ impl Cursor {
         &self.path
     }
 
-    pub fn descend<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
+    pub fn next<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
         let db = db.entry_store();
 
-        let entry = self.tree_cursor.item(db)?.unwrap();
-        if entry.is_dir() {
-            let prev_position = self.tree_cursor.start::<id::Ordered>();
+        let prev_position = self.tree_cursor.start::<id::Ordered>();
+        let mut pop_count = match self.tree_cursor.item(db)?.unwrap() {
+            TreeEntry::File { .. } => 1,
+            _ => 0,
+        };
+        loop {
             self.tree_cursor.next(db)?;
-
-            let first_child = self.tree_cursor.item(db)?;
-            if first_child.as_ref().map_or(true, |c| c.is_parent_dir()) {
-                self.tree_cursor.seek(&prev_position, SeekBias::Right, db)?;
-                Ok(false)
-            } else {
-                self.path.push(first_child.unwrap().name());
-                Ok(true)
+            match self.tree_cursor.item(db)? {
+                Some(entry) => match entry {
+                    TreeEntry::Dir { name, .. } | TreeEntry::File { name, .. } => {
+                        for _ in 0..pop_count {
+                            self.path.pop();
+                        }
+                        self.path.push(name.as_ref());
+                        return Ok(true);
+                    }
+                    TreeEntry::ParentDir { .. } => pop_count += 1,
+                },
+                None => {
+                    self.tree_cursor.seek(&prev_position, SeekBias::Right, db)?;
+                    return Ok(false);
+                }
             }
-        } else {
-            Ok(false)
         }
     }
 
@@ -595,13 +603,11 @@ mod tests {
 
         let mut cursor = tree.cursor(&db).unwrap();
         assert_eq!(cursor.path(), PathBuf::from("root"));
-        assert_eq!(cursor.descend(&db).unwrap(), true);
+        assert_eq!(cursor.next(&db).unwrap(), true);
         assert_eq!(cursor.path(), PathBuf::from("root/a"));
-        assert_eq!(cursor.descend(&db).unwrap(), true);
+        assert_eq!(cursor.next(&db).unwrap(), true);
         assert_eq!(cursor.path(), PathBuf::from("root/a/b"));
-        assert_eq!(cursor.descend(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
-        assert_eq!(cursor.descend(&db).unwrap(), false);
+        assert_eq!(cursor.next(&db).unwrap(), true);
         assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
         assert_eq!(cursor.next_sibling(&db).unwrap(), true);
         assert_eq!(cursor.path(), PathBuf::from("root/a/b/cb"));
@@ -609,6 +615,10 @@ mod tests {
         assert_eq!(cursor.path(), PathBuf::from("root/a/b/c"));
         assert_eq!(cursor.next_sibling(&db).unwrap(), false);
         assert_eq!(cursor.path(), PathBuf::from("root/a/b/c"));
+        assert_eq!(cursor.next(&db).unwrap(), true);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/d"));
+        assert_eq!(cursor.next(&db).unwrap(), false);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/d"));
     }
 
     #[derive(Debug)]
