@@ -36,7 +36,6 @@ pub struct Tree {
 
 pub struct Cursor {
     tree_cursor: btree::Cursor<TreeEntry>,
-    walk: Walk,
     path: PathBuf,
 }
 
@@ -131,7 +130,6 @@ impl Tree {
 
     fn cursor<S: Store>(&self, db: &S) -> Result<Cursor, Error<S>> {
         let entry_store = db.entry_store();
-
         let mut tree_cursor = self.entries.cursor();
         tree_cursor
             .seek(&id::Ordered::min_value(), SeekBias::Left, entry_store)
@@ -148,12 +146,7 @@ impl Tree {
 
         let mut path = PathBuf::new();
         path.extend(walk.0.iter().filter_map(|step| step.name()));
-
-        Ok(Cursor {
-            tree_cursor,
-            walk,
-            path,
-        })
+        Ok(Cursor { tree_cursor, path })
     }
 
     fn insert_dir<'a, I, P, S>(&mut self, path: P, iter: I, db: &S) -> Result<(), Error<S>>
@@ -263,7 +256,7 @@ impl Tree {
 }
 
 impl Cursor {
-    pub fn path(&mut self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
@@ -272,19 +265,16 @@ impl Cursor {
 
         let entry = self.tree_cursor.item(db)?.unwrap();
         if entry.is_dir() {
+            let prev_position = self.tree_cursor.start::<id::Ordered>();
             self.tree_cursor.next(db)?;
-            let descended = self
-                .tree_cursor
-                .item(db)?
-                .map(|item| self.push_entry(&item))
-                .unwrap_or(false);
 
-            if descended {
-                Ok(true)
+            let first_child = self.tree_cursor.item(db)?;
+            if first_child.as_ref().map_or(true, |c| c.is_parent_dir()) {
+                self.tree_cursor.seek(&prev_position, SeekBias::Right, db)?;
+                Ok(false)
             } else {
-                // self.tree_cursor.prev(db)?;
-                // Ok(false)
-                unimplemented!()
+                self.path.push(first_child.unwrap().name());
+                Ok(true)
             }
         } else {
             Ok(false)
@@ -579,8 +569,8 @@ mod tests {
         assert_eq!(cursor.path(), PathBuf::from("root/a/b"));
         assert_eq!(cursor.descend(&db).unwrap(), true);
         assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
-        // assert_eq!(cursor.descend(&db).unwrap(), false);
-        // assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
+        assert_eq!(cursor.descend(&db).unwrap(), false);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
     }
 
     #[derive(Debug)]
