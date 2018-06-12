@@ -96,7 +96,6 @@ pub struct EntryIdToPosition {
     position: id::Ordered,
 }
 
-#[derive(Debug)]
 pub enum Error<S: Store> {
     InvalidPath,
     DuplicatePath,
@@ -269,6 +268,18 @@ impl Tree {
             Ok(())
         }
     }
+
+    #[cfg(test)]
+    fn paths<S: Store>(&self, store: &S) -> Vec<String> {
+        let mut paths = Vec::new();
+        let mut cursor = self.cursor(store).unwrap();
+        loop {
+            paths.push(cursor.path().to_string_lossy().into_owned());
+            if !cursor.next(store).unwrap() {
+                return paths;
+            }
+        }
+    }
 }
 
 impl Cursor {
@@ -406,7 +417,8 @@ impl Builder {
         ).next()
             .unwrap();
 
-        self.new_entries.push(TreeEntry::ParentDir { position }, entry_store)?;
+        self.new_entries
+            .push(TreeEntry::ParentDir { position }, entry_store)?;
         self.walk.0.pop();
         self.open_dir_count -= 1;
 
@@ -653,6 +665,18 @@ impl btree::Dimension for id::Ordered {
     }
 }
 
+// When we derive this implementation, the compiler thinks that Error<S> does not implement Debug
+// in some cases.
+impl<S: Store> fmt::Debug for Error<S> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match self {
+            Error::InvalidPath => write!(f, "InvalidPath"),
+            Error::DuplicatePath => write!(f, "DuplicatePath"),
+            Error::StoreReadError(error) => write!(f, "StoreReadError({:?})", error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,37 +770,28 @@ mod tests {
         builder.push_dir("a", 0, &db).unwrap();
         builder.push_dir("b", 1, &db).unwrap();
         builder.push_dir("c", 2, &db).unwrap();
-
-        let tree = builder.tree(&db).unwrap();
-        let mut cursor = tree.cursor(&db).unwrap();
-        assert_eq!(cursor.path(), PathBuf::from("root"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/c"));
+        assert_eq!(
+            builder.tree(&db).unwrap().paths(&db),
+            ["root", "root/a", "root/a/b", "root/a/b/c"]
+        );
 
         builder.pop_dir(&db).unwrap();
         builder.push_dir("d", 3, &db).unwrap();
         builder.push_dir("e", 3, &db).unwrap();
         builder.pop_dir(&db).unwrap();
         builder.push_dir("f", 3, &db).unwrap();
-        let tree = builder.tree(&db).unwrap();
-        let mut cursor = tree.cursor(&db).unwrap();
-        assert_eq!(cursor.path(), PathBuf::from("root"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/c"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/d"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/d/e"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/d/f"));
+        assert_eq!(
+            builder.tree(&db).unwrap().paths(&db),
+            [
+                "root",
+                "root/a",
+                "root/a/b",
+                "root/a/b/c",
+                "root/a/b/d",
+                "root/a/b/d/e",
+                "root/a/b/d/f",
+            ]
+        )
     }
 
     #[derive(Debug)]
