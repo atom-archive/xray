@@ -39,6 +39,14 @@ pub struct Cursor {
     path: PathBuf,
 }
 
+// The builder is used to update an existing tree. You create a builder with a tree and a path to
+// an existing directory within that tree. You need to include the root as part of that path. For
+// an empty tree, you'll just specify a path to its root.
+//
+// Once you have a builder, you'll update it by calling `push_dir`, `pop_dir`, and `push_file`.
+// This will add entries inside the existing directory you specified. It is assumed that you'll
+// call methods representing every current directory, so any directories you don't mention that
+// were present in the previous tree are implicitly deleted.
 pub struct Builder {
     walk: Walk,
     old_entries: btree::Cursor<TreeEntry>,
