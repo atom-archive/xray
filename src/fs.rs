@@ -1,6 +1,6 @@
 use btree::{self, SeekBias};
 use id;
-use std::cmp::{self, Ord, Ordering};
+use std::cmp::{Ord, Ordering};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::ops::{Add, AddAssign};
@@ -15,18 +15,6 @@ pub trait Store {
     fn gen_id(&self) -> id::Unique;
     fn entry_store(&self) -> &Self::EntryStore;
     fn position_store(&self) -> &Self::PositionStore;
-}
-
-pub struct Entry {
-    name: OsString,
-    depth: usize,
-    inode: u64,
-    kind: EntryKind,
-}
-
-pub enum EntryKind {
-    Dir,
-    File,
 }
 
 #[derive(Clone)]
@@ -165,111 +153,6 @@ impl Tree {
         Ok(Cursor { tree_cursor, path })
     }
 
-    pub fn insert_dir<'a, I, P, S>(&mut self, path: P, iter: I, db: &S) -> Result<(), Error<S>>
-    where
-        P: Into<&'a Path>,
-        I: IntoIterator<Item = Entry>,
-        S: Store,
-    {
-        let path = path.into();
-
-        let entry_db = db.entry_store();
-        let root = self
-            .entries
-            .first(entry_db)
-            .map_err(|error| Error::StoreReadError(error))?
-            .unwrap();
-
-        let mut walk = Walk(Vec::new());
-        walk.0.push(root.into());
-        for component in path.components() {
-            match component {
-                path::Component::Normal(name) => {
-                    walk.0.push(Step::VisitDir(Arc::new(name.to_owned())));
-                }
-                _ => return Err(Error::InvalidPath),
-            }
-        }
-
-        let mut cursor = self.entries.cursor();
-        let mut new_entries = cursor
-            .slice(&walk, SeekBias::Left, entry_db)
-            .map_err(|error| Error::StoreReadError(error))?;
-
-        if cursor.start::<Walk>() == walk {
-            Err(Error::DuplicatePath)
-        } else {
-            let prev_entry = new_entries
-                .last(entry_db)
-                .map_err(|error| Error::StoreReadError(error))?;
-            let next_entry = cursor
-                .item(entry_db)
-                .map_err(|error| Error::StoreReadError(error))?;
-            let mut position_generator = id::Ordered::between(
-                prev_entry.unwrap().position(),
-                next_entry.unwrap().position(),
-            );
-            let mut prev_depth = None;
-            for entry in iter {
-                for _ in entry.depth..prev_depth.unwrap_or(entry.depth) {
-                    let position = position_generator.next().unwrap();
-                    new_entries
-                        .push(TreeEntry::ParentDir { position }, entry_db)
-                        .map_err(|error| Error::StoreReadError(error))?;
-                }
-                prev_depth = Some(entry.depth);
-
-                let entry_id = db.gen_id();
-                let entry_position = position_generator.next().unwrap();
-                let new_entry = match entry.kind {
-                    EntryKind::File => TreeEntry::File {
-                        id: entry_id,
-                        name: Arc::new(entry.name),
-                        inode: Some(entry.inode),
-                        position: entry_position.clone(),
-                    },
-                    EntryKind::Dir => TreeEntry::Dir {
-                        id: entry_id,
-                        name: Arc::new(entry.name),
-                        inode: Some(entry.inode),
-                        position: entry_position.clone(),
-                    },
-                };
-                new_entries
-                    .push(new_entry, entry_db)
-                    .map_err(|error| Error::StoreReadError(error))?;
-
-                let mapping = EntryIdToPosition {
-                    entry_id,
-                    position: entry_position,
-                };
-                self.positions_by_entry_id
-                    .insert(&entry_id, SeekBias::Left, mapping, db.position_store())
-                    .map_err(|error| Error::StoreReadError(error))?;
-            }
-            for _ in 0..cmp::max(1, prev_depth.unwrap()) {
-                let position = position_generator.next().unwrap();
-                new_entries
-                    .push(TreeEntry::ParentDir { position }, entry_db)
-                    .map_err(|error| Error::StoreReadError(error))?;
-            }
-
-            let old_tree_extent = self
-                .entries
-                .extent::<id::Ordered, _>(entry_db)
-                .map_err(|error| Error::StoreReadError(error))?;
-            let suffix = cursor
-                .slice(&old_tree_extent, SeekBias::Right, entry_db)
-                .map_err(|error| Error::StoreReadError(error))?;
-            new_entries
-                .push_tree(suffix, entry_db)
-                .map_err(|error| Error::StoreReadError(error))?;
-            self.entries = new_entries;
-
-            Ok(())
-        }
-    }
-
     #[cfg(test)]
     fn paths<S: Store>(&self, store: &S) -> Vec<String> {
         let mut paths = Vec::new();
@@ -401,7 +284,6 @@ impl Builder {
             Ordering::Less => {
                 self.old_entries.next(entry_store)?;
                 self.open_dir_count += 1;
-                let old_entry_walk = self.old_entries.end::<Walk, _>(entry_store)?;
             }
             Ordering::Equal => {
                 self.old_entries.next(entry_store)?;
@@ -411,13 +293,10 @@ impl Builder {
             }
         }
 
-        // TODO: Eliminate ordered id generator and go back to generating 1 id per call?
         let position = id::Ordered::between(
             &self.new_entries.extent(entry_store)?,
             &self.old_entries.item(entry_store)?.unwrap().position(),
-        ).next()
-            .unwrap();
-
+        );
         self.new_entries.push(
             TreeEntry::Dir {
                 id,
@@ -434,13 +313,10 @@ impl Builder {
     pub fn pop_dir<S: Store>(&mut self, store: &S) -> Result<(), S::ReadError> {
         let entry_store = store.entry_store();
 
-        // TODO: Eliminate ordered id generator and go back to generating 1 id per call?
         let position = id::Ordered::between(
             &self.new_entries.extent(entry_store)?,
             &self.old_entries.item(entry_store)?.unwrap().position(),
-        ).next()
-            .unwrap();
-
+        );
         self.walk.push(Step::VisitParent);
         self.old_entries
             .seek(&self.walk, SeekBias::Right, entry_store)?;
@@ -462,9 +338,7 @@ impl Builder {
             let next_entry = self.old_entries.item(entry_store)?.unwrap();
             for _ in 0..self.open_dir_count {
                 let position =
-                    id::Ordered::between(&new_entries.extent(entry_store)?, next_entry.position())
-                        .next()
-                        .unwrap();
+                    id::Ordered::between(&new_entries.extent(entry_store)?, next_entry.position());
                 new_entries.push(TreeEntry::ParentDir { position }, entry_store)?;
             }
         }
@@ -643,13 +517,6 @@ impl TreeEntry {
             _ => false,
         }
     }
-
-    fn is_dir(&self) -> bool {
-        match self {
-            TreeEntry::Dir { .. } => true,
-            _ => false,
-        }
-    }
 }
 
 impl btree::Item for TreeEntry {
@@ -724,84 +591,6 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashSet;
     use std::path::PathBuf;
-
-    #[test]
-    fn test_insert() {
-        let db = NullStore::new();
-        let mut tree = Tree::new("root", &db).unwrap();
-
-        tree.insert_dir(
-            Path::new("a"),
-            vec![
-                Entry {
-                    name: "a".into(),
-                    depth: 0,
-                    inode: 0,
-                    kind: EntryKind::Dir,
-                },
-                Entry {
-                    name: "b".into(),
-                    depth: 1,
-                    inode: 1,
-                    kind: EntryKind::Dir,
-                },
-                Entry {
-                    name: "c".into(),
-                    depth: 2,
-                    inode: 2,
-                    kind: EntryKind::File,
-                },
-                Entry {
-                    name: "d".into(),
-                    depth: 1,
-                    inode: 3,
-                    kind: EntryKind::File,
-                },
-            ],
-            &db,
-        ).unwrap();
-
-        tree.insert_dir(
-            Path::new("a/b/ca"),
-            vec![Entry {
-                name: "ca".into(),
-                depth: 0,
-                inode: 4,
-                kind: EntryKind::Dir,
-            }],
-            &db,
-        ).unwrap();
-
-        tree.insert_dir(
-            Path::new("a/b/cb"),
-            vec![Entry {
-                name: "cb".into(),
-                depth: 0,
-                inode: 5,
-                kind: EntryKind::Dir,
-            }],
-            &db,
-        ).unwrap();
-
-        let mut cursor = tree.cursor(&db).unwrap();
-        assert_eq!(cursor.path(), PathBuf::from("root"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/ca"));
-        assert_eq!(cursor.next_sibling(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/cb"));
-        assert_eq!(cursor.next_sibling(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/c"));
-        assert_eq!(cursor.next_sibling(&db).unwrap(), false);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/b/c"));
-        assert_eq!(cursor.next(&db).unwrap(), true);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/d"));
-        assert_eq!(cursor.next(&db).unwrap(), false);
-        assert_eq!(cursor.path(), PathBuf::from("root/a/d"));
-    }
 
     #[test]
     fn test_builder_basic() {
@@ -975,11 +764,11 @@ mod tests {
         }
 
         fn build<S: Store>(&self, builder: &mut Builder, store: &S) {
-            builder.push_dir(self.name.clone(), 0, store);
+            builder.push_dir(self.name.clone(), 0, store).unwrap();
             for dir in &self.dir_entries {
                 dir.build(builder, store);
             }
-            builder.pop_dir(store);
+            builder.pop_dir(store).unwrap();
         }
     }
 

@@ -1,5 +1,4 @@
 use std::cmp;
-use std::iter;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 use uuid::{Uuid, UuidVersion};
@@ -14,12 +13,6 @@ pub struct Unique {
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
 pub struct Ordered(Arc<Vec<OrderedEntry>>);
-
-pub struct OrderedGenerator {
-    prev_entries: Vec<OrderedEntry>,
-    next: Ordered,
-    max_entry: OrderedEntry,
-}
 
 impl Unique {
     pub fn random() -> Self {
@@ -73,12 +66,35 @@ impl Ordered {
         ORDERED_ID_MAX_VALUE.clone()
     }
 
-    pub fn between(prev: &Self, next: &Self) -> OrderedGenerator {
-        Self::between_with_max(prev, next, OrderedEntry::max_value())
+    pub fn between(prev_id: &Self, next_id: &Self) -> Self {
+        Self::between_with_max(prev_id, next_id, OrderedEntry::max_value())
     }
 
-    fn between_with_max(prev: &Self, next: &Self, max_value: OrderedEntry) -> OrderedGenerator {
-        OrderedGenerator::new(prev, next, max_value)
+    fn between_with_max(prev_id: &Self, next_id: &Self, max_value: OrderedEntry) -> Self {
+        const MAX_STEP: OrderedEntry = 32;
+        let level = 0;
+        let mut found_lesser = false;
+        let mut new_id = Vec::new();
+
+        loop {
+            let prev = *prev_id.0.get(level).unwrap_or(&0);
+            let next = if found_lesser {
+                max_value
+            } else {
+                *next_id.0.get(level).unwrap_or(&max_value)
+            };
+
+            let interval = next - prev;
+            if interval > 1 {
+                new_id.push(prev + cmp::min(interval / 2, MAX_STEP));
+                return Ordered(Arc::new(new_id));
+            } else {
+                if interval == 1 {
+                    found_lesser = true;
+                }
+                new_id.push(prev);
+            }
+        }
     }
 }
 
@@ -100,53 +116,6 @@ impl<'a> AddAssign<&'a Self> for Ordered {
     fn add_assign(&mut self, other: &Self) {
         if *self < *other {
             *self = other.clone();
-        }
-    }
-}
-
-impl OrderedGenerator {
-    fn new(prev: &Ordered, next: &Ordered, max_entry: OrderedEntry) -> Self {
-        debug_assert!(prev < next);
-
-        let prev_iter = prev.0.iter().cloned().chain(iter::repeat(0));
-        let next_iter = next.0.iter().cloned().chain(iter::repeat(max_entry));
-        let mut iter = prev_iter.zip(next_iter);
-        let mut prev_entries = Vec::new();
-        loop {
-            let (prev, next) = iter.next().unwrap();
-            prev_entries.push(prev);
-            if next.saturating_sub(prev) >= 2 {
-                break;
-            }
-        }
-
-        OrderedGenerator {
-            max_entry,
-            prev_entries,
-            next: next.clone(),
-        }
-    }
-}
-
-impl Iterator for OrderedGenerator {
-    type Item = Ordered;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let prev_entry = *self.prev_entries.last().unwrap();
-        let next_entry = *self.next
-            .0
-            .get(self.prev_entries.len() - 1)
-            .unwrap_or(&self.max_entry);
-
-        let interval = next_entry - prev_entry;
-
-        if interval >= 2 {
-            const MAX_STEP: OrderedEntry = 32;
-            *self.prev_entries.last_mut().unwrap() += cmp::min(interval / 2, MAX_STEP);
-            Some(Ordered(Arc::new(self.prev_entries.clone())))
-        } else {
-            self.prev_entries.push(0);
-            self.next()
         }
     }
 }
