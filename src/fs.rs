@@ -392,17 +392,25 @@ impl Builder {
         ).next()
             .unwrap();
 
+        self.walk.push(Step::VisitDir(name.clone()));
+        self.old_entries
+            .seek(&self.walk, SeekBias::Left, entry_store)?;
+        let old_entry = self.old_entries.item(entry_store)?.unwrap();
+        if old_entry.is_dir() && name.as_ref() == old_entry.name() {
+            self.old_entries.next(entry_store)?;
+        } else {
+            self.open_dir_count += 1;
+        }
+
         self.new_entries.push(
             TreeEntry::Dir {
                 id,
-                name: name.clone(),
+                name,
                 inode,
                 position,
             },
             entry_store,
         )?;
-        self.walk.0.push(Step::VisitDir(name));
-        self.open_dir_count += 1;
 
         Ok(())
     }
@@ -417,35 +425,39 @@ impl Builder {
         ).next()
             .unwrap();
 
+        self.walk.push(Step::VisitParent);
+        self.old_entries
+            .seek(&self.walk, SeekBias::Right, entry_store)?;
+        if self.open_dir_count != 0 {
+            self.open_dir_count -= 1;
+        }
         self.new_entries
             .push(TreeEntry::ParentDir { position }, entry_store)?;
-        self.walk.0.pop();
-        self.open_dir_count -= 1;
 
         Ok(())
     }
 
     pub fn tree<S: Store>(&self, store: &S) -> Result<Tree, S::ReadError> {
         let entry_store = store.entry_store();
-        let mut entries = self.new_entries.clone();
+        let mut old_entries = self.old_entries.clone();
+        let mut new_entries = self.new_entries.clone();
 
         for _ in 0..self.open_dir_count {
             let position =
-                id::Ordered::between(&entries.extent(entry_store)?, &self.old_entries.start())
+                id::Ordered::between(&new_entries.extent(entry_store)?, &self.old_entries.start())
                     .next()
                     .unwrap();
-            entries.push(TreeEntry::ParentDir { position }, entry_store)?;
+            new_entries.push(TreeEntry::ParentDir { position }, entry_store)?;
         }
 
-        entries.push_tree(
-            self.old_entries
-                .clone()
-                .suffix::<id::Ordered, _>(entry_store)?,
+        old_entries.seek(&self.walk, SeekBias::Right, entry_store)?;
+        new_entries.push_tree(
+            old_entries.suffix::<id::Ordered, _>(entry_store)?,
             entry_store,
         )?;
 
         Ok(Tree {
-            entries,
+            entries: new_entries,
             positions_by_entry_id: self.positions_by_entry_id.clone(),
         })
     }
@@ -612,6 +624,13 @@ impl TreeEntry {
             _ => false,
         }
     }
+
+    fn is_dir(&self) -> bool {
+        match self {
+            TreeEntry::Dir { .. } => true,
+            _ => false,
+        }
+    }
 }
 
 impl btree::Item for TreeEntry {
@@ -770,18 +789,20 @@ mod tests {
         builder.push_dir("a", 0, &db).unwrap();
         builder.push_dir("b", 1, &db).unwrap();
         builder.push_dir("c", 2, &db).unwrap();
+        let tree = builder.tree(&db).unwrap();
         assert_eq!(
-            builder.tree(&db).unwrap().paths(&db),
+            tree.paths(&db),
             ["root", "root/a", "root/a/b", "root/a/b/c"]
         );
 
         builder.pop_dir(&db).unwrap();
         builder.push_dir("d", 3, &db).unwrap();
-        builder.push_dir("e", 3, &db).unwrap();
+        builder.push_dir("e", 4, &db).unwrap();
         builder.pop_dir(&db).unwrap();
-        builder.push_dir("f", 3, &db).unwrap();
+        builder.push_dir("f", 5, &db).unwrap();
+        let tree = builder.tree(&db).unwrap();
         assert_eq!(
-            builder.tree(&db).unwrap().paths(&db),
+            tree.paths(&db),
             [
                 "root",
                 "root/a",
@@ -791,7 +812,50 @@ mod tests {
                 "root/a/b/d/e",
                 "root/a/b/d/f",
             ]
-        )
+        );
+
+        let mut builder = Builder::new(tree, &PathBuf::from("root/a/b"), &db).unwrap();
+        builder.push_dir("ca", 6, &db).unwrap();
+        builder.push_dir("g", 7, &db).unwrap();
+        builder.push_dir("h", 8, &db).unwrap();
+        let tree = builder.tree(&db).unwrap();
+        assert_eq!(
+            tree.paths(&db),
+            [
+                "root",
+                "root/a",
+                "root/a/b",
+                "root/a/b/ca",
+                "root/a/b/ca/g",
+                "root/a/b/ca/g/h",
+                "root/a/b/d",
+                "root/a/b/d/e",
+                "root/a/b/d/f",
+            ]
+        );
+        builder.pop_dir(&db).unwrap();
+        builder.pop_dir(&db).unwrap();
+        builder.pop_dir(&db).unwrap();
+        builder.push_dir("d", 3, &db).unwrap();
+        builder.push_dir("e", 4, &db).unwrap();
+        builder.pop_dir(&db).unwrap();
+        builder.push_dir("ea", 9, &db).unwrap();
+        let tree = builder.tree(&db).unwrap();
+        assert_eq!(
+            tree.paths(&db),
+            [
+                "root",
+                "root/a",
+                "root/a/b",
+                "root/a/b/ca",
+                "root/a/b/ca/g",
+                "root/a/b/ca/g/h",
+                "root/a/b/d",
+                "root/a/b/d/e",
+                "root/a/b/d/ea",
+                "root/a/b/d/f",
+            ]
+        );
     }
 
     #[derive(Debug)]
