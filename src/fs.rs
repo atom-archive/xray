@@ -698,6 +698,9 @@ impl<S: Store> fmt::Debug for Error<S> {
 
 #[cfg(test)]
 mod tests {
+    extern crate rand;
+
+    use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -856,6 +859,93 @@ mod tests {
                 "root/a/b/d/f",
             ]
         );
+    }
+
+    #[test]
+    fn test_builder_random() {
+        for seed in 0..100 {
+            let mut rng = StdRng::from_seed(&[seed]);
+
+            let mut store = NullStore::new();
+            let store = &store;
+
+            let mut reference_tree = TestDir::gen(&mut rng, 0);
+            let tree = Tree::new(reference_tree.name.clone(), store).unwrap();
+            let mut builder =
+                Builder::new(tree, &PathBuf::from(&reference_tree.name), store).unwrap();
+            reference_tree.build(&mut builder, store);
+
+            let tree = builder.tree(store).unwrap();
+            assert_eq!(tree.paths(store), reference_tree.paths());
+        }
+    }
+
+    const MAX_TEST_TREE_DEPTH: usize = 5;
+
+    struct TestDir {
+        name: OsString,
+        dir_entries: Vec<TestDir>,
+    }
+
+    impl TestDir {
+        fn gen<T: Rng>(rng: &mut T, depth: usize) -> Self {
+            Self {
+                name: gen_name(rng),
+                dir_entries: (0..rng.gen_range(0, MAX_TEST_TREE_DEPTH - depth))
+                    .map(|_| Self::gen(rng, depth + 1))
+                    .collect(),
+            }
+        }
+
+        fn mutate<T: Rng>(&mut self, rng: &mut T, depth: usize) {
+            if rng.gen_weighted_bool(10) {
+                self.name = gen_name(rng);
+            }
+            self.dir_entries.retain(|_| !rng.gen_weighted_bool(5));
+            for dir in &mut self.dir_entries {
+                if rng.gen_weighted_bool(3) {
+                    dir.mutate(rng, depth + 1);
+                }
+            }
+            if depth < MAX_TEST_TREE_DEPTH {
+                for _ in 0..rng.gen_range(0, 5) {
+                    self.dir_entries.push(Self::gen(rng, depth + 1));
+                }
+            }
+            self.dir_entries.sort_by(|a, b| a.name.cmp(&b.name))
+        }
+
+        fn paths(&self) -> Vec<String> {
+            let mut cur_path = PathBuf::new();
+            let mut paths = Vec::new();
+            self.paths_recursive(&mut cur_path, &mut paths);
+            paths
+        }
+
+        fn paths_recursive(&self, cur_path: &mut PathBuf, paths: &mut Vec<String>) {
+            cur_path.push(self.name.clone());
+            paths.push(cur_path.clone().to_string_lossy().into_owned());
+            for dir in &self.dir_entries {
+                dir.paths_recursive(cur_path, paths);
+            }
+            cur_path.pop();
+        }
+
+        fn build<S: Store>(&self, builder: &mut Builder, store: &S) {
+            for dir in &self.dir_entries {
+                builder.push_dir(dir.name.clone(), 0, store).unwrap();
+                dir.build(builder, store);
+                builder.pop_dir(store).unwrap();
+            }
+        }
+    }
+
+    fn gen_name<T: Rng>(rng: &mut T) -> OsString {
+        let mut name = String::new();
+        for _ in 0..rng.gen_range(1, 4) {
+            name.push(rng.gen_range(b'a', b'z' + 1).into());
+        }
+        name.into()
     }
 
     #[derive(Debug)]
