@@ -115,7 +115,7 @@ impl OrderedGenerator {
         loop {
             let (prev, next) = iter.next().unwrap();
             prev_entries.push(prev);
-            if next - prev >= 2 {
+            if next.saturating_sub(prev) >= 2 {
                 break;
             }
         }

@@ -388,17 +388,10 @@ impl Builder {
         let name = Arc::new(name.into());
         let inode = Some(inode);
 
-        eprintln!("push dir {:?}", name);
-
         self.walk.push(Step::VisitDir(name.clone()));
 
         self.old_entries
             .seek(&self.walk, SeekBias::Left, entry_store)?;
-
-        let old_entry_walk = self.old_entries.end::<Walk, _>(entry_store)?;
-
-        eprintln!("new entry walk {:?}", self.walk);
-        eprintln!("old entry walk {:?}", old_entry_walk);
 
         match self
             .old_entries
@@ -406,20 +399,14 @@ impl Builder {
             .cmp(&self.walk)
         {
             Ordering::Less => {
-                eprintln!("less");
                 self.old_entries.next(entry_store)?;
                 self.open_dir_count += 1;
-
                 let old_entry_walk = self.old_entries.end::<Walk, _>(entry_store)?;
-
-                eprintln!("old_entry_walk {:?}", old_entry_walk);
             }
             Ordering::Equal => {
-                eprintln!("equal");
                 self.old_entries.next(entry_store)?;
             }
             Ordering::Greater => {
-                eprintln!("greater");
                 self.open_dir_count += 1;
             }
         }
@@ -454,9 +441,7 @@ impl Builder {
         ).next()
             .unwrap();
 
-        eprintln!("pop dir");
         self.walk.push(Step::VisitParent);
-        eprintln!("seek to walk after pop {:?}", self.walk);
         self.old_entries
             .seek(&self.walk, SeekBias::Right, entry_store)?;
         if self.open_dir_count != 0 {
@@ -900,8 +885,7 @@ mod tests {
 
     #[test]
     fn test_builder_random() {
-        for seed in 0..10000 {
-            eprintln!("SEED IS {}", seed);
+        for seed in 0..10 {
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut store = NullStore::new();
@@ -910,11 +894,11 @@ mod tests {
             let mut reference_tree = TestDir::gen(&mut rng, 0);
             let mut tree = Tree::new(reference_tree.name.clone(), store).unwrap();
 
-            for _ in 0..2 {
-                eprintln!("=========================================");
-                eprintln!("existing paths {:#?}", tree.paths(store));
-                eprintln!("new tree paths {:#?}", reference_tree.paths());
-                eprintln!("=========================================");
+            for _ in 0..5 {
+                // eprintln!("=========================================");
+                // eprintln!("existing paths {:#?}", tree.paths(store).len());
+                // eprintln!("new tree paths {:#?}", reference_tree.paths().len());
+                // eprintln!("=========================================");
 
                 let mut builder =
                     Builder::new(tree.clone(), &PathBuf::from(&reference_tree.name), store)
@@ -927,7 +911,7 @@ mod tests {
         }
     }
 
-    const MAX_TEST_TREE_DEPTH: usize = 2;
+    const MAX_TEST_TREE_DEPTH: usize = 5;
 
     struct TestDir {
         name: OsString,
