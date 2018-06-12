@@ -452,6 +452,14 @@ impl<T: Item> Cursor<T> {
         D::from_summary(&self.summary)
     }
 
+    pub fn end<D: Dimension<Summary = T::Summary>, S: NodeStore<T>>(&self, db: &S) -> Result<D, S::ReadError> {
+        if let Some(item) = self.item(db)? {
+            Ok(self.start::<D>() + &D::from_summary(&item.summarize()))
+        } else {
+            Ok(self.start::<D>())
+        }
+    }
+
     pub fn item<S: NodeStore<T>>(&self, db: &S) -> Result<Option<T>, S::ReadError> {
         assert!(self.did_seek, "Must seek before calling this method");
         if let Some((subtree, index)) = self.stack.last() {

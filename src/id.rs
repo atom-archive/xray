@@ -106,6 +106,8 @@ impl<'a> AddAssign<&'a Self> for Ordered {
 
 impl OrderedGenerator {
     fn new(prev: &Ordered, next: &Ordered, max_entry: OrderedEntry) -> Self {
+        debug_assert!(prev < next);
+
         let prev_iter = prev.0.iter().cloned().chain(iter::repeat(0));
         let next_iter = next.0.iter().cloned().chain(iter::repeat(max_entry));
         let mut iter = prev_iter.zip(next_iter);
