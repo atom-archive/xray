@@ -39,6 +39,14 @@ pub struct Cursor {
     path: PathBuf,
 }
 
+pub struct Builder {
+    walk: Walk,
+    old_entries: btree::Cursor<TreeEntry>,
+    new_entries: btree::Tree<TreeEntry>,
+    positions_by_entry_id: btree::Tree<EntryIdToPosition>,
+    open_dir_count: usize,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Walk(Vec<Step>);
 
@@ -81,14 +89,14 @@ pub struct EntryIdToPosition {
 }
 
 #[derive(Debug)]
-enum Error<S: Store> {
+pub enum Error<S: Store> {
     InvalidPath,
     DuplicatePath,
     StoreReadError(S::ReadError),
 }
 
 impl Tree {
-    fn new<N: Into<OsString>, S: Store>(root_name: N, db: &S) -> Result<Self, Error<S>> {
+    pub fn new<N: Into<OsString>, S: Store>(root_name: N, db: &S) -> Result<Self, Error<S>> {
         let entry_db = db.entry_store();
         let mut tree = Self {
             entries: btree::Tree::new(),
@@ -128,7 +136,7 @@ impl Tree {
         Ok(tree)
     }
 
-    fn cursor<S: Store>(&self, db: &S) -> Result<Cursor, Error<S>> {
+    pub fn cursor<S: Store>(&self, db: &S) -> Result<Cursor, Error<S>> {
         let entry_store = db.entry_store();
         let mut tree_cursor = self.entries.cursor();
         tree_cursor
@@ -149,7 +157,7 @@ impl Tree {
         Ok(Cursor { tree_cursor, path })
     }
 
-    fn insert_dir<'a, I, P, S>(&mut self, path: P, iter: I, db: &S) -> Result<(), Error<S>>
+    pub fn insert_dir<'a, I, P, S>(&mut self, path: P, iter: I, db: &S) -> Result<(), Error<S>>
     where
         P: Into<&'a Path>,
         I: IntoIterator<Item = Entry>,
@@ -313,6 +321,94 @@ impl Cursor {
             self.path.push(sibling.unwrap().name());
             Ok(true)
         }
+    }
+}
+
+impl Builder {
+    pub fn new<S: Store>(old_tree: Tree, path: &Path, store: &S) -> Result<Self, Error<S>> {
+        let entry_store = store.entry_store();
+
+        let mut walk = Walk(Vec::new());
+        for component in path.components() {
+            match component {
+                path::Component::Normal(name) => {
+                    walk.0.push(Step::VisitDir(Arc::new(name.to_owned())));
+                }
+                _ => return Err(Error::InvalidPath),
+            }
+        }
+
+        let mut old_entries = old_tree.entries.cursor();
+        let mut new_entries = old_entries
+            .slice(&walk, SeekBias::Right, entry_store)
+            .map_err(|error| Error::StoreReadError(error))?;
+
+        if walk == old_entries.start() {
+            Ok(Builder {
+                walk,
+                old_entries,
+                new_entries,
+                positions_by_entry_id: old_tree.positions_by_entry_id.clone(),
+                open_dir_count: 0,
+            })
+        } else {
+            Err(Error::InvalidPath)
+        }
+    }
+
+    pub fn push_dir<N: Into<OsString>, S: Store>(
+        &mut self,
+        name: N,
+        inode: u64,
+        store: &S,
+    ) -> Result<(), S::ReadError> {
+        let entry_store = store.entry_store();
+        let id = store.gen_id();
+
+        // TODO: Eliminate ordered id generator and go back to generating 1 id per call?
+        let position = id::Ordered::between(
+            &self.new_entries.extent(entry_store)?,
+            &self.old_entries.start(),
+        ).next()
+            .unwrap();
+
+        self.new_entries.push(
+            TreeEntry::Dir {
+                id,
+                name: Arc::new(name.into()),
+                inode: Some(inode),
+                position,
+            },
+            entry_store,
+        )?;
+        self.open_dir_count += 1;
+
+        Ok(())
+    }
+
+    pub fn tree<S: Store>(&self, store: &S) -> Result<Tree, S::ReadError> {
+        let entry_store = store.entry_store();
+        let mut entries = self.new_entries.clone();
+
+        for _ in 0..self.open_dir_count {
+            let position =
+                id::Ordered::between(&entries.extent(entry_store)?, &self.old_entries.start())
+                    .next()
+                    .unwrap();
+            entries.push(TreeEntry::ParentDir { position }, entry_store)?;
+        }
+
+        entries.push_tree(
+            self.old_entries
+                .clone()
+                .suffix::<id::Ordered, _>(entry_store)?,
+            entry_store,
+        )?;
+        
+        Ok(Tree {
+            entries,
+            positions_by_entry_id: self.positions_by_entry_id.clone(),
+        })
     }
 }
 
@@ -612,6 +708,27 @@ mod tests {
         assert_eq!(cursor.path(), PathBuf::from("root/a/d"));
         assert_eq!(cursor.next(&db).unwrap(), false);
         assert_eq!(cursor.path(), PathBuf::from("root/a/d"));
+    }
+
+    #[test]
+    fn test_builder() {
+        let db = NullStore::new();
+        let mut tree = Tree::new("root", &db).unwrap();
+        let mut builder = Builder::new(tree, &PathBuf::from("root"), &db).unwrap();
+
+        builder.push_dir("a", 0, &db).unwrap();
+        builder.push_dir("b", 1, &db).unwrap();
+        builder.push_dir("c", 2, &db).unwrap();
+
+        let tree = builder.tree(&db).unwrap();
+        let mut cursor = tree.cursor(&db).unwrap();
+        assert_eq!(cursor.path(), PathBuf::from("root"));
+        assert_eq!(cursor.next(&db).unwrap(), true);
+        assert_eq!(cursor.path(), PathBuf::from("root/a"));
+        assert_eq!(cursor.next(&db).unwrap(), true);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/b"));
+        assert_eq!(cursor.next(&db).unwrap(), true);
+        assert_eq!(cursor.path(), PathBuf::from("root/a/b/c"));
     }
 
     #[derive(Debug)]

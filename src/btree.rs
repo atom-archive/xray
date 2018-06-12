@@ -49,6 +49,7 @@ pub enum Node<T: Item> {
     },
 }
 
+#[derive(Clone)]
 pub struct Cursor<T: Item> {
     tree: Tree<T>,
     stack: SmallVec<[(Tree<T>, usize); 16]>,
@@ -574,6 +575,17 @@ impl<T: Item> Cursor<T> {
     {
         let mut slice = Tree::new();
         self.seek_internal(end, bias, db, Some(&mut slice))?;
+        Ok(slice)
+    }
+    
+    pub fn suffix<D, S>(&mut self, db: &S) -> Result<Tree<T>, S::ReadError>
+    where
+        D: Dimension<Summary = T::Summary>,
+        S: NodeStore<T>,
+    {
+        let extent = &self.tree.extent::<D, _>(db)?;
+        let mut slice = Tree::new();
+        self.seek_internal(extent, SeekBias::Right, db, Some(&mut slice))?;
         Ok(slice)
     }
 
