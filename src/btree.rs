@@ -13,13 +13,15 @@ pub trait Item: Clone + Eq + fmt::Debug {
     fn summarize(&self) -> Self::Summary;
 }
 
-pub trait Dimension: for<'a> Add<&'a Self, Output = Self> + Ord + Clone + fmt::Debug {
+pub trait Dimension:
+    for<'a> Add<&'a Self, Output = Self> + for<'a> AddAssign<&'a Self> + Ord + Clone + fmt::Debug
+{
     type Summary: Default;
 
-    fn from_summary(summary: &Self::Summary) -> Self;
+    fn from_summary(summary: &Self::Summary) -> &Self;
 
     fn default() -> Self {
-        Self::from_summary(&Self::Summary::default())
+        Self::from_summary(&Self::Summary::default()).clone()
     }
 }
 
@@ -94,8 +96,8 @@ impl<T: Item> Tree<T> {
         D: Dimension<Summary = T::Summary>,
     {
         match *self.node(db)? {
-            Node::Internal { ref summary, .. } => Ok(D::from_summary(summary)),
-            Node::Leaf { ref summary, .. } => Ok(D::from_summary(summary)),
+            Node::Internal { ref summary, .. } => Ok(D::from_summary(summary).clone()),
+            Node::Leaf { ref summary, .. } => Ok(D::from_summary(summary).clone()),
         }
     }
 
@@ -449,10 +451,13 @@ impl<T: Item> Cursor<T> {
     }
 
     pub fn start<D: Dimension<Summary = T::Summary>>(&self) -> D {
-        D::from_summary(&self.summary)
+        D::from_summary(&self.summary).clone()
     }
 
-    pub fn end<D: Dimension<Summary = T::Summary>, S: NodeStore<T>>(&self, db: &S) -> Result<D, S::ReadError> {
+    pub fn end<D: Dimension<Summary = T::Summary>, S: NodeStore<T>>(
+        &self,
+        db: &S,
+    ) -> Result<D, S::ReadError> {
         if let Some(item) = self.item(db)? {
             Ok(self.start::<D>() + &D::from_summary(&item.summarize()))
         } else {
@@ -585,7 +590,7 @@ impl<T: Item> Cursor<T> {
         self.seek_internal(end, bias, db, Some(&mut slice))?;
         Ok(slice)
     }
-    
+
     pub fn suffix<D, S>(&mut self, db: &S) -> Result<Tree<T>, S::ReadError>
     where
         D: Dimension<Summary = T::Summary>,
@@ -599,7 +604,7 @@ impl<T: Item> Cursor<T> {
 
     fn seek_internal<D, S>(
         &mut self,
-        pos: &D,
+        target: &D,
         bias: SeekBias,
         db: &S,
         mut slice: Option<&mut Tree<T>>,
@@ -608,6 +613,7 @@ impl<T: Item> Cursor<T> {
         D: Dimension<Summary = T::Summary>,
         S: NodeStore<T>,
     {
+        let mut pos = D::from_summary(&self.summary).clone();
         let mut containing_subtree = None;
 
         if self.did_seek {
@@ -624,16 +630,18 @@ impl<T: Item> Cursor<T> {
                             while *index < child_summaries.len() {
                                 let child_tree = &child_trees[*index];
                                 let child_summary = &child_summaries[*index];
-                                let child_end = D::from_summary(&self.summary)
-                                    + &D::from_summary(&child_summary);
+                                let mut child_end = pos;
+                                child_end += D::from_summary(&child_summary);
 
-                                if *pos > child_end
-                                    || (*pos == child_end && bias == SeekBias::Right)
+                                if *target > child_end
+                                    || (*target == child_end && bias == SeekBias::Right)
                                 {
                                     self.summary += child_summary;
+                                    pos = child_end;
                                     slice.as_mut().unwrap().push_tree(child_tree.clone(), db)?;
                                     *index += 1;
                                 } else {
+                                    pos = D::from_summary(&self.summary).clone();
                                     containing_subtree = Some(child_tree.clone());
                                 }
                             }
@@ -645,16 +653,19 @@ impl<T: Item> Cursor<T> {
                             while *index < items.len() {
                                 let item = &items[*index];
                                 let item_summary = item.summarize();
-                                let item_end = D::from_summary(&self.summary)
-                                    + &D::from_summary(&item_summary);
+                                let mut item_end = pos;
+                                item_end += D::from_summary(&item_summary);
 
-                                if *pos > item_end || (*pos == item_end && bias == SeekBias::Right)
+                                if *target > item_end
+                                    || (*target == item_end && bias == SeekBias::Right)
                                 {
                                     self.summary += &item_summary;
+                                    pos = item_end;
                                     slice_items.push(item.clone());
                                     slice_items_summary += &item_summary;
                                     *index += 1;
                                 } else {
+                                    pos = D::from_summary(&self.summary).clone();
                                     slice.as_mut().unwrap().push_tree(
                                         Tree::Resident(Arc::new(Node::Leaf {
                                             summary: slice_items_summary,
@@ -697,14 +708,19 @@ impl<T: Item> Cursor<T> {
                         ..
                     } => {
                         for (index, child_summary) in child_summaries.iter().enumerate() {
-                            let child_end =
-                                D::from_summary(&self.summary) + &D::from_summary(child_summary);
-                            if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
+                            let mut child_end = pos;
+                            child_end += D::from_summary(child_summary);
+
+                            if *target > child_end
+                                || (*target == child_end && bias == SeekBias::Right)
+                            {
                                 self.summary += child_summary;
+                                pos = child_end;
                                 if let Some(slice) = slice.as_mut() {
                                     slice.push_tree(child_trees[index].clone(), db)?;
                                 }
                             } else {
+                                pos = D::from_summary(&self.summary).clone();
                                 self.stack.push((subtree.clone(), index));
                                 next_subtree = Some(child_trees[index].clone());
                                 break;
@@ -717,16 +733,20 @@ impl<T: Item> Cursor<T> {
 
                         for (index, item) in items.iter().enumerate() {
                             let item_summary = item.summarize();
-                            let child_end =
-                                D::from_summary(&self.summary) + &D::from_summary(&item_summary);
+                            let mut child_end = pos;
+                            child_end += &D::from_summary(&item_summary);
 
-                            if *pos > child_end || (*pos == child_end && bias == SeekBias::Right) {
+                            if *target > child_end
+                                || (*target == child_end && bias == SeekBias::Right)
+                            {
                                 if slice.is_some() {
                                     slice_items.push(item.clone());
                                     slice_items_summary += &item_summary;
                                 }
                                 self.summary += &item_summary;
+                                pos = child_end;
                             } else {
+                                pos = D::from_summary(&self.summary).clone();
                                 self.stack.push((subtree.clone(), index));
                                 break;
                             }
@@ -887,8 +907,7 @@ mod tests {
 
     #[derive(Clone, Default, Debug)]
     pub struct IntegersSummary {
-        count: usize,
-        sum: usize,
+        count: Count,
     }
 
     #[derive(Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
@@ -898,25 +917,27 @@ mod tests {
         type Summary = IntegersSummary;
 
         fn summarize(&self) -> Self::Summary {
-            IntegersSummary {
-                count: 1,
-                sum: *self as usize,
-            }
+            IntegersSummary { count: Count(1) }
         }
     }
 
     impl<'a> AddAssign<&'a Self> for IntegersSummary {
         fn add_assign(&mut self, other: &Self) {
-            self.count += other.count;
-            self.sum += other.sum;
+            self.count += &other.count;
         }
     }
 
     impl Dimension for Count {
         type Summary = IntegersSummary;
 
-        fn from_summary(summary: &Self::Summary) -> Self {
-            Count(summary.count)
+        fn from_summary(summary: &Self::Summary) -> &Self {
+            &summary.count
+        }
+    }
+
+    impl<'a> AddAssign<&'a Self> for Count {
+        fn add_assign(&mut self, other: &Self) {
+            self.0 += other.0;
         }
     }
 

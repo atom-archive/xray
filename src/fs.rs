@@ -377,8 +377,8 @@ impl Walk {
 impl btree::Dimension for Walk {
     type Summary = EntrySummary;
 
-    fn from_summary(summary: &Self::Summary) -> Self {
-        summary.walk.clone()
+    fn from_summary(summary: &Self::Summary) -> &Self {
+        &summary.walk
     }
 }
 
@@ -561,16 +561,16 @@ impl btree::Item for EntryIdToPosition {
 impl btree::Dimension for id::Unique {
     type Summary = Self;
 
-    fn from_summary(summary: &Self::Summary) -> Self {
-        summary.clone()
+    fn from_summary(summary: &Self::Summary) -> &Self {
+        &summary
     }
 }
 
 impl btree::Dimension for id::Ordered {
     type Summary = EntrySummary;
 
-    fn from_summary(summary: &Self::Summary) -> Self {
-        summary.position.clone()
+    fn from_summary(summary: &Self::Summary) -> &Self {
+        &summary.position
     }
 }
 
