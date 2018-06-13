@@ -363,17 +363,14 @@ impl Walk {
         }
 
         if self.0.len() >= 2
-            && !self.0[self.0.len() - 2].is_parent_visit()
+            && self.0[self.0.len() - 2].is_dir_visit()
             && self.0[self.0.len() - 1].is_parent_visit()
         {
             self.0.pop();
             self.0.pop();
         }
 
-        match step {
-            Step::VisitDir(_) | Step::VisitFile(_) => self.0.push(step),
-            Step::VisitParent => self.0.push(step),
-        }
+        self.0.push(step);
     }
 }
 
@@ -461,6 +458,13 @@ impl Step {
     fn is_file_visit(&self) -> bool {
         match self {
             Step::VisitFile(_) => true,
+            _ => false,
+        }
+    }
+
+    fn is_dir_visit(&self) -> bool {
+        match self {
+            Step::VisitDir(_) => true,
             _ => false,
         }
     }
