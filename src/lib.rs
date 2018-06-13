@@ -6,4 +6,5 @@ extern crate uuid;
 
 mod btree;
 mod fs;
+mod fs2;
 mod id;
