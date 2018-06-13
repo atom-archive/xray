@@ -72,7 +72,7 @@ impl Ordered {
 
     fn between_with_max(prev_id: &Self, next_id: &Self, max_value: OrderedEntry) -> Self {
         const MAX_STEP: OrderedEntry = 32;
-        let level = 0;
+        let mut level = 0;
         let mut found_lesser = false;
         let mut new_id = Vec::new();
 
@@ -93,6 +93,7 @@ impl Ordered {
                     found_lesser = true;
                 }
                 new_id.push(prev);
+                level += 1;
             }
         }
     }
