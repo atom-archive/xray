@@ -210,7 +210,8 @@ impl Cursor {
                 let mut dir_end = self.tree_cursor.start::<Walk>();
                 dir_end.push(Step::VisitDir(name.clone()));
                 dir_end.push(Step::VisitParent);
-                self.tree_cursor.seek(&dir_end, SeekBias::Right, db)?;
+                self.tree_cursor
+                    .seek_forward(&dir_end, SeekBias::Right, db)?;
             }
             TreeEntry::ParentDir { .. } => unreachable!("Cursor must be parked at Dir or File"),
         }
@@ -274,7 +275,7 @@ impl Builder {
         self.walk.push(Step::VisitDir(name.clone()));
 
         self.old_entries
-            .seek(&self.walk, SeekBias::Left, entry_store)?;
+            .seek_forward(&self.walk, SeekBias::Left, entry_store)?;
 
         match self
             .old_entries
@@ -319,7 +320,7 @@ impl Builder {
         );
         self.walk.push(Step::VisitParent);
         self.old_entries
-            .seek(&self.walk, SeekBias::Right, entry_store)?;
+            .seek_forward(&self.walk, SeekBias::Right, entry_store)?;
         if self.open_dir_count != 0 {
             self.open_dir_count -= 1;
         }
@@ -343,7 +344,6 @@ impl Builder {
             }
         }
 
-        // old_entries.seek(&self.walk, SeekBias::Right, entry_store)?;
         new_entries.push_tree(
             old_entries.suffix::<id::Ordered, _>(entry_store)?,
             entry_store,

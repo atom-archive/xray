@@ -582,6 +582,19 @@ impl<T: Item> Cursor<T> {
         self.seek_internal(pos, bias, db, None)
     }
 
+    pub fn seek_forward<D, S>(
+        &mut self,
+        pos: &D,
+        bias: SeekBias,
+        db: &S,
+    ) -> Result<(), S::ReadError>
+    where
+        D: Dimension<Summary = T::Summary>,
+        S: NodeStore<T>,
+    {
+        self.seek_internal(pos, bias, db, None)
+    }
+
     pub fn slice<D, S>(&mut self, end: &D, bias: SeekBias, db: &S) -> Result<Tree<T>, S::ReadError>
     where
         D: Dimension<Summary = T::Summary>,
@@ -615,6 +628,7 @@ impl<T: Item> Cursor<T> {
         S: NodeStore<T>,
     {
         let mut pos = D::from_summary(&self.summary).clone();
+        debug_assert!(target >= &pos);
         let mut containing_subtree = None;
 
         if self.did_seek {
@@ -640,11 +654,14 @@ impl<T: Item> Cursor<T> {
                                 {
                                     self.summary += child_summary;
                                     pos = child_end;
-                                    slice.as_mut().unwrap().push_tree(child_tree.clone(), db)?;
+                                    if let Some(slice) = slice.as_mut() {
+                                        slice.push_tree(child_tree.clone(), db)?
+                                    }
                                     *index += 1;
                                 } else {
                                     pos = D::from_summary(&self.summary).clone();
                                     containing_subtree = Some(child_tree.clone());
+                                    break 'outer;
                                 }
                             }
                         }
@@ -664,37 +681,42 @@ impl<T: Item> Cursor<T> {
                                 {
                                     self.summary += &item_summary;
                                     pos = item_end;
-                                    slice_items.push(item.clone());
-                                    slice_items_summary += &item_summary;
+                                    if slice.is_some() {
+                                        slice_items.push(item.clone());
+                                        slice_items_summary += &item_summary;
+                                    }
                                     *index += 1;
                                 } else {
                                     pos = D::from_summary(&self.summary).clone();
-                                    slice.as_mut().unwrap().push_tree(
+                                    if let Some(slice) = slice.as_mut() {
+                                        slice.push_tree(
+                                            Tree::Resident(Arc::new(Node::Leaf {
+                                                summary: slice_items_summary,
+                                                items: slice_items,
+                                            })),
+                                            db,
+                                        )?;
+                                    }
+                                    break 'outer;
+                                }
+                            }
+
+                            if let Some(slice) = slice.as_mut() {
+                                if slice_items.len() > 0 {
+                                    slice.push_tree(
                                         Tree::Resident(Arc::new(Node::Leaf {
                                             summary: slice_items_summary,
                                             items: slice_items,
                                         })),
                                         db,
                                     )?;
-                                    break 'outer;
                                 }
                             }
-
-                            slice.as_mut().unwrap().push_tree(
-                                Tree::Resident(Arc::new(Node::Leaf {
-                                    summary: slice_items_summary,
-                                    items: slice_items,
-                                })),
-                                db,
-                            )?;
                         }
                     }
                 }
-                if containing_subtree.is_some() {
-                    break;
-                } else {
-                    self.stack.pop();
-                }
+
+                self.stack.pop();
             }
         } else {
             self.did_seek = true;
