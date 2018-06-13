@@ -38,8 +38,10 @@ pub struct Cursor {
 // were present in the previous tree are implicitly deleted.
 pub struct Builder {
     walk: Walk,
+    position: id::Ordered,
     old_entries: btree::Cursor<TreeEntry>,
-    new_entries: btree::Tree<TreeEntry>,
+    new_prefix: btree::Tree<TreeEntry>,
+    new_entries: Vec<TreeEntry>,
     positions_by_entry_id: btree::Tree<EntryIdToPosition>,
     open_dir_count: usize,
 }
@@ -243,16 +245,21 @@ impl Builder {
         }
 
         let mut old_entries = old_tree.entries.cursor();
-        let new_entries = old_entries
+        let new_prefix = old_entries
             .slice(&walk, SeekBias::Left, entry_store)
+            .map_err(|error| Error::StoreReadError(error))?;
+        let position = new_prefix
+            .extent(entry_store)
             .map_err(|error| Error::StoreReadError(error))?;
 
         walk.0.pop();
         if walk == old_entries.start() {
             Ok(Builder {
                 walk,
+                position,
                 old_entries,
-                new_entries,
+                new_prefix,
+                new_entries: Vec::new(),
                 positions_by_entry_id: old_tree.positions_by_entry_id.clone(),
                 open_dir_count: 0,
             })
@@ -295,18 +302,16 @@ impl Builder {
         }
 
         let position = id::Ordered::between(
-            &self.new_entries.extent(entry_store)?,
+            &self.position,
             &self.old_entries.item(entry_store)?.unwrap().position(),
         );
-        self.new_entries.push(
-            TreeEntry::Dir {
-                id,
-                name,
-                inode,
-                position,
-            },
-            entry_store,
-        )?;
+        self.position = position.clone();
+        self.new_entries.push(TreeEntry::Dir {
+            id,
+            name,
+            inode,
+            position,
+        });
 
         Ok(())
     }
@@ -315,42 +320,49 @@ impl Builder {
         let entry_store = store.entry_store();
 
         let position = id::Ordered::between(
-            &self.new_entries.extent(entry_store)?,
+            &self.position,
             &self.old_entries.item(entry_store)?.unwrap().position(),
         );
         self.walk.push(Step::VisitParent);
+        self.position = position.clone();
         self.old_entries
             .seek_forward(&self.walk, SeekBias::Right, entry_store)?;
         if self.open_dir_count != 0 {
             self.open_dir_count -= 1;
         }
-        self.new_entries
-            .push(TreeEntry::ParentDir { position }, entry_store)?;
+        self.new_entries.push(TreeEntry::ParentDir { position });
 
         Ok(())
     }
 
-    pub fn tree<S: Store>(&self, store: &S) -> Result<Tree, S::ReadError> {
+    pub fn tree<S: Store>(&mut self, store: &S) -> Result<Tree, S::ReadError> {
         let entry_store = store.entry_store();
-        let mut old_entries = self.old_entries.clone();
-        let mut new_entries = self.new_entries.clone();
+        self.new_prefix
+            .extend(self.new_entries.drain(..), entry_store)?;
+        let mut entries = self.new_prefix.clone();
 
         if self.open_dir_count > 0 {
             let next_entry = self.old_entries.item(entry_store)?.unwrap();
+            let mut last_position = self.position.clone();
+            let mut parent_entries = Vec::with_capacity(self.open_dir_count);
             for _ in 0..self.open_dir_count {
-                let position =
-                    id::Ordered::between(&new_entries.extent(entry_store)?, next_entry.position());
-                new_entries.push(TreeEntry::ParentDir { position }, entry_store)?;
+                last_position = id::Ordered::between(&last_position, next_entry.position());
+                parent_entries.push(TreeEntry::ParentDir {
+                    position: last_position.clone(),
+                });
             }
+            entries.extend(parent_entries, entry_store)?;
         }
 
-        new_entries.push_tree(
-            old_entries.suffix::<id::Ordered, _>(entry_store)?,
+        entries.push_tree(
+            self.old_entries
+                .clone()
+                .suffix::<id::Ordered, _>(entry_store)?,
             entry_store,
         )?;
 
         Ok(Tree {
-            entries: new_entries,
+            entries,
             positions_by_entry_id: self.positions_by_entry_id.clone(),
         })
     }
