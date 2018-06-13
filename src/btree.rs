@@ -1,4 +1,5 @@
 use smallvec::SmallVec;
+use std::cmp::Ordering;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Add, AddAssign};
@@ -633,8 +634,9 @@ impl<T: Item> Cursor<T> {
                                 let mut child_end = pos;
                                 child_end += D::from_summary(&child_summary);
 
-                                if *target > child_end
-                                    || (*target == child_end && bias == SeekBias::Right)
+                                let comparison = target.cmp(&child_end);
+                                if comparison == Ordering::Greater
+                                    || (comparison == Ordering::Equal && bias == SeekBias::Right)
                                 {
                                     self.summary += child_summary;
                                     pos = child_end;
@@ -656,8 +658,9 @@ impl<T: Item> Cursor<T> {
                                 let mut item_end = pos;
                                 item_end += D::from_summary(&item_summary);
 
-                                if *target > item_end
-                                    || (*target == item_end && bias == SeekBias::Right)
+                                let comparison = target.cmp(&item_end);
+                                if comparison == Ordering::Greater
+                                    || (comparison == Ordering::Equal && bias == SeekBias::Right)
                                 {
                                     self.summary += &item_summary;
                                     pos = item_end;
@@ -711,8 +714,9 @@ impl<T: Item> Cursor<T> {
                             let mut child_end = pos;
                             child_end += D::from_summary(child_summary);
 
-                            if *target > child_end
-                                || (*target == child_end && bias == SeekBias::Right)
+                            let comparison = target.cmp(&child_end);
+                            if comparison == Ordering::Greater
+                                || (comparison == Ordering::Equal && bias == SeekBias::Right)
                             {
                                 self.summary += child_summary;
                                 pos = child_end;
@@ -736,8 +740,9 @@ impl<T: Item> Cursor<T> {
                             let mut child_end = pos;
                             child_end += &D::from_summary(&item_summary);
 
-                            if *target > child_end
-                                || (*target == child_end && bias == SeekBias::Right)
+                            let comparison = target.cmp(&child_end);
+                            if comparison == Ordering::Greater
+                                || (comparison == Ordering::Equal && bias == SeekBias::Right)
                             {
                                 if slice.is_some() {
                                     slice_items.push(item.clone());
