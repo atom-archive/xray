@@ -9,6 +9,11 @@ const { ActionContext, Action } = require("../action_dispatcher");
 
 const CURSOR_BLINK_RESUME_DELAY = 300;
 const CURSOR_BLINK_PERIOD = 800;
+const MOUSE_DRAG_AUTOSCROLL_MARGIN = 40;
+
+function scaleMouseDragAutoscrollDelta (delta) {
+  return Math.pow(delta / 3, 3) / 280
+}
 
 const Root = styled("div", {
   width: "100%",
@@ -72,13 +77,27 @@ class TextEditor extends React.Component {
     }
 
     element.addEventListener("wheel", this.handleMouseWheel, { passive: true });
-    element.addEventListener("mousemove", this.handleMouseMove, {
-      passive: true
-    });
-    element.addEventListener("mouseup", this.handleMouseUp, {
-      passive: true
-    });
     element.addEventListener("mousedown", this.handleMouseDown, {
+      passive: true
+    });
+
+    let lastMousemoveEvent
+    const animationFrameLoop = () => {
+      window.requestAnimationFrame(() => {
+        if (this.state.mouseDown) {
+          this.handleMouseMove(lastMousemoveEvent)
+          animationFrameLoop()
+        }
+      })
+    }
+
+    document.addEventListener("mousemove", event => {
+      lastMousemoveEvent = event;
+      animationFrameLoop()
+    }, {
+      passive: true
+    });
+    document.addEventListener("mouseup", this.handleMouseUp, {
       passive: true
     });
 
@@ -240,14 +259,52 @@ class TextEditor extends React.Component {
         }
       }
       return { row, column }
-    } else {
-      return null;
+    }
+  }
+
+  autoscrollOnMouseDrag ({clientX, clientY}) {
+    const top = 0 + MOUSE_DRAG_AUTOSCROLL_MARGIN
+    const bottom = this.props.height - MOUSE_DRAG_AUTOSCROLL_MARGIN
+    const left = 0 + MOUSE_DRAG_AUTOSCROLL_MARGIN
+    const right = this.props.width - MOUSE_DRAG_AUTOSCROLL_MARGIN
+
+    let yDelta, yDirection
+    if (clientY < top) {
+      yDelta = top - clientY
+      yDirection = -1
+    } else if (clientY > bottom) {
+      yDelta = clientY - bottom
+      yDirection = 1
+    }
+
+    let xDelta, xDirection
+    if (clientX < left) {
+      xDelta = left - clientX
+      xDirection = -1
+    } else if (clientX > right) {
+      xDelta = clientX - right
+      xDirection = 1
+    }
+
+    if (yDelta != null) {
+      const scaledDelta = scaleMouseDragAutoscrollDelta(yDelta) * yDirection
+      this.updateScrollTop(scaledDelta)
+    }
+
+    if (xDelta != null) {
+      const scaledDelta = scaleMouseDragAutoscrollDelta(xDelta) * xDirection
+      this.setScrollLeft(this.getScrollLeft() + scaledDelta)
     }
   }
 
   handleMouseMove(event) {
     if (this.canUseTextPlane() && this.state.mouseDown) {
-      const pos = this.getPositionFromMouseEvent(event);
+      const boundedPositions = {
+        clientX: Math.min(Math.max(event.clientX, 0), this.props.width),
+        clientY: Math.min(Math.max(event.clientY, 0), this.props.height),
+      }
+      this.autoscrollOnMouseDrag(event)
+      const pos = this.getPositionFromMouseEvent(boundedPositions);
       if (pos) {
         this.props.dispatch(Object.assign({
           type: "SelectTo",
@@ -256,7 +313,7 @@ class TextEditor extends React.Component {
     }
   }
 
-  handleMouseUp(ecent) {
+  handleMouseUp() {
     this.setState({mouseDown: false})
   }
 
@@ -306,7 +363,7 @@ class TextEditor extends React.Component {
     if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
       this.setScrollLeft(this.state.scrollLeft + event.deltaX);
     } else {
-      this.props.dispatch({ type: "UpdateScrollTop", delta: event.deltaY });
+      this.updateScrollTop(event.deltaY);
     }
   }
 
@@ -402,6 +459,10 @@ class TextEditor extends React.Component {
     } else {
       return this.getScrollLeft();
     }
+  }
+
+  updateScrollTop(deltaY) {
+    this.props.dispatch({ type: "UpdateScrollTop", delta: deltaY });
   }
 
   setScrollLeft(scrollLeft) {
