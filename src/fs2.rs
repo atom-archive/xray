@@ -9,8 +9,6 @@ use std::ops::{Add, AddAssign};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-type ProvisionalFileId = usize;
-
 trait Store {
     type ReadError: fmt::Debug;
     type ItemStore: NodeStore<Item, ReadError = Self::ReadError>;
@@ -19,11 +17,6 @@ trait Store {
     fn item_store(&self) -> &Self::ItemStore;
     fn inode_to_file_id_store(&self) -> &Self::InodeToFileIdStore;
     fn gen_id(&self) -> id::Unique;
-}
-
-enum Either<A, B> {
-    Left(A),
-    Right(B),
 }
 
 struct Tree {
@@ -88,14 +81,14 @@ struct Builder {
     item_changes: Vec<ItemChange>,
     new_mappings: Vec<InodeToFileId>,
     insertions_by_inode: HashMap<Inode, id::Unique>,
-    next_file_id: ProvisionalFileId,
 }
 
 enum ItemChange {
     InsertDirEntry {
-        file_id: Either<ProvisionalFileId, id::Unique>,
+        file_id: id::Unique,
         name: OsString,
         is_dir: bool,
+        child_id: id::Unique,
         child_inode: Inode,
     },
     RemoveDirEntry {
@@ -274,7 +267,6 @@ impl Builder {
             item_changes: Vec::new(),
             new_mappings: Vec::new(),
             insertions_by_inode: HashMap::new(),
-            next_file_id: 0,
         })
     }
 
@@ -298,12 +290,18 @@ impl Builder {
             Ordering::Less => {}
             Ordering::Equal => {}
             Ordering::Greater => {
+                let parent_id = self.stack.last().cloned().unwrap_or(id::Unique::default());
+                let child_id = db.gen_id();
                 self.item_changes.push(ItemChange::InsertDirEntry {
-                    file_id: Either::Right(id::Unique::default()),
+                    file_id: parent_id,
                     is_dir: metadata.is_dir,
+                    child_id,
                     child_inode: metadata.inode,
                     name,
                 });
+                if metadata.is_dir {
+                    self.stack.push(child_id);
+                }
             }
         }
 
@@ -401,16 +399,12 @@ impl Builder {
         for change in self.item_changes {
             match change {
                 ItemChange::InsertDirEntry {
-                    file_id,
+                    file_id: parent_dir_id,
                     name,
                     is_dir,
+                    child_id,
                     child_inode,
                 } => {
-                    let parent_dir_id = match file_id {
-                        Either::Left(_) => unimplemented!(),
-                        Either::Right(file_id) => file_id,
-                    };
-                    let child_id = db.gen_id();
                     new_items.push(Item::Metadata {
                         file_id: child_id,
                         is_dir,
@@ -632,8 +626,10 @@ mod tests {
         let tree = Tree::new();
         let mut builder = Builder::new(tree, &db).unwrap();
         builder.push("a", Metadata::dir(1), 1, &db).unwrap();
+        builder.push("b", Metadata::dir(2), 2, &db).unwrap();
+        builder.push("c", Metadata::dir(3), 3, &db).unwrap();
         let tree = builder.tree(&db).unwrap();
-        assert_eq!(tree.paths(&db), ["a"]);
+        assert_eq!(tree.paths(&db), ["a", "a/b", "a/b/c"]);
     }
 
     #[derive(Debug)]
