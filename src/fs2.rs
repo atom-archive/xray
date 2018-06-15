@@ -63,7 +63,7 @@ struct Key {
     kind: KeyKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum KeyKind {
     Metadata,
     DirEntry { is_dir: bool, name: Arc<OsString> },
@@ -109,6 +109,13 @@ impl Metadata {
     fn dir<I: Into<Inode>>(inode: I) -> Self {
         Metadata {
             is_dir: true,
+            inode: inode.into(),
+        }
+    }
+
+    fn file<I: Into<Inode>>(inode: I) -> Self {
+        Metadata {
+            is_dir: false,
             inode: inode.into(),
         }
     }
@@ -168,6 +175,18 @@ impl btree::Dimension for Inode {
 }
 
 impl Item {
+    fn key(&self) -> Key {
+        match self {
+            Item::Metadata { file_id, .. } => Key::metadata(*file_id),
+            Item::DirEntry {
+                file_id,
+                is_dir,
+                name,
+                ..
+            } => Key::dir_entry(*file_id, *is_dir, name.clone()),
+        }
+    }
+
     fn is_dir_metadata(&self) -> bool {
         match self {
             Item::Metadata { is_dir, .. } => *is_dir,
@@ -186,16 +205,8 @@ impl Item {
 impl btree::Item for Item {
     type Summary = Key;
 
-    fn summarize(&self) -> Key {
-        match self {
-            Item::Metadata { file_id, .. } => Key::metadata(*file_id),
-            Item::DirEntry {
-                file_id,
-                is_dir,
-                name,
-                ..
-            } => Key::dir_entry(*file_id, *is_dir, name.clone()),
-        }
+    fn summarize(&self) -> Self::Summary {
+        self.key()
     }
 }
 
@@ -245,6 +256,32 @@ impl<'a> Add<&'a Self> for Key {
             other.clone()
         } else {
             self
+        }
+    }
+}
+
+impl PartialOrd for KeyKind {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KeyKind {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (KeyKind::Metadata, KeyKind::Metadata) => Ordering::Equal,
+            (KeyKind::Metadata, KeyKind::DirEntry { .. }) => Ordering::Less,
+            (KeyKind::DirEntry { .. }, KeyKind::Metadata) => Ordering::Greater,
+            (
+                KeyKind::DirEntry { is_dir, name },
+                KeyKind::DirEntry {
+                    is_dir: other_is_dir,
+                    name: other_name,
+                },
+            ) => is_dir
+                .cmp(other_is_dir)
+                .reverse()
+                .then_with(|| name.cmp(other_name)),
         }
     }
 }
@@ -428,13 +465,12 @@ impl Builder {
             }
         }
 
-        new_items.sort_unstable_by_key(|item| <Item as btree::Item>::summarize(&item));
+        new_items.sort_unstable_by_key(|item| item.key());
         let mut old_items_cursor = self.tree.items.cursor();
         let mut new_tree = Tree::new();
         for item in new_items {
-            let key = <Item as btree::Item>::summarize(&item);
             new_tree.items.push_tree(
-                old_items_cursor.slice(&key, SeekBias::Right, item_db)?,
+                old_items_cursor.slice(&item.key(), SeekBias::Right, item_db)?,
                 item_db,
             )?;
             new_tree.items.push(item, item_db)?;
@@ -633,12 +669,20 @@ mod tests {
         builder.push("b", Metadata::dir(2), 2, &db).unwrap();
         builder.push("c", Metadata::dir(3), 3, &db).unwrap();
         builder.push("d", Metadata::dir(4), 3, &db).unwrap();
-        builder.push("e", Metadata::dir(4), 3, &db).unwrap();
-        builder.push("f", Metadata::dir(4), 1, &db).unwrap();
+        builder.push("e", Metadata::file(5), 3, &db).unwrap();
+        builder.push("f", Metadata::dir(6), 1, &db).unwrap();
         let tree = builder.tree(&db).unwrap();
         assert_eq!(
             tree.paths(&db),
             ["a", "a/b", "a/b/c", "a/b/d", "a/b/e", "f"]
+        );
+    }
+
+    #[test]
+    fn test_key_ordering() {
+        assert!(
+            Key::dir_entry(id::Unique::default(), true, Arc::new("z".into()))
+                < Key::dir_entry(id::Unique::default(), false, Arc::new("a".into()))
         );
     }
 
