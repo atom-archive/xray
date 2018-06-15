@@ -323,115 +323,45 @@ impl Builder {
         S: Store,
     {
         let name = name.into();
-        match depth.cmp(&self.cursor.depth()) {
-            Ordering::Less => {}
-            Ordering::Equal => {}
-            Ordering::Greater => {
-                if self.stack.len() >= depth {
-                    self.stack.truncate(depth - 1);
-                }
+        let mut perform_insert = false;
+        let mut file_id_to_push = None;
 
-                let parent_id = self.stack.last().cloned().unwrap_or(id::Unique::default());
-                let child_id = db.gen_id();
-                self.item_changes.push(ItemChange::InsertDirEntry {
-                    file_id: parent_id,
-                    is_dir: metadata.is_dir,
-                    child_id,
-                    child_inode: metadata.inode,
-                    name,
-                });
-                if metadata.is_dir {
-                    self.stack.push(child_id);
+        match depth.cmp(&self.cursor.depth()) {
+            Ordering::Less => unimplemented!(),
+            Ordering::Equal => {
+                match self.cursor.cmp(name.as_os_str(), &metadata, db)? {
+                    Ordering::Less => unimplemented!(),
+                    Ordering::Equal => {
+                        file_id_to_push = self.cursor.file_id(db)?;
+                        self.cursor.next(db)?;
+                    }
+                    Ordering::Greater => perform_insert = true,
                 }
-            }
+            },
+            Ordering::Greater => perform_insert = true,
+        };
+
+        if self.stack.len() >= depth {
+            self.stack.truncate(depth - 1);
         }
 
-        // loop {
-        //     if let Some(existing_metadata) = self.cursor.metadata(db)? {
-        //         let ordering = if metadata.is_dir {
-        //             if existing_metadata.is_dir {
-        //                 name.cmp(&self.cursor.name(db)?.unwrap())
-        //             } else {
-        //                 Ordering::Less
-        //             }
-        //         } else {
-        //             if existing_metadata.is_dir {
-        //                 Ordering::Greater
-        //             } else {
-        //                 name.cmp(&self.cursor.name(db)?.unwrap())
-        //             }
-        //         };
-        //
-        //         match ordering {
-        //             Ordering::Less => {
-        //                 let file_id = self.cursor.file_id(db)?.unwrap();
-        //                 let entry_id = db.gen_id();
-        //                 let child_id = self.find_or_create_file_id(&metadata, db)?;
-        //                 self.item_changes.push(ItemChange::Insert(Item::DirEntry {
-        //                     file_id,
-        //                     entry_id,
-        //                     child_id,
-        //                     name: Arc::new(name.to_os_string()),
-        //                     is_dir: metadata.is_dir,
-        //                     deletions: SmallVec::new(),
-        //                     moves: SmallVec::new(),
-        //                 }));
-        //                 if metadata.is_dir {
-        //                     self.insertions_by_inode.insert(metadata.inode, entry_id);
-        //                 }
-        //                 break;
-        //             }
-        //             Ordering::Equal => {
-        //                 self.cursor.next(db)?;
-        //                 break;
-        //             }
-        //             Ordering::Greater => {
-        //                 self.item_changes.push(ItemChange::Remove {
-        //                     entry: self.cursor.dir_entry(db)?.unwrap(),
-        //                     inode: existing_metadata.inode,
-        //                 });
-        //                 self.cursor.next_sibling(db)?;
-        //             }
-        //         }
-        //     } else {
-        //         let entry_id = db.gen_id();
-        //         let child_id = self.find_or_create_file_id(&metadata, db)?;
-        //         self.item_changes.push(ItemChange::Insert(Item::DirEntry {
-        //             file_id: self.cursor.file_id(db)?.unwrap(),
-        //             entry_id,
-        //             child_id,
-        //             name: Arc::new(name.to_os_string()),
-        //             is_dir: metadata.is_dir,
-        //             deletions: SmallVec::new(),
-        //             moves: SmallVec::new(),
-        //         }));
-        //         if metadata.is_dir {
-        //             self.insertions_by_inode.insert(metadata.inode, entry_id);
-        //         }
-        //         break;
-        //     }
-        // }
+        if perform_insert {
+            let parent_id = self.stack.last().cloned().unwrap_or(id::Unique::default());
+            let child_id = db.gen_id();
+            self.item_changes.push(ItemChange::InsertDirEntry {
+                file_id: parent_id,
+                is_dir: metadata.is_dir,
+                child_id,
+                child_inode: metadata.inode,
+                name,
+            });
+            file_id_to_push = Some(child_id);
+        }
+
+        self.stack.push(file_id_to_push.unwrap());
 
         Ok(())
     }
-
-    // fn ascend<S>(&mut self, db: &S) -> Result<(), S::ReadError>
-    // where
-    //     S: Store,
-    // {
-    //     loop {
-    //         self.item_changes.push(ItemChange::Remove {
-    //             entry: self.cursor.dir_entry(db)?.unwrap(),
-    //             inode: self.cursor.metadata(db)?.unwrap().inode,
-    //         });
-    //
-    //         if !self.cursor.next_sibling(db)? {
-    //             break;
-    //         }
-    //     }
-    //
-    //     Ok(())
-    // }
 
     fn tree<S: Store>(self, db: &S) -> Result<Tree, S::ReadError> {
         let item_db = db.item_store();
@@ -537,6 +467,24 @@ impl Cursor {
         }
     }
 
+    pub fn cmp<S: Store>(
+        &self,
+        other_name: &OsStr,
+        other_metadata: &Metadata,
+        db: &S,
+    ) -> Result<Ordering, S::ReadError> {
+        if let Some(self_metadata) = self.metadata(db)? {
+            let ordering = other_metadata.is_dir.cmp(&self_metadata.is_dir);
+            if ordering == Ordering::Equal {
+                Ok(self.name(db)?.unwrap().as_os_str().cmp(other_name))
+            } else {
+                Ok(ordering)
+            }
+        } else {
+            Ok(Ordering::Greater)
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -562,10 +510,9 @@ impl Cursor {
     }
 
     pub fn file_id<S: Store>(&self, db: &S) -> Result<Option<id::Unique>, S::ReadError> {
-        if self.stack.len() > 1 {
-            let cursor = &self.stack[self.stack.len() - 2];
+        if let Some(cursor) = self.stack.last() {
             match cursor.item(db.item_store())?.unwrap() {
-                Item::DirEntry { file_id, .. } => Ok(Some(file_id)),
+                Item::Metadata { file_id, .. } => Ok(Some(file_id)),
                 _ => unreachable!(),
             }
         } else {
@@ -675,6 +622,22 @@ mod tests {
         assert_eq!(
             tree.paths(&db),
             ["a", "a/b", "a/b/c", "a/b/d", "a/b/e", "f"]
+        );
+
+        let mut builder = Builder::new(tree, &db).unwrap();
+        builder.push("a", Metadata::dir(1), 1, &db).unwrap();
+        builder.push("b", Metadata::dir(2), 2, &db).unwrap();
+        builder.push("c", Metadata::dir(3), 3, &db).unwrap();
+        builder.push("c2", Metadata::dir(7), 3, &db).unwrap();
+        builder.push("d", Metadata::dir(4), 3, &db).unwrap();
+        builder.push("e", Metadata::file(5), 3, &db).unwrap();
+        builder.push("b2", Metadata::dir(6), 2, &db).unwrap();
+        builder.push("g", Metadata::dir(6), 3, &db).unwrap();
+        builder.push("f", Metadata::dir(6), 1, &db).unwrap();
+        let tree = builder.tree(&db).unwrap();
+        assert_eq!(
+            tree.paths(&db),
+            ["a", "a/b", "a/b/c", "a/b/c2", "a/b/d", "a/b/e", "a/b2", "a/b2/g", "f"]
         );
     }
 
