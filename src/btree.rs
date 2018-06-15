@@ -79,6 +79,21 @@ impl<T: Item> Tree<T> {
         }))
     }
 
+    pub fn items<S: NodeStore<T>>(&self, db: &S) -> Result<Vec<T>, S::ReadError> {
+        let mut items = Vec::new();
+        let mut cursor = self.cursor();
+        cursor.descend_to_start(self.clone(), db)?;
+        loop {
+            if let Some(item) = cursor.item(db)? {
+                items.push(item.clone());
+            } else {
+                break;
+            }
+            cursor.next(db)?;
+        }
+        Ok(items)
+    }
+
     pub fn cursor(&self) -> Cursor<T> {
         Cursor::new(self.clone())
     }
@@ -974,23 +989,6 @@ mod tests {
         fn add(mut self, other: &Self) -> Self {
             self.0 += other.0;
             self
-        }
-    }
-
-    impl<T: Clone + Item> Tree<T> {
-        pub fn items<S: NodeStore<T>>(&self, db: &S) -> Result<Vec<T>, S::ReadError> {
-            let mut items = Vec::new();
-            let mut cursor = self.cursor();
-            cursor.descend_to_start(self.clone(), db)?;
-            loop {
-                if let Some(item) = cursor.item(db)? {
-                    items.push(item.clone());
-                } else {
-                    break;
-                }
-                cursor.next(db)?;
-            }
-            Ok(items)
         }
     }
 }
