@@ -200,6 +200,20 @@ impl Item {
             _ => false,
         }
     }
+
+    fn is_deleted(&self) -> bool {
+        match self {
+            Item::DirEntry { deletions, .. } => !deletions.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn deletions_mut(&mut self) -> &mut SmallVec<[id::Unique; 1]> {
+        match self {
+            Item::DirEntry { deletions, .. } => deletions,
+            _ => panic!(),
+        }
+    }
 }
 
 impl btree::Item for Item {
@@ -326,24 +340,40 @@ impl Builder {
         let mut perform_insert = false;
         let mut file_id_to_push = None;
 
+        if self.stack.len() >= depth {
+            self.stack
+                .truncate(cmp::max(depth, self.cursor.depth()) - 1);
+        }
+
+        while self.cursor.depth() > depth
+            || self.cursor.depth() == depth
+                && self.cursor.cmp_with_entry(name.as_os_str(), &metadata, db)? == Ordering::Less
+        {
+            println!(
+                "delete {:?} when pushing {:?}",
+                self.cursor.name(db)?.unwrap(),
+                name
+            );
+            self.item_changes.push(ItemChange::RemoveDirEntry {
+                entry: self.cursor.dir_entry(db)?.unwrap(),
+                inode: self.cursor.inode(db)?.unwrap(),
+            });
+            self.cursor.next(db)?;
+            self.stack.truncate(self.cursor.depth().saturating_sub(1));
+        }
+
         match depth.cmp(&self.cursor.depth()) {
             Ordering::Less => unimplemented!(),
-            Ordering::Equal => {
-                match self.cursor.cmp(name.as_os_str(), &metadata, db)? {
-                    Ordering::Less => unimplemented!(),
-                    Ordering::Equal => {
-                        file_id_to_push = self.cursor.file_id(db)?;
-                        self.cursor.next(db)?;
-                    }
-                    Ordering::Greater => perform_insert = true,
+            Ordering::Equal => match self.cursor.cmp_with_entry(name.as_os_str(), &metadata, db)? {
+                Ordering::Less => unimplemented!(),
+                Ordering::Equal => {
+                    file_id_to_push = self.cursor.file_id(db)?;
+                    self.cursor.next(db)?;
                 }
+                Ordering::Greater => perform_insert = true,
             },
             Ordering::Greater => perform_insert = true,
         };
-
-        if self.stack.len() >= depth {
-            self.stack.truncate(depth - 1);
-        }
 
         if perform_insert {
             let parent_id = self.stack.last().cloned().unwrap_or(id::Unique::default());
@@ -391,7 +421,10 @@ impl Builder {
                         moves: SmallVec::new(),
                     });
                 }
-                ItemChange::RemoveDirEntry { .. } => unimplemented!(),
+                ItemChange::RemoveDirEntry { mut entry, .. } => {
+                    entry.deletions_mut().push(db.gen_id());
+                    new_items.push(entry);
+                }
             }
         }
 
@@ -400,10 +433,14 @@ impl Builder {
         let mut new_tree = Tree::new();
         for item in new_items {
             new_tree.items.push_tree(
-                old_items_cursor.slice(&item.key(), SeekBias::Right, item_db)?,
+                old_items_cursor.slice(&item.key(), SeekBias::Left, item_db)?,
                 item_db,
             )?;
-            new_tree.items.push(item, item_db)?;
+            if item.is_deleted() {
+                old_items_cursor.next(item_db)?;
+            } else {
+                new_tree.items.push(item, item_db)?;
+            }
         }
         new_tree
             .items
@@ -467,7 +504,7 @@ impl Cursor {
         }
     }
 
-    pub fn cmp<S: Store>(
+    pub fn cmp_with_entry<S: Store>(
         &self,
         other_name: &OsStr,
         other_metadata: &Metadata,
@@ -513,6 +550,17 @@ impl Cursor {
         if let Some(cursor) = self.stack.last() {
             match cursor.item(db.item_store())?.unwrap() {
                 Item::Metadata { file_id, .. } => Ok(Some(file_id)),
+                _ => unreachable!(),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
+        if let Some(cursor) = self.stack.last() {
+            match cursor.item(db.item_store())?.unwrap() {
+                Item::Metadata { inode, .. } => Ok(Some(inode)),
                 _ => unreachable!(),
             }
         } else {
@@ -631,13 +679,25 @@ mod tests {
         builder.push("c2", Metadata::dir(7), 3, &db).unwrap();
         builder.push("d", Metadata::dir(4), 3, &db).unwrap();
         builder.push("e", Metadata::file(5), 3, &db).unwrap();
-        builder.push("b2", Metadata::dir(6), 2, &db).unwrap();
-        builder.push("g", Metadata::dir(6), 3, &db).unwrap();
+        builder.push("b2", Metadata::dir(8), 2, &db).unwrap();
+        builder.push("g", Metadata::dir(9), 3, &db).unwrap();
         builder.push("f", Metadata::dir(6), 1, &db).unwrap();
         let tree = builder.tree(&db).unwrap();
         assert_eq!(
             tree.paths(&db),
             ["a", "a/b", "a/b/c", "a/b/c2", "a/b/d", "a/b/e", "a/b2", "a/b2/g", "f"]
+        );
+
+        let mut builder = Builder::new(tree, &db).unwrap();
+        builder.push("a", Metadata::dir(1), 1, &db).unwrap();
+        builder.push("b", Metadata::dir(2), 2, &db).unwrap();
+        builder.push("d", Metadata::dir(4), 3, &db).unwrap();
+        builder.push("e", Metadata::file(5), 3, &db).unwrap();
+        builder.push("f", Metadata::dir(6), 1, &db).unwrap();
+        let tree = builder.tree(&db).unwrap();
+        assert_eq!(
+            tree.paths(&db),
+            ["a", "a/b", "a/b/d", "a/b/e", "f"]
         );
     }
 
