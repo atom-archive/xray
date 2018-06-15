@@ -290,6 +290,10 @@ impl Builder {
             Ordering::Less => {}
             Ordering::Equal => {}
             Ordering::Greater => {
+                if self.stack.len() >= depth {
+                    self.stack.truncate(depth - 1);
+                }
+
                 let parent_id = self.stack.last().cloned().unwrap_or(id::Unique::default());
                 let child_id = db.gen_id();
                 self.item_changes.push(ItemChange::InsertDirEntry {
@@ -628,8 +632,14 @@ mod tests {
         builder.push("a", Metadata::dir(1), 1, &db).unwrap();
         builder.push("b", Metadata::dir(2), 2, &db).unwrap();
         builder.push("c", Metadata::dir(3), 3, &db).unwrap();
+        builder.push("d", Metadata::dir(4), 3, &db).unwrap();
+        builder.push("e", Metadata::dir(4), 3, &db).unwrap();
+        builder.push("f", Metadata::dir(4), 1, &db).unwrap();
         let tree = builder.tree(&db).unwrap();
-        assert_eq!(tree.paths(&db), ["a", "a/b", "a/b/c"]);
+        assert_eq!(
+            tree.paths(&db),
+            ["a", "a/b", "a/b/c", "a/b/d", "a/b/e", "f"]
+        );
     }
 
     #[derive(Debug)]
