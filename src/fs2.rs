@@ -438,9 +438,8 @@ impl Builder {
             )?;
             if item.is_deleted() {
                 old_items_cursor.next(item_db)?;
-            } else {
-                new_tree.items.push(item, item_db)?;
             }
+            new_tree.items.push(item, item_db)?;
         }
         new_tree
             .items
@@ -587,18 +586,23 @@ impl Cursor {
     pub fn next<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
         let item_db = db.item_store();
         while !self.stack.is_empty() {
-            let found_entry = {
+            let found_entry = loop {
                 let mut cursor = self.stack.last_mut().unwrap();
                 let cur_item = cursor.item(item_db)?.unwrap();
                 if cur_item.is_dir_entry() || cur_item.is_dir_metadata() {
                     cursor.next(item_db)?;
-                    if let Some(next_item) = cursor.item(item_db)? {
-                        next_item.is_dir_entry()
+                    let next_item = cursor.item(item_db)?;
+                    if next_item.as_ref().map_or(false, |i| i.is_dir_entry()) {
+                        if next_item.unwrap().is_deleted() {
+                            continue;
+                        } else {
+                            break true;
+                        }
                     } else {
-                        false
+                        break false;
                     }
                 } else {
-                    false
+                    break false;
                 }
             };
 
@@ -695,10 +699,7 @@ mod tests {
         builder.push("e", Metadata::file(5), 3, &db).unwrap();
         builder.push("f", Metadata::dir(6), 1, &db).unwrap();
         let tree = builder.tree(&db).unwrap();
-        assert_eq!(
-            tree.paths(&db),
-            ["a", "a/b", "a/b/d", "a/b/e", "f"]
-        );
+        assert_eq!(tree.paths(&db), ["a", "a/b", "a/b/d", "a/b/e", "f"]);
     }
 
     #[test]
