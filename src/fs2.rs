@@ -359,9 +359,9 @@ impl Builder {
                 entry: self.cursor.dir_entry(db)?.unwrap(),
                 inode: self.cursor.inode(db)?.unwrap(),
             });
-            self.stack.truncate(self.cursor.depth().saturating_sub(1));
             self.cursor.next(db)?;
         }
+        self.stack.truncate(depth - 1);
 
         match depth.cmp(&self.cursor.depth()) {
             Ordering::Less => unimplemented!(),
@@ -746,7 +746,7 @@ mod tests {
         );
     }
 
-    const MAX_TEST_TREE_DEPTH: usize = 1;
+    const MAX_TEST_TREE_DEPTH: usize = 5;
 
     struct TestDir {
         name: OsString,
