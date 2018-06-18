@@ -350,11 +350,6 @@ impl Builder {
             || self.cursor.depth() == depth
                 && self.cursor.cmp_with_entry(name.as_os_str(), &metadata, db)? == Ordering::Less
         {
-            println!(
-                "delete {:?} when pushing {:?}",
-                self.cursor.name(db)?.unwrap(),
-                name
-            );
             self.item_changes.push(ItemChange::RemoveDirEntry {
                 entry: self.cursor.dir_entry(db)?.unwrap(),
                 inode: self.cursor.inode(db)?.unwrap(),
@@ -714,7 +709,7 @@ mod tests {
     #[test]
     fn test_builder_random() {
         for seed in 0..100 {
-            println!("SEED: {}", seed);
+            // println!("SEED: {}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut store = NullStore::new();
