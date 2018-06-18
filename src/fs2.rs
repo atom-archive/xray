@@ -359,9 +359,9 @@ impl Builder {
         self.stack.truncate(depth - 1);
 
         match depth.cmp(&self.cursor.depth()) {
-            Ordering::Less => unimplemented!(),
+            Ordering::Less => unreachable!(),
             Ordering::Equal => match self.cursor.cmp_with_entry(name.as_os_str(), &metadata, db)? {
-                Ordering::Less => unimplemented!(),
+                Ordering::Less => unreachable!(),
                 Ordering::Equal => {
                     file_id_to_push = self.cursor.file_id(db)?;
                     self.cursor.next(db)?;
