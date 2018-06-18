@@ -845,14 +845,17 @@ mod tests {
             path: &mut PathBuf,
             moves: &mut Vec<Move>,
         ) -> Option<TestDir> {
-            path.push(gen_name(rng));
+            let name = gen_name(rng);
+            path.push(&name);
             let mut removes = moves
                 .iter_mut()
                 .filter(|m| m.new_path.is_none())
                 .collect::<Vec<_>>();
             if let Some(remove) = rng.choose_mut(&mut removes) {
                 remove.new_path = Some(path.clone());
-                return Some(remove.dir.clone());
+                let mut dir = remove.dir.clone();
+                dir.name = name;
+                return Some(dir);
             }
             path.pop();
             None
