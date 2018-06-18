@@ -19,6 +19,7 @@ trait Store {
     fn gen_id(&self) -> id::Unique;
 }
 
+#[derive(Clone)]
 struct Tree {
     items: btree::Tree<Item>,
     file_ids_by_inode: btree::Tree<InodeToFileId>,
@@ -358,8 +359,8 @@ impl Builder {
                 entry: self.cursor.dir_entry(db)?.unwrap(),
                 inode: self.cursor.inode(db)?.unwrap(),
             });
-            self.cursor.next(db)?;
             self.stack.truncate(self.cursor.depth().saturating_sub(1));
+            self.cursor.next(db)?;
         }
 
         match depth.cmp(&self.cursor.depth()) {
@@ -393,8 +394,16 @@ impl Builder {
         Ok(())
     }
 
-    fn tree<S: Store>(self, db: &S) -> Result<Tree, S::ReadError> {
+    fn tree<S: Store>(mut self, db: &S) -> Result<Tree, S::ReadError> {
         let item_db = db.item_store();
+
+        while let Some(entry) = self.cursor.dir_entry(db)? {
+            self.item_changes.push(ItemChange::RemoveDirEntry {
+                entry,
+                inode: self.cursor.inode(db)?.unwrap(),
+            });
+            self.cursor.next(db)?;
+        }
 
         let mut new_items = Vec::new();
         for change in self.item_changes {
@@ -703,11 +712,118 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_random() {
+        for seed in 0..100 {
+            println!("SEED: {}", seed);
+            let mut rng = StdRng::from_seed(&[seed]);
+
+            let mut store = NullStore::new();
+            let store = &store;
+
+            let mut reference_tree = TestDir::gen(&mut rng, 0);
+            let mut tree = Tree::new();
+
+            for _ in 0..5 {
+                // eprintln!("=========================================");
+                // eprintln!("existing paths {:#?}", tree.paths(store).len());
+                // eprintln!("new tree paths {:#?}", reference_tree.paths().len());
+                // eprintln!("=========================================");
+
+                let mut builder = Builder::new(tree.clone(), store).unwrap();
+                reference_tree.build(&mut builder, 1, store);
+                tree = builder.tree(store).unwrap();
+                assert_eq!(tree.paths(store), reference_tree.paths());
+                reference_tree.mutate(&mut rng, 0);
+            }
+        }
+    }
+
+    #[test]
     fn test_key_ordering() {
         assert!(
             Key::dir_entry(id::Unique::default(), true, Arc::new("z".into()))
                 < Key::dir_entry(id::Unique::default(), false, Arc::new("a".into()))
         );
+    }
+
+    const MAX_TEST_TREE_DEPTH: usize = 1;
+
+    struct TestDir {
+        name: OsString,
+        dir_entries: Vec<TestDir>,
+    }
+
+    impl TestDir {
+        fn gen<T: Rng>(rng: &mut T, depth: usize) -> Self {
+            let mut tree = Self {
+                name: gen_name(rng),
+                dir_entries: (0..rng.gen_range(0, MAX_TEST_TREE_DEPTH - depth + 1))
+                    .map(|_| Self::gen(rng, depth + 1))
+                    .collect(),
+            };
+            tree.normalize_entries();
+            tree
+        }
+
+        fn mutate<T: Rng>(&mut self, rng: &mut T, depth: usize) {
+            self.dir_entries.retain(|_| !rng.gen_weighted_bool(5));
+            for dir in &mut self.dir_entries {
+                if rng.gen_weighted_bool(3) {
+                    dir.mutate(rng, depth + 1);
+                }
+            }
+            if depth < MAX_TEST_TREE_DEPTH {
+                for _ in 0..rng.gen_range(0, 5) {
+                    self.dir_entries.push(Self::gen(rng, depth + 1));
+                }
+            }
+            self.normalize_entries();
+        }
+
+        fn normalize_entries(&mut self) {
+            let mut existing_names = HashSet::new();
+            self.dir_entries.sort_by(|a, b| a.name.cmp(&b.name));
+            self.dir_entries.retain(|entry| {
+                if existing_names.contains(&entry.name) {
+                    false
+                } else {
+                    existing_names.insert(entry.name.clone());
+                    true
+                }
+            });
+        }
+
+        fn paths(&self) -> Vec<String> {
+            let mut cur_path = PathBuf::new();
+            let mut paths = Vec::new();
+            self.paths_recursive(&mut cur_path, &mut paths);
+            paths
+        }
+
+        fn paths_recursive(&self, cur_path: &mut PathBuf, paths: &mut Vec<String>) {
+            cur_path.push(self.name.clone());
+            paths.push(cur_path.clone().to_string_lossy().into_owned());
+            for dir in &self.dir_entries {
+                dir.paths_recursive(cur_path, paths);
+            }
+            cur_path.pop();
+        }
+
+        fn build<S: Store>(&self, builder: &mut Builder, depth: usize, store: &S) {
+            let name = self.name.clone();
+            builder.push(name, Metadata::dir(0), depth, store).unwrap();
+            for dir in &self.dir_entries {
+                dir.build(builder, depth + 1, store);
+            }
+        }
+    }
+
+    fn gen_name<T: Rng>(rng: &mut T) -> OsString {
+        let mut name = String::new();
+        for _ in 0..rng.gen_range(1, 4) {
+            name.push(rng.gen_range(b'a', b'z' + 1).into());
+        }
+        name.into()
     }
 
     #[derive(Debug)]
