@@ -341,11 +341,6 @@ impl Builder {
         let mut perform_insert = false;
         let mut file_id_to_push = None;
 
-        if self.stack.len() >= depth {
-            self.stack
-                .truncate(cmp::max(depth, self.cursor.depth()) - 1);
-        }
-
         while self.cursor.depth() > depth
             || self.cursor.depth() == depth
                 && self.cursor.cmp_with_entry(name.as_os_str(), &metadata, db)? == Ordering::Less
