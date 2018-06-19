@@ -8,7 +8,7 @@ type OrderedEntry = u16;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Unique {
     replica_id: Uuid,
-    seq: u64,
+    pub seq: u64,
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]

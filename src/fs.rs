@@ -22,7 +22,7 @@ trait Store {
 #[derive(Clone)]
 struct Tree {
     items: btree::Tree<Item>,
-    file_ids_by_inode: btree::Tree<InodeToFileId>,
+    inodes_to_file_ids: HashMap<Inode, id::Unique>,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -80,11 +80,15 @@ struct Builder {
     stack: Vec<id::Unique>,
     cursor: Cursor,
     item_changes: Vec<ItemChange>,
-    new_mappings: Vec<InodeToFileId>,
-    insertions_by_inode: HashMap<Inode, id::Unique>,
+    inodes_to_file_ids: HashMap<Inode, id::Unique>,
 }
 
 enum ItemChange {
+    InsertMetadata {
+        file_id: id::Unique,
+        is_dir: bool,
+        inode: Inode,
+    },
     InsertDirEntry {
         file_id: id::Unique,
         name: OsString,
@@ -123,7 +127,7 @@ impl Tree {
     pub fn new() -> Self {
         Self {
             items: btree::Tree::new(),
-            file_ids_by_inode: btree::Tree::new(),
+            inodes_to_file_ids: HashMap::new(),
         }
     }
 
@@ -362,13 +366,13 @@ impl btree::Item for InodeToFileId {
 impl Builder {
     fn new<S: Store>(tree: Tree, db: &S) -> Result<Self, S::ReadError> {
         let cursor = tree.cursor(db)?;
+        let inodes_to_file_ids = tree.inodes_to_file_ids.clone();
         Ok(Self {
             tree,
             cursor,
             stack: Vec::new(),
             item_changes: Vec::new(),
-            new_mappings: Vec::new(),
-            insertions_by_inode: HashMap::new(),
+            inodes_to_file_ids,
         })
     }
 
@@ -390,6 +394,8 @@ impl Builder {
         let name = name.into();
         let mut perform_insert = false;
         let mut file_id_to_push = None;
+
+        println!("push {:?} {:?}", name, metadata.inode);
 
         while self.cursor.depth() > depth
             || self.cursor.depth() == depth
@@ -418,7 +424,21 @@ impl Builder {
 
         if perform_insert {
             let parent_id = self.stack.last().cloned().unwrap_or(id::Unique::default());
-            let child_id = db.gen_id();
+
+            let child_id =
+                if let Some(child_id) = self.inodes_to_file_ids.get(&metadata.inode).cloned() {
+                    child_id
+                } else {
+                    let child_id = db.gen_id();
+                    self.item_changes.push(ItemChange::InsertMetadata {
+                        file_id: child_id,
+                        is_dir: metadata.is_dir,
+                        inode: metadata.inode,
+                    });
+                    self.inodes_to_file_ids.insert(metadata.inode, child_id);
+                    child_id
+                };
+
             self.item_changes.push(ItemChange::InsertDirEntry {
                 file_id: parent_id,
                 is_dir: metadata.is_dir,
@@ -436,7 +456,6 @@ impl Builder {
 
     fn tree<S: Store>(mut self, db: &S) -> Result<Tree, S::ReadError> {
         let item_db = db.item_store();
-
         while let Some(entry) = self.cursor.dir_entry(db)? {
             self.item_changes.push(ItemChange::RemoveDirEntry {
                 entry,
@@ -448,6 +467,17 @@ impl Builder {
         let mut new_items = Vec::new();
         for change in self.item_changes {
             match change {
+                ItemChange::InsertMetadata {
+                    file_id,
+                    is_dir,
+                    inode,
+                } => {
+                    new_items.push(Item::Metadata {
+                        file_id,
+                        is_dir,
+                        inode,
+                    });
+                }
                 ItemChange::InsertDirEntry {
                     file_id: parent_dir_id,
                     name,
@@ -455,11 +485,6 @@ impl Builder {
                     child_id,
                     child_inode,
                 } => {
-                    new_items.push(Item::Metadata {
-                        file_id: child_id,
-                        is_dir,
-                        inode: child_inode,
-                    });
                     new_items.push(Item::DirEntry {
                         file_id: parent_dir_id,
                         entry_id: db.gen_id(),
@@ -479,7 +504,10 @@ impl Builder {
 
         new_items.sort_unstable_by_key(|item| item.key());
         let mut old_items_cursor = self.tree.items.cursor();
-        let mut new_tree = Tree::new();
+        let mut new_tree = Tree {
+            items: btree::Tree::new(),
+            inodes_to_file_ids: self.inodes_to_file_ids,
+        };
         for item in new_items {
             new_tree.items.push_tree(
                 old_items_cursor.slice(&item.key(), SeekBias::Left, item_db)?,
@@ -495,38 +523,6 @@ impl Builder {
             .push_tree(old_items_cursor.suffix::<Key, _>(item_db)?, item_db)?;
         Ok(new_tree)
     }
-
-    // fn find_or_create_file_id<S>(
-    //     &mut self,
-    //     metadata: &Metadata,
-    //     db: &S,
-    // ) -> Result<id::Unique, S::ReadError>
-    // where
-    //     S: Store,
-    // {
-    //     let inode_db = db.inode_to_file_id_store();
-    //     let mut cursor = self.tree.file_ids_by_inode.cursor();
-    //     cursor.seek(&metadata.inode, SeekBias::Left, inode_db)?;
-    //     let mapping = cursor.item(inode_db)?;
-    //     if mapping
-    //         .as_ref()
-    //         .map_or(false, |mapping| metadata.inode == mapping.inode)
-    //     {
-    //         Ok(mapping.unwrap().file_id)
-    //     } else {
-    //         let file_id = db.gen_id();
-    //         self.new_mappings.push(InodeToFileId {
-    //             inode: metadata.inode,
-    //             file_id,
-    //         });
-    //         self.item_changes.push(ItemChange::Insert(Item::Metadata {
-    //             file_id,
-    //             is_dir: metadata.is_dir,
-    //             inode: metadata.inode,
-    //         }));
-    //         Ok(file_id)
-    //     }
-    // }
 }
 
 impl Cursor {
@@ -753,8 +749,9 @@ mod tests {
 
     #[test]
     fn test_builder_random() {
-        for seed in 0..100 {
-            // println!("SEED: {}", seed);
+        for seed in 0..10000 {
+            let seed = 1226;
+            println!("SEED: {}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut store = NullStore::new();
@@ -768,12 +765,7 @@ mod tests {
             tree = builder.tree(store).unwrap();
             assert_eq!(tree.paths(store), reference_tree.paths());
 
-            for _ in 0..5 {
-                // eprintln!("=========================================");
-                // eprintln!("existing paths {:#?}", tree.paths(store).len());
-                // eprintln!("new tree paths {:#?}", reference_tree.paths().len());
-                // eprintln!("=========================================");
-
+            for _ in 0..1 {
                 let mut moves = Vec::new();
                 reference_tree.mutate(
                     &mut rng,
@@ -783,16 +775,55 @@ mod tests {
                     0,
                 );
 
+                eprintln!("=========================================");
+                eprintln!("existing paths {:#?}", tree.paths(store));
+                eprintln!("new tree paths {:#?}", reference_tree.paths());
+                eprintln!("=========================================");
+
                 let mut builder = Builder::new(tree.clone(), store).unwrap();
                 reference_tree.build(&mut builder, 1, store);
                 let new_tree = builder.tree(store).unwrap();
+
+                println!("moves: {:?}", moves);
+                println!("================================");
+                println!(
+                    "{:#?}",
+                    new_tree
+                        .items
+                        .items(store.item_store())
+                        .unwrap()
+                        .iter()
+                        .map(|item| {
+                            match item {
+                            Item::DirEntry {
+                                file_id,
+                                name,
+                                child_id,
+                                deletions,
+                                ..
+                            } => format!(
+                                "DirEntry {{ file_id: {:?}, name: {:?}, child_id: {:?} deletions {:?} }}",
+                                file_id.seq, name, child_id.seq, deletions
+                            ),
+                            Item::Metadata { file_id, .. } => {
+                                format!("Metadata {{ file_id: {:?} }}", file_id.seq)
+                            }
+                        }
+                        })
+                        .collect::<Vec<_>>()
+                );
+
                 assert_eq!(new_tree.paths(store), reference_tree.paths());
                 for m in moves {
+                    println!("verifying move {:?}", m);
                     if let Some(new_path) = m.new_path {
-                        assert_eq!(
-                            new_tree.id_for_path(&new_path, store),
-                            tree.id_for_path(&m.old_path, store)
-                        );
+                        if let Some(old_id) = tree.id_for_path(&m.old_path, store).unwrap() {
+                            let new_id = new_tree
+                                .id_for_path(&new_path, store)
+                                .unwrap()
+                                .expect("Path to exist in new tree");
+                            assert_eq!(new_id, old_id);
+                        }
                     }
                 }
 
@@ -809,15 +840,16 @@ mod tests {
         );
     }
 
-    const MAX_TEST_TREE_DEPTH: usize = 5;
+    const MAX_TEST_TREE_DEPTH: usize = 2;
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     struct TestDir {
         name: OsString,
         inode: Inode,
         dir_entries: Vec<TestDir>,
     }
 
+    #[derive(Debug)]
     struct Move {
         dir: TestDir,
         old_path: PathBuf,
@@ -855,10 +887,12 @@ mod tests {
                 remove.new_path = Some(path.clone());
                 let mut dir = remove.dir.clone();
                 dir.name = name;
+                path.pop();
                 return Some(dir);
+            } else {
+                path.pop();
+                None
             }
-            path.pop();
-            None
         }
 
         fn mutate<T: Rng>(
