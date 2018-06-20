@@ -194,12 +194,11 @@ impl Tree {
     fn paths<S: Store>(&self, store: &S) -> Vec<String> {
         let mut paths = Vec::new();
         let mut cursor = self.cursor(store).unwrap();
-        loop {
-            paths.push(cursor.path().to_string_lossy().into_owned());
-            if !cursor.next(store).unwrap() {
-                return paths;
-            }
+        while let Some(path) = cursor.path().map(|p| p.to_string_lossy().into_owned()) {
+            paths.push(path);
+            cursor.next(store).unwrap();
         }
+        paths
     }
 }
 
@@ -269,6 +268,13 @@ impl Item {
         match self {
             Item::DirEntry { child_id, .. } => *child_id,
             Item::Metadata { .. } => panic!(),
+        }
+    }
+
+    fn is_metadata(&self) -> bool {
+        match self {
+            Item::Metadata { .. } => true,
+            _ => false,
         }
     }
 
@@ -596,27 +602,37 @@ impl Cursor {
         let item_db = db.item_store();
         let mut root_cursor = tree.items.cursor();
         root_cursor.seek(&Key::default(), SeekBias::Left, item_db)?;
-        if let Some(item) = root_cursor.item(item_db)? {
-            let mut cursor = Self {
-                path: PathBuf::new(),
-                stack: vec![root_cursor],
-            };
-            cursor.follow_entry(db)?;
-            Ok(cursor)
-        } else {
-            Ok(Self {
-                path: PathBuf::new(),
-                stack: vec![],
-            })
+        while let Some(item) = root_cursor.item(item_db)? {
+            if item.is_metadata() {
+                break;
+            } else if item.is_dir_entry() && !item.is_deleted() {
+                let mut cursor = Self {
+                    path: PathBuf::new(),
+                    stack: vec![root_cursor],
+                };
+                cursor.follow_entry(db)?;
+                return Ok(cursor);
+            } else {
+                root_cursor.next(item_db)?;
+            }
         }
+
+        Ok(Self {
+            path: PathBuf::new(),
+            stack: vec![],
+        })
     }
 
     pub fn depth(&self) -> usize {
         self.stack.len().saturating_sub(1)
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> Option<&Path> {
+        if self.stack.is_empty() {
+            None
+        } else {
+            Some(&self.path)
+        }
     }
 
     pub fn dir_entry_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
@@ -782,11 +798,11 @@ mod tests {
                 TestDir::gen(&mut rng, &mut next_inode, 0, &mut HashSet::new());
             let mut tree = Tree::new();
             let mut builder = Builder::new(tree.clone(), store).unwrap();
-            reference_tree.build(&mut builder, 1, store);
+            reference_tree.build(&mut builder, 0, store);
             tree = builder.tree(store).unwrap();
             assert_eq!(tree.paths(store), reference_tree.paths());
 
-            for _ in 0..2 {
+            for _ in 0..5 {
                 let mut moves = Vec::new();
                 reference_tree.mutate(
                     &mut rng,
@@ -802,7 +818,7 @@ mod tests {
                 eprintln!("=========================================");
 
                 let mut builder = Builder::new(tree.clone(), store).unwrap();
-                reference_tree.build(&mut builder, 1, store);
+                reference_tree.build(&mut builder, 0, store);
                 let new_tree = builder.tree(store).unwrap();
 
                 println!("moves: {:?}", moves);
@@ -861,7 +877,7 @@ mod tests {
         );
     }
 
-    const MAX_TEST_TREE_DEPTH: usize = 2;
+    const MAX_TEST_TREE_DEPTH: usize = 5;
 
     #[derive(Clone, Debug)]
     struct TestDir {
@@ -932,7 +948,10 @@ mod tests {
             moves: &mut Vec<Move>,
             depth: usize,
         ) {
-            path.push(&self.name);
+            if depth != 0 {
+                path.push(&self.name);
+            }
+
             let mut blacklist = self.dir_entries.iter().map(|d| d.name.clone()).collect();
             self.dir_entries.retain(|entry| {
                 if rng.gen_weighted_bool(5) {
@@ -990,19 +1009,19 @@ mod tests {
         }
 
         fn paths_recursive(&self, cur_path: &mut PathBuf, paths: &mut Vec<String>) {
-            cur_path.push(self.name.clone());
-            paths.push(cur_path.clone().to_string_lossy().into_owned());
             for dir in &self.dir_entries {
+                cur_path.push(&dir.name);
+                paths.push(cur_path.clone().to_string_lossy().into_owned());
                 dir.paths_recursive(cur_path, paths);
+                cur_path.pop();
             }
-            cur_path.pop();
         }
 
         fn build<S: Store>(&self, builder: &mut Builder, depth: usize, store: &S) {
-            let name = self.name.clone();
-            let metadata = Metadata::dir(self.inode.0);
-            builder.push(name, metadata, depth, store).unwrap();
             for dir in &self.dir_entries {
+                builder
+                    .push(&dir.name, Metadata::dir(dir.inode), depth + 1, store)
+                    .unwrap();
                 dir.build(builder, depth + 1, store);
             }
         }
