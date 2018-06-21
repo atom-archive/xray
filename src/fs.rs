@@ -777,11 +777,9 @@ impl Cursor {
         if self.stack.is_empty() {
             Ok(false)
         } else {
-            let prev_depth = self.depth();
             self.stack.pop();
             self.path.pop();
-            self.next(db)?;
-            Ok(self.depth() == prev_depth)
+            self.next(db)
         }
     }
 
