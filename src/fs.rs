@@ -887,7 +887,9 @@ mod tests {
 
     #[test]
     fn test_builder_random() {
-        for seed in 0..5000 {
+        use std::iter::FromIterator;
+
+        for seed in 0..100 {
             // let seed = 116;
             println!("SEED: {}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
@@ -905,12 +907,16 @@ mod tests {
             assert_eq!(tree.paths(store), reference_tree.paths());
 
             for _ in 0..5 {
+                let mut old_paths: HashSet<String> = HashSet::from_iter(reference_tree.paths());
+
                 let mut moves = Vec::new();
+                let mut inserted_paths = HashSet::new();
                 reference_tree.mutate(
                     &mut rng,
                     &mut PathBuf::new(),
                     &mut next_inode,
                     &mut moves,
+                    &mut inserted_paths,
                     0,
                 );
 
@@ -938,14 +944,15 @@ mod tests {
                 //                 file_id,
                 //                 name,
                 //                 child_id,
+                //                 entry_id,
                 //                 deletions,
                 //                 ..
                 //             } => format!(
-                //                 "DirEntry {{ file_id: {:?}, name: {:?}, child_id: {:?} deletions {:?} }}",
-                //                 file_id.seq, name, child_id.seq, deletions
+                //                 "DirEntry {{ file_id: {:?}, name: {:?}, child_id: {:?}, entry_id: {:?}, deletions {:?} }}",
+                //                 file_id.seq, name, child_id.seq, entry_id.seq, deletions
                 //             ),
-                //             Item::Metadata { file_id, .. } => {
-                //                 format!("Metadata {{ file_id: {:?} }}", file_id.seq)
+                //             Item::Metadata { file_id, inode, .. } => {
+                //                 format!("Metadata {{ file_id: {:?}, inode: {:?} }}", file_id.seq, inode.0)
                 //             }
                 //         }
                 //         })
@@ -956,12 +963,16 @@ mod tests {
                 for m in moves {
                     // println!("verifying move {:?}", m);
                     if let Some(new_path) = m.new_path {
-                        if let Some(old_id) = tree.id_for_path(&m.old_path, store).unwrap() {
-                            let new_id = new_tree
+                        if let Some(old_path_id) = tree.id_for_path(&m.old_path, store).unwrap() {
+                            let new_path_id = new_tree
                                 .id_for_path(&new_path, store)
                                 .unwrap()
                                 .expect("Path to exist in new tree");
-                            assert_eq!(new_id, old_id);
+                            if !inserted_paths.contains(&m.old_path)
+                                && !old_paths.contains(&new_path.to_string_lossy().into_owned())
+                            {
+                                assert_eq!(new_path_id, old_path_id);
+                            }
                         }
                     }
                 }
@@ -973,9 +984,10 @@ mod tests {
 
     #[test]
     fn test_key_ordering() {
+        let min_id = id::Unique::default();
         assert!(
-            Key::dir_entry(id::Unique::default(), true, Arc::new("z".into()))
-                < Key::dir_entry(id::Unique::default(), false, Arc::new("a".into()))
+            Key::dir_entry(min_id, true, Arc::new("z".into()), min_id)
+                < Key::dir_entry(min_id, false, Arc::new("a".into()), min_id)
         );
     }
 
@@ -1021,6 +1033,7 @@ mod tests {
             path: &mut PathBuf,
             moves: &mut Vec<Move>,
             name_blacklist: &mut HashSet<OsString>,
+            inserted_paths: &mut HashSet<PathBuf>,
         ) -> Option<TestDir> {
             let name = gen_name(rng, name_blacklist);
             path.push(&name);
@@ -1030,6 +1043,7 @@ mod tests {
                 .collect::<Vec<_>>();
             if let Some(remove) = rng.choose_mut(&mut removes) {
                 // println!("Moving {:?} to {:?}", remove.dir.name, path);
+                inserted_paths.insert(path.clone());
                 remove.new_path = Some(path.clone());
                 let mut dir = remove.dir.clone();
                 dir.name = name;
@@ -1047,13 +1061,13 @@ mod tests {
             path: &mut PathBuf,
             next_inode: &mut u64,
             moves: &mut Vec<Move>,
+            inserted_paths: &mut HashSet<PathBuf>,
             depth: usize,
         ) {
             if depth != 0 {
                 path.push(&self.name);
             }
 
-            let mut blacklist = self.dir_entries.iter().map(|d| d.name.clone()).collect();
             self.dir_entries.retain(|entry| {
                 if rng.gen_weighted_bool(5) {
                     let mut entry_path = path.clone();
@@ -1073,12 +1087,20 @@ mod tests {
             rng.shuffle(&mut indices);
             indices.truncate(rng.gen_range(0, self.dir_entries.len() + 1));
             for index in indices {
-                self.dir_entries[index].mutate(rng, path, next_inode, moves, depth + 1);
+                self.dir_entries[index].mutate(
+                    rng,
+                    path,
+                    next_inode,
+                    moves,
+                    inserted_paths,
+                    depth + 1,
+                );
             }
             if depth < MAX_TEST_TREE_DEPTH {
-                for _ in 0..rng.gen_range(0, 2) {
+                let mut blacklist = self.dir_entries.iter().map(|d| d.name.clone()).collect();
+                for _ in 0..rng.gen_range(0, 5) {
                     let moved_entry = if rng.gen_weighted_bool(4) {
-                        Self::move_entry(rng, path, moves, &mut blacklist)
+                        Self::move_entry(rng, path, moves, &mut blacklist, inserted_paths)
                     } else {
                         None
                     };
@@ -1087,6 +1109,7 @@ mod tests {
                     } else {
                         let new_entry = Self::gen(rng, next_inode, depth + 1, &mut blacklist);
                         path.push(&new_entry.name);
+                        inserted_paths.insert(path.clone());
                         // println!("Generating {:?}", path);
                         path.pop();
                         self.dir_entries.push(new_entry);
