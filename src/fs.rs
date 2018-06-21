@@ -588,23 +588,34 @@ impl Builder {
             items: btree::Tree::new(),
             inodes_to_file_ids: self.inodes_to_file_ids,
         };
+        let mut buffered_items = Vec::new();
+
+        old_items_cursor.seek(&Key::default(), SeekBias::Left, item_db)?;
         for new_item in new_items {
-            new_tree.items.push_tree(
-                old_items_cursor.slice(&new_item.key(), SeekBias::Left, item_db)?,
-                item_db,
-            )?;
-            if let Some(old_item) = old_items_cursor.item(item_db)? {
-                if (old_item.is_dir_entry() && new_item.entry_id() == old_item.entry_id())
-                    || (old_item.is_metadata() && old_item.file_id() == new_item.file_id())
-                {
-                    old_items_cursor.next(item_db)?;
-                }
+            let new_item_key = new_item.key();
+            let mut old_item = old_items_cursor.item(item_db)?;
+            if old_item
+                .as_ref()
+                .map_or(false, |old_item| old_item.key() < new_item_key)
+            {
+                new_tree.items.extend(buffered_items.drain(..), item_db)?;
+                new_tree.items.push_tree(
+                    old_items_cursor.slice(&new_item_key, SeekBias::Left, item_db)?,
+                    item_db,
+                )?;
+                old_item = old_items_cursor.item(item_db)?;
             }
-            new_tree.items.push(new_item, item_db)?;
+
+            if old_item.map_or(false, |old_item| old_item.key() == new_item_key) {
+                old_items_cursor.next(item_db)?;
+            }
+            buffered_items.push(new_item);
         }
+        new_tree.items.extend(buffered_items, item_db)?;
         new_tree
             .items
             .push_tree(old_items_cursor.suffix::<Key, _>(item_db)?, item_db)?;
+
         Ok(new_tree)
     }
 
