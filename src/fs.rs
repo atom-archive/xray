@@ -67,7 +67,11 @@ struct Key {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum KeyKind {
     Metadata,
-    DirEntry { is_dir: bool, name: Arc<OsString> },
+    DirEntry {
+        is_dir: bool,
+        name: Arc<OsString>,
+        entry_id: id::Unique,
+    },
 }
 
 struct Metadata {
@@ -165,6 +169,7 @@ impl Tree {
                     kind: KeyKind::DirEntry {
                         is_dir: true,
                         name: component_name.clone(),
+                        entry_id: id::Unique::default(),
                     },
                 },
                 SeekBias::Left,
@@ -238,8 +243,9 @@ impl Item {
                 file_id,
                 is_dir,
                 name,
+                entry_id,
                 ..
-            } => Key::dir_entry(*file_id, *is_dir, name.clone()),
+            } => Key::dir_entry(*file_id, *is_dir, name.clone(), *entry_id),
         }
     }
 
@@ -267,6 +273,13 @@ impl Item {
     fn child_id(&self) -> id::Unique {
         match self {
             Item::DirEntry { child_id, .. } => *child_id,
+            Item::Metadata { .. } => panic!(),
+        }
+    }
+
+    fn entry_id(&self) -> id::Unique {
+        match self {
+            Item::DirEntry { entry_id, .. } => *entry_id,
             Item::Metadata { .. } => panic!(),
         }
     }
@@ -323,10 +336,19 @@ impl Key {
         }
     }
 
-    fn dir_entry(file_id: id::Unique, is_dir: bool, name: Arc<OsString>) -> Self {
+    fn dir_entry(
+        file_id: id::Unique,
+        is_dir: bool,
+        name: Arc<OsString>,
+        entry_id: id::Unique,
+    ) -> Self {
         Key {
             file_id,
-            kind: KeyKind::DirEntry { is_dir, name },
+            kind: KeyKind::DirEntry {
+                is_dir,
+                name,
+                entry_id,
+            },
         }
     }
 }
@@ -378,15 +400,21 @@ impl Ord for KeyKind {
             (KeyKind::Metadata, KeyKind::DirEntry { .. }) => Ordering::Less,
             (KeyKind::DirEntry { .. }, KeyKind::Metadata) => Ordering::Greater,
             (
-                KeyKind::DirEntry { is_dir, name },
+                KeyKind::DirEntry {
+                    is_dir,
+                    name,
+                    entry_id,
+                },
                 KeyKind::DirEntry {
                     is_dir: other_is_dir,
                     name: other_name,
+                    entry_id: other_entry_id,
                 },
             ) => is_dir
                 .cmp(other_is_dir)
                 .reverse()
-                .then_with(|| name.cmp(other_name)),
+                .then_with(|| name.cmp(other_name))
+                .then_with(|| entry_id.cmp(other_entry_id)),
         }
     }
 }
@@ -559,15 +587,17 @@ impl Builder {
             items: btree::Tree::new(),
             inodes_to_file_ids: self.inodes_to_file_ids,
         };
-        for item in new_items {
+        for new_item in new_items {
             new_tree.items.push_tree(
-                old_items_cursor.slice(&item.key(), SeekBias::Left, item_db)?,
+                old_items_cursor.slice(&new_item.key(), SeekBias::Left, item_db)?,
                 item_db,
             )?;
-            if item.is_deleted() {
-                old_items_cursor.next(item_db)?;
+            if let Some(old_item) = old_items_cursor.item(item_db)? {
+                if old_item.is_dir_entry() && new_item.entry_id() == old_item.entry_id() {
+                    old_items_cursor.next(item_db)?;
+                }
             }
-            new_tree.items.push(item, item_db)?;
+            new_tree.items.push(new_item, item_db)?;
         }
         new_tree
             .items
