@@ -466,13 +466,15 @@ impl Builder {
                             if !self.visited_inodes.contains(&old_inode) {
                                 self.visited_inodes.insert(old_inode);
                                 self.visited_inodes.insert(new_metadata.inode);
-                                self.inodes_to_file_ids
-                                    .insert(new_metadata.inode, old_entry.child_id());
-                                self.item_changes.push(ItemChange::InsertMetadata {
-                                    file_id: old_entry.child_id(),
-                                    is_dir: new_metadata.is_dir,
-                                    inode: new_metadata.inode,
-                                });
+                                if new_metadata.inode != old_inode {
+                                    self.inodes_to_file_ids
+                                        .insert(new_metadata.inode, old_entry.child_id());
+                                    self.item_changes.push(ItemChange::InsertMetadata {
+                                        file_id: old_entry.child_id(),
+                                        is_dir: new_metadata.is_dir,
+                                        inode: new_metadata.inode,
+                                    });
+                                }
                                 self.dir_stack.push(old_entry.child_id());
                                 self.next_old_entry(db)?;
                                 return Ok(());
