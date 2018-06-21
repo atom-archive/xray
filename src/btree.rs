@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 
-const TREE_BASE: usize = 2;
+const TREE_BASE: usize = 16;
 pub type NodeId = usize;
 
 pub trait Item: Clone + Eq + fmt::Debug {
