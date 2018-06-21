@@ -278,6 +278,13 @@ impl Item {
         }
     }
 
+    fn file_id(&self) -> id::Unique {
+        match self {
+            Item::DirEntry { file_id, .. } => *file_id,
+            Item::Metadata { file_id, .. } => *file_id,
+        }
+    }
+
     fn child_id(&self) -> id::Unique {
         match self {
             Item::DirEntry { child_id, .. } => *child_id,
@@ -487,6 +494,13 @@ impl Builder {
                         if !self.visited_inodes.contains(&old_inode) {
                             self.visited_inodes.insert(old_inode);
                             self.visited_inodes.insert(new_metadata.inode);
+                            self.inodes_to_file_ids
+                                .insert(new_metadata.inode, old_entry.child_id());
+                            self.item_changes.push(ItemChange::InsertMetadata {
+                                file_id: old_entry.child_id(),
+                                is_dir: true,
+                                inode: new_metadata.inode,
+                            });
                             self.dir_stack.push(old_entry.child_id());
                             self.next_old_entry(db)?;
                             return Ok(());
@@ -506,7 +520,6 @@ impl Builder {
         // If we make it this far, we did not find an old dir entry that's equivalent to the entry
         // we are pushing. We need to insert a new one. If the inode for the new entry matches an
         // existing file, we recycle its id so long as we have not already visited it.
-
         let parent_id = self
             .dir_stack
             .last()
@@ -601,7 +614,9 @@ impl Builder {
                 item_db,
             )?;
             if let Some(old_item) = old_items_cursor.item(item_db)? {
-                if old_item.is_dir_entry() && new_item.entry_id() == old_item.entry_id() {
+                if (old_item.is_dir_entry() && new_item.entry_id() == old_item.entry_id())
+                    || (old_item.is_metadata() && old_item.file_id() == new_item.file_id())
+                {
                     old_items_cursor.next(item_db)?;
                 }
             }
