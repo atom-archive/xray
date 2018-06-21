@@ -176,19 +176,27 @@ impl Tree {
                 item_db,
             )?;
 
-            match cursor.item(item_db)? {
-                Some(Item::DirEntry {
-                    name: entry_name,
-                    child_id,
-                    ..
-                }) => {
-                    if component_name == entry_name {
-                        parent_file_id = child_id;
-                    } else {
-                        return Ok(None);
+            loop {
+                match cursor.item(item_db)? {
+                    Some(Item::DirEntry {
+                        name: entry_name,
+                        child_id,
+                        deletions,
+                        ..
+                    }) => {
+                        if component_name == entry_name {
+                            if deletions.is_empty() {
+                                parent_file_id = child_id;
+                                break;
+                            } else {
+                                cursor.next(item_db)?;
+                            }
+                        } else {
+                            return Ok(None);
+                        }
                     }
+                    _ => return Ok(None),
                 }
-                _ => return Ok(None),
             }
         }
 
