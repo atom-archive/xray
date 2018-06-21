@@ -141,62 +141,33 @@ impl Tree {
         Cursor::within_root(self, db)
     }
 
-    pub fn id_for_path<I: Into<PathBuf>, S: Store>(
-        &self,
-        path: I,
-        db: &S,
-    ) -> Result<Option<id::Unique>, S::ReadError> {
+    pub fn id_for_path<I, S>(&self, path: I, db: &S) -> Result<Option<id::Unique>, S::ReadError>
+    where
+        I: Into<PathBuf>,
+        S: Store,
+    {
         let path = path.into();
         let item_db = db.item_store();
         let mut parent_file_id = id::Unique::default();
         let mut cursor = self.items.cursor();
+        let mut components_iter = path.components().peekable();
 
-        for component in path.components() {
-            cursor.seek(
-                &Key {
-                    file_id: parent_file_id,
-                    kind: KeyKind::Metadata,
-                },
-                SeekBias::Right,
-                item_db,
-            )?;
-
+        while let Some(component) = components_iter.next() {
             let component_name = Arc::new(OsString::from(component.as_os_str()));
-
-            cursor.seek_forward(
-                &Key {
-                    file_id: parent_file_id,
-                    kind: KeyKind::DirEntry {
-                        is_dir: true,
-                        name: component_name.clone(),
-                        entry_id: id::Unique::default(),
-                    },
-                },
-                SeekBias::Left,
-                item_db,
-            )?;
-
-            loop {
-                match cursor.item(item_db)? {
-                    Some(Item::DirEntry {
-                        name: entry_name,
-                        child_id,
-                        deletions,
-                        ..
-                    }) => {
-                        if component_name == entry_name {
-                            if deletions.is_empty() {
-                                parent_file_id = child_id;
-                                break;
-                            } else {
-                                cursor.next(item_db)?;
-                            }
-                        } else {
-                            return Ok(None);
-                        }
-                    }
-                    _ => return Ok(None),
+            if let Some(child_id) =
+                seek_to_dir_entry(&mut cursor, parent_file_id, &component_name, true, db)?
+            {
+                parent_file_id = child_id;
+            } else if components_iter.peek().is_none() {
+                if let Some(child_id) =
+                    seek_to_dir_entry(&mut cursor, parent_file_id, &component_name, false, db)?
+                {
+                    return Ok(Some(child_id));
+                } else {
+                    return Ok(None);
                 }
+            } else {
+                return Ok(None);
             }
         }
 
@@ -491,17 +462,22 @@ impl Builder {
                 ) {
                     Ordering::Less => break,
                     Ordering::Equal => {
-                        if !self.visited_inodes.contains(&old_inode) {
-                            self.visited_inodes.insert(old_inode);
-                            self.visited_inodes.insert(new_metadata.inode);
-                            self.inodes_to_file_ids
-                                .insert(new_metadata.inode, old_entry.child_id());
-                            self.item_changes.push(ItemChange::InsertMetadata {
-                                file_id: old_entry.child_id(),
-                                is_dir: true,
-                                inode: new_metadata.inode,
-                            });
-                            self.dir_stack.push(old_entry.child_id());
+                        if new_metadata.is_dir {
+                            if !self.visited_inodes.contains(&old_inode) {
+                                self.visited_inodes.insert(old_inode);
+                                self.visited_inodes.insert(new_metadata.inode);
+                                self.inodes_to_file_ids
+                                    .insert(new_metadata.inode, old_entry.child_id());
+                                self.item_changes.push(ItemChange::InsertMetadata {
+                                    file_id: old_entry.child_id(),
+                                    is_dir: new_metadata.is_dir,
+                                    inode: new_metadata.inode,
+                                });
+                                self.dir_stack.push(old_entry.child_id());
+                                self.next_old_entry(db)?;
+                                return Ok(());
+                            }
+                        } else if old_inode == new_metadata.inode {
                             self.next_old_entry(db)?;
                             return Ok(());
                         }
@@ -543,8 +519,10 @@ impl Builder {
             }
         };
 
-        self.dir_stack.push(child_id);
-        self.visited_inodes.insert(new_metadata.inode);
+        if new_metadata.is_dir {
+            self.dir_stack.push(child_id);
+            self.visited_inodes.insert(new_metadata.inode);
+        }
         self.item_changes.push(ItemChange::InsertDirEntry {
             file_id: parent_id,
             is_dir: new_metadata.is_dir,
@@ -832,6 +810,51 @@ fn cmp_dir_entries(a_is_dir: bool, a_name: &OsStr, b_is_dir: bool, b_name: &OsSt
         .then_with(|| a_name.cmp(b_name))
 }
 
+fn seek_to_dir_entry<S: Store>(
+    cursor: &mut btree::Cursor<Item>,
+    parent_id: id::Unique,
+    name: &Arc<OsString>,
+    is_dir: bool,
+    db: &S,
+) -> Result<Option<id::Unique>, S::ReadError> {
+    let item_db = db.item_store();
+    cursor.seek(
+        &Key {
+            file_id: parent_id,
+            kind: KeyKind::DirEntry {
+                is_dir,
+                name: name.clone(),
+                entry_id: id::Unique::default(),
+            },
+        },
+        SeekBias::Left,
+        item_db,
+    )?;
+
+    loop {
+        match cursor.item(item_db)? {
+            Some(Item::DirEntry {
+                name: entry_name,
+                child_id,
+                deletions,
+                is_dir: entry_is_dir,
+                ..
+            }) => {
+                if name == &entry_name && is_dir == entry_is_dir {
+                    if deletions.is_empty() {
+                        return Ok(Some(child_id));
+                    } else {
+                        cursor.next(item_db)?;
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate rand;
@@ -890,7 +913,7 @@ mod tests {
         use std::iter::FromIterator;
 
         for seed in 0..100 {
-            // let seed = 116;
+            // let seed = 908;
             println!("SEED: {}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -899,7 +922,7 @@ mod tests {
             let mut next_inode = 0;
 
             let mut reference_tree =
-                TestDir::gen(&mut rng, &mut next_inode, 0, &mut HashSet::new());
+                TestEntry::gen(&mut rng, &mut next_inode, 0, &mut HashSet::new());
             let mut tree = Tree::new();
             let mut builder = Builder::new(tree.clone(), store).unwrap();
             reference_tree.build(&mut builder, 0, store);
@@ -951,8 +974,8 @@ mod tests {
                 //                 "DirEntry {{ file_id: {:?}, name: {:?}, child_id: {:?}, entry_id: {:?}, deletions {:?} }}",
                 //                 file_id.seq, name, child_id.seq, entry_id.seq, deletions
                 //             ),
-                //             Item::Metadata { file_id, inode, .. } => {
-                //                 format!("Metadata {{ file_id: {:?}, inode: {:?} }}", file_id.seq, inode.0)
+                //             Item::Metadata { file_id, inode, is_dir, .. } => {
+                //                 format!("Metadata {{ file_id: {:?}, inode: {:?}, is_dir: {:?} }}", file_id.seq, inode.0, is_dir)
                 //             }
                 //         }
                 //         })
@@ -968,8 +991,10 @@ mod tests {
                                 .id_for_path(&new_path, store)
                                 .unwrap()
                                 .expect("Path to exist in new tree");
-                            if !inserted_paths.contains(&m.old_path)
-                                && !old_paths.contains(&new_path.to_string_lossy().into_owned())
+                            if !m.entry.is_dir()
+                                || (!inserted_paths.contains(&m.old_path)
+                                    && !old_paths
+                                        .contains(&new_path.to_string_lossy().into_owned()))
                             {
                                 assert_eq!(new_path_id, old_path_id);
                             }
@@ -993,21 +1018,27 @@ mod tests {
 
     const MAX_TEST_TREE_DEPTH: usize = 5;
 
-    #[derive(Clone, Debug)]
-    struct TestDir {
-        name: OsString,
-        inode: Inode,
-        dir_entries: Vec<TestDir>,
+    #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+    enum TestEntry {
+        Dir {
+            name: OsString,
+            inode: Inode,
+            dir_entries: Vec<TestEntry>,
+        },
+        File {
+            name: OsString,
+            inode: Inode,
+        },
     }
 
     #[derive(Debug)]
     struct Move {
-        dir: TestDir,
+        entry: TestEntry,
         old_path: PathBuf,
         new_path: Option<PathBuf>,
     }
 
-    impl TestDir {
+    impl TestEntry {
         fn gen<T: Rng>(
             rng: &mut T,
             next_inode: &mut u64,
@@ -1017,15 +1048,22 @@ mod tests {
             let new_inode = *next_inode;
             *next_inode += 1;
 
-            let mut tree = Self {
-                name: gen_name(rng, name_blacklist),
-                inode: Inode(new_inode),
-                dir_entries: (0..rng.gen_range(0, MAX_TEST_TREE_DEPTH - depth + 1))
+            if rng.gen() {
+                let mut dir_entries = (0..rng.gen_range(0, MAX_TEST_TREE_DEPTH - depth + 1))
                     .map(|_| Self::gen(rng, next_inode, depth + 1, name_blacklist))
-                    .collect(),
-            };
-            tree.sort_entries();
-            tree
+                    .collect::<Vec<_>>();
+                dir_entries.sort();
+                TestEntry::Dir {
+                    name: gen_name(rng, name_blacklist),
+                    inode: Inode(new_inode),
+                    dir_entries,
+                }
+            } else {
+                TestEntry::File {
+                    name: gen_name(rng, name_blacklist),
+                    inode: Inode(new_inode),
+                }
+            }
         }
 
         fn move_entry<T: Rng>(
@@ -1034,7 +1072,7 @@ mod tests {
             moves: &mut Vec<Move>,
             name_blacklist: &mut HashSet<OsString>,
             inserted_paths: &mut HashSet<PathBuf>,
-        ) -> Option<TestDir> {
+        ) -> Option<TestEntry> {
             let name = gen_name(rng, name_blacklist);
             path.push(&name);
             let mut removes = moves
@@ -1045,10 +1083,10 @@ mod tests {
                 // println!("Moving {:?} to {:?}", remove.dir.name, path);
                 inserted_paths.insert(path.clone());
                 remove.new_path = Some(path.clone());
-                let mut dir = remove.dir.clone();
-                dir.name = name;
+                let mut entry = remove.entry.clone();
+                *entry.name_mut() = name;
                 path.pop();
-                return Some(dir);
+                return Some(entry);
             } else {
                 path.pop();
                 None
@@ -1064,64 +1102,65 @@ mod tests {
             inserted_paths: &mut HashSet<PathBuf>,
             depth: usize,
         ) {
-            if depth != 0 {
-                path.push(&self.name);
-            }
-
-            self.dir_entries.retain(|entry| {
-                if rng.gen_weighted_bool(5) {
-                    let mut entry_path = path.clone();
-                    entry_path.push(&entry.name);
-                    // println!("Removing {:?}", entry_path);
-                    moves.push(Move {
-                        dir: entry.clone(),
-                        old_path: entry_path,
-                        new_path: None,
-                    });
-                    false
-                } else {
-                    true
+            if let TestEntry::Dir {
+                name, dir_entries, ..
+            } = self
+            {
+                if depth != 0 {
+                    path.push(name);
                 }
-            });
-            let mut indices = (0..self.dir_entries.len()).collect::<Vec<_>>();
-            rng.shuffle(&mut indices);
-            indices.truncate(rng.gen_range(0, self.dir_entries.len() + 1));
-            for index in indices {
-                self.dir_entries[index].mutate(
-                    rng,
-                    path,
-                    next_inode,
-                    moves,
-                    inserted_paths,
-                    depth + 1,
-                );
-            }
-            if depth < MAX_TEST_TREE_DEPTH {
-                let mut blacklist = self.dir_entries.iter().map(|d| d.name.clone()).collect();
-                for _ in 0..rng.gen_range(0, 5) {
-                    let moved_entry = if rng.gen_weighted_bool(4) {
-                        Self::move_entry(rng, path, moves, &mut blacklist, inserted_paths)
+
+                dir_entries.retain(|entry| {
+                    if rng.gen_weighted_bool(5) {
+                        let mut entry_path = path.clone();
+                        entry_path.push(entry.name());
+                        // println!("Removing {:?}", entry_path);
+                        moves.push(Move {
+                            entry: entry.clone(),
+                            old_path: entry_path,
+                            new_path: None,
+                        });
+                        false
                     } else {
-                        None
-                    };
-                    if let Some(moved_entry) = moved_entry {
-                        self.dir_entries.push(moved_entry);
-                    } else {
-                        let new_entry = Self::gen(rng, next_inode, depth + 1, &mut blacklist);
-                        path.push(&new_entry.name);
-                        inserted_paths.insert(path.clone());
-                        // println!("Generating {:?}", path);
-                        path.pop();
-                        self.dir_entries.push(new_entry);
+                        true
+                    }
+                });
+                let mut indices = (0..dir_entries.len()).collect::<Vec<_>>();
+                rng.shuffle(&mut indices);
+                indices.truncate(rng.gen_range(0, dir_entries.len() + 1));
+                for index in indices {
+                    dir_entries[index].mutate(
+                        rng,
+                        path,
+                        next_inode,
+                        moves,
+                        inserted_paths,
+                        depth + 1,
+                    );
+                }
+                if depth < MAX_TEST_TREE_DEPTH {
+                    let mut blacklist = dir_entries.iter().map(|d| d.name().clone()).collect();
+                    for _ in 0..rng.gen_range(0, 5) {
+                        let moved_entry = if rng.gen_weighted_bool(4) {
+                            Self::move_entry(rng, path, moves, &mut blacklist, inserted_paths)
+                        } else {
+                            None
+                        };
+                        if let Some(moved_entry) = moved_entry {
+                            dir_entries.push(moved_entry);
+                        } else {
+                            let new_entry = Self::gen(rng, next_inode, depth + 1, &mut blacklist);
+                            path.push(new_entry.name());
+                            inserted_paths.insert(path.clone());
+                            // println!("Generating {:?}", path);
+                            path.pop();
+                            dir_entries.push(new_entry);
+                        }
                     }
                 }
+                dir_entries.sort();
+                path.pop();
             }
-            self.sort_entries();
-            path.pop();
-        }
-
-        fn sort_entries(&mut self) {
-            self.dir_entries.sort_by(|a, b| a.name.cmp(&b.name));
         }
 
         fn paths(&self) -> Vec<String> {
@@ -1132,20 +1171,62 @@ mod tests {
         }
 
         fn paths_recursive(&self, cur_path: &mut PathBuf, paths: &mut Vec<String>) {
-            for dir in &self.dir_entries {
-                cur_path.push(&dir.name);
-                paths.push(cur_path.clone().to_string_lossy().into_owned());
-                dir.paths_recursive(cur_path, paths);
-                cur_path.pop();
+            match self {
+                TestEntry::Dir { dir_entries, .. } => {
+                    for entry in dir_entries {
+                        cur_path.push(entry.name());
+                        paths.push(cur_path.clone().to_string_lossy().into_owned());
+                        entry.paths_recursive(cur_path, paths);
+                        cur_path.pop();
+                    }
+                }
+                TestEntry::File { .. } => {}
             }
         }
 
         fn build<S: Store>(&self, builder: &mut Builder, depth: usize, store: &S) {
-            for dir in &self.dir_entries {
-                builder
-                    .push(&dir.name, Metadata::dir(dir.inode), depth + 1, store)
-                    .unwrap();
-                dir.build(builder, depth + 1, store);
+            match self {
+                TestEntry::Dir { dir_entries, .. } => {
+                    for entry in dir_entries {
+                        builder
+                            .push(entry.name(), entry.metadata(), depth + 1, store)
+                            .unwrap();
+                        entry.build(builder, depth + 1, store);
+                    }
+                }
+                TestEntry::File { .. } => {}
+            }
+        }
+
+        fn name(&self) -> &OsString {
+            match self {
+                TestEntry::Dir { name, .. } | TestEntry::File { name, .. } => name,
+            }
+        }
+
+        fn name_mut(&mut self) -> &mut OsString {
+            match self {
+                TestEntry::Dir { name, .. } | TestEntry::File { name, .. } => name,
+            }
+        }
+
+        fn is_dir(&self) -> bool {
+            match self {
+                TestEntry::Dir { .. } => true,
+                _ => false,
+            }
+        }
+
+        fn metadata(&self) -> Metadata {
+            match self {
+                TestEntry::Dir { name, inode, .. } => Metadata {
+                    is_dir: true,
+                    inode: *inode,
+                },
+                TestEntry::File { name, inode, .. } => Metadata {
+                    is_dir: false,
+                    inode: *inode,
+                },
             }
         }
     }
