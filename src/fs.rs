@@ -803,9 +803,20 @@ impl Cursor {
         {
             let entry_cursor = self.stack.last().unwrap();
             match entry_cursor.item(item_db)?.unwrap() {
-                Item::DirEntry { child_id, name, .. } => {
+                Item::DirEntry {
+                    file_id,
+                    child_id,
+                    name,
+                    ..
+                } => {
                     child_cursor = entry_cursor.clone();
-                    child_cursor.seek(&Key::metadata(child_id), SeekBias::Left, item_db)?;
+                    let child_key = Key::metadata(child_id);
+                    if child_id > file_id {
+                        child_cursor.seek_forward(&child_key, SeekBias::Left, item_db)?;
+                    } else {
+                        child_cursor.seek(&child_key, SeekBias::Left, item_db)?;
+                    }
+
                     self.path.push(name.as_ref());
                 }
                 _ => panic!(),
