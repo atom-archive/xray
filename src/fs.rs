@@ -12,12 +12,16 @@ use std::sync::Arc;
 trait Store {
     type ReadError: fmt::Debug;
     type ItemStore: NodeStore<Item, ReadError = Self::ReadError>;
-    type InodeToFileIdStore: NodeStore<InodeToFileId, ReadError = Self::ReadError>;
 
     fn item_store(&self) -> &Self::ItemStore;
-    fn inode_to_file_id_store(&self) -> &Self::InodeToFileIdStore;
     fn gen_id(&self) -> id::Unique;
 }
+
+trait IoProvider {
+    fn gen_inode(&mut self) -> Inode;
+}
+
+type Inode = u64;
 
 #[derive(Clone)]
 struct Tree {
@@ -25,8 +29,19 @@ struct Tree {
     inodes_to_file_ids: HashMap<Inode, id::Unique>,
 }
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
-struct Inode(u64);
+enum Operation {
+    InsertMetadata {
+        file_id: id::Unique,
+        is_dir: bool,
+    },
+    InsertDirEntry {
+        file_id: id::Unique,
+        is_dir: bool,
+        name: Arc<OsString>,
+        entry_id: id::Unique,
+        child_id: id::Unique,
+    },
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Item {
@@ -114,17 +129,17 @@ struct Cursor {
 }
 
 impl Metadata {
-    fn dir<I: Into<Inode>>(inode: I) -> Self {
+    fn dir(inode: Inode) -> Self {
         Metadata {
             is_dir: true,
-            inode: inode.into(),
+            inode,
         }
     }
 
-    fn file<I: Into<Inode>>(inode: I) -> Self {
+    fn file(inode: Inode) -> Self {
         Metadata {
             is_dir: false,
-            inode: inode.into(),
+            inode: inode,
         }
     }
 }
@@ -175,6 +190,71 @@ impl Tree {
     }
 
     #[cfg(test)]
+    fn integrate_ops<I, S>(
+        &mut self,
+        ops: Vec<Operation>,
+        db: &S,
+        io: &mut I,
+    ) -> Result<(), S::ReadError>
+    where
+        I: IoProvider,
+        S: Store,
+    {
+        for op in ops {
+            self.integrate_op(op, db, io)?;
+        }
+        Ok(())
+    }
+
+    pub fn integrate_op<I, S>(
+        &mut self,
+        op: Operation,
+        db: &S,
+        io: &mut I,
+    ) -> Result<(), S::ReadError>
+    where
+        I: IoProvider,
+        S: Store,
+    {
+        match op {
+            Operation::InsertMetadata { file_id, is_dir } => {
+                self.items = interleave_items(
+                    &self.items,
+                    Some(Item::Metadata {
+                        file_id,
+                        is_dir,
+                        inode: io.gen_inode(),
+                    }),
+                    db,
+                )?;
+            }
+            Operation::InsertDirEntry {
+                file_id,
+                is_dir,
+                name,
+                entry_id,
+                child_id,
+            } => {
+                self.items = interleave_items(
+                    &self.items,
+                    Some(Item::DirEntry {
+                        file_id,
+                        is_dir,
+                        name,
+                        entry_id,
+                        child_id,
+                        deletions: SmallVec::new(),
+                        moves: SmallVec::new(),
+                    }),
+                    db,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn paths<S: Store>(&self, store: &S) -> Vec<String> {
         let mut paths = Vec::new();
         let mut cursor = self.cursor(store).unwrap();
@@ -183,34 +263,6 @@ impl Tree {
             cursor.next(store).unwrap();
         }
         paths
-    }
-}
-
-impl From<u64> for Inode {
-    fn from(inode: u64) -> Self {
-        Inode(inode)
-    }
-}
-
-impl<'a> Add<&'a Self> for Inode {
-    type Output = Inode;
-
-    fn add(self, other: &Self) -> Self::Output {
-        cmp::max(self, *other)
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for Inode {
-    fn add_assign(&mut self, other: &Self) {
-        *self = cmp::max(*self, *other);
-    }
-}
-
-impl btree::Dimension for Inode {
-    type Summary = Self;
-
-    fn from_summary(summary: &Self) -> &Self {
-        summary
     }
 }
 
@@ -534,7 +586,7 @@ impl Builder {
         Ok(())
     }
 
-    pub fn tree<S: Store>(mut self, db: &S) -> Result<Tree, S::ReadError> {
+    pub fn tree<S: Store>(mut self, db: &S) -> Result<(Tree, Vec<Operation>), S::ReadError> {
         let item_db = db.item_store();
         while let Some(entry) = self.old_dir_entry_item(db)? {
             let inode = self.old_inode(db)?.unwrap();
@@ -543,6 +595,7 @@ impl Builder {
             self.next_old_entry_sibling(db)?;
         }
 
+        let mut operations = Vec::new();
         let mut new_items = Vec::new();
         for change in self.item_changes {
             match change {
@@ -551,6 +604,7 @@ impl Builder {
                     is_dir,
                     inode,
                 } => {
+                    operations.push(Operation::InsertMetadata { file_id, is_dir });
                     new_items.push(Item::Metadata {
                         file_id,
                         is_dir,
@@ -558,17 +612,26 @@ impl Builder {
                     });
                 }
                 ItemChange::InsertDirEntry {
-                    file_id: parent_dir_id,
+                    file_id,
                     name,
                     is_dir,
                     child_id,
                     child_inode,
                 } => {
-                    new_items.push(Item::DirEntry {
-                        file_id: parent_dir_id,
-                        entry_id: db.gen_id(),
+                    let entry_id = db.gen_id();
+                    let name = Arc::new(name);
+                    operations.push(Operation::InsertDirEntry {
+                        file_id,
+                        is_dir,
+                        name: name.clone(),
+                        entry_id,
                         child_id,
-                        name: Arc::new(name),
+                    });
+                    new_items.push(Item::DirEntry {
+                        file_id,
+                        entry_id,
+                        child_id,
+                        name,
                         is_dir,
                         deletions: SmallVec::new(),
                         moves: SmallVec::new(),
@@ -580,42 +643,14 @@ impl Builder {
                 }
             }
         }
-
         new_items.sort_unstable_by_key(|item| item.key());
-        let mut old_items_cursor = self.tree.items.cursor();
+
         let mut new_tree = Tree {
-            items: btree::Tree::new(),
+            items: interleave_items(&self.tree.items, new_items, db)?,
             inodes_to_file_ids: self.inodes_to_file_ids,
         };
-        let mut buffered_items = Vec::new();
 
-        old_items_cursor.seek(&Key::default(), SeekBias::Left, item_db)?;
-        for new_item in new_items {
-            let new_item_key = new_item.key();
-            let mut old_item = old_items_cursor.item(item_db)?;
-            if old_item
-                .as_ref()
-                .map_or(false, |old_item| old_item.key() < new_item_key)
-            {
-                new_tree.items.extend(buffered_items.drain(..), item_db)?;
-                new_tree.items.push_tree(
-                    old_items_cursor.slice(&new_item_key, SeekBias::Left, item_db)?,
-                    item_db,
-                )?;
-                old_item = old_items_cursor.item(item_db)?;
-            }
-
-            if old_item.map_or(false, |old_item| old_item.key() == new_item_key) {
-                old_items_cursor.next(item_db)?;
-            }
-            buffered_items.push(new_item);
-        }
-        new_tree.items.extend(buffered_items, item_db)?;
-        new_tree
-            .items
-            .push_tree(old_items_cursor.suffix::<Key, _>(item_db)?, item_db)?;
-
-        Ok(new_tree)
+        Ok((new_tree, operations))
     }
 
     fn old_depth(&self) -> usize {
@@ -878,19 +913,59 @@ fn seek_to_dir_entry<S: Store>(
     }
 }
 
+fn interleave_items<I, S>(
+    tree: &btree::Tree<Item>,
+    sorted_items: I,
+    db: &S,
+) -> Result<btree::Tree<Item>, S::ReadError>
+where
+    I: IntoIterator<Item = Item>,
+    S: Store,
+{
+    let item_db = db.item_store();
+    let mut old_items_cursor = tree.cursor();
+    let mut new_tree = btree::Tree::new();
+    let mut buffered_items = Vec::new();
+
+    old_items_cursor.seek(&Key::default(), SeekBias::Left, item_db)?;
+    for new_item in sorted_items {
+        let new_item_key = new_item.key();
+        let mut old_item = old_items_cursor.item(item_db)?;
+        if old_item
+            .as_ref()
+            .map_or(false, |old_item| old_item.key() < new_item_key)
+        {
+            new_tree.extend(buffered_items.drain(..), item_db)?;
+            new_tree.push_tree(
+                old_items_cursor.slice(&new_item_key, SeekBias::Left, item_db)?,
+                item_db,
+            )?;
+            old_item = old_items_cursor.item(item_db)?;
+        }
+
+        if old_item.map_or(false, |old_item| old_item.key() == new_item_key) {
+            old_items_cursor.next(item_db)?;
+        }
+        buffered_items.push(new_item);
+    }
+    new_tree.extend(buffered_items, item_db)?;
+    new_tree.push_tree(old_items_cursor.suffix::<Key, _>(item_db)?, item_db)?;
+    Ok(new_tree)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate rand;
 
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::Cell;
     use std::collections::HashSet;
     use std::path::PathBuf;
 
     #[test]
     fn test_builder_basic() {
-        let db = NullStore::new();
+        let db = NullStore::new(1);
         let tree = Tree::new();
         let mut builder = Builder::new(tree, &db).unwrap();
         builder.push("a", Metadata::dir(1), 1, &db).unwrap();
@@ -899,7 +974,7 @@ mod tests {
         builder.push("d", Metadata::dir(4), 3, &db).unwrap();
         builder.push("e", Metadata::file(5), 3, &db).unwrap();
         builder.push("f", Metadata::dir(6), 1, &db).unwrap();
-        let tree = builder.tree(&db).unwrap();
+        let (tree, _) = builder.tree(&db).unwrap();
         assert_eq!(
             tree.paths(&db),
             ["a", "a/b", "a/b/c", "a/b/d", "a/b/e", "f"]
@@ -915,7 +990,7 @@ mod tests {
         builder.push("b2", Metadata::dir(8), 2, &db).unwrap();
         builder.push("g", Metadata::dir(9), 3, &db).unwrap();
         builder.push("f", Metadata::dir(6), 1, &db).unwrap();
-        let tree = builder.tree(&db).unwrap();
+        let (tree, _) = builder.tree(&db).unwrap();
         assert_eq!(
             tree.paths(&db),
             ["a", "a/b", "a/b/c", "a/b/c2", "a/b/d", "a/b/e", "a/b2", "a/b2/g", "f"]
@@ -927,7 +1002,7 @@ mod tests {
         builder.push("d", Metadata::dir(4), 3, &db).unwrap();
         builder.push("e", Metadata::file(5), 3, &db).unwrap();
         builder.push("f", Metadata::dir(6), 1, &db).unwrap();
-        let tree = builder.tree(&db).unwrap();
+        let (tree, _) = builder.tree(&db).unwrap();
         assert_eq!(tree.paths(&db), ["a", "a/b", "a/b/d", "a/b/e", "f"]);
     }
 
@@ -940,7 +1015,7 @@ mod tests {
             println!("SEED: {}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut store = NullStore::new();
+            let mut store = NullStore::new(1);
             let store = &store;
             let mut next_inode = 0;
 
@@ -949,7 +1024,7 @@ mod tests {
             let mut tree = Tree::new();
             let mut builder = Builder::new(tree.clone(), store).unwrap();
             reference_tree.build(&mut builder, 0, store);
-            tree = builder.tree(store).unwrap();
+            tree = builder.tree(store).unwrap().0;
             assert_eq!(tree.paths(store), reference_tree.paths());
 
             for _ in 0..5 {
@@ -973,7 +1048,7 @@ mod tests {
 
                 let mut builder = Builder::new(tree.clone(), store).unwrap();
                 reference_tree.build(&mut builder, 0, store);
-                let new_tree = builder.tree(store).unwrap();
+                let (new_tree, _) = builder.tree(store).unwrap();
 
                 // println!("moves: {:?}", moves);
                 // println!("================================");
@@ -1031,6 +1106,33 @@ mod tests {
     }
 
     #[test]
+    fn test_replication_basic() {
+        let mut io_1 = TestIoProvider::new();
+        let db_1 = NullStore::new(1);
+        let tree_1 = Tree::new();
+        let mut io_2 = TestIoProvider::new();
+        let db_2 = NullStore::new(2);
+        let tree_2 = Tree::new();
+
+        let mut builder = Builder::new(tree_1, &db_1).unwrap();
+        builder
+            .push("a", Metadata::dir(io_1.gen_inode()), 1, &db_1)
+            .unwrap();
+        let (mut tree_1, ops_1) = builder.tree(&db_1).unwrap();
+
+        let mut builder = Builder::new(tree_2, &db_2).unwrap();
+        builder
+            .push("b", Metadata::dir(io_2.gen_inode()), 1, &db_2)
+            .unwrap();
+        let (mut tree_2, ops_2) = builder.tree(&db_2).unwrap();
+
+        tree_1.integrate_ops(ops_2, &db_1, &mut io_1).unwrap();
+        tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
+        assert_eq!(tree_1.paths(&db_1), ["a", "b"]);
+        assert_eq!(tree_2.paths(&db_2), ["a", "b"]);
+    }
+
+    #[test]
     fn test_key_ordering() {
         let min_id = id::Unique::default();
         assert!(
@@ -1078,13 +1180,13 @@ mod tests {
                 dir_entries.sort();
                 TestEntry::Dir {
                     name: gen_name(rng, name_blacklist),
-                    inode: Inode(new_inode),
+                    inode: new_inode,
                     dir_entries,
                 }
             } else {
                 TestEntry::File {
                     name: gen_name(rng, name_blacklist),
-                    inode: Inode(new_inode),
+                    inode: new_inode,
                 }
             }
         }
@@ -1270,13 +1372,17 @@ mod tests {
 
     #[derive(Debug)]
     struct NullStore {
-        next_id: RefCell<id::Unique>,
+        next_id: Cell<id::Unique>,
+    }
+
+    struct TestIoProvider {
+        next_inode: Inode,
     }
 
     impl NullStore {
-        fn new() -> Self {
+        fn new(replica_id: u64) -> Self {
             Self {
-                next_id: RefCell::new(id::Unique::random()),
+                next_id: Cell::new(id::Unique::new(replica_id)),
             }
         }
     }
@@ -1284,19 +1390,14 @@ mod tests {
     impl Store for NullStore {
         type ReadError = ();
         type ItemStore = NullStore;
-        type InodeToFileIdStore = NullStore;
 
         fn gen_id(&self) -> id::Unique {
-            let next_id = self.next_id.borrow().clone();
-            self.next_id.borrow_mut().inc();
+            let next_id = self.next_id.get();
+            self.next_id.replace(next_id.next());
             next_id
         }
 
         fn item_store(&self) -> &Self::ItemStore {
-            self
-        }
-
-        fn inode_to_file_id_store(&self) -> &Self::InodeToFileIdStore {
             self
         }
     }
@@ -1309,14 +1410,17 @@ mod tests {
         }
     }
 
-    impl btree::NodeStore<InodeToFileId> for NullStore {
-        type ReadError = ();
+    impl TestIoProvider {
+        fn new() -> Self {
+            Self { next_inode: 0 }
+        }
+    }
 
-        fn get(
-            &self,
-            _id: btree::NodeId,
-        ) -> Result<Arc<btree::Node<InodeToFileId>>, Self::ReadError> {
-            panic!("get should never be called on a null store")
+    impl IoProvider for TestIoProvider {
+        fn gen_inode(&mut self) -> Inode {
+            let inode = self.next_inode;
+            self.next_inode += 1;
+            inode
         }
     }
 }

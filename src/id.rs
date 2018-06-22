@@ -15,6 +15,10 @@ pub struct Unique {
 pub struct Ordered(Arc<Vec<OrderedEntry>>);
 
 impl Unique {
+    pub fn new(replica_id: u64) -> Self {
+        Self { replica_id, seq: 0 }
+    }
+
     pub fn random() -> Self {
         Self {
             replica_id: 1,
@@ -22,8 +26,9 @@ impl Unique {
         }
     }
 
-    pub fn inc(&mut self) {
+    pub fn next(mut self) -> Self {
         self.seq += 1;
+        self
     }
 }
 
