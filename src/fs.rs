@@ -1,7 +1,7 @@
 use btree::{self, NodeStore, SeekBias};
 use id;
 use smallvec::SmallVec;
-use std::cmp::{self, Ordering};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -964,49 +964,35 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::collections::HashSet;
+    use std::iter::Peekable;
     use std::path::PathBuf;
 
     #[test]
     fn test_builder_basic() {
         let db = NullStore::new(1);
-        let tree = Tree::new();
-        let mut builder = Builder::new(tree, &db).unwrap();
-        builder.push("a", Metadata::dir(1), 1, &db).unwrap();
-        builder.push("b", Metadata::dir(2), 2, &db).unwrap();
-        builder.push("c", Metadata::dir(3), 3, &db).unwrap();
-        builder.push("d", Metadata::dir(4), 3, &db).unwrap();
-        builder.push("e", Metadata::file(5), 3, &db).unwrap();
-        builder.push("f", Metadata::dir(6), 1, &db).unwrap();
-        let (tree, _) = builder.tree(&db).unwrap();
-        assert_eq!(
-            tree.paths(&db),
-            ["a", "a/b", "a/b/c", "a/b/d", "a/b/e", "f"]
-        );
 
-        let mut builder = Builder::new(tree, &db).unwrap();
-        builder.push("a", Metadata::dir(1), 1, &db).unwrap();
-        builder.push("b", Metadata::dir(2), 2, &db).unwrap();
-        builder.push("c", Metadata::dir(3), 3, &db).unwrap();
-        builder.push("c2", Metadata::dir(7), 3, &db).unwrap();
-        builder.push("d", Metadata::dir(4), 3, &db).unwrap();
-        builder.push("e", Metadata::file(5), 3, &db).unwrap();
-        builder.push("b2", Metadata::dir(8), 2, &db).unwrap();
-        builder.push("g", Metadata::dir(9), 3, &db).unwrap();
-        builder.push("f", Metadata::dir(6), 1, &db).unwrap();
-        let (tree, _) = builder.tree(&db).unwrap();
-        assert_eq!(
-            tree.paths(&db),
-            ["a", "a/b", "a/b/c", "a/b/c2", "a/b/d", "a/b/e", "a/b2", "a/b2/g", "f"]
-        );
+        let mut reference = TestFile::dir();
+        reference.insert_dir("a");
+        reference.insert_dir("a/b");
+        reference.insert_dir("a/b/c");
+        reference.insert_dir("a/b/d");
+        reference.insert_dir("a/b/e");
+        reference.insert_dir("f");
 
-        let mut builder = Builder::new(tree, &db).unwrap();
-        builder.push("a", Metadata::dir(1), 1, &db).unwrap();
-        builder.push("b", Metadata::dir(2), 2, &db).unwrap();
-        builder.push("d", Metadata::dir(4), 3, &db).unwrap();
-        builder.push("e", Metadata::file(5), 3, &db).unwrap();
-        builder.push("f", Metadata::dir(6), 1, &db).unwrap();
-        let (tree, _) = builder.tree(&db).unwrap();
-        assert_eq!(tree.paths(&db), ["a", "a/b", "a/b/d", "a/b/e", "f"]);
+        let (tree, _) = reference.update_tree(Tree::new(), &db);
+        assert_eq!(tree.paths(&db), reference.paths());
+
+        reference.insert_dir("a/b/c2");
+        reference.insert_dir("a/b2");
+        reference.insert_dir("a/b2/g");
+        let (tree, _) = reference.update_tree(Tree::new(), &db);
+        assert_eq!(tree.paths(&db), reference.paths());
+
+        reference.remove_dir("a/b/c2");
+        reference.remove_dir("a/b2");
+        reference.remove_dir("a/b2/g");
+        let (tree, _) = reference.update_tree(Tree::new(), &db);
+        assert_eq!(tree.paths(&db), reference.paths());
     }
 
     #[test]
@@ -1024,10 +1010,7 @@ mod tests {
 
             let mut reference_tree =
                 TestFile::gen(&mut rng, &mut next_inode, 0, &mut HashSet::new());
-            let mut tree = Tree::new();
-            let mut builder = Builder::new(tree.clone(), store).unwrap();
-            reference_tree.build(&mut builder, 0, store);
-            tree = builder.tree(store).unwrap().0;
+            let (mut tree, _) = reference_tree.update_tree(Tree::new(), store);
             assert_eq!(tree.paths(store), reference_tree.paths());
 
             for _ in 0..5 {
@@ -1049,9 +1032,7 @@ mod tests {
                 // println!("new tree paths {:#?}", reference_tree.paths());
                 // println!("=========================================");
 
-                let mut builder = Builder::new(tree.clone(), store).unwrap();
-                reference_tree.build(&mut builder, 0, store);
-                let (new_tree, _) = builder.tree(store).unwrap();
+                let (new_tree, _) = reference_tree.update_tree(tree.clone(), store);
 
                 // println!("moves: {:?}", moves);
                 // println!("================================");
@@ -1111,29 +1092,27 @@ mod tests {
 
     #[test]
     fn test_replication_basic() {
+        let mut reference_1 = TestFile::dir();
+        let mut reference_2 = TestFile::dir();
         let mut io_1 = TestIoProvider::new();
-        let db_1 = NullStore::new(1);
-        let tree_1 = Tree::new();
         let mut io_2 = TestIoProvider::new();
+        let db_1 = NullStore::new(1);
         let db_2 = NullStore::new(2);
+        let tree_1 = Tree::new();
         let tree_2 = Tree::new();
 
-        let mut builder = Builder::new(tree_1, &db_1).unwrap();
-        builder
-            .push("a", Metadata::dir(io_1.gen_inode()), 1, &db_1)
-            .unwrap();
-        let (mut tree_1, ops_1) = builder.tree(&db_1).unwrap();
+        let tree2 = Tree::new();
 
-        let mut builder = Builder::new(tree_2, &db_2).unwrap();
-        builder
-            .push("b", Metadata::dir(io_2.gen_inode()), 1, &db_2)
-            .unwrap();
-        let (mut tree_2, ops_2) = builder.tree(&db_2).unwrap();
+        reference_1.insert_dir("a");
+        let (mut tree_1, ops_1) = reference_1.update_tree(tree_1, &db_1);
+
+        reference_2.insert_dir("b");
+        let (mut tree_2, ops_2) = reference_2.update_tree(tree_2, &db_2);
 
         tree_1.integrate_ops(ops_2, &db_1, &mut io_1).unwrap();
         tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
-        assert_eq!(tree_1.paths(&db_1), ["a", "b"]);
-        assert_eq!(tree_2.paths(&db_2), ["a", "b"]);
+        assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
+        assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
     }
 
     #[test]
@@ -1167,6 +1146,74 @@ mod tests {
     }
 
     impl TestFile {
+        fn dir() -> Self {
+            TestFile {
+                inode: 0,
+                dir_entries: Some(Vec::new()),
+            }
+        }
+
+        fn file() -> Self {
+            TestFile {
+                inode: 0,
+                dir_entries: None,
+            }
+        }
+
+        fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) {
+            self.update_path(path.into(), true, true);
+        }
+
+        fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
+            self.update_path(path.into(), true, false);
+        }
+
+        fn update_path(&mut self, path: PathBuf, is_dir: bool, insert: bool) {
+            let mut dir = self;
+            let mut components = path.components().peekable();
+
+            loop {
+                if let Some(component) = components.next() {
+                    let dir_entries = { dir }.dir_entries.as_mut().unwrap();
+
+                    let needle = TestDirEntry {
+                        name: OsString::from(component.as_os_str()),
+                        file: if is_dir || components.peek().is_some() {
+                            TestFile::dir()
+                        } else {
+                            TestFile::file()
+                        },
+                    };
+                    dir = match dir_entries.binary_search(&needle) {
+                        Ok(index) => {
+                            if insert || components.peek().is_some() {
+                                &mut dir_entries[index].file
+                            } else {
+                                dir_entries.remove(index);
+                                break;
+                            }
+                        }
+                        Err(index) => {
+                            if insert {
+                                dir_entries.insert(index, needle);
+                                &mut dir_entries[index].file
+                            } else {
+                                break;
+                            }
+                        }
+                    };
+                } else {
+                    break;
+                }
+            }
+        }
+
+        fn update_tree<S: Store>(&self, tree: Tree, db: &S) -> (Tree, Vec<Operation>) {
+            let mut builder = Builder::new(tree, db).unwrap();
+            self.build(&mut builder, 0, db);
+            builder.tree(db).unwrap()
+        }
+
         fn gen<T: Rng>(
             rng: &mut T,
             next_inode: &mut u64,
