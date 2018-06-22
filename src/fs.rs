@@ -355,9 +355,8 @@ impl btree::Dimension for Key {
 
 impl<'a> AddAssign<&'a Self> for Key {
     fn add_assign(&mut self, other: &Self) {
-        if *self < *other {
-            *self = other.clone();
-        }
+        debug_assert!(*self < *other);
+        *self = other.clone();
     }
 }
 
