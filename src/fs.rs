@@ -258,7 +258,10 @@ impl Tree {
     fn paths<S: Store>(&self, store: &S) -> Vec<String> {
         let mut paths = Vec::new();
         let mut cursor = self.cursor(store).unwrap();
-        while let Some(path) = cursor.path().map(|p| p.to_string_lossy().into_owned()) {
+        while let Some(mut path) = cursor.path().map(|p| p.to_string_lossy().into_owned()) {
+            if cursor.dir_entry_item(store).unwrap().unwrap().is_dir() {
+                path.push('/');
+            }
             paths.push(path);
             cursor.next(store).unwrap();
         }
@@ -1020,7 +1023,7 @@ mod tests {
             let mut next_inode = 0;
 
             let mut reference_tree =
-                TestEntry::gen(&mut rng, &mut next_inode, 0, &mut HashSet::new());
+                TestFile::gen(&mut rng, &mut next_inode, 0, &mut HashSet::new());
             let mut tree = Tree::new();
             let mut builder = Builder::new(tree.clone(), store).unwrap();
             reference_tree.build(&mut builder, 0, store);
@@ -1031,13 +1034,13 @@ mod tests {
                 let mut old_paths: HashSet<String> = HashSet::from_iter(reference_tree.paths());
 
                 let mut moves = Vec::new();
-                let mut inserted_paths = HashSet::new();
+                let mut touched_paths = HashSet::new();
                 reference_tree.mutate(
                     &mut rng,
                     &mut PathBuf::new(),
                     &mut next_inode,
                     &mut moves,
-                    &mut inserted_paths,
+                    &mut touched_paths,
                     0,
                 );
 
@@ -1073,7 +1076,7 @@ mod tests {
                 //                 file_id.seq, name, child_id.seq, entry_id.seq, deletions
                 //             ),
                 //             Item::Metadata { file_id, inode, is_dir, .. } => {
-                //                 format!("Metadata {{ file_id: {:?}, inode: {:?}, is_dir: {:?} }}", file_id.seq, inode.0, is_dir)
+                //                 format!("Metadata {{ file_id: {:?}, inode: {:?}, is_dir: {:?} }}", file_id.seq, inode, is_dir)
                 //             }
                 //         }
                 //         })
@@ -1089,8 +1092,9 @@ mod tests {
                                 .id_for_path(&new_path, store)
                                 .unwrap()
                                 .expect("Path to exist in new tree");
-                            if !m.entry.is_dir()
-                                || (!inserted_paths.contains(&m.old_path)
+
+                            if !m.file.is_dir()
+                                || (!touched_paths.contains(&m.old_path)
                                     && !old_paths
                                         .contains(&new_path.to_string_lossy().into_owned()))
                             {
@@ -1144,26 +1148,25 @@ mod tests {
     const MAX_TEST_TREE_DEPTH: usize = 5;
 
     #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
-    enum TestEntry {
-        Dir {
-            name: OsString,
-            inode: Inode,
-            dir_entries: Vec<TestEntry>,
-        },
-        File {
-            name: OsString,
-            inode: Inode,
-        },
+    struct TestFile {
+        inode: Inode,
+        dir_entries: Option<Vec<TestDirEntry>>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct TestDirEntry {
+        name: OsString,
+        file: TestFile,
     }
 
     #[derive(Debug)]
     struct Move {
-        entry: TestEntry,
+        file: TestFile,
         old_path: PathBuf,
         new_path: Option<PathBuf>,
     }
 
-    impl TestEntry {
+    impl TestFile {
         fn gen<T: Rng>(
             rng: &mut T,
             next_inode: &mut u64,
@@ -1175,46 +1178,21 @@ mod tests {
 
             if rng.gen() {
                 let mut dir_entries = (0..rng.gen_range(0, MAX_TEST_TREE_DEPTH - depth + 1))
-                    .map(|_| Self::gen(rng, next_inode, depth + 1, name_blacklist))
+                    .map(|_| TestDirEntry {
+                        name: gen_name(rng, name_blacklist),
+                        file: Self::gen(rng, next_inode, depth + 1, name_blacklist),
+                    })
                     .collect::<Vec<_>>();
                 dir_entries.sort();
-                TestEntry::Dir {
-                    name: gen_name(rng, name_blacklist),
+                TestFile {
                     inode: new_inode,
-                    dir_entries,
+                    dir_entries: Some(dir_entries),
                 }
             } else {
-                TestEntry::File {
-                    name: gen_name(rng, name_blacklist),
+                TestFile {
                     inode: new_inode,
+                    dir_entries: None,
                 }
-            }
-        }
-
-        fn move_entry<T: Rng>(
-            rng: &mut T,
-            path: &mut PathBuf,
-            moves: &mut Vec<Move>,
-            name_blacklist: &mut HashSet<OsString>,
-            inserted_paths: &mut HashSet<PathBuf>,
-        ) -> Option<TestEntry> {
-            let name = gen_name(rng, name_blacklist);
-            path.push(&name);
-            let mut removes = moves
-                .iter_mut()
-                .filter(|m| m.new_path.is_none())
-                .collect::<Vec<_>>();
-            if let Some(remove) = rng.choose_mut(&mut removes) {
-                // println!("Moving {:?} to {:?}", remove.dir.name, path);
-                inserted_paths.insert(path.clone());
-                remove.new_path = Some(path.clone());
-                let mut entry = remove.entry.clone();
-                *entry.name_mut() = name;
-                path.pop();
-                return Some(entry);
-            } else {
-                path.pop();
-                None
             }
         }
 
@@ -1224,24 +1202,17 @@ mod tests {
             path: &mut PathBuf,
             next_inode: &mut u64,
             moves: &mut Vec<Move>,
-            inserted_paths: &mut HashSet<PathBuf>,
+            touched_paths: &mut HashSet<PathBuf>,
             depth: usize,
         ) {
-            if let TestEntry::Dir {
-                name, dir_entries, ..
-            } = self
-            {
-                if depth != 0 {
-                    path.push(name);
-                }
-
-                dir_entries.retain(|entry| {
+            if let Some(dir_entries) = self.dir_entries.as_mut() {
+                dir_entries.retain(|TestDirEntry { name, file }| {
                     if rng.gen_weighted_bool(5) {
                         let mut entry_path = path.clone();
-                        entry_path.push(entry.name());
-                        // println!("Removing {:?}", entry_path);
+                        entry_path.push(name);
+                        touched_paths.insert(entry_path.clone());
                         moves.push(Move {
-                            entry: entry.clone(),
+                            file: file.clone(),
                             old_path: entry_path,
                             new_path: None,
                         });
@@ -1254,37 +1225,50 @@ mod tests {
                 rng.shuffle(&mut indices);
                 indices.truncate(rng.gen_range(0, dir_entries.len() + 1));
                 for index in indices {
-                    dir_entries[index].mutate(
+                    path.push(&dir_entries[index].name);
+                    dir_entries[index].file.mutate(
                         rng,
                         path,
                         next_inode,
                         moves,
-                        inserted_paths,
+                        touched_paths,
                         depth + 1,
                     );
+                    path.pop();
                 }
                 if depth < MAX_TEST_TREE_DEPTH {
-                    let mut blacklist = dir_entries.iter().map(|d| d.name().clone()).collect();
+                    let mut blacklist = dir_entries
+                        .iter()
+                        .map(|TestDirEntry { name, .. }| name.clone())
+                        .collect();
                     for _ in 0..rng.gen_range(0, 5) {
-                        let moved_entry = if rng.gen_weighted_bool(4) {
-                            Self::move_entry(rng, path, moves, &mut blacklist, inserted_paths)
+                        let name = gen_name(rng, &mut blacklist);
+                        path.push(&name);
+                        touched_paths.insert(path.clone());
+
+                        let mut removals = moves
+                            .iter_mut()
+                            .filter(|m| m.new_path.is_none())
+                            .collect::<Vec<_>>();
+
+                        if !removals.is_empty() && rng.gen_weighted_bool(4) {
+                            let removal = rng.choose_mut(&mut removals).unwrap();
+                            removal.new_path = Some(path.clone());
+                            dir_entries.push(TestDirEntry {
+                                name,
+                                file: removal.file.clone(),
+                            });
                         } else {
-                            None
-                        };
-                        if let Some(moved_entry) = moved_entry {
-                            dir_entries.push(moved_entry);
-                        } else {
-                            let new_entry = Self::gen(rng, next_inode, depth + 1, &mut blacklist);
-                            path.push(new_entry.name());
-                            inserted_paths.insert(path.clone());
+                            let file = Self::gen(rng, next_inode, depth + 1, &mut blacklist);
+                            touched_paths.insert(path.clone());
                             // println!("Generating {:?}", path);
-                            path.pop();
-                            dir_entries.push(new_entry);
-                        }
+                            dir_entries.push(TestDirEntry { name, file });
+                        };
+
+                        path.pop();
                     }
                 }
                 dir_entries.sort();
-                path.pop();
             }
         }
 
@@ -1296,63 +1280,57 @@ mod tests {
         }
 
         fn paths_recursive(&self, cur_path: &mut PathBuf, paths: &mut Vec<String>) {
-            match self {
-                TestEntry::Dir { dir_entries, .. } => {
-                    for entry in dir_entries {
-                        cur_path.push(entry.name());
-                        paths.push(cur_path.clone().to_string_lossy().into_owned());
-                        entry.paths_recursive(cur_path, paths);
-                        cur_path.pop();
+            if let Some(dir_entries) = &self.dir_entries {
+                for TestDirEntry { name, file } in dir_entries {
+                    cur_path.push(name);
+                    let mut path = cur_path.clone().to_string_lossy().into_owned();
+                    if file.is_dir() {
+                        path.push('/');
                     }
+                    paths.push(path);
+                    file.paths_recursive(cur_path, paths);
+                    cur_path.pop();
                 }
-                TestEntry::File { .. } => {}
             }
         }
 
         fn build<S: Store>(&self, builder: &mut Builder, depth: usize, store: &S) {
-            match self {
-                TestEntry::Dir { dir_entries, .. } => {
-                    for entry in dir_entries {
-                        builder
-                            .push(entry.name(), entry.metadata(), depth + 1, store)
-                            .unwrap();
-                        entry.build(builder, depth + 1, store);
-                    }
+            if let Some(dir_entries) = &self.dir_entries {
+                for TestDirEntry { name, file } in dir_entries {
+                    builder
+                        .push(
+                            name,
+                            Metadata {
+                                inode: file.inode,
+                                is_dir: file.is_dir(),
+                            },
+                            depth + 1,
+                            store,
+                        )
+                        .unwrap();
+                    file.build(builder, depth + 1, store);
                 }
-                TestEntry::File { .. } => {}
-            }
-        }
-
-        fn name(&self) -> &OsString {
-            match self {
-                TestEntry::Dir { name, .. } | TestEntry::File { name, .. } => name,
-            }
-        }
-
-        fn name_mut(&mut self) -> &mut OsString {
-            match self {
-                TestEntry::Dir { name, .. } | TestEntry::File { name, .. } => name,
             }
         }
 
         fn is_dir(&self) -> bool {
-            match self {
-                TestEntry::Dir { .. } => true,
-                _ => false,
-            }
+            self.dir_entries.is_some()
         }
+    }
 
-        fn metadata(&self) -> Metadata {
-            match self {
-                TestEntry::Dir { name, inode, .. } => Metadata {
-                    is_dir: true,
-                    inode: *inode,
-                },
-                TestEntry::File { name, inode, .. } => Metadata {
-                    is_dir: false,
-                    inode: *inode,
-                },
-            }
+    impl Ord for TestDirEntry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.file
+                .is_dir()
+                .cmp(&other.file.is_dir())
+                .reverse()
+                .then_with(|| self.name.cmp(&other.name))
+        }
+    }
+
+    impl PartialOrd for TestDirEntry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
         }
     }
 
