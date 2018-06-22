@@ -183,12 +183,14 @@ impl<T: Item> Tree<T> {
 
     pub fn push_tree<S: NodeStore<T>>(&mut self, other: Self, db: &S) -> Result<(), S::ReadError> {
         let other_node = other.node(db)?;
-        if self.node(db)?.height() < other_node.height() {
-            for tree in other_node.child_trees() {
-                self.push_tree(tree.clone(), db)?;
+        if !other_node.is_leaf() || other_node.items().len() > 0 {
+            if self.node(db)?.height() < other_node.height() {
+                for tree in other_node.child_trees() {
+                    self.push_tree(tree.clone(), db)?;
+                }
+            } else if let Some(split_tree) = self.push_tree_recursive(other, db)? {
+                *self = Self::from_child_trees(vec![self.clone(), split_tree], db)?;
             }
-        } else if let Some(split_tree) = self.push_tree_recursive(other, db)? {
-            *self = Self::from_child_trees(vec![self.clone(), split_tree], db)?;
         }
         Ok(())
     }
@@ -369,6 +371,13 @@ impl<T: Item> Clone for Tree<T> {
 }
 
 impl<T: Item> Node<T> {
+    fn is_leaf(&self) -> bool {
+        match self {
+            Node::Leaf { .. } => true,
+            _ => false,
+        }
+    }
+
     fn height(&self) -> u8 {
         match self {
             Node::Internal { height, .. } => *height,
