@@ -1206,6 +1206,7 @@ mod tests {
             depth: usize,
         ) {
             if let Some(dir_entries) = self.dir_entries.as_mut() {
+                // Delete random entries
                 dir_entries.retain(|TestDirEntry { name, file }| {
                     if rng.gen_weighted_bool(5) {
                         let mut entry_path = path.clone();
@@ -1221,6 +1222,8 @@ mod tests {
                         true
                     }
                 });
+
+                // Mutate random entries
                 let mut indices = (0..dir_entries.len()).collect::<Vec<_>>();
                 rng.shuffle(&mut indices);
                 indices.truncate(rng.gen_range(0, dir_entries.len() + 1));
@@ -1236,11 +1239,14 @@ mod tests {
                     );
                     path.pop();
                 }
+
+                // Insert entries if we are less than the max depth
                 if depth < MAX_TEST_TREE_DEPTH {
                     let mut blacklist = dir_entries
                         .iter()
                         .map(|TestDirEntry { name, .. }| name.clone())
                         .collect();
+
                     for _ in 0..rng.gen_range(0, 5) {
                         let name = gen_name(rng, &mut blacklist);
                         path.push(&name);
@@ -1261,13 +1267,13 @@ mod tests {
                         } else {
                             let file = Self::gen(rng, next_inode, depth + 1, &mut blacklist);
                             touched_paths.insert(path.clone());
-                            // println!("Generating {:?}", path);
                             dir_entries.push(TestDirEntry { name, file });
                         };
 
                         path.pop();
                     }
                 }
+
                 dir_entries.sort();
             }
         }
