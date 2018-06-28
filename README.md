@@ -1,8 +1,8 @@
 # Eon: Xray's real-time version control system
 
-[Xray](https://github.com/atom/xray) ships with its own operation-based version control system called *Eon*, which supports real-time, conflict-free synchronization and interoperates with Git. Eon is enabled by default when editing via the Xray editor, and Eon can also be integrated with other text editors via a shared-library or a standalone server that communicates over local sockets.
+Eon is an experimental real-time conflict-free version control system. It is currently work-in-progress and has been extracted from the work we've done in [Xray](https://github.com/atom/xray). Eventually, our goal is to enable Eon by default when editing via the Xray editor, but also allow Eon to be integrated with other text editors via a shared-library or a standalone server that communicates over local sockets.
 
-The code in this repository has been extracted from the work we've done in [Xray](https://github.com/atom/xray).
+The sections that follow in this document are totally aspirational and subject to change as we implement more and more features.
 
 ## Overview
 
