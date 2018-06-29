@@ -1113,6 +1113,18 @@ mod tests {
         tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
         assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
         assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
+
+        // This currently fails. We need to make the reference tree a proper
+        // IoProvider and have it insert directories and files when we integrate
+        // operations. Then we need to break ties in the case of duplicates.
+        reference_1.insert_dir("c");
+        let (mut tree_1, ops_1) = reference_1.update_tree(tree_1, &db_1);
+        reference_2.insert_dir("c");
+        let (mut tree_2, ops_2) = reference_2.update_tree(tree_2, &db_2);
+        tree_1.integrate_ops(ops_2, &db_1, &mut io_1).unwrap();
+        tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
+        assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/"]);
+        assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/"]);
     }
 
     #[test]
