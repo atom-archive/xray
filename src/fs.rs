@@ -24,6 +24,7 @@ trait IoProvider {
 }
 
 type Inode = u64;
+type LamportTimestamp = u64;
 
 #[derive(Clone)]
 struct Tree {
@@ -32,17 +33,6 @@ struct Tree {
 }
 
 enum Operation {
-    InsertMetadata {
-        file_id: id::Unique,
-        is_dir: bool,
-    },
-    InsertDirEntry {
-        file_id: id::Unique,
-        is_dir: bool,
-        name: Arc<OsString>,
-        entry_id: id::Unique,
-        child_id: id::Unique,
-    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,21 +42,29 @@ enum Item {
         is_dir: bool,
         inode: Inode,
     },
-    DirEntry {
-        file_id: id::Unique,
-        entry_id: id::Unique,
+    ParentRef {
         child_id: id::Unique,
+        ref_id: id::Unique,
+        timestamp: LamportTimestamp,
+        version: id::Unique,
+        parent_id: Option<id::Unique>,
         name: Arc<OsString>,
+    },
+    ChildRef {
+        parent_id: id::Unique,
         is_dir: bool,
+        name: Arc<OsString>,
+        ref_id: id::Unique,
+        child_id: id::Unique,
+        version: id::Unique,
         deletions: SmallVec<[id::Unique; 1]>,
-        moves: SmallVec<[Move; 1]>,
     },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Move {
     file_id: id::Unique,
-    entry_id: id::Unique,
+    ref_id: id::Unique,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,20 +73,30 @@ struct InodeToFileId {
     file_id: id::Unique,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-struct Key {
-    file_id: id::Unique,
-    kind: KeyKind,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum KeyKind {
-    Metadata,
-    DirEntry {
+enum Key {
+    Metadata {
+        file_id: id::Unique,
+    },
+    ParentRef {
+        child_id: id::Unique,
+        ref_id: id::Unique,
+        timestamp: LamportTimestamp,
+        replica_id: id::ReplicaId,
+    },
+    ChildRef {
+        parent_id: id::Unique,
         is_dir: bool,
         name: Arc<OsString>,
-        entry_id: id::Unique,
+        ref_id: id::Unique,
     },
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum KeyKind {
+    Metadata,
+    ParentRef,
+    ChildRef,
 }
 
 struct Metadata {
@@ -112,14 +120,14 @@ enum ItemChange {
         is_dir: bool,
         inode: Inode,
     },
-    InsertDirEntry {
-        file_id: id::Unique,
+    InsertChildRef {
+        parent_id: id::Unique,
         name: OsString,
         is_dir: bool,
         child_id: id::Unique,
         child_inode: Inode,
     },
-    RemoveDirEntry {
+    RemoveChildRef {
         entry: Item,
         inode: Inode,
     },
@@ -172,12 +180,12 @@ impl Tree {
         while let Some(component) = components_iter.next() {
             let component_name = Arc::new(OsString::from(component.as_os_str()));
             if let Some(child_id) =
-                seek_to_dir_entry(&mut cursor, parent_file_id, &component_name, true, db)?
+                seek_to_child_ref(&mut cursor, parent_file_id, &component_name, true, db)?
             {
                 parent_file_id = child_id;
             } else if components_iter.peek().is_none() {
                 if let Some(child_id) =
-                    seek_to_dir_entry(&mut cursor, parent_file_id, &component_name, false, db)?
+                    seek_to_child_ref(&mut cursor, parent_file_id, &component_name, false, db)?
                 {
                     return Ok(Some(child_id));
                 } else {
@@ -218,42 +226,7 @@ impl Tree {
         I: IoProvider,
         S: Store,
     {
-        match op {
-            Operation::InsertMetadata { file_id, is_dir } => {
-                self.items = interleave_items(
-                    &self.items,
-                    Some(Item::Metadata {
-                        file_id,
-                        is_dir,
-                        inode: io.gen_inode(),
-                    }),
-                    db,
-                )?;
-            }
-            Operation::InsertDirEntry {
-                file_id,
-                is_dir,
-                name,
-                entry_id,
-                child_id,
-            } => {
-                self.items = interleave_items(
-                    &self.items,
-                    Some(Item::DirEntry {
-                        file_id,
-                        is_dir,
-                        name,
-                        entry_id,
-                        child_id,
-                        deletions: SmallVec::new(),
-                        moves: SmallVec::new(),
-                    }),
-                    db,
-                )?;
-            }
-        }
-
-        Ok(())
+        unimplemented!()
     }
 
     #[cfg(test)]
@@ -261,7 +234,7 @@ impl Tree {
         let mut paths = Vec::new();
         let mut cursor = self.cursor(store).unwrap();
         while let Some(mut path) = cursor.path().map(|p| p.to_string_lossy().into_owned()) {
-            if cursor.dir_entry_item(store).unwrap().unwrap().is_dir() {
+            if cursor.child_ref_item(store).unwrap().unwrap().is_dir() {
                 path.push('/');
             }
             paths.push(path);
@@ -274,56 +247,76 @@ impl Tree {
 impl Item {
     fn key(&self) -> Key {
         match self {
-            Item::Metadata { file_id, .. } => Key::metadata(*file_id),
-            Item::DirEntry {
-                file_id,
+            Item::Metadata { file_id, .. } => Key::Metadata { file_id: *file_id },
+            Item::ParentRef {
+                child_id,
+                ref_id,
+                timestamp,
+                version,
+                ..
+            } => Key::ParentRef {
+                child_id: *child_id,
+                ref_id: *ref_id,
+                timestamp: *timestamp,
+                replica_id: version.replica_id,
+            },
+            Item::ChildRef {
+                parent_id,
                 is_dir,
                 name,
-                entry_id,
+                ref_id,
                 ..
-            } => Key::dir_entry(*file_id, *is_dir, name.clone(), *entry_id),
+            } => Key::ChildRef {
+                parent_id: *parent_id,
+                is_dir: *is_dir,
+                name: name.clone(),
+                ref_id: *ref_id,
+            },
         }
     }
 
     fn is_dir(&self) -> bool {
         match self {
             Item::Metadata { is_dir, .. } => *is_dir,
-            Item::DirEntry { is_dir, .. } => *is_dir,
+            Item::ChildRef { is_dir, .. } => *is_dir,
+            _ => panic!(),
         }
     }
 
     fn inode(&self) -> Inode {
         match self {
             Item::Metadata { inode, .. } => *inode,
-            Item::DirEntry { .. } => panic!(),
+            _ => panic!(),
         }
     }
 
     fn name(&self) -> Arc<OsString> {
         match self {
-            Item::DirEntry { name, .. } => name.clone(),
-            Item::Metadata { .. } => panic!(),
+            Item::ChildRef { name, .. } => name.clone(),
+            _ => panic!(),
         }
     }
 
     fn file_id(&self) -> id::Unique {
         match self {
-            Item::DirEntry { file_id, .. } => *file_id,
             Item::Metadata { file_id, .. } => *file_id,
+            Item::ParentRef { child_id, .. } => *child_id,
+            Item::ChildRef { parent_id, .. } => *parent_id,
         }
     }
 
     fn child_id(&self) -> id::Unique {
         match self {
-            Item::DirEntry { child_id, .. } => *child_id,
-            Item::Metadata { .. } => panic!(),
+            Item::ChildRef { child_id, .. } => *child_id,
+            _ => panic!(),
         }
     }
 
-    fn entry_id(&self) -> id::Unique {
+    fn ref_id(&self) -> id::Unique {
         match self {
-            Item::DirEntry { entry_id, .. } => *entry_id,
             Item::Metadata { .. } => panic!(),
+            Item::ParentRef { ref_id, .. } => *ref_id,
+            Item::ChildRef { ref_id, .. } => *ref_id,
         }
     }
 
@@ -341,23 +334,23 @@ impl Item {
         }
     }
 
-    fn is_dir_entry(&self) -> bool {
+    fn is_child_ref(&self) -> bool {
         match self {
-            Item::DirEntry { .. } => true,
+            Item::ChildRef { .. } => true,
             _ => false,
         }
     }
 
     fn is_deleted(&self) -> bool {
         match self {
-            Item::DirEntry { deletions, .. } => !deletions.is_empty(),
+            Item::ChildRef { deletions, .. } => !deletions.is_empty(),
             _ => false,
         }
     }
 
     fn deletions_mut(&mut self) -> &mut SmallVec<[id::Unique; 1]> {
         match self {
-            Item::DirEntry { deletions, .. } => deletions,
+            Item::ChildRef { deletions, .. } => deletions,
             _ => panic!(),
         }
     }
@@ -373,25 +366,20 @@ impl btree::Item for Item {
 
 impl Key {
     fn metadata(file_id: id::Unique) -> Self {
-        Key {
-            file_id,
-            kind: KeyKind::Metadata,
-        }
+        Key::Metadata { file_id }
     }
 
-    fn dir_entry(
-        file_id: id::Unique,
+    fn child_ref(
+        parent_id: id::Unique,
         is_dir: bool,
         name: Arc<OsString>,
-        entry_id: id::Unique,
+        ref_id: id::Unique,
     ) -> Self {
-        Key {
-            file_id,
-            kind: KeyKind::DirEntry {
-                is_dir,
-                name,
-                entry_id,
-            },
+        Key::ChildRef {
+            parent_id,
+            is_dir,
+            name,
+            ref_id,
         }
     }
 }
@@ -429,35 +417,67 @@ impl<'a> Add<&'a Self> for Key {
     }
 }
 
-impl PartialOrd for KeyKind {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+impl Ord for Key {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (file_id, kind) = match self {
+            Key::Metadata { file_id, .. } => (file_id, KeyKind::Metadata),
+            Key::ParentRef { child_id, .. } => (child_id, KeyKind::ParentRef),
+            Key::ChildRef { parent_id, .. } => (parent_id, KeyKind::ChildRef),
+        };
+        let (other_file_id, other_kind) = match other {
+            Key::Metadata { file_id, .. } => (file_id, KeyKind::Metadata),
+            Key::ParentRef { child_id, .. } => (child_id, KeyKind::ParentRef),
+            Key::ChildRef { parent_id, .. } => (parent_id, KeyKind::ChildRef),
+        };
+
+        file_id
+            .cmp(other_file_id)
+            .then(kind.cmp(&other_kind))
+            .then_with(|| match (self, other) {
+                (Key::Metadata { .. }, Key::Metadata { .. }) => Ordering::Equal,
+                (
+                    Key::ParentRef {
+                        ref_id,
+                        timestamp,
+                        replica_id,
+                        ..
+                    },
+                    Key::ParentRef {
+                        ref_id: other_ref_id,
+                        timestamp: other_timestamp,
+                        replica_id: other_replica_id,
+                        ..
+                    },
+                ) => ref_id
+                    .cmp(other_ref_id)
+                    .then_with(|| timestamp.cmp(other_timestamp))
+                    .then_with(|| replica_id.cmp(other_replica_id)),
+                (
+                    Key::ChildRef {
+                        is_dir,
+                        name,
+                        ref_id,
+                        ..
+                    },
+                    Key::ChildRef {
+                        is_dir: other_is_dir,
+                        name: other_name,
+                        ref_id: other_ref_id,
+                        ..
+                    },
+                ) => is_dir
+                    .cmp(other_is_dir)
+                    .reverse()
+                    .then_with(|| name.cmp(other_name))
+                    .then_with(|| ref_id.cmp(other_ref_id)),
+                _ => unreachable!(),
+            })
     }
 }
 
-impl Ord for KeyKind {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (self, other) {
-            (KeyKind::Metadata, KeyKind::Metadata) => Ordering::Equal,
-            (KeyKind::Metadata, KeyKind::DirEntry { .. }) => Ordering::Less,
-            (KeyKind::DirEntry { .. }, KeyKind::Metadata) => Ordering::Greater,
-            (
-                KeyKind::DirEntry {
-                    is_dir,
-                    name,
-                    entry_id,
-                },
-                KeyKind::DirEntry {
-                    is_dir: other_is_dir,
-                    name: other_name,
-                    entry_id: other_entry_id,
-                },
-            ) => is_dir
-                .cmp(other_is_dir)
-                .reverse()
-                .then_with(|| name.cmp(other_name))
-                .then_with(|| entry_id.cmp(other_entry_id)),
-        }
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -506,7 +526,7 @@ impl Builder {
                 break;
             }
 
-            let old_entry = self.old_dir_entry_item(db)?.unwrap();
+            let old_entry = self.old_child_ref_item(db)?.unwrap();
             let old_inode = self.old_inode(db)?.unwrap();
 
             if old_depth == new_depth {
@@ -544,7 +564,7 @@ impl Builder {
                 }
             }
 
-            self.item_changes.push(ItemChange::RemoveDirEntry {
+            self.item_changes.push(ItemChange::RemoveChildRef {
                 entry: old_entry,
                 inode: old_inode,
             });
@@ -577,8 +597,8 @@ impl Builder {
             self.dir_stack.push(child_id);
             self.visited_inodes.insert(new_metadata.inode);
         }
-        self.item_changes.push(ItemChange::InsertDirEntry {
-            file_id: parent_id,
+        self.item_changes.push(ItemChange::InsertChildRef {
+            parent_id,
             is_dir: new_metadata.is_dir,
             child_id,
             child_inode: new_metadata.inode,
@@ -589,10 +609,10 @@ impl Builder {
 
     pub fn tree<S: Store>(mut self, db: &S) -> Result<(Tree, Vec<Operation>), S::ReadError> {
         let item_db = db.item_store();
-        while let Some(entry) = self.old_dir_entry_item(db)? {
+        while let Some(entry) = self.old_child_ref_item(db)? {
             let inode = self.old_inode(db)?.unwrap();
             self.item_changes
-                .push(ItemChange::RemoveDirEntry { entry, inode });
+                .push(ItemChange::RemoveChildRef { entry, inode });
             self.next_old_entry_sibling(db)?;
         }
 
@@ -605,40 +625,32 @@ impl Builder {
                     is_dir,
                     inode,
                 } => {
-                    operations.push(Operation::InsertMetadata { file_id, is_dir });
                     new_items.push(Item::Metadata {
                         file_id,
                         is_dir,
                         inode,
                     });
                 }
-                ItemChange::InsertDirEntry {
-                    file_id,
+                ItemChange::InsertChildRef {
+                    parent_id,
                     name,
                     is_dir,
                     child_id,
                     child_inode,
                 } => {
-                    let entry_id = db.gen_id();
+                    let ref_id = db.gen_id();
                     let name = Arc::new(name);
-                    operations.push(Operation::InsertDirEntry {
-                        file_id,
-                        is_dir,
-                        name: name.clone(),
-                        entry_id,
-                        child_id,
-                    });
-                    new_items.push(Item::DirEntry {
-                        file_id,
-                        entry_id,
+                    new_items.push(Item::ChildRef {
+                        parent_id,
+                        ref_id,
                         child_id,
                         name,
                         is_dir,
+                        version: db.gen_id(),
                         deletions: SmallVec::new(),
-                        moves: SmallVec::new(),
                     });
                 }
-                ItemChange::RemoveDirEntry { mut entry, .. } => {
+                ItemChange::RemoveChildRef { mut entry, .. } => {
                     entry.deletions_mut().push(db.gen_id());
                     new_items.push(entry);
                 }
@@ -659,8 +671,8 @@ impl Builder {
         base_depth + cursor.depth()
     }
 
-    fn old_dir_entry_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
-        self.cursor_stack.last().unwrap().1.dir_entry_item(db)
+    fn old_child_ref_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
+        self.cursor_stack.last().unwrap().1.child_ref_item(db)
     }
 
     fn old_inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
@@ -712,7 +724,7 @@ impl Cursor {
         while let Some(item) = root_cursor.item(item_db)? {
             if item.is_metadata() {
                 break;
-            } else if item.is_dir_entry() && !item.is_deleted() {
+            } else if item.is_child_ref() && !item.is_deleted() {
                 let mut cursor = Self {
                     path: PathBuf::new(),
                     stack: vec![root_cursor],
@@ -740,7 +752,7 @@ impl Cursor {
         while let Some(item) = root_cursor.item(item_db)? {
             if item.is_metadata() {
                 break;
-            } else if item.is_dir_entry() && !item.is_deleted() {
+            } else if item.is_child_ref() && !item.is_deleted() {
                 let mut cursor = Self {
                     path: PathBuf::new(),
                     stack: vec![root_cursor],
@@ -767,7 +779,7 @@ impl Cursor {
         }
     }
 
-    pub fn dir_entry_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
+    pub fn child_ref_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
         if self.stack.len() > 1 {
             let cursor = &self.stack[self.stack.len() - 2];
             cursor.item(db.item_store())
@@ -793,10 +805,10 @@ impl Cursor {
             let found_entry = loop {
                 let mut cursor = self.stack.last_mut().unwrap();
                 let cur_item = cursor.item(item_db)?.unwrap();
-                if cur_item.is_dir_entry() || cur_item.is_dir_metadata() {
+                if cur_item.is_child_ref() || cur_item.is_dir_metadata() {
                     cursor.next(item_db)?;
                     let next_item = cursor.item(item_db)?;
-                    if next_item.as_ref().map_or(false, |i| i.is_dir_entry()) {
+                    if next_item.as_ref().map_or(false, |i| i.is_child_ref()) {
                         if next_item.unwrap().is_deleted() {
                             continue;
                         } else {
@@ -838,15 +850,15 @@ impl Cursor {
         {
             let entry_cursor = self.stack.last().unwrap();
             match entry_cursor.item(item_db)?.unwrap() {
-                Item::DirEntry {
-                    file_id,
+                Item::ChildRef {
+                    parent_id,
                     child_id,
                     name,
                     ..
                 } => {
                     child_cursor = entry_cursor.clone();
                     let child_key = Key::metadata(child_id);
-                    if child_id > file_id {
+                    if child_id > parent_id {
                         child_cursor.seek_forward(&child_key, SeekBias::Left, item_db)?;
                     } else {
                         child_cursor.seek(&child_key, SeekBias::Left, item_db)?;
@@ -869,7 +881,7 @@ fn cmp_dir_entries(a_is_dir: bool, a_name: &OsStr, b_is_dir: bool, b_name: &OsSt
         .then_with(|| a_name.cmp(b_name))
 }
 
-fn seek_to_dir_entry<S: Store>(
+fn seek_to_child_ref<S: Store>(
     cursor: &mut btree::Cursor<Item>,
     parent_id: id::Unique,
     name: &Arc<OsString>,
@@ -878,13 +890,11 @@ fn seek_to_dir_entry<S: Store>(
 ) -> Result<Option<id::Unique>, S::ReadError> {
     let item_db = db.item_store();
     cursor.seek(
-        &Key {
-            file_id: parent_id,
-            kind: KeyKind::DirEntry {
-                is_dir,
-                name: name.clone(),
-                entry_id: id::Unique::default(),
-            },
+        &Key::ChildRef {
+            parent_id,
+            is_dir,
+            name: name.clone(),
+            ref_id: id::Unique::default(),
         },
         SeekBias::Left,
         item_db,
@@ -892,11 +902,11 @@ fn seek_to_dir_entry<S: Store>(
 
     loop {
         match cursor.item(item_db)? {
-            Some(Item::DirEntry {
+            Some(Item::ChildRef {
+                is_dir: entry_is_dir,
                 name: entry_name,
                 child_id,
                 deletions,
-                is_dir: entry_is_dir,
                 ..
             }) => {
                 if name == &entry_name && is_dir == entry_is_dir {
@@ -1043,16 +1053,16 @@ mod tests {
                 //         .iter()
                 //         .map(|item| {
                 //             match item {
-                //             Item::DirEntry {
+                //             Item::ChildRef {
                 //                 file_id,
                 //                 name,
                 //                 child_id,
-                //                 entry_id,
+                //                 ref_id,
                 //                 deletions,
                 //                 ..
                 //             } => format!(
-                //                 "DirEntry {{ file_id: {:?}, name: {:?}, child_id: {:?}, entry_id: {:?}, deletions {:?} }}",
-                //                 file_id.seq, name, child_id.seq, entry_id.seq, deletions
+                //                 "ChildRef {{ file_id: {:?}, name: {:?}, child_id: {:?}, ref_id: {:?}, deletions {:?} }}",
+                //                 file_id.seq, name, child_id.seq, ref_id.seq, deletions
                 //             ),
                 //             Item::Metadata { file_id, inode, is_dir, .. } => {
                 //                 format!("Metadata {{ file_id: {:?}, inode: {:?}, is_dir: {:?} }}", file_id.seq, inode, is_dir)
@@ -1088,49 +1098,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_replication_basic() {
-        let mut reference_1 = TestFile::dir();
-        let mut reference_2 = TestFile::dir();
-        let mut io_1 = TestIoProvider::new();
-        let mut io_2 = TestIoProvider::new();
-        let db_1 = NullStore::new(1);
-        let db_2 = NullStore::new(2);
-        let tree_1 = Tree::new();
-        let tree_2 = Tree::new();
-
-        let tree2 = Tree::new();
-
-        reference_1.insert_dir("a");
-        let (mut tree_1, ops_1) = reference_1.update_tree(tree_1, &db_1);
-
-        reference_2.insert_dir("b");
-        let (mut tree_2, ops_2) = reference_2.update_tree(tree_2, &db_2);
-
-        tree_1.integrate_ops(ops_2, &db_1, &mut io_1).unwrap();
-        tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
-        assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
-        assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
-
-        // This currently fails. We need to make the reference tree a proper
-        // IoProvider and have it insert directories and files when we integrate
-        // operations. Then we need to break ties in the case of duplicates.
-        reference_1.insert_dir("c");
-        let (mut tree_1, ops_1) = reference_1.update_tree(tree_1, &db_1);
-        reference_2.insert_dir("c");
-        let (mut tree_2, ops_2) = reference_2.update_tree(tree_2, &db_2);
-        tree_1.integrate_ops(ops_2, &db_1, &mut io_1).unwrap();
-        tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
-        assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/"]);
-        assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/"]);
-    }
+    // #[test]
+    // fn test_replication_basic() {
+    //     let mut reference_1 = TestFile::dir();
+    //     let mut reference_2 = TestFile::dir();
+    //     let mut io_1 = TestIoProvider::new();
+    //     let mut io_2 = TestIoProvider::new();
+    //     let db_1 = NullStore::new(1);
+    //     let db_2 = NullStore::new(2);
+    //     let tree_1 = Tree::new();
+    //     let tree_2 = Tree::new();
+    //
+    //     let tree2 = Tree::new();
+    //
+    //     reference_1.insert_dir("a");
+    //     let (mut tree_1, ops_1) = reference_1.update_tree(tree_1, &db_1);
+    //
+    //     reference_2.insert_dir("b");
+    //     let (mut tree_2, ops_2) = reference_2.update_tree(tree_2, &db_2);
+    //
+    //     tree_1.integrate_ops(ops_2, &db_1, &mut io_1).unwrap();
+    //     tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
+    //     assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
+    //     assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
+    //
+    //     // This currently fails. We need to make the reference tree a proper
+    //     // IoProvider and have it insert directories and files when we integrate
+    //     // operations. Then we need to break ties in the case of duplicates.
+    //     reference_1.insert_dir("c");
+    //     let (mut tree_1, ops_1) = reference_1.update_tree(tree_1, &db_1);
+    //     reference_2.insert_dir("c");
+    //     let (mut tree_2, ops_2) = reference_2.update_tree(tree_2, &db_2);
+    //     tree_1.integrate_ops(ops_2, &db_1, &mut io_1).unwrap();
+    //     tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
+    //     assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/"]);
+    //     assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/"]);
+    // }
 
     #[test]
     fn test_key_ordering() {
         let min_id = id::Unique::default();
         assert!(
-            Key::dir_entry(min_id, true, Arc::new("z".into()), min_id)
-                < Key::dir_entry(min_id, false, Arc::new("a".into()), min_id)
+            Key::child_ref(min_id, true, Arc::new("z".into()), min_id)
+                < Key::child_ref(min_id, false, Arc::new("a".into()), min_id)
         );
     }
 
@@ -1139,11 +1149,11 @@ mod tests {
     #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
     struct TestFile {
         inode: Inode,
-        dir_entries: Option<Vec<TestDirEntry>>,
+        dir_entries: Option<Vec<TestChildRef>>,
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
-    struct TestDirEntry {
+    struct TestChildRef {
         name: OsString,
         file: TestFile,
     }
@@ -1186,7 +1196,7 @@ mod tests {
                 if let Some(component) = components.next() {
                     let dir_entries = { dir }.dir_entries.as_mut().unwrap();
 
-                    let needle = TestDirEntry {
+                    let needle = TestChildRef {
                         name: OsString::from(component.as_os_str()),
                         file: if is_dir || components.peek().is_some() {
                             TestFile::dir()
@@ -1235,7 +1245,7 @@ mod tests {
 
             if rng.gen() {
                 let mut dir_entries = (0..rng.gen_range(0, MAX_TEST_TREE_DEPTH - depth + 1))
-                    .map(|_| TestDirEntry {
+                    .map(|_| TestChildRef {
                         name: gen_name(rng, name_blacklist),
                         file: Self::gen(rng, next_inode, depth + 1, name_blacklist),
                     })
@@ -1264,7 +1274,7 @@ mod tests {
         ) {
             if let Some(dir_entries) = self.dir_entries.as_mut() {
                 // Delete random entries
-                dir_entries.retain(|TestDirEntry { name, file }| {
+                dir_entries.retain(|TestChildRef { name, file }| {
                     if rng.gen_weighted_bool(5) {
                         let mut entry_path = path.clone();
                         entry_path.push(name);
@@ -1301,7 +1311,7 @@ mod tests {
                 if depth < MAX_TEST_TREE_DEPTH {
                     let mut blacklist = dir_entries
                         .iter()
-                        .map(|TestDirEntry { name, .. }| name.clone())
+                        .map(|TestChildRef { name, .. }| name.clone())
                         .collect();
 
                     for _ in 0..rng.gen_range(0, 5) {
@@ -1317,14 +1327,14 @@ mod tests {
                         if !removals.is_empty() && rng.gen_weighted_bool(4) {
                             let removal = rng.choose_mut(&mut removals).unwrap();
                             removal.new_path = Some(path.clone());
-                            dir_entries.push(TestDirEntry {
+                            dir_entries.push(TestChildRef {
                                 name,
                                 file: removal.file.clone(),
                             });
                         } else {
                             let file = Self::gen(rng, next_inode, depth + 1, &mut blacklist);
                             touched_paths.insert(path.clone());
-                            dir_entries.push(TestDirEntry { name, file });
+                            dir_entries.push(TestChildRef { name, file });
                         };
 
                         path.pop();
@@ -1344,7 +1354,7 @@ mod tests {
 
         fn paths_recursive(&self, cur_path: &mut PathBuf, paths: &mut Vec<String>) {
             if let Some(dir_entries) = &self.dir_entries {
-                for TestDirEntry { name, file } in dir_entries {
+                for TestChildRef { name, file } in dir_entries {
                     cur_path.push(name);
                     let mut path = cur_path.clone().to_string_lossy().into_owned();
                     if file.is_dir() {
@@ -1359,7 +1369,7 @@ mod tests {
 
         fn build<S: Store>(&self, builder: &mut Builder, depth: usize, store: &S) {
             if let Some(dir_entries) = &self.dir_entries {
-                for TestDirEntry { name, file } in dir_entries {
+                for TestChildRef { name, file } in dir_entries {
                     builder
                         .push(
                             name,
@@ -1381,7 +1391,7 @@ mod tests {
         }
     }
 
-    impl Ord for TestDirEntry {
+    impl Ord for TestChildRef {
         fn cmp(&self, other: &Self) -> Ordering {
             self.file
                 .is_dir()
@@ -1391,7 +1401,7 @@ mod tests {
         }
     }
 
-    impl PartialOrd for TestDirEntry {
+    impl PartialOrd for TestChildRef {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             Some(self.cmp(other))
         }

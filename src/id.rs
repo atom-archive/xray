@@ -1,13 +1,13 @@
 use std::cmp;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
-use uuid::{Uuid, UuidVersion};
 
+pub type ReplicaId = u64;
 type OrderedEntry = u16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Unique {
-    replica_id: u64,
+    pub replica_id: ReplicaId,
     pub seq: u64,
 }
 
