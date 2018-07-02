@@ -9,6 +9,8 @@ use std::ops::{Add, AddAssign};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+const ROOT_ID: id::Unique = id::Unique::DEFAULT;
+
 trait Store {
     type ReadError: fmt::Debug;
     type ItemStore: NodeStore<Item, ReadError = Self::ReadError>;
@@ -163,7 +165,7 @@ impl Tree {
     {
         let path = path.into();
         let item_db = db.item_store();
-        let mut parent_file_id = id::Unique::default();
+        let mut parent_file_id = ROOT_ID;
         let mut cursor = self.items.cursor();
         let mut components_iter = path.components().peekable();
 
@@ -396,7 +398,7 @@ impl Key {
 
 impl Default for Key {
     fn default() -> Self {
-        Key::metadata(id::Unique::default())
+        Key::metadata(ROOT_ID)
     }
 }
 
@@ -552,11 +554,7 @@ impl Builder {
         // If we make it this far, we did not find an old dir entry that's equivalent to the entry
         // we are pushing. We need to insert a new one. If the inode for the new entry matches an
         // existing file, we recycle its id so long as we have not already visited it.
-        let parent_id = self
-            .dir_stack
-            .last()
-            .cloned()
-            .unwrap_or(id::Unique::default());
+        let parent_id = self.dir_stack.last().cloned().unwrap_or(ROOT_ID);
         let child_id = {
             let file_id = self.inodes_to_file_ids.get(&new_metadata.inode).cloned();
             if self.visited_inodes.contains(&new_metadata.inode) || file_id.is_none() {
