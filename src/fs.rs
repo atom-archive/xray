@@ -17,6 +17,7 @@ trait Store {
 
     fn item_store(&self) -> &Self::ItemStore;
     fn gen_id(&self) -> id::Unique;
+    fn gen_timestamp(&self) -> LamportTimestamp;
 }
 
 trait IoProvider {
@@ -45,7 +46,7 @@ enum Item {
         child_id: id::Unique,
         ref_id: id::Unique,
         timestamp: LamportTimestamp,
-        version: id::Unique,
+        // version: id::Unique,
         parent_id: Option<id::Unique>,
         name: Arc<OsString>,
     },
@@ -55,15 +56,9 @@ enum Item {
         name: Arc<OsString>,
         ref_id: id::Unique,
         child_id: id::Unique,
-        version: id::Unique,
+        // version: id::Unique,
         deletions: SmallVec<[id::Unique; 1]>,
     },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Move {
-    file_id: id::Unique,
-    ref_id: id::Unique,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,7 +76,7 @@ enum Key {
         child_id: id::Unique,
         ref_id: id::Unique,
         timestamp: LamportTimestamp,
-        replica_id: id::ReplicaId,
+        // replica_id: id::ReplicaId,
     },
     ChildRef {
         parent_id: id::Unique,
@@ -113,26 +108,6 @@ struct Builder {
     dir_changes: HashMap<id::Unique, DirChange>,
 }
 
-#[derive(Debug)]
-enum ItemChange {
-    InsertMetadata {
-        file_id: id::Unique,
-        is_dir: bool,
-        inode: Inode,
-    },
-    InsertChildRef {
-        parent_id: id::Unique,
-        name: OsString,
-        is_dir: bool,
-        child_id: id::Unique,
-        child_inode: Inode,
-    },
-    RemoveChildRef {
-        entry: Item,
-        inode: Inode,
-    },
-}
-
 enum DirChange {
     Insert {
         inode: Inode,
@@ -140,7 +115,7 @@ enum DirChange {
         name: Arc<OsString>,
     },
     Update {
-        inode: Inode,
+        new_inode: Inode,
     },
     Remove,
     Move {
@@ -268,13 +243,13 @@ impl Item {
                 child_id,
                 ref_id,
                 timestamp,
-                version,
+                // version,
                 ..
             } => Key::ParentRef {
                 child_id: *child_id,
                 ref_id: *ref_id,
                 timestamp: *timestamp,
-                replica_id: version.replica_id,
+                // replica_id: version.replica_id,
             },
             Item::ChildRef {
                 parent_id,
@@ -318,6 +293,13 @@ impl Item {
             Item::Metadata { file_id, .. } => *file_id,
             Item::ParentRef { child_id, .. } => *child_id,
             Item::ChildRef { parent_id, .. } => *parent_id,
+        }
+    }
+
+    fn parent_id(&self) -> Option<id::Unique> {
+        match self {
+            Item::ParentRef { parent_id, .. } => parent_id.clone(),
+            _ => panic!(),
         }
     }
 
@@ -454,20 +436,19 @@ impl Ord for Key {
                 (
                     Key::ParentRef {
                         ref_id,
-                        timestamp,
-                        replica_id,
+                        // timestamp,
+                        // replica_id,
                         ..
                     },
                     Key::ParentRef {
                         ref_id: other_ref_id,
-                        timestamp: other_timestamp,
-                        replica_id: other_replica_id,
+                        // timestamp: other_timestamp,
+                        // replica_id: other_replica_id,
                         ..
                     },
-                ) => ref_id
-                    .cmp(other_ref_id)
-                    .then_with(|| timestamp.cmp(other_timestamp))
-                    .then_with(|| replica_id.cmp(other_replica_id)),
+                ) => ref_id.cmp(other_ref_id),
+                // .then_with(|| timestamp.cmp(other_timestamp))
+                // .then_with(|| replica_id.cmp(other_replica_id)),
                 (
                     Key::ChildRef {
                         is_dir,
@@ -513,9 +494,9 @@ impl Builder {
             tree,
             dir_stack: Vec::new(),
             cursor_stack: vec![(0, cursor)],
-            item_changes: Vec::new(),
             inodes_to_file_ids,
             visited_inodes: HashSet::new(),
+            dir_changes: HashMap::new(),
         })
     }
 
@@ -564,7 +545,7 @@ impl Builder {
                                     self.dir_changes.insert(
                                         old_entry.child_id(),
                                         DirChange::Update {
-                                            inode: new_metadata.inode,
+                                            new_inode: new_metadata.inode,
                                         },
                                     );
                                 }
@@ -628,60 +609,132 @@ impl Builder {
 
     pub fn tree<S: Store>(mut self, db: &S) -> Result<(Tree, Vec<Operation>), S::ReadError> {
         let item_db = db.item_store();
-        while let Some(entry) = self.old_child_ref_item(db)? {
-            let inode = self.old_inode(db)?.unwrap();
-            self.item_changes
-                .push(ItemChange::RemoveChildRef { entry, inode });
+        while let Some(old_entry) = self.old_child_ref_item(db)? {
+            self.dir_changes
+                .entry(old_entry.child_id())
+                .or_insert(DirChange::Remove);
             self.next_old_entry_sibling(db)?;
         }
 
         let mut operations = Vec::new();
         let mut new_items = Vec::new();
-        for change in self.item_changes {
+        for (child_id, change) in self.dir_changes {
             match change {
-                ItemChange::InsertMetadata {
-                    file_id,
-                    is_dir,
+                DirChange::Insert {
                     inode,
-                } => {
-                    new_items.push(Item::Metadata {
-                        file_id,
-                        is_dir,
-                        inode,
-                    });
-                }
-                ItemChange::InsertChildRef {
                     parent_id,
                     name,
-                    is_dir,
-                    child_id,
-                    child_inode,
                 } => {
                     let ref_id = db.gen_id();
-                    let name = Arc::new(name);
                     new_items.push(Item::ChildRef {
                         parent_id,
+                        is_dir: true,
+                        name: name.clone(),
                         ref_id,
                         child_id,
-                        name,
-                        is_dir,
-                        version: db.gen_id(),
                         deletions: SmallVec::new(),
                     });
+                    new_items.push(Item::Metadata {
+                        file_id: child_id,
+                        inode,
+                        is_dir: true,
+                    });
+                    new_items.push(Item::ParentRef {
+                        child_id,
+                        ref_id,
+                        timestamp: db.gen_timestamp(),
+                        parent_id: Some(parent_id),
+                        name,
+                    });
                 }
-                ItemChange::RemoveChildRef { mut entry, .. } => {
-                    entry.deletions_mut().push(db.gen_id());
-                    new_items.push(entry);
+                DirChange::Update { new_inode } => {
+                    let mut cursor = self.tree.items.cursor();
+                    cursor.seek(&Key::metadata(child_id), SeekBias::Left, item_db)?;
+                    match cursor.item(item_db)? {
+                        Some(Item::Metadata {
+                            file_id, is_dir, ..
+                        }) => new_items.push(Item::Metadata {
+                            file_id,
+                            is_dir,
+                            inode: new_inode,
+                        }),
+                        _ => panic!(),
+                    }
+                }
+                DirChange::Remove | DirChange::Move { .. } => {
+                    let mut cursor = self.tree.items.cursor();
+                    cursor.seek(&Key::metadata(child_id), SeekBias::Right, item_db)?;
+                    let mut parent_ref = None;
+                    loop {
+                        let item = cursor.item(item_db)?;
+                        if let Some(Item::ParentRef { .. }) = item {
+                            parent_ref = item;
+                        } else {
+                            break;
+                        }
+                    }
+                    let parent_ref = parent_ref.unwrap();
+
+                    let old_parent_id = parent_ref.parent_id().unwrap();
+                    let old_name = parent_ref.name();
+                    let ref_id = parent_ref.ref_id();
+                    cursor.seek(
+                        &Key::child_ref(old_parent_id, true, old_name.clone(), ref_id),
+                        SeekBias::Left,
+                        item_db,
+                    )?;
+                    if let Item::ChildRef { mut deletions, .. } = cursor.item(item_db)?.unwrap() {
+                        deletions.push(db.gen_id());
+                        new_items.push(Item::ChildRef {
+                            parent_id: old_parent_id,
+                            is_dir: true,
+                            name: old_name.clone(),
+                            ref_id,
+                            child_id,
+                            deletions,
+                        });
+                    } else {
+                        panic!();
+                    }
+
+                    if let DirChange::Move {
+                        new_parent_id,
+                        new_name,
+                    } = change
+                    {
+                        new_items.push(Item::ParentRef {
+                            child_id,
+                            ref_id,
+                            timestamp: db.gen_timestamp(),
+                            parent_id: Some(new_parent_id),
+                            name: new_name.clone(),
+                        });
+                        new_items.push(Item::ChildRef {
+                            parent_id: new_parent_id,
+                            is_dir: true,
+                            name: new_name,
+                            ref_id,
+                            child_id,
+                            deletions: SmallVec::new(),
+                        });
+                    } else {
+                        new_items.push(Item::ParentRef {
+                            child_id,
+                            ref_id,
+                            timestamp: db.gen_timestamp(),
+                            parent_id: None,
+                            name: old_name.clone(),
+                        });
+                    }
                 }
             }
         }
         new_items.sort_unstable_by_key(|item| item.key());
 
-        let mut new_tree = Tree {
+        let new_tree = Tree {
             items: interleave_items(&self.tree.items, new_items, db)?,
             inodes_to_file_ids: self.inodes_to_file_ids,
         };
-
         Ok((new_tree, operations))
     }
 
@@ -1465,6 +1518,10 @@ mod tests {
             let next_id = self.next_id.get();
             self.next_id.replace(next_id.next());
             next_id
+        }
+
+        fn gen_timestamp(&self) -> LamportTimestamp {
+            unimplemented!()
         }
 
         fn item_store(&self) -> &Self::ItemStore {
