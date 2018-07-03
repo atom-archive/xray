@@ -32,8 +32,7 @@ struct Tree {
     inodes_to_file_ids: HashMap<Inode, id::Unique>,
 }
 
-enum Operation {
-}
+enum Operation {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Item {
@@ -108,9 +107,10 @@ struct Builder {
     tree: Tree,
     dir_stack: Vec<id::Unique>,
     cursor_stack: Vec<(usize, Cursor)>,
-    item_changes: Vec<ItemChange>,
+    // item_changes: Vec<ItemChange>,
     inodes_to_file_ids: HashMap<Inode, id::Unique>,
     visited_inodes: HashSet<Inode>,
+    dir_changes: HashMap<id::Unique, DirChange>,
 }
 
 #[derive(Debug)]
@@ -130,6 +130,22 @@ enum ItemChange {
     RemoveChildRef {
         entry: Item,
         inode: Inode,
+    },
+}
+
+enum DirChange {
+    Insert {
+        inode: Inode,
+        parent_id: id::Unique,
+        name: Arc<OsString>,
+    },
+    Update {
+        inode: Inode,
+    },
+    Remove,
+    Move {
+        new_parent_id: id::Unique,
+        new_name: Arc<OsString>,
     },
 }
 
@@ -545,11 +561,12 @@ impl Builder {
                                 if new_metadata.inode != old_inode {
                                     self.inodes_to_file_ids
                                         .insert(new_metadata.inode, old_entry.child_id());
-                                    self.item_changes.push(ItemChange::InsertMetadata {
-                                        file_id: old_entry.child_id(),
-                                        is_dir: new_metadata.is_dir,
-                                        inode: new_metadata.inode,
-                                    });
+                                    self.dir_changes.insert(
+                                        old_entry.child_id(),
+                                        DirChange::Update {
+                                            inode: new_metadata.inode,
+                                        },
+                                    );
                                 }
                                 self.dir_stack.push(old_entry.child_id());
                                 self.next_old_entry(db)?;
@@ -564,10 +581,9 @@ impl Builder {
                 }
             }
 
-            self.item_changes.push(ItemChange::RemoveChildRef {
-                entry: old_entry,
-                inode: old_inode,
-            });
+            self.dir_changes
+                .entry(old_entry.child_id())
+                .or_insert(DirChange::Remove);
             self.next_old_entry_sibling(db)?;
         }
 
@@ -576,20 +592,30 @@ impl Builder {
         // existing file, we recycle its id so long as we have not already visited it.
         let parent_id = self.dir_stack.last().cloned().unwrap_or(ROOT_ID);
         let child_id = {
-            let file_id = self.inodes_to_file_ids.get(&new_metadata.inode).cloned();
-            if self.visited_inodes.contains(&new_metadata.inode) || file_id.is_none() {
+            let child_id = self.inodes_to_file_ids.get(&new_metadata.inode).cloned();
+            if self.visited_inodes.contains(&new_metadata.inode) || child_id.is_none() {
                 let child_id = db.gen_id();
-                self.item_changes.push(ItemChange::InsertMetadata {
-                    file_id: child_id,
-                    is_dir: new_metadata.is_dir,
-                    inode: new_metadata.inode,
-                });
+                self.dir_changes.insert(
+                    child_id,
+                    DirChange::Insert {
+                        inode: new_metadata.inode,
+                        parent_id,
+                        name: Arc::new(new_name),
+                    },
+                );
                 self.inodes_to_file_ids.insert(new_metadata.inode, child_id);
                 child_id
             } else {
-                let file_id = file_id.unwrap();
-                self.jump_to_old_entry(new_depth, file_id, db)?;
-                file_id
+                let child_id = child_id.unwrap();
+                self.jump_to_old_entry(new_depth, child_id, db)?;
+                self.dir_changes.insert(
+                    child_id,
+                    DirChange::Move {
+                        new_parent_id: parent_id,
+                        new_name: Arc::new(new_name),
+                    },
+                );
+                child_id
             }
         };
 
@@ -597,13 +623,6 @@ impl Builder {
             self.dir_stack.push(child_id);
             self.visited_inodes.insert(new_metadata.inode);
         }
-        self.item_changes.push(ItemChange::InsertChildRef {
-            parent_id,
-            is_dir: new_metadata.is_dir,
-            child_id,
-            child_inode: new_metadata.inode,
-            name: new_name.clone(),
-        });
         Ok(())
     }
 

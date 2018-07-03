@@ -5,7 +5,7 @@ use std::sync::Arc;
 pub type ReplicaId = u64;
 type OrderedEntry = u16;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct Unique {
     pub replica_id: ReplicaId,
     pub seq: u64,
