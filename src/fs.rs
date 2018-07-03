@@ -283,7 +283,7 @@ impl Item {
 
     fn name(&self) -> Arc<OsString> {
         match self {
-            Item::ChildRef { name, .. } => name.clone(),
+            Item::ChildRef { name, .. } | Item::ParentRef { name, .. } => name.clone(),
             _ => panic!(),
         }
     }
@@ -451,18 +451,19 @@ impl Ord for Key {
                 (
                     Key::ParentRef {
                         ref_id,
-                        // timestamp,
+                        timestamp,
                         // replica_id,
                         ..
                     },
                     Key::ParentRef {
                         ref_id: other_ref_id,
-                        // timestamp: other_timestamp,
+                        timestamp: other_timestamp,
                         // replica_id: other_replica_id,
                         ..
                     },
-                ) => ref_id.cmp(other_ref_id),
-                // .then_with(|| timestamp.cmp(other_timestamp))
+                ) => ref_id
+                    .cmp(other_ref_id)
+                    .then_with(|| timestamp.cmp(other_timestamp).reverse()),
                 // .then_with(|| replica_id.cmp(other_replica_id)),
                 (
                     Key::ChildRef {
@@ -679,17 +680,7 @@ impl Builder {
                 DirChange::Remove | DirChange::Move { .. } => {
                     let mut cursor = self.tree.items.cursor();
                     cursor.seek(&Key::metadata(child_id), SeekBias::Right, item_db)?;
-                    let mut parent_ref = None;
-                    loop {
-                        let item = cursor.item(item_db)?;
-                        if let Some(Item::ParentRef { .. }) = item {
-                            parent_ref = item;
-                        } else {
-                            break;
-                        }
-                    }
-                    let parent_ref = parent_ref.unwrap();
-
+                    let mut parent_ref = cursor.item(item_db)?.unwrap();
                     let old_parent_id = parent_ref.parent_id().unwrap();
                     let old_name = parent_ref.name();
                     let ref_id = parent_ref.ref_id();
@@ -1262,10 +1253,11 @@ mod tests {
         }
 
         fn file() -> Self {
-            TestFile {
-                inode: 0,
-                dir_entries: None,
-            }
+            unimplemented!()
+            // TestFile {
+            //     inode: 0,
+            //     dir_entries: None,
+            // }
         }
 
         fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) {
@@ -1289,7 +1281,8 @@ mod tests {
                         file: if is_dir || components.peek().is_some() {
                             TestFile::dir()
                         } else {
-                            TestFile::file()
+                            unimplemented!()
+                            // TestFile::file()
                         },
                     };
                     dir = match dir_entries.binary_search(&needle) {
@@ -1331,24 +1324,24 @@ mod tests {
             let new_inode = *next_inode;
             *next_inode += 1;
 
-            if rng.gen() {
-                let mut dir_entries = (0..rng.gen_range(0, MAX_TEST_TREE_DEPTH - depth + 1))
-                    .map(|_| TestChildRef {
-                        name: gen_name(rng, name_blacklist),
-                        file: Self::gen(rng, next_inode, depth + 1, name_blacklist),
-                    })
-                    .collect::<Vec<_>>();
-                dir_entries.sort();
-                TestFile {
-                    inode: new_inode,
-                    dir_entries: Some(dir_entries),
-                }
-            } else {
-                TestFile {
-                    inode: new_inode,
-                    dir_entries: None,
-                }
+            // if rng.gen() {
+            let mut dir_entries = (0..rng.gen_range(0, MAX_TEST_TREE_DEPTH - depth + 1))
+                .map(|_| TestChildRef {
+                    name: gen_name(rng, name_blacklist),
+                    file: Self::gen(rng, next_inode, depth + 1, name_blacklist),
+                })
+                .collect::<Vec<_>>();
+            dir_entries.sort();
+            TestFile {
+                inode: new_inode,
+                dir_entries: Some(dir_entries),
             }
+            // } else {
+            //     TestFile {
+            //         inode: new_inode,
+            //         dir_entries: None,
+            //     }
+            // }
         }
 
         fn mutate<T: Rng>(
