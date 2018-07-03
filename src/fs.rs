@@ -339,6 +339,21 @@ impl Item {
         }
     }
 
+    fn is_parent_ref(&self) -> bool {
+        match self {
+            Item::ParentRef { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn is_ref(&self) -> bool {
+        match self {
+            Item::ParentRef { .. } => true,
+            Item::ChildRef { .. } => true,
+            _ => false,
+        }
+    }
+
     fn is_deleted(&self) -> bool {
         match self {
             Item::ChildRef { deletions, .. } => !deletions.is_empty(),
@@ -877,17 +892,18 @@ impl Cursor {
             let found_entry = loop {
                 let mut cursor = self.stack.last_mut().unwrap();
                 let cur_item = cursor.item(item_db)?.unwrap();
-                if cur_item.is_child_ref() || cur_item.is_dir_metadata() {
+                if cur_item.is_ref() || cur_item.is_dir_metadata() {
                     cursor.next(item_db)?;
-                    let next_item = cursor.item(item_db)?;
-                    if next_item.as_ref().map_or(false, |i| i.is_child_ref()) {
-                        if next_item.unwrap().is_deleted() {
-                            continue;
-                        } else {
-                            break true;
+                    match cursor.item(item_db)? {
+                        Some(Item::ParentRef { .. }) => continue,
+                        Some(Item::ChildRef { deletions, .. }) => {
+                            if deletions.is_empty() {
+                                break true;
+                            } else {
+                                continue;
+                            }
                         }
-                    } else {
-                        break false;
+                        _ => break false,
                     }
                 } else {
                     break false;
@@ -1496,6 +1512,7 @@ mod tests {
     #[derive(Debug)]
     struct NullStore {
         next_id: Cell<id::Unique>,
+        lamport_clock: Cell<LamportTimestamp>,
     }
 
     struct TestIoProvider {
@@ -1506,6 +1523,7 @@ mod tests {
         fn new(replica_id: u64) -> Self {
             Self {
                 next_id: Cell::new(id::Unique::new(replica_id)),
+                lamport_clock: Cell::new(0),
             }
         }
     }
@@ -1521,7 +1539,8 @@ mod tests {
         }
 
         fn gen_timestamp(&self) -> LamportTimestamp {
-            unimplemented!()
+            self.lamport_clock.replace(self.lamport_clock.get() + 1);
+            self.lamport_clock.get()
         }
 
         fn item_store(&self) -> &Self::ItemStore {
