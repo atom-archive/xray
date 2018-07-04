@@ -20,8 +20,8 @@ trait Store {
     fn gen_timestamp(&self) -> LamportTimestamp;
 }
 
-trait IoProvider {
-    fn gen_inode(&mut self) -> Inode;
+trait FileSystem {
+    fn create_dir(&mut self, path: &Path) -> Inode;
 }
 
 type Inode = u64;
@@ -191,30 +191,30 @@ impl Tree {
     }
 
     #[cfg(test)]
-    fn integrate_ops<I, S>(
+    fn integrate_ops<F, S>(
         &mut self,
         ops: Vec<Operation>,
         db: &S,
-        io: &mut I,
+        fs: &mut F,
     ) -> Result<(), S::ReadError>
     where
-        I: IoProvider,
+        F: FileSystem,
         S: Store,
     {
         for op in ops {
-            self.integrate_op(op, db, io)?;
+            self.integrate_op(op, db, fs)?;
         }
         Ok(())
     }
 
-    pub fn integrate_op<I, S>(
+    pub fn integrate_op<F, S>(
         &mut self,
         op: Operation,
         db: &S,
-        io: &mut I,
+        fs: &mut F,
     ) -> Result<(), S::ReadError>
     where
-        I: IoProvider,
+        F: FileSystem,
         S: Store,
     {
         unimplemented!()
@@ -1066,28 +1066,28 @@ mod tests {
     fn test_builder_basic() {
         let db = NullStore::new(1);
 
-        let mut reference = TestFile::dir();
-        reference.insert_dir("a");
-        reference.insert_dir("a/b");
-        reference.insert_dir("a/b/c");
-        reference.insert_dir("a/b/d");
-        reference.insert_dir("a/b/e");
-        reference.insert_dir("f");
+        let mut reference_fs = TestFileSystem::new();
+        reference_fs.insert_dir("a");
+        reference_fs.insert_dir("a/b");
+        reference_fs.insert_dir("a/b/c");
+        reference_fs.insert_dir("a/b/d");
+        reference_fs.insert_dir("a/b/e");
+        reference_fs.insert_dir("f");
 
-        let (tree, _) = reference.update_tree(Tree::new(), &db);
-        assert_eq!(tree.paths(&db), reference.paths());
+        let (tree, _) = reference_fs.update_tree(Tree::new(), &db);
+        assert_eq!(tree.paths(&db), reference_fs.paths());
 
-        reference.insert_dir("a/b/c2");
-        reference.insert_dir("a/b2");
-        reference.insert_dir("a/b2/g");
-        let (tree, _) = reference.update_tree(Tree::new(), &db);
-        assert_eq!(tree.paths(&db), reference.paths());
+        reference_fs.insert_dir("a/b/c2");
+        reference_fs.insert_dir("a/b2");
+        reference_fs.insert_dir("a/b2/g");
+        let (tree, _) = reference_fs.update_tree(Tree::new(), &db);
+        assert_eq!(tree.paths(&db), reference_fs.paths());
 
-        reference.remove_dir("a/b/c2");
-        reference.remove_dir("a/b2");
-        reference.remove_dir("a/b2/g");
-        let (tree, _) = reference.update_tree(Tree::new(), &db);
-        assert_eq!(tree.paths(&db), reference.paths());
+        reference_fs.remove_dir("a/b/c2");
+        reference_fs.remove_dir("a/b2");
+        reference_fs.remove_dir("a/b2/g");
+        let (tree, _) = reference_fs.update_tree(Tree::new(), &db);
+        assert_eq!(tree.paths(&db), reference_fs.paths());
     }
 
     #[test]
@@ -1103,31 +1103,23 @@ mod tests {
             let store = &store;
             let mut next_inode = 0;
 
-            let mut reference_tree =
-                TestFile::gen(&mut rng, &mut next_inode, 0, &mut HashSet::new());
-            let (mut tree, _) = reference_tree.update_tree(Tree::new(), store);
-            assert_eq!(tree.paths(store), reference_tree.paths());
+            let mut reference_fs = TestFileSystem::gen(&mut rng);
+            let (mut tree, _) = reference_fs.update_tree(Tree::new(), store);
+            assert_eq!(tree.paths(store), reference_fs.paths());
 
             for _ in 0..5 {
-                let mut old_paths: HashSet<String> = HashSet::from_iter(reference_tree.paths());
+                let mut old_paths: HashSet<String> = HashSet::from_iter(reference_fs.paths());
 
                 let mut moves = Vec::new();
                 let mut touched_paths = HashSet::new();
-                reference_tree.mutate(
-                    &mut rng,
-                    &mut PathBuf::new(),
-                    &mut next_inode,
-                    &mut moves,
-                    &mut touched_paths,
-                    0,
-                );
+                reference_fs.mutate(&mut rng, &mut moves, &mut touched_paths);
 
                 // println!("=========================================");
                 // println!("existing paths {:#?}", tree.paths(store));
-                // println!("new tree paths {:#?}", reference_tree.paths());
+                // println!("new tree paths {:#?}", reference_fs.paths());
                 // println!("=========================================");
 
-                let (new_tree, _) = reference_tree.update_tree(tree.clone(), store);
+                let (new_tree, _) = reference_fs.update_tree(tree.clone(), store);
 
                 // println!("moves: {:?}", moves);
                 // println!("================================");
@@ -1159,7 +1151,7 @@ mod tests {
                 //         .collect::<Vec<_>>()
                 // );
 
-                assert_eq!(new_tree.paths(store), reference_tree.paths());
+                assert_eq!(new_tree.paths(store), reference_fs.paths());
                 for m in moves {
                     // println!("verifying move {:?}", m);
                     if let Some(new_path) = m.new_path {
@@ -1187,10 +1179,8 @@ mod tests {
 
     // #[test]
     // fn test_replication_basic() {
-    //     let mut reference_1 = TestFile::dir();
-    //     let mut reference_2 = TestFile::dir();
-    //     let mut io_1 = TestIoProvider::new();
-    //     let mut io_2 = TestIoProvider::new();
+    //     let mut fs_1 = TestFileSystem::new();
+    //     let mut fs_2 = TestFileSystem::new();
     //     let db_1 = NullStore::new(1);
     //     let db_2 = NullStore::new(2);
     //     let tree_1 = Tree::new();
@@ -1198,26 +1188,26 @@ mod tests {
     //
     //     let tree2 = Tree::new();
     //
-    //     reference_1.insert_dir("a");
-    //     let (mut tree_1, ops_1) = reference_1.update_tree(tree_1, &db_1);
+    //     fs_1.insert_dir("a");
+    //     let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
     //
-    //     reference_2.insert_dir("b");
-    //     let (mut tree_2, ops_2) = reference_2.update_tree(tree_2, &db_2);
+    //     fs_2.insert_dir("b");
+    //     let (mut tree_2, ops_2) = fs_2.update_tree(tree_2, &db_2);
     //
-    //     tree_1.integrate_ops(ops_2, &db_1, &mut io_1).unwrap();
-    //     tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
+    //     tree_1.integrate_ops(ops_2, &db_1, &mut fs_1).unwrap();
+    //     tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
     //     assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
     //     assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
     //
-    //     // This currently fails. We need to make the reference tree a proper
-    //     // IoProvider and have it insert directories and files when we integrate
-    //     // operations. Then we need to break ties in the case of duplicates.
-    //     reference_1.insert_dir("c");
-    //     let (mut tree_1, ops_1) = reference_1.update_tree(tree_1, &db_1);
-    //     reference_2.insert_dir("c");
-    //     let (mut tree_2, ops_2) = reference_2.update_tree(tree_2, &db_2);
-    //     tree_1.integrate_ops(ops_2, &db_1, &mut io_1).unwrap();
-    //     tree_2.integrate_ops(ops_1, &db_2, &mut io_2).unwrap();
+    //     This currently fails. We need to make the reference tree a proper
+    //     FileSystem and have it insert directories and files when we integrate
+    //     operations. Then we need to break ties in the case of duplicates.
+    //     fs_1.insert_dir("c");
+    //     let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
+    //     fs_2.insert_dir("c");
+    //     let (mut tree_2, ops_2) = fs_2.update_tree(tree_2, &db_2);
+    //     tree_1.integrate_ops(ops_2, &db_1, &mut fs_1).unwrap();
+    //     tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
     //     assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/"]);
     //     assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/"]);
     // }
@@ -1253,7 +1243,7 @@ mod tests {
     }
 
     impl TestFile {
-        fn dir() -> Self {
+        fn dir(inode: Inode) -> Self {
             TestFile {
                 inode: 0,
                 dir_entries: Some(Vec::new()),
@@ -1268,15 +1258,21 @@ mod tests {
             // }
         }
 
-        fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) {
-            self.update_path(path.into(), true, true);
+        fn insert_dir<I: Into<PathBuf>>(&mut self, path: I, next_inode: &mut Inode) {
+            self.update_path(path.into(), true, true, next_inode);
         }
 
         fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
-            self.update_path(path.into(), true, false);
+            self.update_path(path.into(), true, false, &mut 0);
         }
 
-        fn update_path(&mut self, path: PathBuf, is_dir: bool, insert: bool) {
+        fn update_path(
+            &mut self,
+            path: PathBuf,
+            is_dir: bool,
+            insert: bool,
+            next_inode: &mut Inode,
+        ) {
             let mut dir = self;
             let mut components = path.components().peekable();
 
@@ -1287,7 +1283,9 @@ mod tests {
                     let needle = TestChildRef {
                         name: OsString::from(component.as_os_str()),
                         file: if is_dir || components.peek().is_some() {
-                            TestFile::dir()
+                            let inode = *next_inode;
+                            *next_inode += 1;
+                            TestFile::dir(inode)
                         } else {
                             unimplemented!()
                             // TestFile::file()
@@ -1516,7 +1514,8 @@ mod tests {
         lamport_clock: Cell<LamportTimestamp>,
     }
 
-    struct TestIoProvider {
+    struct TestFileSystem {
+        root: TestFile,
         next_inode: Inode,
     }
 
@@ -1557,14 +1556,55 @@ mod tests {
         }
     }
 
-    impl TestIoProvider {
+    impl TestFileSystem {
         fn new() -> Self {
-            Self { next_inode: 0 }
+            Self {
+                root: TestFile::dir(0),
+                next_inode: 1,
+            }
+        }
+
+        fn gen<T: Rng>(rng: &mut T) -> Self {
+            let mut next_inode = 0;
+            let root = TestFile::gen(rng, &mut next_inode, 0, &mut HashSet::new());
+            TestFileSystem { root, next_inode }
+        }
+
+        fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) {
+            self.root.insert_dir(path, &mut self.next_inode);
+        }
+
+        fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
+            self.root.remove_dir(path);
+        }
+
+        fn update_tree<S: Store>(&self, tree: Tree, db: &S) -> (Tree, Vec<Operation>) {
+            self.root.update_tree(tree, db)
+        }
+
+        fn mutate<T: Rng>(
+            &mut self,
+            rng: &mut T,
+            moves: &mut Vec<Move>,
+            touched_paths: &mut HashSet<PathBuf>,
+        ) {
+            self.root.mutate(
+                rng,
+                &mut PathBuf::new(),
+                &mut self.next_inode,
+                moves,
+                touched_paths,
+                0,
+            );
+        }
+
+        fn paths(&self) -> Vec<String> {
+            self.root.paths()
         }
     }
 
-    impl IoProvider for TestIoProvider {
-        fn gen_inode(&mut self) -> Inode {
+    impl FileSystem for TestFileSystem {
+        fn create_dir(&mut self, path: &Path) -> Inode {
             let inode = self.next_inode;
             self.next_inode += 1;
             inode
