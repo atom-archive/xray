@@ -33,7 +33,30 @@ struct Tree {
     inodes_to_file_ids: HashMap<Inode, id::Unique>,
 }
 
-enum Operation {}
+enum Operation {
+    Insert {
+        file_id: id::Unique,
+        is_dir: bool,
+        ref_id: id::Unique,
+        timestamp: LamportTimestamp,
+        version: id::Unique,
+        parent_id: id::Unique,
+        name: Arc<OsString>,
+    },
+    Move {
+        file_id: id::Unique,
+        ref_id: id::Unique,
+        timestamp: LamportTimestamp,
+        version: id::Unique,
+        new_parent_id: id::Unique,
+    },
+    Remove {
+        file_id: id::Unique,
+        ref_id: id::Unique,
+        timestamp: LamportTimestamp,
+        version: id::Unique,
+    },
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Item {
@@ -217,7 +240,86 @@ impl Tree {
         F: FileSystem,
         S: Store,
     {
-        unimplemented!()
+        match op {
+            Operation::Insert {
+                file_id,
+                is_dir,
+                ref_id,
+                timestamp,
+                version,
+                parent_id,
+                name,
+            } => {
+                let mut path = self.path_for_dir_id(parent_id, db)?.unwrap();
+                path.push(name.as_ref());
+                let inode = fs.create_dir(&path);
+                let mut new_items: SmallVec<[Item; 3]> = SmallVec::new();
+                new_items.push(Item::ChildRef {
+                    parent_id,
+                    is_dir: true,
+                    name: name.clone(),
+                    ref_id,
+                    child_id: file_id,
+                    version,
+                    deletions: SmallVec::new(),
+                });
+                new_items.push(Item::Metadata {
+                    file_id,
+                    inode,
+                    is_dir: true,
+                });
+                new_items.push(Item::ParentRef {
+                    child_id: file_id,
+                    ref_id,
+                    timestamp,
+                    version,
+                    parent_id: Some(parent_id),
+                    name: name.clone(),
+                });
+                self.inodes_to_file_ids.insert(inode, file_id);
+                self.items = interleave_items(&self.items, new_items, db)?;
+            }
+            _ => unimplemented!(),
+        }
+
+        Ok(())
+    }
+
+    fn path_for_dir_id<S>(&self, id: id::Unique, db: &S) -> Result<Option<PathBuf>, S::ReadError>
+    where
+        S: Store,
+    {
+        let item_db = db.item_store();
+        let mut path_components = Vec::new();
+
+        let mut cursor = self.items.cursor();
+        let mut next_id = id;
+        while next_id != ROOT_ID {
+            cursor.seek(&Key::metadata(next_id), SeekBias::Right, item_db)?;
+
+            let mut ref_parent_id = None;
+            let mut ref_name = None;
+            while let Some(Item::ParentRef {
+                parent_id, name, ..
+            }) = cursor.item(item_db)?
+            {
+                ref_parent_id = parent_id;
+                ref_name = Some(name);
+            }
+
+            if ref_parent_id.is_some() && ref_name.is_some() {
+                next_id = ref_parent_id.unwrap();
+                path_components.push(ref_name.unwrap());
+            } else {
+                return Ok(None);
+            }
+        }
+
+        let mut path = PathBuf::new();
+        for component in path_components.into_iter().rev() {
+            path.push(component.as_ref());
+        }
+        Ok(Some(path))
     }
 
     #[cfg(test)]
@@ -642,6 +744,7 @@ impl Builder {
                     name,
                 } => {
                     let ref_id = db.gen_id();
+                    let timestamp = db.gen_timestamp();
                     let version = ref_id;
                     new_items.push(Item::ChildRef {
                         parent_id,
@@ -660,9 +763,18 @@ impl Builder {
                     new_items.push(Item::ParentRef {
                         child_id,
                         ref_id,
-                        timestamp: db.gen_timestamp(),
+                        timestamp,
                         version,
                         parent_id: Some(parent_id),
+                        name: name.clone(),
+                    });
+                    operations.push(Operation::Insert {
+                        file_id: child_id,
+                        is_dir: true,
+                        ref_id,
+                        timestamp,
+                        version,
+                        parent_id,
                         name,
                     });
                 }
@@ -713,10 +825,11 @@ impl Builder {
                         new_name,
                     } = change
                     {
+                        let timestamp = db.gen_timestamp();
                         new_items.push(Item::ParentRef {
                             child_id,
                             ref_id,
-                            timestamp: db.gen_timestamp(),
+                            timestamp,
                             version,
                             parent_id: Some(new_parent_id),
                             name: new_name.clone(),
@@ -730,14 +843,28 @@ impl Builder {
                             version,
                             deletions: SmallVec::new(),
                         });
+                        operations.push(Operation::Move {
+                            file_id: child_id,
+                            ref_id,
+                            timestamp,
+                            version,
+                            new_parent_id,
+                        });
                     } else {
+                        let timestamp = db.gen_timestamp();
                         new_items.push(Item::ParentRef {
                             child_id,
                             ref_id,
-                            timestamp: db.gen_timestamp(),
+                            timestamp,
                             version,
                             parent_id: None,
                             name: old_name.clone(),
+                        });
+                        operations.push(Operation::Remove {
+                            file_id: child_id,
+                            ref_id,
+                            timestamp,
+                            version,
                         });
                     }
                 }
@@ -1177,40 +1304,42 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_replication_basic() {
-    //     let mut fs_1 = TestFileSystem::new();
-    //     let mut fs_2 = TestFileSystem::new();
-    //     let db_1 = NullStore::new(1);
-    //     let db_2 = NullStore::new(2);
-    //     let tree_1 = Tree::new();
-    //     let tree_2 = Tree::new();
-    //
-    //     let tree2 = Tree::new();
-    //
-    //     fs_1.insert_dir("a");
-    //     let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
-    //
-    //     fs_2.insert_dir("b");
-    //     let (mut tree_2, ops_2) = fs_2.update_tree(tree_2, &db_2);
-    //
-    //     tree_1.integrate_ops(ops_2, &db_1, &mut fs_1).unwrap();
-    //     tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
-    //     assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
-    //     assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
-    //
-    //     This currently fails. We need to make the reference tree a proper
-    //     FileSystem and have it insert directories and files when we integrate
-    //     operations. Then we need to break ties in the case of duplicates.
-    //     fs_1.insert_dir("c");
-    //     let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
-    //     fs_2.insert_dir("c");
-    //     let (mut tree_2, ops_2) = fs_2.update_tree(tree_2, &db_2);
-    //     tree_1.integrate_ops(ops_2, &db_1, &mut fs_1).unwrap();
-    //     tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
-    //     assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/"]);
-    //     assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/"]);
-    // }
+    #[test]
+    fn test_replication_basic() {
+        let mut fs_1 = TestFileSystem::new();
+        let mut fs_2 = TestFileSystem::new();
+        let db_1 = NullStore::new(1);
+        let db_2 = NullStore::new(2);
+        let tree_1 = Tree::new();
+        let tree_2 = Tree::new();
+
+        let tree2 = Tree::new();
+
+        fs_1.insert_dir("a");
+        let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
+
+        fs_2.insert_dir("b");
+        let (mut tree_2, ops_2) = fs_2.update_tree(tree_2, &db_2);
+
+        tree_1.integrate_ops(ops_2, &db_1, &mut fs_1).unwrap();
+        tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
+        assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
+        assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
+
+        // This currently fails. We need to make the reference tree a proper
+        // FileSystem and have it insert directories and files when we integrate
+        // operations. Then we need to break ties in the case of duplicates.
+        // fs_1.insert_dir("c");
+        // fs_1.insert_dir("c/d1");
+        // let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
+        // fs_2.insert_dir("c");
+        // fs_1.insert_dir("c/d2");
+        // let (mut tree_2, ops_2) = fs_2.update_tree(tree_2, &db_2);
+        // tree_1.integrate_ops(ops_2, &db_1, &mut fs_1).unwrap();
+        // tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
+        // assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/", "c/d2"]);
+        // assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/", "c/d2"]);
+    }
 
     #[test]
     fn test_key_ordering() {
