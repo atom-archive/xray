@@ -46,7 +46,7 @@ enum Item {
         child_id: id::Unique,
         ref_id: id::Unique,
         timestamp: LamportTimestamp,
-        // version: id::Unique,
+        version: id::Unique,
         parent_id: Option<id::Unique>,
         name: Arc<OsString>,
     },
@@ -56,7 +56,7 @@ enum Item {
         name: Arc<OsString>,
         ref_id: id::Unique,
         child_id: id::Unique,
-        // version: id::Unique,
+        version: id::Unique,
         deletions: SmallVec<[id::Unique; 1]>,
     },
 }
@@ -76,7 +76,7 @@ enum Key {
         child_id: id::Unique,
         ref_id: id::Unique,
         timestamp: LamportTimestamp,
-        // replica_id: id::ReplicaId,
+        replica_id: id::ReplicaId,
     },
     ChildRef {
         parent_id: id::Unique,
@@ -243,13 +243,13 @@ impl Item {
                 child_id,
                 ref_id,
                 timestamp,
-                // version,
+                version,
                 ..
             } => Key::ParentRef {
                 child_id: *child_id,
                 ref_id: *ref_id,
                 timestamp: *timestamp,
-                // replica_id: version.replica_id,
+                replica_id: version.replica_id,
             },
             Item::ChildRef {
                 parent_id,
@@ -452,19 +452,19 @@ impl Ord for Key {
                     Key::ParentRef {
                         ref_id,
                         timestamp,
-                        // replica_id,
+                        replica_id,
                         ..
                     },
                     Key::ParentRef {
                         ref_id: other_ref_id,
                         timestamp: other_timestamp,
-                        // replica_id: other_replica_id,
+                        replica_id: other_replica_id,
                         ..
                     },
                 ) => ref_id
                     .cmp(other_ref_id)
-                    .then_with(|| timestamp.cmp(other_timestamp).reverse()),
-                // .then_with(|| replica_id.cmp(other_replica_id)),
+                    .then_with(|| timestamp.cmp(other_timestamp).reverse())
+                    .then_with(|| replica_id.cmp(other_replica_id)),
                 (
                     Key::ChildRef {
                         is_dir,
@@ -642,12 +642,14 @@ impl Builder {
                     name,
                 } => {
                     let ref_id = db.gen_id();
+                    let version = ref_id;
                     new_items.push(Item::ChildRef {
                         parent_id,
                         is_dir: true,
                         name: name.clone(),
                         ref_id,
                         child_id,
+                        version,
                         deletions: SmallVec::new(),
                     });
                     new_items.push(Item::Metadata {
@@ -659,6 +661,7 @@ impl Builder {
                         child_id,
                         ref_id,
                         timestamp: db.gen_timestamp(),
+                        version,
                         parent_id: Some(parent_id),
                         name,
                     });
@@ -684,19 +687,21 @@ impl Builder {
                     let old_parent_id = parent_ref.parent_id().unwrap();
                     let old_name = parent_ref.name();
                     let ref_id = parent_ref.ref_id();
+                    let version = db.gen_id();
                     cursor.seek(
                         &Key::child_ref(old_parent_id, true, old_name.clone(), ref_id),
                         SeekBias::Left,
                         item_db,
                     )?;
                     if let Item::ChildRef { mut deletions, .. } = cursor.item(item_db)?.unwrap() {
-                        deletions.push(db.gen_id());
+                        deletions.push(version);
                         new_items.push(Item::ChildRef {
                             parent_id: old_parent_id,
                             is_dir: true,
                             name: old_name.clone(),
                             ref_id,
                             child_id,
+                            version,
                             deletions,
                         });
                     } else {
@@ -712,6 +717,7 @@ impl Builder {
                             child_id,
                             ref_id,
                             timestamp: db.gen_timestamp(),
+                            version,
                             parent_id: Some(new_parent_id),
                             name: new_name.clone(),
                         });
@@ -721,6 +727,7 @@ impl Builder {
                             name: new_name,
                             ref_id,
                             child_id,
+                            version,
                             deletions: SmallVec::new(),
                         });
                     } else {
@@ -728,6 +735,7 @@ impl Builder {
                             child_id,
                             ref_id,
                             timestamp: db.gen_timestamp(),
+                            version,
                             parent_id: None,
                             name: old_name.clone(),
                         });
