@@ -18,6 +18,7 @@ trait Store {
     fn item_store(&self) -> &Self::ItemStore;
     fn gen_id(&self) -> id::Unique;
     fn gen_timestamp(&self) -> LamportTimestamp;
+    fn recv_timestamp(&self, timestamp: LamportTimestamp);
 }
 
 trait FileSystem {
@@ -288,6 +289,7 @@ impl Tree {
         F: FileSystem,
         S: Store,
     {
+        let item_db = db.item_store();
         match op {
             Operation::Insert {
                 file_id,
@@ -304,7 +306,6 @@ impl Tree {
                 let mut cursor = self.items.cursor();
                 let inode = if seek_to_child_ref(&mut cursor, parent_id, &name, true, db)?.is_some()
                 {
-                    let item_db = db.item_store();
                     if cursor.item(item_db)?.unwrap().ref_id() < ref_id {
                         path.set_extension(format!("tmp{}.{}", version.replica_id, version.seq));
                         let inode = fs.insert_dir(&path);
@@ -343,6 +344,7 @@ impl Tree {
                 });
                 self.inodes_to_file_ids.insert(inode, file_id);
                 self.items = interleave_items(&self.items, new_items, db)?;
+                db.recv_timestamp(timestamp);
             }
             _ => unimplemented!(),
         }
@@ -1707,6 +1709,12 @@ mod tests {
         fn gen_timestamp(&self) -> LamportTimestamp {
             self.lamport_clock.replace(self.lamport_clock.get() + 1);
             self.lamport_clock.get()
+        }
+
+        fn recv_timestamp(&self, timestamp: LamportTimestamp) {
+            use std::cmp;
+            let new_clock = cmp::max(self.lamport_clock.get(), timestamp) + 1;
+            self.lamport_clock.set(new_clock);
         }
 
         fn item_store(&self) -> &Self::ItemStore {
