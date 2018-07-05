@@ -305,6 +305,7 @@ impl Tree {
             {
                 ref_parent_id = parent_id;
                 ref_name = Some(name);
+                cursor.next(item_db)?;
             }
 
             if ref_parent_id.is_some() && ref_name.is_some() {
