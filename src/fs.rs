@@ -21,7 +21,8 @@ trait Store {
 }
 
 trait FileSystem {
-    fn create_dir(&mut self, path: &Path) -> Inode;
+    fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) -> Inode;
+    fn remove_dir<I: Into<PathBuf>>(&mut self, path: I);
 }
 
 type Inode = u64;
@@ -1700,14 +1701,6 @@ mod tests {
             TestFileSystem { root, next_inode }
         }
 
-        fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) {
-            self.root.insert_dir(path, &mut self.next_inode);
-        }
-
-        fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
-            self.root.remove_dir(path);
-        }
-
         fn update_tree<S: Store>(&self, tree: Tree, db: &S) -> (Tree, Vec<Operation>) {
             self.root.update_tree(tree, db)
         }
@@ -1734,10 +1727,14 @@ mod tests {
     }
 
     impl FileSystem for TestFileSystem {
-        fn create_dir(&mut self, path: &Path) -> Inode {
+        fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) -> Inode {
             let inode = self.next_inode;
-            self.next_inode += 1;
+            self.root.insert_dir(path, &mut self.next_inode);
             inode
+        }
+
+        fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
+            self.root.remove_dir(path);
         }
     }
 }
