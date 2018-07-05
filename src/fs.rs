@@ -66,7 +66,7 @@ enum Item {
     Metadata {
         file_id: id::Unique,
         is_dir: bool,
-        inode: Inode,
+        inode: Option<Inode>,
     },
     ParentRef {
         child_id: id::Unique,
@@ -406,7 +406,7 @@ impl Item {
         }
     }
 
-    fn inode(&self) -> Inode {
+    fn inode(&self) -> Option<Inode> {
         match self {
             Item::Metadata { inode, .. } => *inode,
             _ => panic!(),
@@ -672,7 +672,7 @@ impl Builder {
             }
 
             let old_entry = self.old_child_ref_item(db)?.unwrap();
-            let old_inode = self.old_inode(db)?.unwrap();
+            let old_inode = self.old_inode(db)?;
 
             if old_depth == new_depth {
                 match cmp_dir_entries(
@@ -682,7 +682,7 @@ impl Builder {
                     old_entry.name().as_os_str(),
                 ) {
                     Ordering::Less => break,
-                    Ordering::Equal => {
+                    Ordering::Equal => if let Some(old_inode) = old_inode {
                         if new_metadata.is_dir {
                             if !self.visited_inodes.contains(&old_inode) {
                                 self.visited_inodes.insert(old_inode);
@@ -705,7 +705,7 @@ impl Builder {
                             self.next_old_entry(db)?;
                             return Ok(());
                         }
-                    }
+                    },
                     Ordering::Greater => {}
                 }
             }
@@ -787,7 +787,7 @@ impl Builder {
                     });
                     new_items.push(Item::Metadata {
                         file_id: child_id,
-                        inode,
+                        inode: Some(inode),
                         is_dir: true,
                     });
                     new_items.push(Item::ParentRef {
@@ -817,7 +817,7 @@ impl Builder {
                         }) => new_items.push(Item::Metadata {
                             file_id,
                             is_dir,
-                            inode: new_inode,
+                            inode: Some(new_inode),
                         }),
                         _ => panic!(),
                     }
@@ -1038,7 +1038,7 @@ impl Cursor {
     pub fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
         if let Some((cursor, _)) = self.stack.last() {
             match cursor.item(db.item_store())?.unwrap() {
-                Item::Metadata { inode, .. } => Ok(Some(inode)),
+                Item::Metadata { inode, .. } => Ok(inode),
                 _ => unreachable!(),
             }
         } else {
