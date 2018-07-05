@@ -34,6 +34,7 @@ struct Tree {
     inodes_to_file_ids: HashMap<Inode, id::Unique>,
 }
 
+#[derive(Debug)]
 enum Operation {
     Insert {
         file_id: id::Unique,
@@ -150,7 +151,7 @@ enum DirChange {
 
 struct Cursor {
     path: PathBuf,
-    stack: Vec<btree::Cursor<Item>>,
+    stack: Vec<(btree::Cursor<Item>, HashSet<Arc<OsString>>)>,
 }
 
 impl Metadata {
@@ -253,7 +254,24 @@ impl Tree {
             } => {
                 let mut path = self.path_for_dir_id(parent_id, db)?.unwrap();
                 path.push(name.as_ref());
-                let inode = fs.create_dir(&path);
+
+                let mut cursor = self.items.cursor();
+                let inode = if seek_to_child_ref(&mut cursor, parent_id, &name, true, db)?.is_some()
+                {
+                    let item_db = db.item_store();
+                    if cursor.item(item_db)?.unwrap().ref_id() < ref_id {
+                        path.set_extension(format!("tmp{}.{}", version.replica_id, version.seq));
+                        let inode = fs.insert_dir(&path);
+                        fs.remove_dir(&path);
+                        inode
+                    } else {
+                        fs.remove_dir(&path);
+                        fs.insert_dir(&path)
+                    }
+                } else {
+                    fs.insert_dir(&path)
+                };
+
                 let mut new_items: SmallVec<[Item; 3]> = SmallVec::new();
                 new_items.push(Item::ChildRef {
                     parent_id,
@@ -275,7 +293,7 @@ impl Tree {
                     timestamp,
                     version,
                     parent_id: Some(parent_id),
-                    name: name.clone(),
+                    name,
                 });
                 self.inodes_to_file_ids.insert(inode, file_id);
                 self.items = interleave_items(&self.items, new_items, db)?;
@@ -940,9 +958,11 @@ impl Cursor {
             if item.is_metadata() {
                 break;
             } else if item.is_child_ref() && !item.is_deleted() {
+                let mut visited_names = HashSet::new();
+                visited_names.insert(item.name());
                 let mut cursor = Self {
                     path: PathBuf::new(),
-                    stack: vec![root_cursor],
+                    stack: vec![(root_cursor, visited_names)],
                 };
                 cursor.follow_entry(db)?;
                 return Ok(cursor);
@@ -968,9 +988,11 @@ impl Cursor {
             if item.is_metadata() {
                 break;
             } else if item.is_child_ref() && !item.is_deleted() {
+                let mut visited_names = HashSet::new();
+                visited_names.insert(item.name());
                 let mut cursor = Self {
                     path: PathBuf::new(),
-                    stack: vec![root_cursor],
+                    stack: vec![(root_cursor, visited_names)],
                 };
                 cursor.follow_entry(db)?;
                 return Ok(Some(cursor));
@@ -996,7 +1018,7 @@ impl Cursor {
 
     pub fn child_ref_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
         if self.stack.len() > 1 {
-            let cursor = &self.stack[self.stack.len() - 2];
+            let (cursor, _) = &self.stack[self.stack.len() - 2];
             cursor.item(db.item_store())
         } else {
             Ok(None)
@@ -1004,7 +1026,7 @@ impl Cursor {
     }
 
     pub fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
-        if let Some(cursor) = self.stack.last() {
+        if let Some((cursor, _)) = self.stack.last() {
             match cursor.item(db.item_store())?.unwrap() {
                 Item::Metadata { inode, .. } => Ok(Some(inode)),
                 _ => unreachable!(),
@@ -1018,14 +1040,17 @@ impl Cursor {
         let item_db = db.item_store();
         while !self.stack.is_empty() {
             let found_entry = loop {
-                let mut cursor = self.stack.last_mut().unwrap();
+                let (cursor, visited_names) = self.stack.last_mut().unwrap();
                 let cur_item = cursor.item(item_db)?.unwrap();
                 if cur_item.is_ref() || cur_item.is_dir_metadata() {
                     cursor.next(item_db)?;
                     match cursor.item(item_db)? {
                         Some(Item::ParentRef { .. }) => continue,
-                        Some(Item::ChildRef { deletions, .. }) => {
-                            if deletions.is_empty() {
+                        Some(Item::ChildRef {
+                            name, deletions, ..
+                        }) => {
+                            if deletions.is_empty() && !visited_names.contains(&name) {
+                                visited_names.insert(name);
                                 break true;
                             } else {
                                 continue;
@@ -1064,7 +1089,7 @@ impl Cursor {
         let item_db = db.item_store();
         let mut child_cursor;
         {
-            let entry_cursor = self.stack.last().unwrap();
+            let (entry_cursor, _) = self.stack.last().unwrap();
             match entry_cursor.item(item_db)?.unwrap() {
                 Item::ChildRef {
                     parent_id,
@@ -1085,7 +1110,7 @@ impl Cursor {
                 _ => panic!(),
             }
         }
-        self.stack.push(child_cursor);
+        self.stack.push((child_cursor, HashSet::new()));
         Ok(())
     }
 }
@@ -1327,20 +1352,22 @@ mod tests {
         tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
         assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
         assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
+        assert_eq!(fs_1.paths(), tree_1.paths(&db_1));
+        assert_eq!(fs_2.paths(), tree_2.paths(&db_2));
 
-        // This currently fails. We need to make the reference tree a proper
-        // FileSystem and have it insert directories and files when we integrate
-        // operations. Then we need to break ties in the case of duplicates.
-        // fs_1.insert_dir("c");
-        // fs_1.insert_dir("c/d1");
-        // let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
-        // fs_2.insert_dir("c");
-        // fs_1.insert_dir("c/d2");
-        // let (mut tree_2, ops_2) = fs_2.update_tree(tree_2, &db_2);
-        // tree_1.integrate_ops(ops_2, &db_1, &mut fs_1).unwrap();
-        // tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
-        // assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/", "c/d2"]);
-        // assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/", "c/d2"]);
+        fs_1.insert_dir("c");
+        fs_1.insert_dir("c/d1");
+        let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
+        fs_2.insert_dir("c");
+        fs_1.insert_dir("c/d2");
+        let (mut tree_2, ops_2) = fs_2.update_tree(tree_2, &db_2);
+        tree_1.integrate_ops(ops_2, &db_1, &mut fs_1).unwrap();
+        tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
+
+        assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/", "c/d2/"]);
+        assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/", "c/d2/"]);
+        assert_eq!(fs_1.paths(), tree_1.paths(&db_1));
+        assert_eq!(fs_2.paths(), tree_2.paths(&db_2));
     }
 
     #[test]
