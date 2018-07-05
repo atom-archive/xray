@@ -1411,7 +1411,7 @@ mod tests {
     impl TestFile {
         fn dir(inode: Inode) -> Self {
             TestFile {
-                inode: 0,
+                inode,
                 dir_entries: Some(Vec::new()),
             }
         }
