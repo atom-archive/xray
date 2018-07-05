@@ -215,6 +215,44 @@ impl Tree {
         Ok(Some(parent_file_id))
     }
 
+    fn path_for_dir_id<S>(&self, id: id::Unique, db: &S) -> Result<Option<PathBuf>, S::ReadError>
+    where
+        S: Store,
+    {
+        let item_db = db.item_store();
+        let mut path_components = Vec::new();
+
+        let mut cursor = self.items.cursor();
+        let mut next_id = id;
+        while next_id != ROOT_ID {
+            cursor.seek(&Key::metadata(next_id), SeekBias::Right, item_db)?;
+
+            let mut ref_parent_id = None;
+            let mut ref_name = None;
+            while let Some(Item::ParentRef {
+                parent_id, name, ..
+            }) = cursor.item(item_db)?
+            {
+                ref_parent_id = parent_id;
+                ref_name = Some(name);
+                cursor.next(item_db)?;
+            }
+
+            if ref_parent_id.is_some() && ref_name.is_some() {
+                next_id = ref_parent_id.unwrap();
+                path_components.push(ref_name.unwrap());
+            } else {
+                return Ok(None);
+            }
+        }
+
+        let mut path = PathBuf::new();
+        for component in path_components.into_iter().rev() {
+            path.push(component.as_ref());
+        }
+        Ok(Some(path))
+    }
+
     #[cfg(test)]
     fn integrate_ops<F, S>(
         &mut self,
@@ -302,44 +340,6 @@ impl Tree {
         }
 
         Ok(())
-    }
-
-    fn path_for_dir_id<S>(&self, id: id::Unique, db: &S) -> Result<Option<PathBuf>, S::ReadError>
-    where
-        S: Store,
-    {
-        let item_db = db.item_store();
-        let mut path_components = Vec::new();
-
-        let mut cursor = self.items.cursor();
-        let mut next_id = id;
-        while next_id != ROOT_ID {
-            cursor.seek(&Key::metadata(next_id), SeekBias::Right, item_db)?;
-
-            let mut ref_parent_id = None;
-            let mut ref_name = None;
-            while let Some(Item::ParentRef {
-                parent_id, name, ..
-            }) = cursor.item(item_db)?
-            {
-                ref_parent_id = parent_id;
-                ref_name = Some(name);
-                cursor.next(item_db)?;
-            }
-
-            if ref_parent_id.is_some() && ref_name.is_some() {
-                next_id = ref_parent_id.unwrap();
-                path_components.push(ref_name.unwrap());
-            } else {
-                return Ok(None);
-            }
-        }
-
-        let mut path = PathBuf::new();
-        for component in path_components.into_iter().rev() {
-            path.push(component.as_ref());
-        }
-        Ok(Some(path))
     }
 
     #[cfg(test)]
