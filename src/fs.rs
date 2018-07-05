@@ -229,24 +229,18 @@ impl Tree {
         while next_id != ROOT_ID {
             cursor.seek(&Key::metadata(next_id), SeekBias::Right, item_db)?;
 
-            let mut ref_parent_id = None;
-            let mut ref_name = None;
-            while let Some(Item::ParentRef {
+            if let Some(Item::ParentRef {
                 parent_id, name, ..
             }) = cursor.item(item_db)?
             {
-                ref_parent_id = parent_id;
-                ref_name = Some(name);
-                cursor.next(item_db)?;
-            }
-
-            if ref_parent_id.is_some() && ref_name.is_some() {
-                let ref_parent_id = ref_parent_id.unwrap();
-                let ref_name = ref_name.unwrap();
-                let child_id = seek_to_child_ref(&mut cursor, ref_parent_id, &ref_name, true, db)?;
-                if child_id.map_or(false, |child_id| child_id == next_id) {
-                    next_id = ref_parent_id;
-                    path_components.push(ref_name);
+                if let Some(parent_id) = parent_id {
+                    let child_id = seek_to_child_ref(&mut cursor, parent_id, &name, true, db)?;
+                    if child_id.map_or(false, |child_id| child_id == next_id) {
+                        next_id = parent_id;
+                        path_components.push(name);
+                    } else {
+                        return Ok(None);
+                    }
                 } else {
                     return Ok(None);
                 }
@@ -300,23 +294,21 @@ impl Tree {
                 parent_id,
                 name,
             } => {
-                let mut path = self.path_for_dir_id(parent_id, db)?.unwrap();
-                path.push(name.as_ref());
-
-                let mut cursor = self.items.cursor();
-                let inode = if seek_to_child_ref(&mut cursor, parent_id, &name, true, db)?.is_some()
-                {
-                    if cursor.item(item_db)?.unwrap().ref_id() < ref_id {
-                        path.set_extension(format!("tmp{}.{}", version.replica_id, version.seq));
-                        let inode = fs.insert_dir(&path);
-                        fs.remove_dir(&path);
-                        inode
+                let inode = if let Some(mut path) = self.path_for_dir_id(parent_id, db)? {
+                    path.push(name.as_ref());
+                    let mut cursor = self.items.cursor();
+                    if seek_to_child_ref(&mut cursor, parent_id, &name, true, db)?.is_some() {
+                        if cursor.item(item_db)?.unwrap().ref_id() < ref_id {
+                            None
+                        } else {
+                            fs.remove_dir(&path);
+                            Some(fs.insert_dir(&path))
+                        }
                     } else {
-                        fs.remove_dir(&path);
-                        fs.insert_dir(&path)
+                        Some(fs.insert_dir(&path))
                     }
                 } else {
-                    fs.insert_dir(&path)
+                    None
                 };
 
                 let mut new_items: SmallVec<[Item; 3]> = SmallVec::new();
@@ -342,7 +334,9 @@ impl Tree {
                     parent_id: Some(parent_id),
                     name,
                 });
-                self.inodes_to_file_ids.insert(inode, file_id);
+                if let Some(inode) = inode {
+                    self.inodes_to_file_ids.insert(inode, file_id);
+                }
                 self.items = interleave_items(&self.items, new_items, db)?;
                 db.recv_timestamp(timestamp);
             }
@@ -1369,13 +1363,13 @@ mod tests {
         fs_1.insert_dir("c/d1");
         let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
         fs_2.insert_dir("c");
-        fs_1.insert_dir("c/d2");
+        fs_2.insert_dir("c/d2");
         let (mut tree_2, ops_2) = fs_2.update_tree(tree_2, &db_2);
         tree_1.integrate_ops(ops_2, &db_1, &mut fs_1).unwrap();
         tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
 
-        assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/", "c/d2/"]);
-        assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/", "c/d2/"]);
+        assert_eq!(tree_1.paths(&db_1), ["a/", "b/", "c/", "c/d1/"]);
+        assert_eq!(tree_2.paths(&db_2), ["a/", "b/", "c/", "c/d1/"]);
         assert_eq!(fs_1.paths(), tree_1.paths(&db_1));
         assert_eq!(fs_2.paths(), tree_2.paths(&db_2));
     }
