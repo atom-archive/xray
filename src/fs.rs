@@ -2,7 +2,7 @@ use btree::{self, NodeStore, SeekBias};
 use id;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::ops::{Add, AddAssign};
@@ -129,7 +129,7 @@ struct Builder {
     // item_changes: Vec<ItemChange>,
     inodes_to_file_ids: HashMap<Inode, id::Unique>,
     visited_inodes: HashSet<Inode>,
-    dir_changes: HashMap<id::Unique, DirChange>,
+    dir_changes: BTreeMap<id::Unique, DirChange>,
 }
 
 enum DirChange {
@@ -616,7 +616,7 @@ impl Builder {
             cursor_stack: vec![(0, cursor)],
             inodes_to_file_ids,
             visited_inodes: HashSet::new(),
-            dir_changes: HashMap::new(),
+            dir_changes: BTreeMap::new(),
         })
     }
 
