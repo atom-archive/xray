@@ -223,6 +223,7 @@ impl Tree {
         let mut path_components = Vec::new();
 
         let mut cursor = self.items.cursor();
+
         let mut next_id = id;
         while next_id != ROOT_ID {
             cursor.seek(&Key::metadata(next_id), SeekBias::Right, item_db)?;
@@ -239,8 +240,15 @@ impl Tree {
             }
 
             if ref_parent_id.is_some() && ref_name.is_some() {
-                next_id = ref_parent_id.unwrap();
-                path_components.push(ref_name.unwrap());
+                let ref_parent_id = ref_parent_id.unwrap();
+                let ref_name = ref_name.unwrap();
+                let child_id = seek_to_child_ref(&mut cursor, ref_parent_id, &ref_name, true, db)?;
+                if child_id.map_or(false, |child_id| child_id == next_id) {
+                    next_id = ref_parent_id;
+                    path_components.push(ref_name);
+                } else {
+                    return Ok(None);
+                }
             } else {
                 return Ok(None);
             }
