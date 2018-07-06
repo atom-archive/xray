@@ -307,19 +307,17 @@ impl Tree {
 
                 if let Some(mut path) = self.path_for_dir_id(parent_id, db)? {
                     path.push(name.as_ref());
-                    if let Some(mut existing_child_ref) =
+                    if let Some(mut old_child_ref) =
                         self.find_child_ref(parent_id, &name, true, db)?
                     {
-                        if existing_child_ref.ref_id() < ref_id {
-                            new_child_ref
-                                .deletions_mut()
-                                .push(existing_child_ref.version());
+                        if old_child_ref.ref_id() < ref_id {
+                            new_child_ref.deletions_mut().push(old_child_ref.version());
                             inode = None;
                         } else {
                             fs.remove_dir(&path);
                             inode = Some(fs.insert_dir(&path));
-                            existing_child_ref.deletions_mut().push(version);
-                            new_items.push(existing_child_ref);
+                            old_child_ref.deletions_mut().push(version);
+                            new_items.push(old_child_ref);
                         }
                     } else {
                         inode = Some(fs.insert_dir(&path));
