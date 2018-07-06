@@ -347,7 +347,55 @@ impl Tree {
                 self.items = interleave_items(&self.items, new_items, db)?;
                 db.recv_timestamp(timestamp);
             }
-            _ => unimplemented!(),
+            Operation::Remove {
+                file_id,
+                ref_id,
+                timestamp,
+                version,
+            } => {
+                let mut new_items: SmallVec<[Item; 3]> = SmallVec::new();
+
+                let old_ref = self.find_parent_ref(file_id, ref_id, db)?.unwrap();
+                let new_ref_key = Key::parent_ref(file_id, ref_id, timestamp, version.replica_id);
+                match new_ref_key.cmp(&old_ref.key()) {
+                    Ordering::Less => {
+                        if let Some(path) = self.path_for_dir_id(file_id, db)? {
+                            fs.remove_dir(path);
+                        }
+
+                        if let Some(old_parent_id) = old_ref.parent_id() {
+                            let mut cursor = self.items.cursor();
+                            cursor.seek(
+                                &Key::ChildRef {
+                                    parent_id: old_parent_id,
+                                    is_dir: true,
+                                    name: old_ref.name(),
+                                    ref_id,
+                                },
+                                SeekBias::Left,
+                                item_db,
+                            )?;
+                            let mut child_ref = cursor.item(item_db)?.unwrap();
+                            child_ref.deletions_mut().push(version);
+                            new_items.push(child_ref);
+                        }
+                    }
+                    Ordering::Equal => panic!(),
+                    Ordering::Greater => unimplemented!(),
+                }
+                new_items.push(Item::ParentRef {
+                    child_id: file_id,
+                    ref_id,
+                    timestamp,
+                    version,
+                    parent_id: None,
+                    name: old_ref.name(),
+                });
+
+                self.items = interleave_items(&self.items, new_items, db)?;
+                db.recv_timestamp(timestamp);
+            }
+            _ => unimplemented!("Integrating op is not implemented: {:?}", op),
         }
 
         Ok(())
@@ -398,6 +446,30 @@ impl Tree {
             }
         }
         Ok(item)
+    }
+
+    fn find_parent_ref<S>(
+        &self,
+        file_id: id::Unique,
+        ref_id: id::Unique,
+        db: &S,
+    ) -> Result<Option<Item>, S::ReadError>
+    where
+        S: Store,
+    {
+        let item_db = db.item_store();
+        let mut cursor = self.items.cursor();
+        cursor.seek(
+            &Key::parent_ref(
+                file_id,
+                ref_id,
+                LamportTimestamp::max_value(),
+                id::ReplicaId::min_value(),
+            ),
+            SeekBias::Left,
+            item_db,
+        )?;
+        cursor.item(item_db)
     }
 
     #[cfg(test)]
@@ -568,6 +640,20 @@ impl btree::Item for Item {
 impl Key {
     fn metadata(file_id: id::Unique) -> Self {
         Key::Metadata { file_id }
+    }
+
+    fn parent_ref(
+        child_id: id::Unique,
+        ref_id: id::Unique,
+        timestamp: LamportTimestamp,
+        replica_id: id::ReplicaId,
+    ) -> Self {
+        Key::ParentRef {
+            child_id,
+            ref_id,
+            timestamp,
+            replica_id,
+        }
     }
 
     fn child_ref(
@@ -1385,12 +1471,12 @@ mod tests {
 
         fs_1.remove_dir("c");
         let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
-        // tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
+        tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
 
         assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
-        // assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
+        assert_eq!(tree_2.paths(&db_2), ["a/", "b/"]);
         assert_eq!(fs_1.paths(), tree_1.paths(&db_1));
-        // assert_eq!(fs_2.paths(), tree_2.paths(&db_2));
+        assert_eq!(fs_2.paths(), tree_2.paths(&db_2));
     }
 
     #[test]
