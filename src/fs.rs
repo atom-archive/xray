@@ -1344,8 +1344,6 @@ mod tests {
         let tree_1 = Tree::new();
         let tree_2 = Tree::new();
 
-        let tree2 = Tree::new();
-
         fs_1.insert_dir("a");
         let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
 
