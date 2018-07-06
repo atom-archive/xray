@@ -196,15 +196,14 @@ impl Tree {
 
         while let Some(component) = components_iter.next() {
             let component_name = Arc::new(OsString::from(component.as_os_str()));
-            if let Some(child_id) =
-                seek_to_child_ref(&mut cursor, parent_file_id, &component_name, true, db)?
+            if let Some(child_ref) = self.find_child_ref(parent_file_id, &component_name, true, db)?
             {
-                parent_file_id = child_id;
+                parent_file_id = child_ref.child_id();
             } else if components_iter.peek().is_none() {
-                if let Some(child_id) =
-                    seek_to_child_ref(&mut cursor, parent_file_id, &component_name, false, db)?
+                if let Some(child_ref) =
+                    self.find_child_ref(parent_file_id, &component_name, false, db)?
                 {
-                    return Ok(Some(child_id));
+                    return Ok(Some(child_ref.child_id()));
                 } else {
                     return Ok(None);
                 }
@@ -234,8 +233,8 @@ impl Tree {
             }) = cursor.item(item_db)?
             {
                 if let Some(parent_id) = parent_id {
-                    let child_id = seek_to_child_ref(&mut cursor, parent_id, &name, true, db)?;
-                    if child_id.map_or(false, |child_id| child_id == next_id) {
+                    let child_ref = self.find_child_ref(parent_id, &name, true, db)?;
+                    if child_ref.map_or(false, |child_ref| child_ref.child_id() == next_id) {
                         next_id = parent_id;
                         path_components.push(name);
                     } else {
@@ -308,18 +307,18 @@ impl Tree {
 
                 if let Some(mut path) = self.path_for_dir_id(parent_id, db)? {
                     path.push(name.as_ref());
-                    let mut cursor = self.items.cursor();
-                    if seek_to_child_ref(&mut cursor, parent_id, &name, true, db)?.is_some() {
-                        let mut existing_child_ref = cursor.item(item_db)?.unwrap();
+                    if let Some(mut existing_child_ref) =
+                        self.find_child_ref(parent_id, &name, true, db)?
+                    {
                         if existing_child_ref.ref_id() < ref_id {
                             new_child_ref
                                 .deletions_mut()
-                                .push(existing_child_ref.ref_id());
+                                .push(existing_child_ref.version());
                             inode = None;
                         } else {
                             fs.remove_dir(&path);
                             inode = Some(fs.insert_dir(&path));
-                            existing_child_ref.deletions_mut().push(ref_id);
+                            existing_child_ref.deletions_mut().push(version);
                             new_items.push(existing_child_ref);
                         }
                     } else {
@@ -352,6 +351,53 @@ impl Tree {
         }
 
         Ok(())
+    }
+
+    fn find_child_ref<S: Store>(
+        &self,
+        parent_id: id::Unique,
+        name: &Arc<OsString>,
+        is_dir: bool,
+        db: &S,
+    ) -> Result<Option<Item>, S::ReadError> {
+        let item_db = db.item_store();
+        let mut cursor = self.items.cursor();
+        cursor.seek(
+            &Key::ChildRef {
+                parent_id,
+                is_dir,
+                name: name.clone(),
+                ref_id: id::Unique::default(),
+            },
+            SeekBias::Left,
+            item_db,
+        )?;
+
+        let mut item = None;
+        loop {
+            item = cursor.item(item_db)?;
+            match &item {
+                Some(Item::ChildRef {
+                    is_dir: entry_is_dir,
+                    name: entry_name,
+                    child_id,
+                    deletions,
+                    ..
+                }) => {
+                    if name == entry_name && is_dir == *entry_is_dir {
+                        if deletions.is_empty() {
+                            break;
+                        } else {
+                            cursor.next(item_db)?;
+                        }
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                _ => return Ok(None),
+            }
+        }
+        Ok(item)
     }
 
     #[cfg(test)]
@@ -498,6 +544,14 @@ impl Item {
     fn deletions_mut(&mut self) -> &mut SmallVec<[id::Unique; 1]> {
         match self {
             Item::ChildRef { deletions, .. } => deletions,
+            _ => panic!(),
+        }
+    }
+
+    fn version(&self) -> id::Unique {
+        match self {
+            Item::ParentRef { version, .. } => *version,
+            Item::ChildRef { version, .. } => *version,
             _ => panic!(),
         }
     }
@@ -1127,49 +1181,6 @@ fn cmp_dir_entries(a_is_dir: bool, a_name: &OsStr, b_is_dir: bool, b_name: &OsSt
         .cmp(&b_is_dir)
         .reverse()
         .then_with(|| a_name.cmp(b_name))
-}
-
-fn seek_to_child_ref<S: Store>(
-    cursor: &mut btree::Cursor<Item>,
-    parent_id: id::Unique,
-    name: &Arc<OsString>,
-    is_dir: bool,
-    db: &S,
-) -> Result<Option<id::Unique>, S::ReadError> {
-    let item_db = db.item_store();
-    cursor.seek(
-        &Key::ChildRef {
-            parent_id,
-            is_dir,
-            name: name.clone(),
-            ref_id: id::Unique::default(),
-        },
-        SeekBias::Left,
-        item_db,
-    )?;
-
-    loop {
-        match cursor.item(item_db)? {
-            Some(Item::ChildRef {
-                is_dir: entry_is_dir,
-                name: entry_name,
-                child_id,
-                deletions,
-                ..
-            }) => {
-                if name == &entry_name && is_dir == entry_is_dir {
-                    if deletions.is_empty() {
-                        return Ok(Some(child_id));
-                    } else {
-                        cursor.next(item_db)?;
-                    }
-                } else {
-                    return Ok(None);
-                }
-            }
-            _ => return Ok(None),
-        }
-    }
 }
 
 fn interleave_items<I, S>(
