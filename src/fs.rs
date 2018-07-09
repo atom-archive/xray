@@ -22,8 +22,10 @@ trait Store {
 }
 
 trait FileSystem {
+    // TODO: Replace PathBuf with Path. There's no need to have ownership in these methods.
     fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) -> Inode;
     fn remove_dir<I: Into<PathBuf>>(&mut self, path: I);
+    fn move_dir<I1: Into<PathBuf>, I2: Into<PathBuf>>(&mut self, from: I1, to: I2);
 }
 
 type Inode = u64;
@@ -49,13 +51,8 @@ enum Operation {
     Move {
         file_id: id::Unique,
         ref_id: id::Unique,
-        timestamp: LamportTimestamp,
-        version: id::Unique,
-        new_parent_id: id::Unique,
-    },
-    Remove {
-        file_id: id::Unique,
-        ref_id: id::Unique,
+        new_parent_id: Option<id::Unique>,
+        new_name: Option<Arc<OsString>>,
         old_timestamp: LamportTimestamp,
         old_replica_id: id::ReplicaId,
         new_timestamp: LamportTimestamp,
@@ -104,6 +101,7 @@ enum Key {
     ParentRef {
         child_id: id::Unique,
         ref_id: id::Unique,
+        is_deletion: bool,
         timestamp: LamportTimestamp,
         replica_id: id::ReplicaId,
     },
@@ -135,20 +133,26 @@ struct Builder {
     // item_changes: Vec<ItemChange>,
     inodes_to_file_ids: HashMap<Inode, id::Unique>,
     visited_inodes: HashSet<Inode>,
-    dir_changes: BTreeMap<id::Unique, DirChange>,
+    dir_changes: HashMap<id::Unique, DirChange>,
+    next_change_id: usize,
 }
 
 enum DirChange {
     Insert {
+        timestamp: usize,
         inode: Inode,
         parent_id: id::Unique,
         name: Arc<OsString>,
     },
     Update {
+        timestamp: usize,
         new_inode: Inode,
     },
-    Remove,
+    Remove {
+        timestamp: usize,
+    },
     Move {
+        timestamp: usize,
         new_parent_id: id::Unique,
         new_name: Arc<OsString>,
     },
@@ -269,6 +273,8 @@ impl Tree {
         F: FileSystem,
         S: Store,
     {
+        println!("Integrating op {:?}", op);
+
         let item_db = db.item_store();
         match op {
             Operation::Insert {
@@ -280,7 +286,7 @@ impl Tree {
                 parent_id,
                 name,
             } => {
-                let mut new_child_ref = Item::ChildRef {
+                let new_child_ref = Item::ChildRef {
                     parent_id,
                     is_dir,
                     name: name.clone(),
@@ -292,10 +298,15 @@ impl Tree {
                 };
                 let inode = if let Some(mut path) = self.path_for_dir_id(parent_id, db)? {
                     path.push(name.as_ref());
+                    if name.as_ref() == &OsString::from("n") {
+                        println!("PATH!!!!!!!!!!!!!!!!!! {:?}", path);
+                    }
 
                     if let Some(mut old_child_ref) =
                         self.find_child_ref(parent_id, &name, true, db)?
                     {
+
+                        println!("Old child ref key {:?}. New child ref key {:?}", old_child_ref.key(), new_child_ref.key());
                         if old_child_ref.key() < new_child_ref.key() {
                             None
                         } else {
@@ -332,20 +343,68 @@ impl Tree {
                 self.items = interleave_items(&self.items, new_items, db)?;
                 db.recv_timestamp(timestamp);
             }
-            Operation::Remove {
+            Operation::Move {
                 file_id,
                 ref_id,
+                new_parent_id,
+                new_name,
                 old_timestamp,
                 old_replica_id,
                 new_timestamp,
                 version,
             } => {
-                let active_ref = self.find_active_parent_ref(file_id, ref_id, db)?.unwrap();
-                let removed_ref_key =
-                    Key::parent_ref(file_id, ref_id, new_timestamp, version.replica_id);
-                if removed_ref_key < active_ref.key() {
-                    if let Some(path) = self.path_for_dir_id(file_id, db)? {
-                        fs.remove_dir(path);
+                let mut new_items: SmallVec<[Item; 3]> = SmallVec::new();
+
+                let active_parent_ref = self.find_active_parent_ref(file_id, ref_id, db)?.unwrap();
+                let new_parent_ref_key =
+                    Key::parent_ref(file_id, ref_id, false, new_timestamp, version.replica_id);
+                if new_parent_ref_key < active_parent_ref.key() {
+                    let old_path = self.path_for_dir_id(file_id, db)?;
+
+                    if let Some(new_parent_id) = new_parent_id {
+                        let new_name = new_name.clone().unwrap();
+                        let new_path = self.path_for_dir_id(new_parent_id, db)?.map(|mut path| {
+                            path.push(new_name.as_ref());
+                            path
+                        });
+                        let new_child_ref = Item::ChildRef {
+                            parent_id: new_parent_id,
+                            is_dir: true,
+                            name: new_name.clone(),
+                            ref_id,
+                            child_id: file_id,
+                            timestamp: new_timestamp,
+                            version,
+                            deletions: SmallVec::new(),
+                        };
+
+                        if let Some(old_child_ref) =
+                            self.find_child_ref(new_parent_id, &new_name, true, db)?
+                        {
+                            if old_child_ref.key() < new_child_ref.key() {
+                                old_path.map(|old_path| fs.remove_dir(old_path));
+                            } else {
+                                if !old_child_ref.is_deleted() {
+                                    new_path.as_ref().map(|new_path| fs.remove_dir(new_path));
+                                }
+                                if old_path.is_some() && new_path.is_some() {
+                                    fs.move_dir(old_path.unwrap(), new_path.unwrap());
+                                } else if old_path.is_some() {
+                                    fs.remove_dir(old_path.unwrap());
+                                }
+                            }
+                        } else {
+                            println!("OLD_PATH = {:?}, NEW_PATH = {:?}", old_path, new_path);
+                            if old_path.is_some() && new_path.is_some() {
+                                fs.move_dir(old_path.unwrap(), new_path.unwrap());
+                            } else if old_path.is_some() {
+                                fs.remove_dir(old_path.unwrap());
+                            }
+                        }
+
+                        new_items.push(new_child_ref);
+                    } else {
+                        old_path.map(|old_path| fs.remove_dir(old_path));
                     }
                 }
 
@@ -364,25 +423,22 @@ impl Tree {
                     SeekBias::Left,
                     item_db,
                 )?;
-                let mut child_ref = cursor.item(item_db)?.unwrap();
-                child_ref.deletions_mut().push(version);
-
-                let mut new_items: SmallVec<[Item; 2]> = SmallVec::new();
-                new_items.push(child_ref);
+                let mut deleted_child_ref = cursor.item(item_db)?.unwrap();
+                deleted_child_ref.deletions_mut().push(version);
+                new_items.push(deleted_child_ref);
                 new_items.push(Item::ParentRef {
                     child_id: file_id,
                     ref_id,
                     timestamp: new_timestamp,
                     version,
-                    parent_id: None,
-                    name: old_parent_ref.name(),
+                    parent_id: new_parent_id,
+                    name: new_name.unwrap_or(old_parent_ref.name()),
                 });
                 new_items.sort_unstable_by_key(|item| item.key());
 
                 self.items = interleave_items(&self.items, new_items, db)?;
                 db.recv_timestamp(new_timestamp);
             }
-            _ => unimplemented!("Integrating op is not implemented: {:?}", op),
         }
 
         Ok(())
@@ -471,7 +527,7 @@ impl Tree {
         let item_db = db.item_store();
         let mut cursor = self.items.cursor();
         cursor.seek(
-            &Key::parent_ref(file_id, ref_id, timestamp, replica_id),
+            &Key::parent_ref(file_id, ref_id, false, timestamp, replica_id),
             SeekBias::Left,
             item_db,
         )?;
@@ -510,10 +566,12 @@ impl Item {
                 ref_id,
                 timestamp,
                 version,
+                parent_id,
                 ..
             } => Key::ParentRef {
                 child_id: *child_id,
                 ref_id: *ref_id,
+                is_deletion: parent_id.is_none(),
                 timestamp: *timestamp,
                 replica_id: version.replica_id,
             },
@@ -647,12 +705,14 @@ impl Key {
     fn parent_ref(
         child_id: id::Unique,
         ref_id: id::Unique,
+        is_deletion: bool,
         timestamp: LamportTimestamp,
         replica_id: id::ReplicaId,
     ) -> Self {
         Key::ParentRef {
             child_id,
             ref_id,
+            is_deletion,
             timestamp,
             replica_id,
         }
@@ -729,18 +789,21 @@ impl Ord for Key {
                 (
                     Key::ParentRef {
                         ref_id,
+                        is_deletion,
                         timestamp,
                         replica_id,
                         ..
                     },
                     Key::ParentRef {
                         ref_id: other_ref_id,
+                        is_deletion: other_is_deletion,
                         timestamp: other_timestamp,
                         replica_id: other_replica_id,
                         ..
                     },
                 ) => ref_id
                     .cmp(other_ref_id)
+                    .then_with(|| is_deletion.cmp(other_is_deletion).reverse())
                     .then_with(|| timestamp.cmp(other_timestamp).reverse())
                     .then_with(|| replica_id.cmp(other_replica_id)),
                 (
@@ -793,8 +856,15 @@ impl Builder {
             cursor_stack: vec![(0, cursor)],
             inodes_to_file_ids,
             visited_inodes: HashSet::new(),
-            dir_changes: BTreeMap::new(),
+            dir_changes: HashMap::new(),
+            next_change_id: 0,
         })
+    }
+
+    fn gen_change_timestamp(&mut self) -> usize {
+        let change_id = self.next_change_id;
+        self.next_change_id += 1;
+        change_id
     }
 
     pub fn push<N, S>(
@@ -839,9 +909,11 @@ impl Builder {
                                 if new_metadata.inode != old_inode {
                                     self.inodes_to_file_ids
                                         .insert(new_metadata.inode, old_entry.child_id());
+                                    let timestamp = self.gen_change_timestamp();
                                     self.dir_changes.insert(
                                         old_entry.child_id(),
                                         DirChange::Update {
+                                            timestamp,
                                             new_inode: new_metadata.inode,
                                         },
                                     );
@@ -859,9 +931,10 @@ impl Builder {
                 }
             }
 
+            let timestamp = self.gen_change_timestamp();
             self.dir_changes
                 .entry(old_entry.child_id())
-                .or_insert(DirChange::Remove);
+                .or_insert_with(|| DirChange::Remove { timestamp });
             self.next_old_entry_sibling(db)?;
         }
 
@@ -873,9 +946,11 @@ impl Builder {
             let child_id = self.inodes_to_file_ids.get(&new_metadata.inode).cloned();
             if self.visited_inodes.contains(&new_metadata.inode) || child_id.is_none() {
                 let child_id = db.gen_id();
+                let timestamp = self.gen_change_timestamp();
                 self.dir_changes.insert(
                     child_id,
                     DirChange::Insert {
+                        timestamp,
                         inode: new_metadata.inode,
                         parent_id,
                         name: Arc::new(new_name),
@@ -886,9 +961,12 @@ impl Builder {
             } else {
                 let child_id = child_id.unwrap();
                 self.jump_to_old_entry(new_depth, child_id, db)?;
+
+                let timestamp = self.gen_change_timestamp();
                 self.dir_changes.insert(
                     child_id,
                     DirChange::Move {
+                        timestamp,
                         new_parent_id: parent_id,
                         new_name: Arc::new(new_name),
                     },
@@ -907,20 +985,25 @@ impl Builder {
     pub fn tree<S: Store>(mut self, db: &S) -> Result<(Tree, Vec<Operation>), S::ReadError> {
         let item_db = db.item_store();
         while let Some(old_entry) = self.old_child_ref_item(db)? {
+            let timestamp = self.gen_change_timestamp();
             self.dir_changes
                 .entry(old_entry.child_id())
-                .or_insert(DirChange::Remove);
+                .or_insert_with(|| DirChange::Remove { timestamp });
             self.next_old_entry_sibling(db)?;
         }
 
+        let mut dir_changes = self.dir_changes.into_iter().collect::<Vec<_>>();
+        dir_changes.sort_unstable_by_key(|(_, change)| change.timestamp());
+
         let mut operations = Vec::new();
         let mut new_items = Vec::new();
-        for (child_id, change) in self.dir_changes {
+        for (child_id, change) in dir_changes {
             match change {
                 DirChange::Insert {
                     inode,
                     parent_id,
                     name,
+                    ..
                 } => {
                     let ref_id = db.gen_id();
                     let timestamp = db.gen_timestamp();
@@ -958,7 +1041,7 @@ impl Builder {
                         name,
                     });
                 }
-                DirChange::Update { new_inode } => {
+                DirChange::Update { new_inode, .. } => {
                     let mut cursor = self.tree.items.cursor();
                     cursor.seek(&Key::metadata(child_id), SeekBias::Left, item_db)?;
                     match cursor.item(item_db)? {
@@ -972,7 +1055,7 @@ impl Builder {
                         _ => panic!(),
                     }
                 }
-                DirChange::Remove | DirChange::Move { .. } => {
+                DirChange::Remove { .. } | DirChange::Move { .. } => {
                     let new_version = db.gen_id();
                     let new_timestamp = db.gen_timestamp();
 
@@ -1016,6 +1099,7 @@ impl Builder {
                     if let DirChange::Move {
                         new_parent_id,
                         new_name,
+                        ..
                     } = change
                     {
                         new_items.push(Item::ParentRef {
@@ -1029,7 +1113,7 @@ impl Builder {
                         new_items.push(Item::ChildRef {
                             parent_id: new_parent_id,
                             is_dir: true,
-                            name: new_name,
+                            name: new_name.clone(),
                             timestamp: new_timestamp,
                             version: new_version,
                             ref_id,
@@ -1039,9 +1123,12 @@ impl Builder {
                         operations.push(Operation::Move {
                             file_id: child_id,
                             ref_id,
-                            timestamp: new_timestamp,
+                            new_parent_id: Some(new_parent_id),
+                            new_name: Some(new_name),
+                            old_timestamp: parent_ref.timestamp(),
+                            old_replica_id: parent_ref.version().replica_id,
+                            new_timestamp,
                             version: new_version,
-                            new_parent_id,
                         });
                     } else {
                         new_items.push(Item::ParentRef {
@@ -1052,9 +1139,11 @@ impl Builder {
                             parent_id: None,
                             name: parent_ref.name(),
                         });
-                        operations.push(Operation::Remove {
+                        operations.push(Operation::Move {
                             file_id: child_id,
                             ref_id,
+                            new_parent_id: None,
+                            new_name: None,
                             old_timestamp: parent_ref.timestamp(),
                             old_replica_id: parent_ref.version().replica_id,
                             new_timestamp,
@@ -1117,6 +1206,17 @@ impl Builder {
             self.cursor_stack.push((base_depth, cursor));
         }
         Ok(())
+    }
+}
+
+impl DirChange {
+    fn timestamp(&self) -> usize {
+        match self {
+            DirChange::Insert { timestamp, .. } => *timestamp,
+            DirChange::Update { timestamp, .. } => *timestamp,
+            DirChange::Remove { timestamp, .. } => *timestamp,
+            DirChange::Move { timestamp, .. } => *timestamp,
+        }
     }
 }
 
@@ -1503,8 +1603,9 @@ mod tests {
         use std::iter::FromIterator;
         use std::mem;
 
-        for seed in 0..100 {
-            const PEERS: u64 = 5;
+        for seed in 0..10000 {
+            let seed = 4894;
+            const PEERS: u64 = 2;
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1513,7 +1614,7 @@ mod tests {
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
-            for _ in 0..5 {
+            for _ in 0..3 {
                 let replica_index = rng.gen_range(0, PEERS) as usize;
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
@@ -1552,6 +1653,10 @@ mod tests {
                     assert_eq!(trees[i].paths(&db[i]), trees[i + 1].paths(&db[i + 1]));
                     assert_eq!(trees[i].path_ids(&db[i]), trees[i + 1].path_ids(&db[i + 1]));
                 }
+                //
+                // println!("{:?}", fs[0].paths());
+                // println!("{:?}", i);
+                // println!("{:#?}", trees[i].items.items(&db[i]).unwrap());
                 assert_eq!(trees[i].paths(&db[i]), fs[i].paths());
             }
         }
@@ -1564,16 +1669,16 @@ mod tests {
         assert!(a < z);
     }
 
-    const MAX_TEST_TREE_DEPTH: usize = 5;
+    const MAX_TEST_TREE_DEPTH: usize = 2;
 
     #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
     struct TestFile {
         inode: Inode,
-        dir_entries: Option<Vec<TestChildRef>>,
+        dir_entries: Option<Vec<TestDirEntry>>,
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
-    struct TestChildRef {
+    struct TestDirEntry {
         name: OsString,
         file: TestFile,
     }
@@ -1593,21 +1698,7 @@ mod tests {
             }
         }
 
-        fn insert_dir<I: Into<PathBuf>>(&mut self, path: I, next_inode: &mut Inode) {
-            self.update_path(path.into(), true, true, next_inode);
-        }
-
-        fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
-            self.update_path(path.into(), true, false, &mut 0);
-        }
-
-        fn update_path(
-            &mut self,
-            path: PathBuf,
-            is_dir: bool,
-            insert: bool,
-            next_inode: &mut Inode,
-        ) {
+        fn insert_entry(&mut self, path: PathBuf, file: TestFile, next_inode: &mut Inode) {
             let mut dir = self;
             let mut components = path.components().peekable();
 
@@ -1615,37 +1706,68 @@ mod tests {
                 if let Some(component) = components.next() {
                     let dir_entries = { dir }.dir_entries.as_mut().unwrap();
 
-                    let needle = TestChildRef {
-                        name: OsString::from(component.as_os_str()),
-                        file: if is_dir || components.peek().is_some() {
-                            let inode = *next_inode;
-                            *next_inode += 1;
-                            TestFile::dir(inode)
-                        } else {
-                            unimplemented!()
-                            // TestFile::file()
-                        },
-                    };
-                    dir = match dir_entries.binary_search(&needle) {
+                    dir = match dir_entries
+                        .binary_search_by(|probe| probe.name.as_os_str().cmp(component.as_os_str()))
+                    {
                         Ok(index) => {
-                            if insert || components.peek().is_some() {
+                            if components.peek().is_some() {
                                 &mut dir_entries[index].file
                             } else {
-                                dir_entries.remove(index);
-                                break;
+                                panic!("Inserting a duplicate entry")
                             }
                         }
                         Err(index) => {
-                            if insert {
-                                dir_entries.insert(index, needle);
+                            if components.peek().is_some() {
+                                let inode = *next_inode;
+                                *next_inode += 1;
+                                dir_entries.insert(
+                                    index,
+                                    TestDirEntry {
+                                        name: OsString::from(&component),
+                                        file: TestFile::dir(inode),
+                                    },
+                                );
                                 &mut dir_entries[index].file
                             } else {
-                                break;
+                                dir_entries.insert(
+                                    index,
+                                    TestDirEntry {
+                                        name: OsString::from(&component),
+                                        file,
+                                    },
+                                );
+                                return;
                             }
                         }
                     };
                 } else {
-                    break;
+                    panic!("Inserting an empty path");
+                }
+            }
+        }
+
+        fn remove_entry(&mut self, path: PathBuf) -> Option<TestFile> {
+            let mut dir = self;
+            let mut components = path.components().peekable();
+
+            loop {
+                if let Some(component) = components.next() {
+                    let dir_entries = { dir }.dir_entries.as_mut().unwrap();
+
+                    dir = match dir_entries
+                        .binary_search_by(|probe| probe.name.as_os_str().cmp(component.as_os_str()))
+                    {
+                        Ok(index) => {
+                            if components.peek().is_some() {
+                                &mut dir_entries[index].file
+                            } else {
+                                return Some(dir_entries.remove(index).file);
+                            }
+                        }
+                        Err(_) => return None,
+                    };
+                } else {
+                    panic!("Removing an empty path")
                 }
             }
         }
@@ -1667,7 +1789,7 @@ mod tests {
 
             // if rng.gen() {
             let mut dir_entries = (0..rng.gen_range(0, MAX_TEST_TREE_DEPTH - depth + 1))
-                .map(|_| TestChildRef {
+                .map(|_| TestDirEntry {
                     name: gen_name(rng, name_blacklist),
                     file: Self::gen(rng, next_inode, depth + 1, name_blacklist),
                 })
@@ -1696,7 +1818,7 @@ mod tests {
         ) {
             if let Some(dir_entries) = self.dir_entries.as_mut() {
                 // Delete random entries
-                dir_entries.retain(|TestChildRef { name, file }| {
+                dir_entries.retain(|TestDirEntry { name, file }| {
                     if rng.gen_weighted_bool(5) {
                         let mut entry_path = path.clone();
                         entry_path.push(name);
@@ -1733,7 +1855,7 @@ mod tests {
                 if depth < MAX_TEST_TREE_DEPTH {
                     let mut blacklist = dir_entries
                         .iter()
-                        .map(|TestChildRef { name, .. }| name.clone())
+                        .map(|TestDirEntry { name, .. }| name.clone())
                         .collect();
 
                     for _ in 0..rng.gen_range(0, 5) {
@@ -1746,18 +1868,17 @@ mod tests {
                             .filter(|m| m.new_path.is_none())
                             .collect::<Vec<_>>();
 
-                        // TODO: Remove `false` and start handling moves.
-                        if false && !removals.is_empty() && rng.gen_weighted_bool(4) {
+                        if !removals.is_empty() && rng.gen_weighted_bool(4) {
                             let removal = rng.choose_mut(&mut removals).unwrap();
                             removal.new_path = Some(path.clone());
-                            dir_entries.push(TestChildRef {
+                            dir_entries.push(TestDirEntry {
                                 name,
                                 file: removal.file.clone(),
                             });
                         } else {
                             let file = Self::gen(rng, next_inode, depth + 1, &mut blacklist);
                             touched_paths.insert(path.clone());
-                            dir_entries.push(TestChildRef { name, file });
+                            dir_entries.push(TestDirEntry { name, file });
                         };
 
                         path.pop();
@@ -1777,7 +1898,7 @@ mod tests {
 
         fn paths_recursive(&self, cur_path: &mut PathBuf, paths: &mut Vec<String>) {
             if let Some(dir_entries) = &self.dir_entries {
-                for TestChildRef { name, file } in dir_entries {
+                for TestDirEntry { name, file } in dir_entries {
                     cur_path.push(name);
                     let mut path = cur_path.clone().to_string_lossy().into_owned();
                     if file.is_dir() {
@@ -1792,7 +1913,7 @@ mod tests {
 
         fn build<S: Store>(&self, builder: &mut Builder, depth: usize, store: &S) {
             if let Some(dir_entries) = &self.dir_entries {
-                for TestChildRef { name, file } in dir_entries {
+                for TestDirEntry { name, file } in dir_entries {
                     builder
                         .push(
                             name,
@@ -1814,7 +1935,7 @@ mod tests {
         }
     }
 
-    impl Ord for TestChildRef {
+    impl Ord for TestDirEntry {
         fn cmp(&self, other: &Self) -> Ordering {
             self.file
                 .is_dir()
@@ -1824,7 +1945,7 @@ mod tests {
         }
     }
 
-    impl PartialOrd for TestChildRef {
+    impl PartialOrd for TestDirEntry {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             Some(self.cmp(other))
         }
@@ -1939,13 +2060,27 @@ mod tests {
 
     impl FileSystem for TestFileSystem {
         fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) -> Inode {
+            let path = path.into();
+            println!("INSERT!!!! {:?}", path);
             let inode = self.next_inode;
-            self.root.insert_dir(path, &mut self.next_inode);
+            self.next_inode += 1;
+            self.root
+                .insert_entry(path, TestFile::dir(inode), &mut self.next_inode);
             inode
         }
 
         fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
-            self.root.remove_dir(path);
+            let path = path.into();
+            println!("REMOVE!!!! {:?}", path);
+            self.root.remove_entry(path);
+        }
+
+        fn move_dir<I1: Into<PathBuf>, I2: Into<PathBuf>>(&mut self, from: I1, to: I2) {
+            let from = from.into();
+            let to = to.into();
+            println!("MOVE!!!! {:?} -> {:?}", from, to);
+            let dir = self.root.remove_entry(from).unwrap();
+            self.root.insert_entry(to, dir, &mut self.next_inode);
         }
     }
 }
