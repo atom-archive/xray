@@ -497,17 +497,25 @@ impl Tree {
     }
 
     #[cfg(test)]
-    fn paths<S: Store>(&self, store: &S) -> Vec<String> {
+    fn paths<S: Store>(&self, db: &S) -> Vec<String> {
         let mut paths = Vec::new();
-        let mut cursor = self.cursor(store).unwrap();
+        let mut cursor = self.cursor(db).unwrap();
         while let Some(mut path) = cursor.path().map(|p| p.to_string_lossy().into_owned()) {
-            if cursor.child_ref_item(store).unwrap().unwrap().is_dir() {
+            if cursor.child_ref_item(db).unwrap().unwrap().is_dir() {
                 path.push('/');
             }
             paths.push(path);
-            cursor.next(store).unwrap();
+            cursor.next(db).unwrap();
         }
         paths
+    }
+
+    #[cfg(test)]
+    fn path_ids<S: Store>(&self, db: &S) -> Vec<id::Unique> {
+        self.paths(db)
+            .into_iter()
+            .map(|path| self.id_for_path(path, db).unwrap().unwrap())
+            .collect()
     }
 }
 
@@ -1589,6 +1597,7 @@ mod tests {
             for i in 0..PEERS as usize {
                 if i + 1 < PEERS as usize {
                     assert_eq!(trees[i].paths(&db[i]), trees[i + 1].paths(&db[i + 1]));
+                    assert_eq!(trees[i].path_ids(&db[i]), trees[i + 1].path_ids(&db[i + 1]));
                 }
                 assert_eq!(trees[i].paths(&db[i]), fs[i].paths());
             }
