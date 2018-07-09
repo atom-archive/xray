@@ -56,7 +56,9 @@ enum Operation {
     Remove {
         file_id: id::Unique,
         ref_id: id::Unique,
-        timestamp: LamportTimestamp,
+        old_timestamp: LamportTimestamp,
+        old_replica_id: id::ReplicaId,
+        new_timestamp: LamportTimestamp,
         version: id::Unique,
     },
 }
@@ -80,9 +82,10 @@ enum Item {
         parent_id: id::Unique,
         is_dir: bool,
         name: Arc<OsString>,
+        timestamp: LamportTimestamp,
+        version: id::Unique,
         ref_id: id::Unique,
         child_id: id::Unique,
-        version: id::Unique,
         deletions: SmallVec<[id::Unique; 1]>,
     },
 }
@@ -108,7 +111,8 @@ enum Key {
         parent_id: id::Unique,
         is_dir: bool,
         name: Arc<OsString>,
-        ref_id: id::Unique,
+        timestamp: LamportTimestamp,
+        replica_id: id::ReplicaId,
     },
 }
 
@@ -152,7 +156,7 @@ enum DirChange {
 
 struct Cursor {
     path: PathBuf,
-    stack: Vec<btree::Cursor<Item>>,
+    stack: Vec<(btree::Cursor<Item>, HashSet<Arc<OsString>>)>,
 }
 
 impl Metadata {
@@ -196,12 +200,13 @@ impl Tree {
 
         while let Some(component) = components_iter.next() {
             let component_name = Arc::new(OsString::from(component.as_os_str()));
-            if let Some(child_ref) = self.find_child_ref(parent_file_id, &component_name, true, db)?
+            if let Some(child_ref) =
+                self.find_active_child_ref(parent_file_id, &component_name, true, db)?
             {
                 parent_file_id = child_ref.child_id();
             } else if components_iter.peek().is_none() {
                 if let Some(child_ref) =
-                    self.find_child_ref(parent_file_id, &component_name, false, db)?
+                    self.find_active_child_ref(parent_file_id, &component_name, false, db)?
                 {
                     return Ok(Some(child_ref.child_id()));
                 } else {
@@ -233,7 +238,7 @@ impl Tree {
             }) = cursor.item(item_db)?
             {
                 if let Some(parent_id) = parent_id {
-                    let child_ref = self.find_child_ref(parent_id, &name, true, db)?;
+                    let child_ref = self.find_active_child_ref(parent_id, &name, true, db)?;
                     if child_ref.map_or(false, |child_ref| child_ref.child_id() == next_id) {
                         next_id = parent_id;
                         path_components.push(name);
@@ -261,16 +266,15 @@ impl Tree {
         ops: Vec<Operation>,
         db: &S,
         fs: &mut F,
-    ) -> Result<Vec<Operation>, S::ReadError>
+    ) -> Result<(), S::ReadError>
     where
         F: FileSystem,
         S: Store,
     {
-        let mut additional_ops = Vec::new();
         for op in ops {
-            additional_ops.append(&mut self.integrate_op(op, db, fs)?);
+            self.integrate_op(op, db, fs)?;
         }
-        Ok(additional_ops)
+        Ok(())
     }
 
     pub fn integrate_op<F, S>(
@@ -278,13 +282,12 @@ impl Tree {
         op: Operation,
         db: &S,
         fs: &mut F,
-    ) -> Result<Vec<Operation>, S::ReadError>
+    ) -> Result<(), S::ReadError>
     where
         F: FileSystem,
         S: Store,
     {
         let item_db = db.item_store();
-        let mut additional_ops = Vec::new();
         match op {
             Operation::Insert {
                 file_id,
@@ -295,74 +298,44 @@ impl Tree {
                 parent_id,
                 name,
             } => {
-                db.recv_timestamp(timestamp);
-
-                let mut new_items: SmallVec<[Item; 4]> = SmallVec::new();
                 let mut new_child_ref = Item::ChildRef {
                     parent_id,
                     is_dir: true,
                     name: name.clone(),
                     ref_id,
                     child_id: file_id,
+                    timestamp,
                     version,
                     deletions: SmallVec::new(),
                 };
-                let inode;
-
-                if let Some(mut path) = self.path_for_dir_id(parent_id, db)? {
+                let inode = if let Some(mut path) = self.path_for_dir_id(parent_id, db)? {
                     path.push(name.as_ref());
+
                     if let Some(mut old_child_ref) =
                         self.find_child_ref(parent_id, &name, true, db)?
                     {
-                        if old_child_ref.ref_id() < ref_id {
-                            let timestamp = db.gen_timestamp();
-                            let version = db.gen_id();
-                            additional_ops.push(Operation::Remove {
-                                file_id,
-                                ref_id,
-                                timestamp,
-                                version,
-                            });
-                            new_child_ref.deletions_mut().push(version);
-                            new_items.push(Item::ParentRef {
-                                child_id: file_id,
-                                ref_id,
-                                timestamp,
-                                version,
-                                parent_id: None,
-                                name: name.clone(),
-                            });
-                            inode = None;
+                        if old_child_ref.key() < new_child_ref.key() {
+                            None
                         } else {
-                            fs.remove_dir(&path);
-                            inode = Some(fs.insert_dir(&path));
-
-                            let timestamp = db.gen_timestamp();
-                            let version = db.gen_id();
-                            additional_ops.push(Operation::Remove {
-                                file_id: old_child_ref.child_id(),
-                                ref_id: old_child_ref.ref_id(),
-                                timestamp,
-                                version,
-                            });
-                            old_child_ref.deletions_mut().push(version);
-                            new_items.push(Item::ParentRef {
-                                child_id: old_child_ref.child_id(),
-                                ref_id: old_child_ref.ref_id(),
-                                timestamp,
-                                version,
-                                parent_id: None,
-                                name: name.clone(),
-                            });
-                            new_items.push(old_child_ref);
+                            if !old_child_ref.is_deleted() {
+                                fs.remove_dir(&path);
+                            }
+                            Some(fs.insert_dir(&path))
                         }
                     } else {
-                        inode = Some(fs.insert_dir(&path));
+                        Some(fs.insert_dir(&path))
                     }
                 } else {
-                    inode = None;
+                    None
                 };
+
+                let mut new_items: SmallVec<[Item; 3]> = SmallVec::new();
                 new_items.push(new_child_ref);
+                new_items.push(Item::Metadata {
+                    file_id,
+                    inode,
+                    is_dir: true,
+                });
                 new_items.push(Item::ParentRef {
                     child_id: file_id,
                     ref_id,
@@ -371,75 +344,84 @@ impl Tree {
                     parent_id: Some(parent_id),
                     name: name.clone(),
                 });
-                new_items.push(Item::Metadata {
-                    file_id,
-                    inode,
-                    is_dir: true,
-                });
                 new_items.sort_unstable_by_key(|item| item.key());
 
                 inode.map(|inode| self.inodes_to_file_ids.insert(inode, file_id));
                 self.items = interleave_items(&self.items, new_items, db)?;
+                db.recv_timestamp(timestamp);
             }
             Operation::Remove {
                 file_id,
                 ref_id,
-                timestamp,
+                old_timestamp,
+                old_replica_id,
+                new_timestamp,
                 version,
             } => {
-                db.recv_timestamp(timestamp);
-                let mut new_items: SmallVec<[Item; 3]> = SmallVec::new();
-
-                let old_ref = self.find_parent_ref(file_id, ref_id, db)?.unwrap();
-                let new_ref_key = Key::parent_ref(file_id, ref_id, timestamp, version.replica_id);
-                match new_ref_key.cmp(&old_ref.key()) {
-                    Ordering::Less => {
-                        if let Some(path) = self.path_for_dir_id(file_id, db)? {
-                            fs.remove_dir(path);
-                        }
-
-                        if let Some(old_parent_id) = old_ref.parent_id() {
-                            let mut cursor = self.items.cursor();
-                            cursor.seek(
-                                &Key::ChildRef {
-                                    parent_id: old_parent_id,
-                                    is_dir: true,
-                                    name: old_ref.name(),
-                                    ref_id,
-                                },
-                                SeekBias::Left,
-                                item_db,
-                            )?;
-                            let mut child_ref = cursor.item(item_db)?.unwrap();
-                            child_ref.deletions_mut().push(version);
-                            new_items.push(child_ref);
-                        }
-                    }
-                    Ordering::Equal => panic!(),
-                    Ordering::Greater => {
-                        // TODO: If the ParentRef is greater it means that some concurrent
-                        // operation won, so we don't need to perform any modification to the file
-                        // system. We may want, however, to create tombstones in the ChildRef so
-                        // that querying a particular version of the tree works consistently
-                        // independently of the order in which removals arrive.
+                let active_ref = self.find_active_parent_ref(file_id, ref_id, db)?.unwrap();
+                let removed_ref_key =
+                    Key::parent_ref(file_id, ref_id, new_timestamp, version.replica_id);
+                if removed_ref_key < active_ref.key() {
+                    if let Some(path) = self.path_for_dir_id(file_id, db)? {
+                        fs.remove_dir(path);
                     }
                 }
+
+                let old_parent_ref = self
+                    .find_parent_ref(file_id, ref_id, old_timestamp, old_replica_id, db)?
+                    .unwrap();
+                let mut cursor = self.items.cursor();
+                cursor.seek(
+                    &Key::child_ref(
+                        old_parent_ref.parent_id().unwrap(),
+                        true,
+                        old_parent_ref.name(),
+                        old_parent_ref.timestamp(),
+                        old_parent_ref.version().replica_id,
+                    ),
+                    SeekBias::Left,
+                    item_db,
+                )?;
+                let mut child_ref = cursor.item(item_db)?.unwrap();
+                child_ref.deletions_mut().push(version);
+
+                let mut new_items: SmallVec<[Item; 2]> = SmallVec::new();
+                new_items.push(child_ref);
                 new_items.push(Item::ParentRef {
                     child_id: file_id,
                     ref_id,
-                    timestamp,
+                    timestamp: new_timestamp,
                     version,
                     parent_id: None,
-                    name: old_ref.name(),
+                    name: old_parent_ref.name(),
                 });
                 new_items.sort_unstable_by_key(|item| item.key());
 
                 self.items = interleave_items(&self.items, new_items, db)?;
+                db.recv_timestamp(new_timestamp);
             }
             _ => unimplemented!("Integrating op is not implemented: {:?}", op),
         }
 
-        Ok(additional_ops)
+        Ok(())
+    }
+
+    fn find_active_child_ref<S: Store>(
+        &self,
+        parent_id: id::Unique,
+        name: &Arc<OsString>,
+        is_dir: bool,
+        db: &S,
+    ) -> Result<Option<Item>, S::ReadError> {
+        if let Some(child_ref) = self.find_child_ref(parent_id, name, is_dir, db)? {
+            if child_ref.is_deleted() {
+                Ok(None)
+            } else {
+                Ok(Some(child_ref))
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     fn find_child_ref<S: Store>(
@@ -456,40 +438,26 @@ impl Tree {
                 parent_id,
                 is_dir,
                 name: name.clone(),
-                ref_id: id::Unique::default(),
+                timestamp: LamportTimestamp::max_value(),
+                replica_id: id::ReplicaId::min_value(),
             },
             SeekBias::Left,
             item_db,
         )?;
 
-        let mut item = None;
-        loop {
-            item = cursor.item(item_db)?;
-            match &item {
-                Some(Item::ChildRef {
-                    is_dir: entry_is_dir,
-                    name: entry_name,
-                    child_id,
-                    deletions,
-                    ..
-                }) => {
-                    if name == entry_name && is_dir == *entry_is_dir {
-                        if deletions.is_empty() {
-                            break;
-                        } else {
-                            cursor.next(item_db)?;
-                        }
-                    } else {
-                        return Ok(None);
-                    }
+        match cursor.item(item_db)? {
+            Some(item) => {
+                if item.is_child_ref() && is_dir == item.is_dir() && *name == item.name() {
+                    Ok(Some(item))
+                } else {
+                    Ok(None)
                 }
-                _ => return Ok(None),
             }
+            None => Ok(None),
         }
-        Ok(item)
     }
 
-    fn find_parent_ref<S>(
+    fn find_active_parent_ref<S>(
         &self,
         file_id: id::Unique,
         ref_id: id::Unique,
@@ -498,15 +466,30 @@ impl Tree {
     where
         S: Store,
     {
+        self.find_parent_ref(
+            file_id,
+            ref_id,
+            LamportTimestamp::max_value(),
+            id::ReplicaId::min_value(),
+            db,
+        )
+    }
+
+    fn find_parent_ref<S>(
+        &self,
+        file_id: id::Unique,
+        ref_id: id::Unique,
+        timestamp: LamportTimestamp,
+        replica_id: id::ReplicaId,
+        db: &S,
+    ) -> Result<Option<Item>, S::ReadError>
+    where
+        S: Store,
+    {
         let item_db = db.item_store();
         let mut cursor = self.items.cursor();
         cursor.seek(
-            &Key::parent_ref(
-                file_id,
-                ref_id,
-                LamportTimestamp::max_value(),
-                id::ReplicaId::min_value(),
-            ),
+            &Key::parent_ref(file_id, ref_id, timestamp, replica_id),
             SeekBias::Left,
             item_db,
         )?;
@@ -548,13 +531,15 @@ impl Item {
                 parent_id,
                 is_dir,
                 name,
-                ref_id,
+                timestamp,
+                version,
                 ..
             } => Key::ChildRef {
                 parent_id: *parent_id,
                 is_dir: *is_dir,
                 name: name.clone(),
-                ref_id: *ref_id,
+                timestamp: *timestamp,
+                replica_id: version.replica_id,
             },
         }
     }
@@ -654,9 +639,24 @@ impl Item {
         }
     }
 
+    fn deletions(&self) -> &[id::Unique] {
+        match self {
+            Item::ChildRef { deletions, .. } => deletions,
+            _ => panic!(),
+        }
+    }
+
     fn deletions_mut(&mut self) -> &mut SmallVec<[id::Unique; 1]> {
         match self {
             Item::ChildRef { deletions, .. } => deletions,
+            _ => panic!(),
+        }
+    }
+
+    fn timestamp(&self) -> LamportTimestamp {
+        match self {
+            Item::ParentRef { timestamp, .. } => *timestamp,
+            Item::ChildRef { timestamp, .. } => *timestamp,
             _ => panic!(),
         }
     }
@@ -701,13 +701,15 @@ impl Key {
         parent_id: id::Unique,
         is_dir: bool,
         name: Arc<OsString>,
-        ref_id: id::Unique,
+        timestamp: LamportTimestamp,
+        replica_id: id::ReplicaId,
     ) -> Self {
         Key::ChildRef {
             parent_id,
             is_dir,
             name,
-            ref_id,
+            timestamp,
+            replica_id,
         }
     }
 }
@@ -784,20 +786,23 @@ impl Ord for Key {
                     Key::ChildRef {
                         is_dir,
                         name,
-                        ref_id,
+                        timestamp,
+                        replica_id,
                         ..
                     },
                     Key::ChildRef {
                         is_dir: other_is_dir,
                         name: other_name,
-                        ref_id: other_ref_id,
+                        timestamp: other_timestamp,
+                        replica_id: other_replica_id,
                         ..
                     },
                 ) => is_dir
                     .cmp(other_is_dir)
                     .reverse()
                     .then_with(|| name.cmp(other_name))
-                    .then_with(|| ref_id.cmp(other_ref_id)),
+                    .then_with(|| timestamp.cmp(other_timestamp).reverse())
+                    .then_with(|| replica_id.cmp(other_replica_id)),
                 _ => unreachable!(),
             })
     }
@@ -963,9 +968,10 @@ impl Builder {
                         parent_id,
                         is_dir: true,
                         name: name.clone(),
+                        timestamp,
+                        version,
                         ref_id,
                         child_id,
-                        version,
                         deletions: SmallVec::new(),
                     });
                     new_items.push(Item::Metadata {
@@ -1006,27 +1012,40 @@ impl Builder {
                     }
                 }
                 DirChange::Remove | DirChange::Move { .. } => {
+                    let new_version = db.gen_id();
+                    let new_timestamp = db.gen_timestamp();
+
                     let mut cursor = self.tree.items.cursor();
                     cursor.seek(&Key::metadata(child_id), SeekBias::Right, item_db)?;
                     let mut parent_ref = cursor.item(item_db)?.unwrap();
-                    let old_parent_id = parent_ref.parent_id().unwrap();
-                    let old_name = parent_ref.name();
                     let ref_id = parent_ref.ref_id();
-                    let version = db.gen_id();
                     cursor.seek(
-                        &Key::child_ref(old_parent_id, true, old_name.clone(), ref_id),
+                        &Key::child_ref(
+                            parent_ref.parent_id().unwrap(),
+                            true,
+                            parent_ref.name(),
+                            parent_ref.timestamp(),
+                            parent_ref.version().replica_id,
+                        ),
                         SeekBias::Left,
                         item_db,
                     )?;
-                    if let Item::ChildRef { mut deletions, .. } = cursor.item(item_db)?.unwrap() {
-                        deletions.push(version);
+                    if let Item::ChildRef {
+                        mut deletions,
+                        timestamp,
+                        version,
+                        ..
+                    } = cursor.item(item_db)?.unwrap()
+                    {
+                        deletions.push(new_version);
                         new_items.push(Item::ChildRef {
-                            parent_id: old_parent_id,
+                            parent_id: parent_ref.parent_id().unwrap(),
                             is_dir: true,
-                            name: old_name.clone(),
+                            name: parent_ref.name(),
+                            timestamp,
+                            version,
                             ref_id,
                             child_id,
-                            version,
                             deletions,
                         });
                     } else {
@@ -1038,12 +1057,11 @@ impl Builder {
                         new_name,
                     } = change
                     {
-                        let timestamp = db.gen_timestamp();
                         new_items.push(Item::ParentRef {
                             child_id,
                             ref_id,
-                            timestamp,
-                            version,
+                            timestamp: new_timestamp,
+                            version: new_version,
                             parent_id: Some(new_parent_id),
                             name: new_name.clone(),
                         });
@@ -1051,33 +1069,35 @@ impl Builder {
                             parent_id: new_parent_id,
                             is_dir: true,
                             name: new_name,
+                            timestamp: new_timestamp,
+                            version: new_version,
                             ref_id,
                             child_id,
-                            version,
                             deletions: SmallVec::new(),
                         });
                         operations.push(Operation::Move {
                             file_id: child_id,
                             ref_id,
-                            timestamp,
-                            version,
+                            timestamp: new_timestamp,
+                            version: new_version,
                             new_parent_id,
                         });
                     } else {
-                        let timestamp = db.gen_timestamp();
                         new_items.push(Item::ParentRef {
                             child_id,
                             ref_id,
-                            timestamp,
-                            version,
+                            timestamp: new_timestamp,
+                            version: new_version,
                             parent_id: None,
-                            name: old_name.clone(),
+                            name: parent_ref.name(),
                         });
                         operations.push(Operation::Remove {
                             file_id: child_id,
                             ref_id,
-                            timestamp,
-                            version,
+                            old_timestamp: parent_ref.timestamp(),
+                            old_replica_id: parent_ref.version().replica_id,
+                            new_timestamp,
+                            version: new_version,
                         });
                     }
                 }
@@ -1144,28 +1164,12 @@ impl Cursor {
     where
         S: Store,
     {
-        let item_db = db.item_store();
-        let mut root_cursor = tree.items.cursor();
-        root_cursor.seek(&Key::default(), SeekBias::Left, item_db)?;
-        while let Some(item) = root_cursor.item(item_db)? {
-            if item.is_metadata() {
-                break;
-            } else if item.is_child_ref() && !item.is_deleted() {
-                let mut cursor = Self {
-                    path: PathBuf::new(),
-                    stack: vec![root_cursor],
-                };
-                cursor.follow_entry(db)?;
-                return Ok(cursor);
-            } else {
-                root_cursor.next(item_db)?;
-            }
-        }
-
-        Ok(Self {
-            path: PathBuf::new(),
-            stack: vec![],
-        })
+        Ok(
+            Self::within_dir(ROOT_ID, tree, db)?.unwrap_or_else(|| Self {
+                stack: vec![],
+                path: PathBuf::new(),
+            }),
+        )
     }
 
     fn within_dir<S>(file_id: id::Unique, tree: &Tree, db: &S) -> Result<Option<Self>, S::ReadError>
@@ -1175,16 +1179,24 @@ impl Cursor {
         let item_db = db.item_store();
         let mut root_cursor = tree.items.cursor();
         root_cursor.seek(&Key::metadata(file_id), SeekBias::Right, item_db)?;
+        let mut visited_names = HashSet::new();
         while let Some(item) = root_cursor.item(item_db)? {
             if item.is_metadata() {
                 break;
-            } else if item.is_child_ref() && !item.is_deleted() {
-                let mut cursor = Self {
-                    path: PathBuf::new(),
-                    stack: vec![root_cursor],
-                };
-                cursor.follow_entry(db)?;
-                return Ok(Some(cursor));
+            } else if item.is_child_ref() {
+                let name = item.name();
+                if item.is_deleted() || visited_names.contains(&name) {
+                    visited_names.insert(name);
+                    root_cursor.next(item_db)?;
+                } else {
+                    visited_names.insert(name);
+                    let mut cursor = Self {
+                        path: PathBuf::new(),
+                        stack: vec![(root_cursor, visited_names)],
+                    };
+                    cursor.follow_entry(db)?;
+                    return Ok(Some(cursor));
+                }
             } else {
                 root_cursor.next(item_db)?;
             }
@@ -1207,7 +1219,7 @@ impl Cursor {
 
     pub fn child_ref_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
         if self.stack.len() > 1 {
-            let cursor = &self.stack[self.stack.len() - 2];
+            let (cursor, _) = &self.stack[self.stack.len() - 2];
             cursor.item(db.item_store())
         } else {
             Ok(None)
@@ -1215,7 +1227,7 @@ impl Cursor {
     }
 
     pub fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
-        if let Some(cursor) = self.stack.last() {
+        if let Some((cursor, _)) = self.stack.last() {
             match cursor.item(db.item_store())?.unwrap() {
                 Item::Metadata { inode, .. } => Ok(inode),
                 _ => unreachable!(),
@@ -1229,7 +1241,7 @@ impl Cursor {
         let item_db = db.item_store();
         while !self.stack.is_empty() {
             let found_entry = loop {
-                let cursor = self.stack.last_mut().unwrap();
+                let (cursor, visited_names) = self.stack.last_mut().unwrap();
                 let cur_item = cursor.item(item_db)?.unwrap();
                 if cur_item.is_ref() || cur_item.is_dir_metadata() {
                     cursor.next(item_db)?;
@@ -1238,10 +1250,15 @@ impl Cursor {
                         Some(Item::ChildRef {
                             name, deletions, ..
                         }) => {
-                            if deletions.is_empty() {
-                                break true;
-                            } else {
+                            if visited_names.contains(&name) {
                                 continue;
+                            } else {
+                                visited_names.insert(name);
+                                if deletions.is_empty() {
+                                    break true;
+                                } else {
+                                    continue;
+                                }
                             }
                         }
                         _ => break false,
@@ -1277,7 +1294,7 @@ impl Cursor {
         let item_db = db.item_store();
         let mut child_cursor;
         {
-            let entry_cursor = self.stack.last().unwrap();
+            let (entry_cursor, _) = self.stack.last().unwrap();
             match entry_cursor.item(item_db)?.unwrap() {
                 Item::ChildRef {
                     parent_id,
@@ -1298,7 +1315,7 @@ impl Cursor {
                 _ => panic!(),
             }
         }
-        self.stack.push(child_cursor);
+        self.stack.push((child_cursor, HashSet::new()));
         Ok(())
     }
 }
@@ -1476,10 +1493,6 @@ mod tests {
 
     #[test]
     fn test_replication_basic() {
-        // TODO: this test needs to be changed to account for additional operations getting
-        // generated after integrating a prior operation.
-        unimplemented!();
-
         let mut fs_1 = TestFileSystem::new();
         let mut fs_2 = TestFileSystem::new();
         let db_1 = NullStore::new(1);
@@ -1529,7 +1542,7 @@ mod tests {
         use std::iter::FromIterator;
         use std::mem;
 
-        for seed in 0..1000 {
+        for seed in 0..100 {
             const PEERS: u64 = 5;
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
@@ -1547,41 +1560,30 @@ mod tests {
                     let db = &db[replica_index];
                     let tree = &mut trees[replica_index];
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let mut additional_ops = tree.integrate_ops(ops, db, fs).unwrap();
-
-                    for (i, inbox) in inboxes.iter_mut().enumerate() {
-                        if i != replica_index {
-                            inbox.append(&mut additional_ops.clone());
-                        }
-                    }
+                    tree.integrate_ops(ops, db, fs).unwrap();
                 } else {
                     let fs = &mut fs[replica_index];
                     let db = &db[replica_index];
                     fs.mutate(&mut rng, &mut Vec::new(), &mut HashSet::new());
-                    let (new_tree, new_ops) = fs.update_tree(trees[replica_index].clone(), db);
-                    trees[replica_index] = new_tree;
+                    let (tree, ops) = fs.update_tree(trees[replica_index].clone(), db);
+                    trees[replica_index] = tree;
+
                     for (i, inbox) in inboxes.iter_mut().enumerate() {
                         if i != replica_index {
-                            inbox.append(&mut new_ops.clone());
+                            for op in &ops {
+                                inbox.push(op.clone());
+                            }
                         }
                     }
                 }
             }
 
-            while inboxes.iter().any(|inbox| !inbox.is_empty()) {
-                for replica_index in 0..PEERS as usize {
-                    let fs = &mut fs[replica_index];
-                    let db = &db[replica_index];
-                    let tree = &mut trees[replica_index];
-                    let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let additional_ops = tree.integrate_ops(ops, db, fs).unwrap();
-
-                    for other_replica_index in 0..PEERS as usize {
-                        if replica_index != other_replica_index {
-                            inboxes[other_replica_index].append(&mut additional_ops.clone());
-                        }
-                    }
-                }
+            for replica_index in 0..PEERS as usize {
+                let fs = &mut fs[replica_index];
+                let db = &db[replica_index];
+                let tree = &mut trees[replica_index];
+                let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
+                tree.integrate_ops(ops, db, fs).unwrap();
             }
 
             for i in 0..PEERS as usize {
@@ -1595,11 +1597,9 @@ mod tests {
 
     #[test]
     fn test_key_ordering() {
-        let min_id = id::Unique::default();
-        assert!(
-            Key::child_ref(min_id, true, Arc::new("z".into()), min_id)
-                < Key::child_ref(min_id, false, Arc::new("a".into()), min_id)
-        );
+        let z = Key::child_ref(id::Unique::default(), true, Arc::new("z".into()), 0, 0);
+        let a = Key::child_ref(id::Unique::default(), true, Arc::new("a".into()), 0, 0);
+        assert!(a < z);
     }
 
     const MAX_TEST_TREE_DEPTH: usize = 5;
