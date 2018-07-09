@@ -159,22 +159,6 @@ struct Cursor {
     stack: Vec<(btree::Cursor<Item>, HashSet<Arc<OsString>>)>,
 }
 
-impl Metadata {
-    fn dir(inode: Inode) -> Self {
-        Metadata {
-            is_dir: true,
-            inode,
-        }
-    }
-
-    fn file(inode: Inode) -> Self {
-        Metadata {
-            is_dir: false,
-            inode: inode,
-        }
-    }
-}
-
 impl Tree {
     pub fn new() -> Self {
         Self {
@@ -193,9 +177,7 @@ impl Tree {
         S: Store,
     {
         let path = path.into();
-        let item_db = db.item_store();
         let mut parent_file_id = ROOT_ID;
-        let mut cursor = self.items.cursor();
         let mut components_iter = path.components().peekable();
 
         while let Some(component) = components_iter.next() {
@@ -300,7 +282,7 @@ impl Tree {
             } => {
                 let mut new_child_ref = Item::ChildRef {
                     parent_id,
-                    is_dir: true,
+                    is_dir,
                     name: name.clone(),
                     ref_id,
                     child_id: file_id,
@@ -560,25 +542,10 @@ impl Item {
         }
     }
 
-    fn inode(&self) -> Option<Inode> {
-        match self {
-            Item::Metadata { inode, .. } => *inode,
-            _ => panic!(),
-        }
-    }
-
     fn name(&self) -> Arc<OsString> {
         match self {
             Item::ChildRef { name, .. } | Item::ParentRef { name, .. } => name.clone(),
             _ => panic!(),
-        }
-    }
-
-    fn file_id(&self) -> id::Unique {
-        match self {
-            Item::Metadata { file_id, .. } => *file_id,
-            Item::ParentRef { child_id, .. } => *child_id,
-            Item::ChildRef { parent_id, .. } => *parent_id,
         }
     }
 
@@ -625,13 +592,6 @@ impl Item {
         }
     }
 
-    fn is_parent_ref(&self) -> bool {
-        match self {
-            Item::ParentRef { .. } => true,
-            _ => false,
-        }
-    }
-
     fn is_ref(&self) -> bool {
         match self {
             Item::ParentRef { .. } => true,
@@ -644,13 +604,6 @@ impl Item {
         match self {
             Item::ChildRef { deletions, .. } => !deletions.is_empty(),
             _ => false,
-        }
-    }
-
-    fn deletions(&self) -> &[id::Unique] {
-        match self {
-            Item::ChildRef { deletions, .. } => deletions,
-            _ => panic!(),
         }
     }
 
@@ -1536,7 +1489,7 @@ mod tests {
         assert_eq!(fs_2.paths(), tree_2.paths(&db_2));
 
         fs_1.remove_dir("c");
-        let (mut tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
+        let (tree_1, ops_1) = fs_1.update_tree(tree_1, &db_1);
         tree_2.integrate_ops(ops_1, &db_2, &mut fs_2).unwrap();
 
         assert_eq!(tree_1.paths(&db_1), ["a/", "b/"]);
@@ -1638,14 +1591,6 @@ mod tests {
                 inode,
                 dir_entries: Some(Vec::new()),
             }
-        }
-
-        fn file() -> Self {
-            unimplemented!()
-            // TestFile {
-            //     inode: 0,
-            //     dir_entries: None,
-            // }
         }
 
         fn insert_dir<I: Into<PathBuf>>(&mut self, path: I, next_inode: &mut Inode) {
