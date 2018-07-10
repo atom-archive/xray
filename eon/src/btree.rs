@@ -1,7 +1,6 @@
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::fmt;
-use std::marker::PhantomData;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 
@@ -65,11 +64,6 @@ pub enum SeekBias {
     Left,
     Right,
 }
-
-#[derive(Debug)]
-pub struct NullNodeStoreReadError;
-
-pub struct NullNodeStore<T: Item>(PhantomData<T>);
 
 impl<T: Item> Tree<T> {
     pub fn new() -> Self {
@@ -829,20 +823,6 @@ impl<T: Item> Cursor<T> {
     }
 }
 
-impl<T: Item> NullNodeStore<T> {
-    fn new() -> Self {
-        NullNodeStore(PhantomData)
-    }
-}
-
-impl<T: Item> NodeStore<T> for NullNodeStore<T> {
-    type ReadError = NullNodeStoreReadError;
-
-    fn get(&self, _: NodeId) -> Result<Arc<Node<T>>, Self::ReadError> {
-        Err(NullNodeStoreReadError)
-    }
-}
-
 fn sum<'a, T, I>(iter: I) -> T
 where
     T: 'a + Default + AddAssign<&'a T>,
@@ -872,6 +852,7 @@ mod tests {
     extern crate rand;
 
     use super::*;
+    use std::marker::PhantomData;
 
     #[test]
     fn test_extend_and_push_tree() {
@@ -956,6 +937,11 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct NullNodeStoreReadError;
+
+    struct NullNodeStore<T: Item>(PhantomData<T>);
+
     #[derive(Clone, Default, Debug)]
     pub struct IntegersSummary {
         count: Count,
@@ -963,6 +949,20 @@ mod tests {
 
     #[derive(Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
     struct Count(usize);
+
+    impl<T: Item> NullNodeStore<T> {
+        pub fn new() -> Self {
+            NullNodeStore(PhantomData)
+        }
+    }
+
+    impl<T: Item> NodeStore<T> for NullNodeStore<T> {
+        type ReadError = NullNodeStoreReadError;
+
+        fn get(&self, _: NodeId) -> Result<Arc<Node<T>>, Self::ReadError> {
+            Err(NullNodeStoreReadError)
+        }
+    }
 
     impl Item for u8 {
         type Summary = IntegersSummary;

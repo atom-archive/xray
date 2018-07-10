@@ -2,7 +2,7 @@ use btree::{self, NodeStore, SeekBias};
 use id;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::ops::{Add, AddAssign};
@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 const ROOT_ID: id::Unique = id::Unique::DEFAULT;
 
-trait Store {
+pub trait Store {
     type ReadError: fmt::Debug;
     type ItemStore: NodeStore<Item, ReadError = Self::ReadError>;
 
@@ -21,7 +21,7 @@ trait Store {
     fn recv_timestamp(&self, timestamp: LamportTimestamp);
 }
 
-trait FileSystem {
+pub trait FileSystem {
     // TODO: Replace PathBuf with Path. There's no need to have ownership in these methods.
     fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) -> Inode;
     fn remove_dir<I: Into<PathBuf>>(&mut self, path: I);
@@ -32,13 +32,13 @@ type Inode = u64;
 type LamportTimestamp = u64;
 
 #[derive(Clone)]
-struct Tree {
+pub struct Tree {
     items: btree::Tree<Item>,
     inodes_to_file_ids: HashMap<Inode, id::Unique>,
 }
 
 #[derive(Clone, Debug)]
-enum Operation {
+pub enum Operation {
     Insert {
         child_id: id::Unique,
         is_dir: bool,
@@ -61,7 +61,7 @@ enum Operation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum Item {
+pub enum Item {
     Metadata {
         file_id: id::Unique,
         is_dir: bool,
@@ -94,7 +94,7 @@ struct InodeToFileId {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum Key {
+pub enum Key {
     Metadata {
         file_id: id::Unique,
     },
@@ -121,12 +121,12 @@ enum KeyKind {
     ChildRef,
 }
 
-struct Metadata {
+pub struct Metadata {
     inode: Inode,
     is_dir: bool,
 }
 
-struct Builder {
+pub struct Builder {
     tree: Tree,
     dir_stack: Vec<id::Unique>,
     cursor_stack: Vec<(usize, Cursor)>,
@@ -158,7 +158,7 @@ enum DirChange {
     },
 }
 
-struct Cursor {
+pub struct Cursor {
     path: PathBuf,
     stack: Vec<(btree::Cursor<Item>, HashSet<Arc<OsString>>)>,
 }
@@ -395,7 +395,7 @@ impl Tree {
                             } else if old_path.is_some() {
                                 fs.remove_dir(old_path.unwrap());
                             } else if new_path.is_some() {
-                                self.insert_subtree(new_path.unwrap(), child_id, db, fs);
+                                self.insert_subtree(new_path.unwrap(), child_id, db, fs)?;
                             }
                         }
 
