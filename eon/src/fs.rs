@@ -157,7 +157,7 @@ enum DirChange {
 
 pub struct Cursor {
     path: PathBuf,
-    stack: Vec<(btree::Cursor<Item>, HashSet<Arc<OsString>>)>,
+    stack: Vec<btree::Cursor<Item>>,
 }
 
 impl Tree {
@@ -294,9 +294,7 @@ impl Tree {
                 let inode = if let Some(mut path) = self.path_for_dir_id(parent_id, db)? {
                     path.push(name.as_ref());
 
-                    if let Some(mut old_child_ref) =
-                        self.find_child_ref(parent_id, &name, db)?
-                    {
+                    if let Some(mut old_child_ref) = self.find_child_ref(parent_id, &name, db)? {
                         if old_child_ref.key() < new_child_ref.key() {
                             None
                         } else {
@@ -1234,20 +1232,23 @@ impl Cursor {
         let item_db = db.item_store();
         let mut root_cursor = tree.items.cursor();
         root_cursor.seek(&Key::metadata(file_id), SeekBias::Right, item_db)?;
-        let mut visited_names = HashSet::new();
+        let mut prev_name: Option<Arc<OsString>> = None;
         while let Some(item) = root_cursor.item(item_db)? {
             if item.is_metadata() {
                 break;
             } else if item.is_child_ref() {
                 let name = item.name();
-                if item.is_deleted() || visited_names.contains(&name) {
-                    visited_names.insert(name);
+                if item.is_deleted()
+                    || prev_name
+                        .as_ref()
+                        .map_or(false, |prev_name| prev_name.as_os_str() == name.as_os_str())
+                {
+                    prev_name = Some(name);
                     root_cursor.next(item_db)?;
                 } else {
-                    visited_names.insert(name);
                     let mut cursor = Self {
                         path: PathBuf::new(),
-                        stack: vec![(root_cursor, visited_names)],
+                        stack: vec![root_cursor],
                     };
                     cursor.follow_entry(db)?;
                     return Ok(Some(cursor));
@@ -1274,7 +1275,7 @@ impl Cursor {
 
     pub fn child_ref_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
         if self.stack.len() > 1 {
-            let (cursor, _) = &self.stack[self.stack.len() - 2];
+            let cursor = &self.stack[self.stack.len() - 2];
             cursor.item(db.item_store())
         } else {
             Ok(None)
@@ -1284,7 +1285,7 @@ impl Cursor {
     #[cfg(test)]
     fn metadata_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
         if self.stack.len() > 1 {
-            let (cursor, _) = &self.stack[self.stack.len() - 1];
+            let cursor = &self.stack[self.stack.len() - 1];
             cursor.item(db.item_store())
         } else {
             Ok(None)
@@ -1292,7 +1293,7 @@ impl Cursor {
     }
 
     pub fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
-        if let Some((cursor, _)) = self.stack.last() {
+        if let Some(cursor) = self.stack.last() {
             match cursor.item(db.item_store())?.unwrap() {
                 Item::Metadata { inode, .. } => Ok(inode),
                 _ => unreachable!(),
@@ -1306,7 +1307,7 @@ impl Cursor {
         let item_db = db.item_store();
         while !self.stack.is_empty() {
             let found_entry = loop {
-                let (cursor, visited_names) = self.stack.last_mut().unwrap();
+                let cursor = self.stack.last_mut().unwrap();
                 let cur_item = cursor.item(item_db)?.unwrap();
                 if cur_item.is_ref() || cur_item.is_dir_metadata() {
                     cursor.next(item_db)?;
@@ -1315,15 +1316,12 @@ impl Cursor {
                         Some(Item::ChildRef {
                             name, deletions, ..
                         }) => {
-                            if visited_names.contains(&name) {
+                            if !deletions.is_empty()
+                                || cur_item.is_child_ref() && cur_item.name() == name
+                            {
                                 continue;
                             } else {
-                                visited_names.insert(name);
-                                if deletions.is_empty() {
-                                    break true;
-                                } else {
-                                    continue;
-                                }
+                                break true;
                             }
                         }
                         _ => break false,
@@ -1359,7 +1357,7 @@ impl Cursor {
         let item_db = db.item_store();
         let mut child_cursor;
         {
-            let (entry_cursor, _) = self.stack.last().unwrap();
+            let entry_cursor = self.stack.last().unwrap();
             match entry_cursor.item(item_db)?.unwrap() {
                 Item::ChildRef {
                     parent_id,
@@ -1380,7 +1378,7 @@ impl Cursor {
                 _ => panic!(),
             }
         }
-        self.stack.push((child_cursor, HashSet::new()));
+        self.stack.push(child_cursor);
         Ok(())
     }
 }
