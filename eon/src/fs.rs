@@ -3,7 +3,7 @@ use id;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::path::{Path, PathBuf};
@@ -41,7 +41,6 @@ pub struct Tree {
 pub enum Operation {
     Insert {
         child_id: id::Unique,
-        is_dir: bool,
         ref_id: id::Unique,
         timestamp: LamportTimestamp,
         version: id::Unique,
@@ -77,7 +76,6 @@ pub enum Item {
     },
     ChildRef {
         parent_id: id::Unique,
-        is_dir: bool,
         name: Arc<OsString>,
         timestamp: LamportTimestamp,
         version: id::Unique,
@@ -107,7 +105,6 @@ pub enum Key {
     },
     ChildRef {
         parent_id: id::Unique,
-        is_dir: bool,
         name: Arc<OsString>,
         timestamp: LamportTimestamp,
         replica_id: id::ReplicaId,
@@ -187,12 +184,12 @@ impl Tree {
         while let Some(component) = components_iter.next() {
             let component_name = Arc::new(OsString::from(component.as_os_str()));
             if let Some(child_ref) =
-                self.find_active_child_ref(parent_file_id, &component_name, true, db)?
+                self.find_active_child_ref(parent_file_id, &component_name, db)?
             {
                 parent_file_id = child_ref.child_id();
             } else if components_iter.peek().is_none() {
                 if let Some(child_ref) =
-                    self.find_active_child_ref(parent_file_id, &component_name, false, db)?
+                    self.find_active_child_ref(parent_file_id, &component_name, db)?
                 {
                     return Ok(Some(child_ref.child_id()));
                 } else {
@@ -224,7 +221,7 @@ impl Tree {
             }) = cursor.item(item_db)?
             {
                 if let Some(parent_id) = parent_id {
-                    let child_ref = self.find_active_child_ref(parent_id, &name, true, db)?;
+                    let child_ref = self.find_active_child_ref(parent_id, &name, db)?;
                     if child_ref.map_or(false, |child_ref| child_ref.child_id() == next_id) {
                         next_id = parent_id;
                         path_components.push(name);
@@ -279,7 +276,6 @@ impl Tree {
         match op {
             Operation::Insert {
                 child_id,
-                is_dir,
                 ref_id,
                 timestamp,
                 version,
@@ -288,7 +284,6 @@ impl Tree {
             } => {
                 let new_child_ref = Item::ChildRef {
                     parent_id,
-                    is_dir,
                     name: name.clone(),
                     ref_id,
                     child_id,
@@ -300,7 +295,7 @@ impl Tree {
                     path.push(name.as_ref());
 
                     if let Some(mut old_child_ref) =
-                        self.find_child_ref(parent_id, &name, true, db)?
+                        self.find_child_ref(parent_id, &name, db)?
                     {
                         if old_child_ref.key() < new_child_ref.key() {
                             None
@@ -364,7 +359,6 @@ impl Tree {
                         });
                         let new_child_ref = Item::ChildRef {
                             parent_id: new_parent_id,
-                            is_dir: true,
                             name: new_name.clone(),
                             ref_id,
                             child_id,
@@ -374,7 +368,7 @@ impl Tree {
                         };
 
                         if let Some(old_child_ref) =
-                            self.find_child_ref(new_parent_id, &new_name, true, db)?
+                            self.find_child_ref(new_parent_id, &new_name, db)?
                         {
                             if old_child_ref.key() < new_child_ref.key() {
                                 old_path.map(|old_path| fs.remove_dir(old_path));
@@ -412,7 +406,6 @@ impl Tree {
                 cursor.seek(
                     &Key::child_ref(
                         old_parent_ref.parent_id().unwrap(),
-                        true,
                         old_parent_ref.name(),
                         old_parent_ref.timestamp(),
                         old_parent_ref.version().replica_id,
@@ -470,10 +463,9 @@ impl Tree {
         &self,
         parent_id: id::Unique,
         name: &Arc<OsString>,
-        is_dir: bool,
         db: &S,
     ) -> Result<Option<Item>, S::ReadError> {
-        if let Some(child_ref) = self.find_child_ref(parent_id, name, is_dir, db)? {
+        if let Some(child_ref) = self.find_child_ref(parent_id, name, db)? {
             if child_ref.is_deleted() {
                 Ok(None)
             } else {
@@ -488,7 +480,6 @@ impl Tree {
         &self,
         parent_id: id::Unique,
         name: &Arc<OsString>,
-        is_dir: bool,
         db: &S,
     ) -> Result<Option<Item>, S::ReadError> {
         let item_db = db.item_store();
@@ -496,7 +487,6 @@ impl Tree {
         cursor.seek(
             &Key::ChildRef {
                 parent_id,
-                is_dir,
                 name: name.clone(),
                 timestamp: LamportTimestamp::max_value(),
                 replica_id: id::ReplicaId::min_value(),
@@ -507,7 +497,7 @@ impl Tree {
 
         match cursor.item(item_db)? {
             Some(item) => {
-                if item.is_child_ref() && is_dir == item.is_dir() && *name == item.name() {
+                if item.is_child_ref() && *name == item.name() {
                     Ok(Some(item))
                 } else {
                     Ok(None)
@@ -561,7 +551,7 @@ impl Tree {
         let mut paths = Vec::new();
         let mut cursor = self.cursor(db).unwrap();
         while let Some(mut path) = cursor.path().map(|p| p.to_string_lossy().into_owned()) {
-            if cursor.child_ref_item(db).unwrap().unwrap().is_dir() {
+            if cursor.metadata_item(db).unwrap().unwrap().is_dir() {
                 path.push('/');
             }
             paths.push(path);
@@ -599,14 +589,12 @@ impl Item {
             },
             Item::ChildRef {
                 parent_id,
-                is_dir,
                 name,
                 timestamp,
                 version,
                 ..
             } => Key::ChildRef {
                 parent_id: *parent_id,
-                is_dir: *is_dir,
                 name: name.clone(),
                 timestamp: *timestamp,
                 replica_id: version.replica_id,
@@ -614,10 +602,10 @@ impl Item {
         }
     }
 
+    #[cfg(test)]
     fn is_dir(&self) -> bool {
         match self {
             Item::Metadata { is_dir, .. } => *is_dir,
-            Item::ChildRef { is_dir, .. } => *is_dir,
             _ => panic!(),
         }
     }
@@ -742,14 +730,12 @@ impl Key {
 
     fn child_ref(
         parent_id: id::Unique,
-        is_dir: bool,
         name: Arc<OsString>,
         timestamp: LamportTimestamp,
         replica_id: id::ReplicaId,
     ) -> Self {
         Key::ChildRef {
             parent_id,
-            is_dir,
             name,
             timestamp,
             replica_id,
@@ -830,23 +816,19 @@ impl Ord for Key {
                     .then_with(|| replica_id.cmp(other_replica_id)),
                 (
                     Key::ChildRef {
-                        is_dir,
                         name,
                         timestamp,
                         replica_id,
                         ..
                     },
                     Key::ChildRef {
-                        is_dir: other_is_dir,
                         name: other_name,
                         timestamp: other_timestamp,
                         replica_id: other_replica_id,
                         ..
                     },
-                ) => is_dir
-                    .cmp(other_is_dir)
-                    .reverse()
-                    .then_with(|| name.cmp(other_name))
+                ) => name
+                    .cmp(other_name)
                     .then_with(|| timestamp.cmp(other_timestamp).reverse())
                     .then_with(|| replica_id.cmp(other_replica_id)),
                 _ => unreachable!(),
@@ -916,12 +898,7 @@ impl Builder {
             let old_inode = self.old_inode(db)?;
 
             if old_depth == new_depth {
-                match cmp_dir_entries(
-                    new_metadata.is_dir,
-                    new_name.as_os_str(),
-                    old_entry.is_dir(),
-                    old_entry.name().as_os_str(),
-                ) {
+                match new_name.as_os_str().cmp(old_entry.name().as_os_str()) {
                     Ordering::Less => break,
                     Ordering::Equal => if let Some(old_inode) = old_inode {
                         if new_metadata.is_dir {
@@ -1032,7 +1009,6 @@ impl Builder {
                     let version = ref_id;
                     new_items.push(Item::ChildRef {
                         parent_id,
-                        is_dir: true,
                         name: name.clone(),
                         timestamp,
                         version,
@@ -1055,7 +1031,6 @@ impl Builder {
                     });
                     operations.push(Operation::Insert {
                         child_id,
-                        is_dir: true,
                         ref_id,
                         timestamp,
                         version,
@@ -1088,7 +1063,6 @@ impl Builder {
                     cursor.seek(
                         &Key::child_ref(
                             parent_ref.parent_id().unwrap(),
-                            true,
                             parent_ref.name(),
                             parent_ref.timestamp(),
                             parent_ref.version().replica_id,
@@ -1106,7 +1080,6 @@ impl Builder {
                         deletions.push(new_version);
                         new_items.push(Item::ChildRef {
                             parent_id: parent_ref.parent_id().unwrap(),
-                            is_dir: true,
                             name: parent_ref.name(),
                             timestamp,
                             version,
@@ -1134,7 +1107,6 @@ impl Builder {
                         });
                         new_items.push(Item::ChildRef {
                             parent_id: new_parent_id,
-                            is_dir: true,
                             name: new_name.clone(),
                             timestamp: new_timestamp,
                             version: new_version,
@@ -1309,6 +1281,16 @@ impl Cursor {
         }
     }
 
+    #[cfg(test)]
+    fn metadata_item<S: Store>(&self, db: &S) -> Result<Option<Item>, S::ReadError> {
+        if self.stack.len() > 1 {
+            let (cursor, _) = &self.stack[self.stack.len() - 1];
+            cursor.item(db.item_store())
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
         if let Some((cursor, _)) = self.stack.last() {
             match cursor.item(db.item_store())?.unwrap() {
@@ -1401,13 +1383,6 @@ impl Cursor {
         self.stack.push((child_cursor, HashSet::new()));
         Ok(())
     }
-}
-
-fn cmp_dir_entries(a_is_dir: bool, a_name: &OsStr, b_is_dir: bool, b_name: &OsStr) -> Ordering {
-    a_is_dir
-        .cmp(&b_is_dir)
-        .reverse()
-        .then_with(|| a_name.cmp(b_name))
 }
 
 fn interleave_items<I, S>(
@@ -1686,8 +1661,8 @@ mod tests {
 
     #[test]
     fn test_key_ordering() {
-        let z = Key::child_ref(id::Unique::default(), true, Arc::new("z".into()), 0, 0);
-        let a = Key::child_ref(id::Unique::default(), true, Arc::new("a".into()), 0, 0);
+        let z = Key::child_ref(id::Unique::default(), Arc::new("z".into()), 0, 0);
+        let a = Key::child_ref(id::Unique::default(), Arc::new("a".into()), 0, 0);
         assert!(a < z);
     }
 
