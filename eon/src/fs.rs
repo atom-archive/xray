@@ -99,7 +99,6 @@ pub enum Key {
     ParentRef {
         child_id: id::Unique,
         ref_id: id::Unique,
-        is_deletion: bool,
         timestamp: LamportTimestamp,
         replica_id: id::ReplicaId,
     },
@@ -342,7 +341,7 @@ impl Tree {
 
                 let active_parent_ref = self.find_active_parent_ref(child_id, ref_id, db)?.unwrap();
                 let new_parent_ref_key =
-                    Key::parent_ref(child_id, ref_id, false, new_timestamp, version.replica_id);
+                    Key::parent_ref(child_id, ref_id, new_timestamp, version.replica_id);
                 if new_parent_ref_key < active_parent_ref.key() {
                     let old_path = self.path_for_dir_id(child_id, db)?;
 
@@ -533,7 +532,7 @@ impl Tree {
         let item_db = db.item_store();
         let mut cursor = self.items.cursor();
         cursor.seek(
-            &Key::parent_ref(file_id, ref_id, false, timestamp, replica_id),
+            &Key::parent_ref(file_id, ref_id, timestamp, replica_id),
             SeekBias::Left,
             item_db,
         )?;
@@ -572,12 +571,10 @@ impl Item {
                 ref_id,
                 timestamp,
                 version,
-                parent_id,
                 ..
             } => Key::ParentRef {
                 child_id: *child_id,
                 ref_id: *ref_id,
-                is_deletion: parent_id.is_none(),
                 timestamp: *timestamp,
                 replica_id: version.replica_id,
             },
@@ -709,14 +706,12 @@ impl Key {
     fn parent_ref(
         child_id: id::Unique,
         ref_id: id::Unique,
-        is_deletion: bool,
         timestamp: LamportTimestamp,
         replica_id: id::ReplicaId,
     ) -> Self {
         Key::ParentRef {
             child_id,
             ref_id,
-            is_deletion,
             timestamp,
             replica_id,
         }
@@ -791,21 +786,18 @@ impl Ord for Key {
                 (
                     Key::ParentRef {
                         ref_id,
-                        is_deletion,
                         timestamp,
                         replica_id,
                         ..
                     },
                     Key::ParentRef {
                         ref_id: other_ref_id,
-                        is_deletion: other_is_deletion,
                         timestamp: other_timestamp,
                         replica_id: other_replica_id,
                         ..
                     },
                 ) => ref_id
                     .cmp(other_ref_id)
-                    .then_with(|| is_deletion.cmp(other_is_deletion).reverse())
                     .then_with(|| timestamp.cmp(other_timestamp).reverse())
                     .then_with(|| replica_id.cmp(other_replica_id)),
                 (
