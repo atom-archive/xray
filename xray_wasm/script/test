@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+LOCAL_CRATE_PATH=./.cargo
+PATH=$LOCAL_CRATE_PATH/bin:$PATH
+
 set -e
 
 rm -rf dist
