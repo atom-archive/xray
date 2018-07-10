@@ -4,6 +4,10 @@
 
 Xray is an experimental Electron-based text editor informed by what we've learned in the four years since the launch of Atom. In the short term, this project is a testbed for rapidly iterating on several radical ideas without risking the stability of Atom. The longer term future of the code in this repository will become clearer after a few months of progress. For now, our primary goal is to iterate rapidly and learn as much as possible.
 
+## Active development is on the Eon branch
+
+We're actively developing a subcomponent of Xray called [Eon](https://github.com/atom/xray/tree/eon/eon), which is a real-time, fine-grained version control system. We're keeping that work on a branch since it's still in a pretty messy state, but Xray will eventually pull in Eon as a library and build directly on its data structures. Check out the README on that branch for more details.
+
 ## Updates
 
 * [July 10, 2018](./docs/updates/2018_07_10.md)
