@@ -40,7 +40,7 @@ struct Tree {
 #[derive(Clone, Debug)]
 enum Operation {
     Insert {
-        file_id: id::Unique,
+        child_id: id::Unique,
         is_dir: bool,
         ref_id: id::Unique,
         timestamp: LamportTimestamp,
@@ -49,7 +49,7 @@ enum Operation {
         name: Arc<OsString>,
     },
     Move {
-        file_id: id::Unique,
+        child_id: id::Unique,
         ref_id: id::Unique,
         new_parent_id: Option<id::Unique>,
         new_name: Option<Arc<OsString>>,
@@ -273,12 +273,12 @@ impl Tree {
         F: FileSystem,
         S: Store,
     {
-        println!("Integrating op {:?}", op);
+        // println!("Integrating op {:?}", op);
 
         let item_db = db.item_store();
         match op {
             Operation::Insert {
-                file_id,
+                child_id,
                 is_dir,
                 ref_id,
                 timestamp,
@@ -291,22 +291,17 @@ impl Tree {
                     is_dir,
                     name: name.clone(),
                     ref_id,
-                    child_id: file_id,
+                    child_id,
                     timestamp,
                     version,
                     deletions: SmallVec::new(),
                 };
                 let inode = if let Some(mut path) = self.path_for_dir_id(parent_id, db)? {
                     path.push(name.as_ref());
-                    if name.as_ref() == &OsString::from("n") {
-                        println!("PATH!!!!!!!!!!!!!!!!!! {:?}", path);
-                    }
 
                     if let Some(mut old_child_ref) =
                         self.find_child_ref(parent_id, &name, true, db)?
                     {
-
-                        println!("Old child ref key {:?}. New child ref key {:?}", old_child_ref.key(), new_child_ref.key());
                         if old_child_ref.key() < new_child_ref.key() {
                             None
                         } else {
@@ -325,12 +320,12 @@ impl Tree {
                 let mut new_items: SmallVec<[Item; 3]> = SmallVec::new();
                 new_items.push(new_child_ref);
                 new_items.push(Item::Metadata {
-                    file_id,
+                    file_id: child_id,
                     inode,
                     is_dir: true,
                 });
                 new_items.push(Item::ParentRef {
-                    child_id: file_id,
+                    child_id,
                     ref_id,
                     timestamp,
                     version,
@@ -339,12 +334,12 @@ impl Tree {
                 });
                 new_items.sort_unstable_by_key(|item| item.key());
 
-                inode.map(|inode| self.inodes_to_file_ids.insert(inode, file_id));
+                inode.map(|inode| self.inodes_to_file_ids.insert(inode, child_id));
                 self.items = interleave_items(&self.items, new_items, db)?;
                 db.recv_timestamp(timestamp);
             }
             Operation::Move {
-                file_id,
+                child_id,
                 ref_id,
                 new_parent_id,
                 new_name,
@@ -355,11 +350,11 @@ impl Tree {
             } => {
                 let mut new_items: SmallVec<[Item; 3]> = SmallVec::new();
 
-                let active_parent_ref = self.find_active_parent_ref(file_id, ref_id, db)?.unwrap();
+                let active_parent_ref = self.find_active_parent_ref(child_id, ref_id, db)?.unwrap();
                 let new_parent_ref_key =
-                    Key::parent_ref(file_id, ref_id, false, new_timestamp, version.replica_id);
+                    Key::parent_ref(child_id, ref_id, false, new_timestamp, version.replica_id);
                 if new_parent_ref_key < active_parent_ref.key() {
-                    let old_path = self.path_for_dir_id(file_id, db)?;
+                    let old_path = self.path_for_dir_id(child_id, db)?;
 
                     if let Some(new_parent_id) = new_parent_id {
                         let new_name = new_name.clone().unwrap();
@@ -372,7 +367,7 @@ impl Tree {
                             is_dir: true,
                             name: new_name.clone(),
                             ref_id,
-                            child_id: file_id,
+                            child_id,
                             timestamp: new_timestamp,
                             version,
                             deletions: SmallVec::new(),
@@ -394,11 +389,13 @@ impl Tree {
                                 }
                             }
                         } else {
-                            println!("OLD_PATH = {:?}, NEW_PATH = {:?}", old_path, new_path);
+                            // println!("OLD_PATH = {:?}, NEW_PATH = {:?}", old_path, new_path);
                             if old_path.is_some() && new_path.is_some() {
                                 fs.move_dir(old_path.unwrap(), new_path.unwrap());
                             } else if old_path.is_some() {
                                 fs.remove_dir(old_path.unwrap());
+                            } else if new_path.is_some() {
+                                self.insert_subtree(new_path.unwrap(), child_id, db, fs);
                             }
                         }
 
@@ -409,7 +406,7 @@ impl Tree {
                 }
 
                 let old_parent_ref = self
-                    .find_parent_ref(file_id, ref_id, old_timestamp, old_replica_id, db)?
+                    .find_parent_ref(child_id, ref_id, old_timestamp, old_replica_id, db)?
                     .unwrap();
                 let mut cursor = self.items.cursor();
                 cursor.seek(
@@ -427,7 +424,7 @@ impl Tree {
                 deleted_child_ref.deletions_mut().push(version);
                 new_items.push(deleted_child_ref);
                 new_items.push(Item::ParentRef {
-                    child_id: file_id,
+                    child_id,
                     ref_id,
                     timestamp: new_timestamp,
                     version,
@@ -441,6 +438,31 @@ impl Tree {
             }
         }
 
+        Ok(())
+    }
+
+    fn insert_subtree<F, S>(
+        &self,
+        path: PathBuf,
+        file_id: id::Unique,
+        db: &S,
+        fs: &mut F,
+    ) -> Result<(), S::ReadError>
+    where
+        S: Store,
+        F: FileSystem,
+    {
+        fs.insert_dir(&path);
+        if let Some(mut cursor) = Cursor::within_dir(file_id, self, db)? {
+            loop {
+                let mut path = path.clone();
+                path.push(cursor.path().unwrap());
+                fs.insert_dir(&path);
+                if !cursor.next(db)? {
+                    break;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1032,7 +1054,7 @@ impl Builder {
                         name: name.clone(),
                     });
                     operations.push(Operation::Insert {
-                        file_id: child_id,
+                        child_id,
                         is_dir: true,
                         ref_id,
                         timestamp,
@@ -1121,7 +1143,7 @@ impl Builder {
                             deletions: SmallVec::new(),
                         });
                         operations.push(Operation::Move {
-                            file_id: child_id,
+                            child_id,
                             ref_id,
                             new_parent_id: Some(new_parent_id),
                             new_name: Some(new_name),
@@ -1140,7 +1162,7 @@ impl Builder {
                             name: parent_ref.name(),
                         });
                         operations.push(Operation::Move {
-                            file_id: child_id,
+                            child_id,
                             ref_id,
                             new_parent_id: None,
                             new_name: None,
@@ -1603,9 +1625,9 @@ mod tests {
         use std::iter::FromIterator;
         use std::mem;
 
-        for seed in 0..10000 {
-            let seed = 4894;
-            const PEERS: u64 = 2;
+        for seed in 0..100 {
+            // let seed = 4894;
+            const PEERS: u64 = 3;
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1669,7 +1691,7 @@ mod tests {
         assert!(a < z);
     }
 
-    const MAX_TEST_TREE_DEPTH: usize = 2;
+    const MAX_TEST_TREE_DEPTH: usize = 5;
 
     #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
     struct TestFile {
@@ -2061,7 +2083,7 @@ mod tests {
     impl FileSystem for TestFileSystem {
         fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) -> Inode {
             let path = path.into();
-            println!("INSERT!!!! {:?}", path);
+            // println!("INSERT!!!! {:?}", path);
             let inode = self.next_inode;
             self.next_inode += 1;
             self.root
@@ -2071,14 +2093,14 @@ mod tests {
 
         fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
             let path = path.into();
-            println!("REMOVE!!!! {:?}", path);
+            // println!("REMOVE!!!! {:?}", path);
             self.root.remove_entry(path);
         }
 
         fn move_dir<I1: Into<PathBuf>, I2: Into<PathBuf>>(&mut self, from: I1, to: I2) {
             let from = from.into();
             let to = to.into();
-            println!("MOVE!!!! {:?} -> {:?}", from, to);
+            // println!("MOVE!!!! {:?} -> {:?}", from, to);
             let dir = self.root.remove_entry(from).unwrap();
             self.root.insert_entry(to, dir, &mut self.next_inode);
         }
