@@ -127,7 +127,6 @@ pub struct Builder {
     tree: Tree,
     dir_stack: Vec<id::Unique>,
     cursor_stack: Vec<(usize, Cursor)>,
-    // item_changes: Vec<ItemChange>,
     inodes_to_file_ids: HashMap<Inode, id::Unique>,
     visited_inodes: HashSet<Inode>,
     dir_changes: HashMap<id::Unique, DirChange>,
@@ -270,8 +269,6 @@ impl Tree {
         F: FileSystem,
         S: Store,
     {
-        // println!("Integrating op {:?}", op);
-
         let item_db = db.item_store();
         match op {
             Operation::Insert {
@@ -381,7 +378,6 @@ impl Tree {
                                 }
                             }
                         } else {
-                            // println!("OLD_PATH = {:?}, NEW_PATH = {:?}", old_path, new_path);
                             if old_path.is_some() && new_path.is_some() {
                                 fs.move_dir(old_path.unwrap(), new_path.unwrap());
                             } else if old_path.is_some() {
@@ -1491,39 +1487,8 @@ mod tests {
 
                 let (new_tree, _) = reference_fs.update_tree(tree.clone(), store);
 
-                // println!("moves: {:?}", moves);
-                // println!("================================");
-                // println!(
-                //     "{:#?}",
-                //     new_tree
-                //         .items
-                //         .items(store.item_store())
-                //         .unwrap()
-                //         .iter()
-                //         .map(|item| {
-                //             match item {
-                //             Item::ChildRef {
-                //                 file_id,
-                //                 name,
-                //                 child_id,
-                //                 ref_id,
-                //                 deletions,
-                //                 ..
-                //             } => format!(
-                //                 "ChildRef {{ file_id: {:?}, name: {:?}, child_id: {:?}, ref_id: {:?}, deletions {:?} }}",
-                //                 file_id.seq, name, child_id.seq, ref_id.seq, deletions
-                //             ),
-                //             Item::Metadata { file_id, inode, is_dir, .. } => {
-                //                 format!("Metadata {{ file_id: {:?}, inode: {:?}, is_dir: {:?} }}", file_id.seq, inode, is_dir)
-                //             }
-                //         }
-                //         })
-                //         .collect::<Vec<_>>()
-                // );
-
                 assert_eq!(new_tree.paths(store), reference_fs.paths());
                 for m in moves {
-                    // println!("verifying move {:?}", m);
                     if let Some(new_path) = m.new_path {
                         if let Some(old_path_id) = tree.id_for_path(&m.old_path, store).unwrap() {
                             let new_path_id = new_tree
@@ -2056,7 +2021,6 @@ mod tests {
     impl FileSystem for TestFileSystem {
         fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) -> Inode {
             let path = path.into();
-            // println!("INSERT!!!! {:?}", path);
             let inode = self.next_inode;
             self.next_inode += 1;
             self.root
@@ -2066,14 +2030,12 @@ mod tests {
 
         fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
             let path = path.into();
-            // println!("REMOVE!!!! {:?}", path);
             self.root.remove_entry(path);
         }
 
         fn move_dir<I1: Into<PathBuf>, I2: Into<PathBuf>>(&mut self, from: I1, to: I2) {
             let from = from.into();
             let to = to.into();
-            // println!("MOVE!!!! {:?} -> {:?}", from, to);
             let dir = self.root.remove_entry(from).unwrap();
             self.root.insert_entry(to, dir, &mut self.next_inode);
         }
