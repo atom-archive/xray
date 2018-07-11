@@ -365,10 +365,12 @@ impl Tree {
                             self.find_child_ref(new_parent_id, &new_name, db)?
                         {
                             if old_child_ref.key() < new_child_ref.key() {
-                                old_path.map(|old_path| fs.remove_dir(old_path));
+                                if let Some(old_path) = old_path {
+                                    fs.remove_dir(old_path);
+                                }
                             } else {
-                                if !old_child_ref.is_deleted() {
-                                    new_path.as_ref().map(|new_path| fs.remove_dir(new_path));
+                                if !old_child_ref.is_deleted() && new_path.is_some() {
+                                    fs.remove_dir(new_path.as_ref().unwrap());
                                 }
                                 if old_path.is_some() && new_path.is_some() {
                                     fs.move_dir(old_path.unwrap(), new_path.unwrap());
@@ -376,19 +378,17 @@ impl Tree {
                                     fs.remove_dir(old_path.unwrap());
                                 }
                             }
-                        } else {
-                            if old_path.is_some() && new_path.is_some() {
-                                fs.move_dir(old_path.unwrap(), new_path.unwrap());
-                            } else if old_path.is_some() {
-                                fs.remove_dir(old_path.unwrap());
-                            } else if new_path.is_some() {
-                                self.insert_subtree(new_path.unwrap(), child_id, db, fs)?;
-                            }
+                        } else if old_path.is_some() && new_path.is_some() {
+                            fs.move_dir(old_path.unwrap(), new_path.unwrap());
+                        } else if old_path.is_some() {
+                            fs.remove_dir(old_path.unwrap());
+                        } else if new_path.is_some() {
+                            self.insert_subtree(new_path.unwrap(), child_id, db, fs)?;
                         }
 
                         new_items.push(new_child_ref);
-                    } else {
-                        old_path.map(|old_path| fs.remove_dir(old_path));
+                    } else if let Some(old_path) = old_path {
+                        fs.remove_dir(old_path);
                     }
                 }
 
@@ -610,7 +610,7 @@ impl Item {
 
     fn parent_id(&self) -> Option<id::Unique> {
         match self {
-            Item::ParentRef { parent_id, .. } => parent_id.clone(),
+            Item::ParentRef { parent_id, .. } => *parent_id,
             _ => panic!(),
         }
     }
@@ -919,7 +919,7 @@ impl Builder {
             let timestamp = self.gen_change_timestamp();
             self.dir_changes
                 .entry(old_entry.child_id())
-                .or_insert_with(|| DirChange::Remove { timestamp });
+                .or_insert(DirChange::Remove { timestamp });
             self.next_old_entry_sibling(db)?;
         }
 
@@ -973,7 +973,7 @@ impl Builder {
             let timestamp = self.gen_change_timestamp();
             self.dir_changes
                 .entry(old_entry.child_id())
-                .or_insert_with(|| DirChange::Remove { timestamp });
+                .or_insert(DirChange::Remove { timestamp });
             self.next_old_entry_sibling(db)?;
         }
 
@@ -1156,19 +1156,16 @@ impl Builder {
     }
 
     fn next_old_entry<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
-        if !self.cursor_stack.last_mut().unwrap().1.next(db)? {
-            if self.cursor_stack.len() > 1 {
-                self.cursor_stack.pop();
-            }
+        if !self.cursor_stack.last_mut().unwrap().1.next(db)? && self.cursor_stack.len() > 1 {
+            self.cursor_stack.pop();
         }
         Ok(())
     }
 
     fn next_old_entry_sibling<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
-        if !self.cursor_stack.last_mut().unwrap().1.next_sibling(db)? {
-            if self.cursor_stack.len() > 1 {
-                self.cursor_stack.pop();
-            }
+        if !self.cursor_stack.last_mut().unwrap().1.next_sibling(db)? && self.cursor_stack.len() > 1
+        {
+            self.cursor_stack.pop();
         }
         Ok(())
     }
