@@ -376,6 +376,8 @@ impl Tree {
                                     fs.move_dir(old_path.unwrap(), new_path.unwrap());
                                 } else if old_path.is_some() {
                                     fs.remove_dir(old_path.unwrap());
+                                } else if new_path.is_some() {
+                                    self.insert_subtree(new_path.unwrap(), child_id, db, fs)?;
                                 }
                             }
                         } else if old_path.is_some() && new_path.is_some() {
