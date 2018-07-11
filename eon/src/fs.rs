@@ -1550,8 +1550,8 @@ mod tests {
         use std::iter::FromIterator;
         use std::mem;
 
-        for seed in 0..100 {
-            // let seed = 4894;
+        for seed in 0..100000 {
+            let seed = 706;
             const PEERS: u64 = 3;
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
@@ -1561,7 +1561,7 @@ mod tests {
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let replica_index = rng.gen_range(0, PEERS) as usize;
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
@@ -1597,6 +1597,12 @@ mod tests {
 
             for i in 0..PEERS as usize {
                 if i + 1 < PEERS as usize {
+                    println!("Comparing {:?} with {:?}", i, i + 1);
+                    println!(
+                        "trees[0] = {:?}\n======================trees[1] = {:?}",
+                        trees[0].items.items(&db[0]),
+                        trees[1].items.items(&db[1]),
+                    );
                     assert_eq!(trees[i].paths(&db[i]), trees[i + 1].paths(&db[i + 1]));
                     assert_eq!(trees[i].path_ids(&db[i]), trees[i + 1].path_ids(&db[i + 1]));
                 }
@@ -1616,7 +1622,7 @@ mod tests {
         assert!(a < z);
     }
 
-    const MAX_TEST_TREE_DEPTH: usize = 5;
+    const MAX_TEST_TREE_DEPTH: usize = 2;
 
     #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
     struct TestFile {
