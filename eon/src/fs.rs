@@ -1226,11 +1226,7 @@ impl Cursor {
                 break;
             } else if item.is_child_ref() {
                 let name = item.name();
-                if item.is_deleted()
-                    || prev_name
-                        .as_ref()
-                        .map_or(false, |prev_name| prev_name.as_os_str() == name.as_os_str())
-                {
+                if item.is_deleted() || prev_name.map_or(false, |prev_name| name == prev_name) {
                     prev_name = Some(name);
                     root_cursor.next(item_db)?;
                 } else {
@@ -1305,7 +1301,7 @@ impl Cursor {
                             name, deletions, ..
                         }) => {
                             if !deletions.is_empty()
-                                || cur_item.is_child_ref() && cur_item.name() == name
+                                || (cur_item.is_child_ref() && name == cur_item.name())
                             {
                                 continue;
                             } else {
