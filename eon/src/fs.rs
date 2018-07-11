@@ -277,6 +277,19 @@ impl Tree {
         Ok(Some(path))
     }
 
+    fn path_for_child_ref<S: Store>(
+        &self,
+        child_ref: &Item,
+        db: &S,
+    ) -> Result<Option<PathBuf>, S::ReadError> {
+        Ok(self
+            .path_for_dir_id(child_ref.parent_id().unwrap(), db)?
+            .map(|mut path| {
+                path.push(child_ref.name().unwrap().as_os_str());
+                path
+            }))
+    }
+
     #[cfg(test)]
     fn integrate_ops<F, S>(
         &mut self,
@@ -451,6 +464,14 @@ impl Tree {
                         } else if item.timestamp() >= prev_timestamp {
                             if let Some(mut deleted_child_ref) = item.build_child_ref() {
                                 deleted_child_ref.deletions_mut().push(op_id);
+                                // This is half baked, but I think we want to delete the child ref
+                                // that we just clobbered ONLY if it is active (not shadowed by another child ref with the same name)
+                                if deleted_child_ref == self.find_active_child_ref(deleted_child_ref.parent_id().unwrap(), deleted_child_ref.name().unwrap(), db) {
+                                    if let Some(path) = self.path_for_child_ref(&deleted_child_ref, db)? {
+                                        println!("removing {:?}", path);
+                                        fs.remove_dir(path);
+                                    }
+                                }
                                 new_items.push(deleted_child_ref);
                             }
                         } else {
@@ -650,6 +671,7 @@ impl Item {
     fn parent_id(&self) -> Option<id::Unique> {
         match self {
             Item::ParentRef { parent_id, .. } => *parent_id,
+            Item::ChildRef { parent_id, .. } => Some(*parent_id),
             _ => panic!(),
         }
     }
@@ -1606,7 +1628,7 @@ mod tests {
         use std::mem;
 
         for seed in 0..100000 {
-            // let seed = 327;
+            let seed = 141;
             const PEERS: u64 = 3;
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
@@ -1661,10 +1683,10 @@ mod tests {
                     assert_eq!(trees[i].paths(&db[i]), trees[i + 1].paths(&db[i + 1]));
                     assert_eq!(trees[i].path_ids(&db[i]), trees[i + 1].path_ids(&db[i + 1]));
                 }
-                //
+
                 // println!("{:?}", fs[0].paths());
-                // println!("{:?}", i);
-                // println!("{:#?}", trees[i].items.items(&db[i]).unwrap());
+                println!("{:?}", i);
+                println!("{:#?}", trees[i].items.items(&db[i]).unwrap());
                 assert_eq!(trees[i].paths(&db[i]), fs[i].paths());
             }
         }
