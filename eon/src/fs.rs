@@ -277,19 +277,6 @@ impl Tree {
         Ok(Some(path))
     }
 
-    fn path_for_child_ref<S: Store>(
-        &self,
-        child_ref: &Item,
-        db: &S,
-    ) -> Result<Option<PathBuf>, S::ReadError> {
-        Ok(self
-            .path_for_dir_id(child_ref.parent_id().unwrap(), db)?
-            .map(|mut path| {
-                path.push(child_ref.name().unwrap().as_os_str());
-                path
-            }))
-    }
-
     #[cfg(test)]
     fn integrate_ops<F, S>(
         &mut self,
@@ -462,16 +449,8 @@ impl Tree {
                                     .push(item.op_id());
                             }
                         } else if item.timestamp() >= prev_timestamp {
-                            if let Some(mut deleted_child_ref) = item.build_child_ref() {
+                            if let Some(mut deleted_child_ref) = item.to_child_ref() {
                                 deleted_child_ref.deletions_mut().push(op_id);
-                                // This is half baked, but I think we want to delete the child ref
-                                // that we just clobbered ONLY if it is active (not shadowed by another child ref with the same name)
-                                if deleted_child_ref == self.find_active_child_ref(deleted_child_ref.parent_id().unwrap(), deleted_child_ref.name().unwrap(), db) {
-                                    if let Some(path) = self.path_for_child_ref(&deleted_child_ref, db)? {
-                                        println!("removing {:?}", path);
-                                        fs.remove_dir(path);
-                                    }
-                                }
                                 new_items.push(deleted_child_ref);
                             }
                         } else {
@@ -764,7 +743,7 @@ impl Item {
         }
     }
 
-    fn build_child_ref(&self) -> Option<Self> {
+    fn to_child_ref(&self) -> Option<Self> {
         match self {
             Item::ParentRef {
                 child_id,
@@ -1163,7 +1142,7 @@ impl Builder {
                         new_items.push(Item::ParentRef {
                             child_id,
                             ref_id,
-                            timestamp: timestamp,
+                            timestamp,
                             op_id,
                             prev_timestamp,
                             parent_id: Some(new_parent_id),
@@ -1191,11 +1170,11 @@ impl Builder {
                         new_items.push(Item::ParentRef {
                             child_id,
                             ref_id,
-                            timestamp: timestamp,
+                            timestamp,
                             op_id,
                             prev_timestamp,
                             parent_id: None,
-                            name: parent_ref.name(),
+                            name: None,
                         });
                         operations.push(Operation::Move {
                             child_id,
@@ -1627,9 +1606,9 @@ mod tests {
         use std::iter::FromIterator;
         use std::mem;
 
-        for seed in 0..100000 {
-            let seed = 141;
-            const PEERS: u64 = 3;
+        for seed in 0..10000 {
+            let seed = 2285;
+            const PEERS: u64 = 2;
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1685,8 +1664,11 @@ mod tests {
                 }
 
                 // println!("{:?}", fs[0].paths());
-                println!("{:?}", i);
-                println!("{:#?}", trees[i].items.items(&db[i]).unwrap());
+                // println!("{:?}", i);
+                // println!("{:#?}", trees[0].items.items(&db[i]).unwrap());
+                // println!("{:#?}", trees[1].items.items(&db[i]).unwrap());
+                // println!("{:?}", fs[2].paths());
+                // println!("{:?}", trees[1].paths(&db[1]));
                 assert_eq!(trees[i].paths(&db[i]), fs[i].paths());
             }
         }
@@ -2098,6 +2080,7 @@ mod tests {
     impl FileSystem for TestFileSystem {
         fn insert_dir<I: Into<PathBuf>>(&mut self, path: I) -> Inode {
             let path = path.into();
+            // println!("Inserting {:?}", path);
             let inode = self.next_inode;
             self.next_inode += 1;
             self.root
@@ -2107,12 +2090,15 @@ mod tests {
 
         fn remove_dir<I: Into<PathBuf>>(&mut self, path: I) {
             let path = path.into();
+            // println!("Removing {:?}", path);
             self.root.remove_entry(path);
         }
 
         fn move_dir<I1: Into<PathBuf>, I2: Into<PathBuf>>(&mut self, from: I1, to: I2) {
             let from = from.into();
             let to = to.into();
+            // println!("Moving {:?} to {:?}", from, to);
+            assert!(to.ancestors().all(|ancestor| from != ancestor));
             let dir = self.root.remove_entry(from).unwrap();
             self.root.insert_entry(to, dir, &mut self.next_inode);
         }
