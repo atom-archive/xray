@@ -1012,9 +1012,7 @@ impl Buffer {
             cursor.next();
         }
 
-        while cursor.item().is_some() {
-            let fragment = cursor.item().unwrap();
-
+        while let Some(fragment) = cursor.item() {
             if new_text.is_none() && fragment.id > end_fragment_id {
                 break;
             }
