@@ -13,15 +13,13 @@ pub trait Item: Clone + Eq + fmt::Debug {
     fn summarize(&self) -> Self::Summary;
 }
 
-pub trait Dimension:
+pub trait Dimension<Summary: Default>:
     for<'a> Add<&'a Self, Output = Self> + for<'a> AddAssign<&'a Self> + Ord + Clone + fmt::Debug
 {
-    type Summary: Default;
-
-    fn from_summary(summary: &Self::Summary) -> &Self;
+    fn from_summary(summary: &Summary) -> &Self;
 
     fn default() -> Self {
-        Self::from_summary(&Self::Summary::default()).clone()
+        Self::from_summary(&Summary::default()).clone()
     }
 }
 
@@ -103,7 +101,7 @@ impl<T: Item> Tree<T> {
     pub fn extent<D, S>(&self, db: &S) -> Result<D, S::ReadError>
     where
         S: NodeStore<T>,
-        D: Dimension<Summary = T::Summary>,
+        D: Dimension<T::Summary>,
     {
         match *self.node(db)? {
             Node::Internal { ref summary, .. } => Ok(D::from_summary(summary).clone()),
@@ -119,7 +117,7 @@ impl<T: Item> Tree<T> {
         db: &S,
     ) -> Result<(), S::ReadError>
     where
-        D: Dimension<Summary = T::Summary>,
+        D: Dimension<T::Summary>,
         S: NodeStore<T>,
     {
         let mut cursor = self.cursor();
@@ -469,11 +467,11 @@ impl<T: Item> Cursor<T> {
         self.summary = T::Summary::default();
     }
 
-    pub fn start<D: Dimension<Summary = T::Summary>>(&self) -> D {
+    pub fn start<D: Dimension<T::Summary>>(&self) -> D {
         D::from_summary(&self.summary).clone()
     }
 
-    pub fn end<D: Dimension<Summary = T::Summary>, S: NodeStore<T>>(
+    pub fn end<D: Dimension<T::Summary>, S: NodeStore<T>>(
         &self,
         db: &S,
     ) -> Result<D, S::ReadError> {
@@ -593,7 +591,7 @@ impl<T: Item> Cursor<T> {
 
     pub fn seek<D, S>(&mut self, pos: &D, bias: SeekBias, db: &S) -> Result<(), S::ReadError>
     where
-        D: Dimension<Summary = T::Summary>,
+        D: Dimension<T::Summary>,
         S: NodeStore<T>,
     {
         self.reset();
@@ -607,7 +605,7 @@ impl<T: Item> Cursor<T> {
         db: &S,
     ) -> Result<(), S::ReadError>
     where
-        D: Dimension<Summary = T::Summary>,
+        D: Dimension<T::Summary>,
         S: NodeStore<T>,
     {
         self.seek_internal(pos, bias, db, None)
@@ -615,7 +613,7 @@ impl<T: Item> Cursor<T> {
 
     pub fn slice<D, S>(&mut self, end: &D, bias: SeekBias, db: &S) -> Result<Tree<T>, S::ReadError>
     where
-        D: Dimension<Summary = T::Summary>,
+        D: Dimension<T::Summary>,
         S: NodeStore<T>,
     {
         let mut slice = Tree::new();
@@ -625,7 +623,7 @@ impl<T: Item> Cursor<T> {
 
     pub fn suffix<D, S>(&mut self, db: &S) -> Result<Tree<T>, S::ReadError>
     where
-        D: Dimension<Summary = T::Summary>,
+        D: Dimension<T::Summary>,
         S: NodeStore<T>,
     {
         let extent = &self.tree.extent::<D, _>(db)?;
@@ -642,7 +640,7 @@ impl<T: Item> Cursor<T> {
         mut slice: Option<&mut Tree<T>>,
     ) -> Result<(), S::ReadError>
     where
-        D: Dimension<Summary = T::Summary>,
+        D: Dimension<T::Summary>,
         S: NodeStore<T>,
     {
         let mut pos = D::from_summary(&self.summary).clone();
@@ -978,10 +976,8 @@ mod tests {
         }
     }
 
-    impl Dimension for Count {
-        type Summary = IntegersSummary;
-
-        fn from_summary(summary: &Self::Summary) -> &Self {
+    impl Dimension<IntegersSummary> for Count {
+        fn from_summary(summary: &IntegersSummary) -> &Self {
             &summary.count
         }
     }
