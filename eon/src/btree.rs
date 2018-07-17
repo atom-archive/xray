@@ -16,7 +16,7 @@ pub trait Item: Clone + Eq + fmt::Debug {
 pub trait Dimension<Summary: Default>:
     for<'a> Add<&'a Self, Output = Self> + for<'a> AddAssign<&'a Self> + Ord + Clone + fmt::Debug
 {
-    fn from_summary(summary: &Summary) -> &Self;
+    fn from_summary(summary: &Summary) -> Self;
 
     fn default() -> Self {
         Self::from_summary(&Summary::default()).clone()
@@ -589,7 +589,7 @@ impl<T: Item> Cursor<T> {
         }
     }
 
-    pub fn seek<D, S>(&mut self, pos: &D, bias: SeekBias, db: &S) -> Result<(), S::ReadError>
+    pub fn seek<D, S>(&mut self, pos: &D, bias: SeekBias, db: &S) -> Result<bool, S::ReadError>
     where
         D: Dimension<T::Summary>,
         S: NodeStore<T>,
@@ -603,7 +603,7 @@ impl<T: Item> Cursor<T> {
         pos: &D,
         bias: SeekBias,
         db: &S,
-    ) -> Result<(), S::ReadError>
+    ) -> Result<bool, S::ReadError>
     where
         D: Dimension<T::Summary>,
         S: NodeStore<T>,
@@ -638,7 +638,7 @@ impl<T: Item> Cursor<T> {
         bias: SeekBias,
         db: &S,
         mut slice: Option<&mut Tree<T>>,
-    ) -> Result<(), S::ReadError>
+    ) -> Result<bool, S::ReadError>
     where
         D: Dimension<T::Summary>,
         S: NodeStore<T>,
@@ -662,7 +662,7 @@ impl<T: Item> Cursor<T> {
                                 let child_tree = &child_trees[*index];
                                 let child_summary = &child_summaries[*index];
                                 let mut child_end = pos;
-                                child_end += D::from_summary(&child_summary);
+                                child_end += &D::from_summary(&child_summary);
 
                                 let comparison = target.cmp(&child_end);
                                 if comparison == Ordering::Greater
@@ -689,7 +689,7 @@ impl<T: Item> Cursor<T> {
                                 let item = &items[*index];
                                 let item_summary = item.summarize();
                                 let mut item_end = pos;
-                                item_end += D::from_summary(&item_summary);
+                                item_end += &D::from_summary(&item_summary);
 
                                 let comparison = target.cmp(&item_end);
                                 if comparison == Ordering::Greater
@@ -750,7 +750,7 @@ impl<T: Item> Cursor<T> {
                     } => {
                         for (index, child_summary) in child_summaries.iter().enumerate() {
                             let mut child_end = pos;
-                            child_end += D::from_summary(child_summary);
+                            child_end += &D::from_summary(child_summary);
 
                             let comparison = target.cmp(&child_end);
                             if comparison == Ordering::Greater
@@ -817,7 +817,7 @@ impl<T: Item> Cursor<T> {
             }
         }
 
-        Ok(())
+        Ok(pos == *target)
     }
 }
 
@@ -977,8 +977,8 @@ mod tests {
     }
 
     impl Dimension<IntegersSummary> for Count {
-        fn from_summary(summary: &IntegersSummary) -> &Self {
-            &summary.count
+        fn from_summary(summary: &IntegersSummary) -> Self {
+            summary.count.clone()
         }
     }
 

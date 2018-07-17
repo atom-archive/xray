@@ -1,12 +1,11 @@
 use btree::{self, NodeStore, SeekBias};
 use id;
 use smallvec::SmallVec;
-use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::cmp::{self, Ordering};
 use std::ffi::OsString;
 use std::fmt;
-use std::ops::AddAssign;
-use std::path::PathBuf;
+use std::ops::{Add, AddAssign};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub trait Store {
@@ -31,15 +30,59 @@ pub trait FileSystem {
     fn move_dir<I1: Into<PathBuf>, I2: Into<PathBuf>>(&mut self, from: I1, to: I2);
 }
 
+trait Keyed {
+    type Key: Ord;
+
+    fn key(&self) -> Self::Key;
+}
+
 type Inode = u64;
 type VisibleCount = usize;
 
 const ROOT_ID: id::Unique = id::Unique::DEFAULT;
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct LamportTimestamp {
-    value: u64,
-    replica_id: id::ReplicaId,
+#[derive(Clone)]
+pub struct Tree {
+    metadata: btree::Tree<Metadata>,
+    parent_refs: btree::Tree<ParentRef>,
+    child_refs: btree::Tree<ChildRef>,
+}
+
+pub struct TreeCursor {
+    path: PathBuf,
+    stack: Vec<btree::Cursor<ChildRef>>,
+    metadata_cursor: btree::Cursor<Metadata>,
+}
+
+struct TreeDiff {
+    tree: Tree,
+    prev_tree: Tree,
+}
+
+pub enum TreeDiffItem {
+    Keep {
+        depth: usize,
+        name: Arc<OsString>,
+    },
+    Insert {
+        depth: usize,
+        name: Arc<OsString>,
+        src_path: Option<PathBuf>,
+    },
+    Remove {
+        depth: usize,
+        name: Arc<OsString>,
+        dst_path: Option<PathBuf>,
+    },
+}
+
+pub enum Operation {
+    InsertDir {
+        op_id: id::Unique,
+        timestamp: LamportTimestamp,
+        parent_id: id::Unique,
+        name: Arc<OsString>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,7 +98,6 @@ pub struct ParentRef {
     ref_id: id::Unique,
     timestamp: LamportTimestamp,
     op_id: id::Unique,
-    prev_timestamp: LamportTimestamp,
     parent: Option<(id::Unique, Arc<OsString>)>,
 }
 
@@ -85,164 +127,179 @@ pub struct ChildRefSummary {
     visible_count: VisibleCount,
 }
 
-#[derive(Clone)]
-pub struct Tree {
-    metadata: btree::Tree<Metadata>,
-    parent_refs: btree::Tree<ParentRef>,
-    child_refs: btree::Tree<ChildRef>,
-    inodes_to_file_ids: HashMap<Inode, id::Unique>,
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ChildRefKey {
+    parent_id: id::Unique,
+    name: Arc<OsString>,
+    timestamp: LamportTimestamp,
 }
 
-struct TreeCursor {
-    path: PathBuf,
-    stack: Vec<btree::Cursor<ChildRef>>,
-    metadata_cursor: btree::Cursor<Metadata>,
-}
+#[derive(Clone, Debug, Default, Ord, Eq, PartialEq, PartialOrd)]
+pub struct ParentIdAndName(id::Unique, Arc<OsString>);
 
-struct TreeDiff {
-    tree: Tree,
-    prev_tree: Tree,
-}
-
-pub enum TreeDiffItem {
-    Keep {
-        depth: usize,
-        name: Arc<OsString>,
-    },
-    Insert {
-        depth: usize,
-        name: Arc<OsString>,
-        src_path: Option<PathBuf>,
-    },
-    Remove {
-        depth: usize,
-        name: Arc<OsString>,
-        dst_path: Option<PathBuf>,
-    },
-}
-
-impl btree::Item for Metadata {
-    type Summary = id::Unique;
-
-    fn summarize(&self) -> Self::Summary {
-        self.file_id
-    }
-}
-
-impl btree::Dimension<id::Unique> for id::Unique {
-    fn from_summary(summary: &id::Unique) -> &Self {
-        summary
-    }
-}
-
-impl btree::Item for ParentRef {
-    type Summary = ParentRefKey;
-
-    fn summarize(&self) -> Self::Summary {
-        ParentRefKey {
-            child_id: self.child_id,
-            ref_id: self.ref_id,
-            timestamp: self.timestamp,
-        }
-    }
-}
-
-impl Ord for ParentRefKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.child_id
-            .cmp(&other.child_id)
-            .then_with(|| self.ref_id.cmp(&other.ref_id))
-            .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
-    }
-}
-
-impl PartialOrd for ParentRefKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for ParentRefKey {
-    fn add_assign(&mut self, other: &Self) {
-        debug_assert!(*self < *other);
-        *self = other.clone();
-    }
-}
-
-impl ChildRef {
-    fn is_visible(&self) -> bool {
-        self.deletions.is_empty()
-    }
-}
-
-impl btree::Item for ChildRef {
-    type Summary = ChildRefSummary;
-
-    fn summarize(&self) -> Self::Summary {
-        ChildRefSummary {
-            parent_id: self.child_id,
-            name: self.name.clone(),
-            timestamp: self.timestamp,
-            visible_count: if self.deletions.is_empty() { 1 } else { 0 },
-        }
-    }
-}
-
-impl Ord for ChildRefSummary {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.parent_id
-            .cmp(&other.parent_id)
-            .then_with(|| self.name.cmp(&other.name))
-            .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
-    }
-}
-
-impl PartialOrd for ChildRefSummary {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for ChildRefSummary {
-    fn add_assign(&mut self, other: &Self) {
-        debug_assert!(*self < *other);
-        self.parent_id = other.parent_id;
-        self.name = other.name.clone();
-        self.timestamp = other.timestamp;
-        self.visible_count += other.visible_count;
-    }
-}
-
-impl btree::Dimension<ChildRefSummary> for id::Unique {
-    fn from_summary(summary: &ChildRefSummary) -> &Self {
-        &summary.parent_id
-    }
-}
-
-impl btree::Dimension<ChildRefSummary> for VisibleCount {
-    fn from_summary(summary: &ChildRefSummary) -> &Self {
-        &summary.visible_count
-    }
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct LamportTimestamp {
+    value: u64,
+    replica_id: id::ReplicaId,
 }
 
 impl Tree {
-    fn cursor<S: Store>(&self, db: &S) -> Result<TreeCursor, S::ReadError> {
+    pub fn new() -> Self {
+        Tree {
+            metadata: btree::Tree::new(),
+            parent_refs: btree::Tree::new(),
+            child_refs: btree::Tree::new(),
+        }
+    }
+
+    pub fn cursor<S: Store>(&self, db: &S) -> Result<TreeCursor, S::ReadError> {
         let mut cursor = TreeCursor {
             path: PathBuf::new(),
             stack: Vec::new(),
             metadata_cursor: self.metadata.cursor(),
         };
-        cursor.descend(self.child_refs.cursor(), ROOT_ID, db)?;
+        cursor.descend_into(self.child_refs.cursor(), ROOT_ID, db)?;
         Ok(cursor)
+    }
+
+    pub fn insert_dirs<I: Into<PathBuf>, S: Store>(
+        &mut self,
+        path: I,
+        db: &S,
+    ) -> Result<(), S::ReadError> {
+        let path: PathBuf = path.into();
+        let child_ref_db = db.child_ref_store();
+
+        let mut operations = Vec::new();
+        let mut cursor = self.child_refs.cursor();
+        let mut parent_id = ROOT_ID;
+        let mut entry_exists = true;
+
+        for name in path.components() {
+            let name = Arc::new(OsString::from(name.as_os_str()));
+            if entry_exists {
+                let key = &ParentIdAndName(parent_id, name.clone());
+                if cursor.seek(key, SeekBias::Left, child_ref_db)? {
+                    parent_id = cursor.item(child_ref_db)?.unwrap().child_id;
+                } else {
+                    entry_exists = false;
+                }
+            }
+            if !entry_exists {
+                let op_id = db.gen_id();
+                operations.push(Operation::InsertDir {
+                    op_id,
+                    timestamp: db.gen_timestamp(),
+                    parent_id,
+                    name,
+                });
+                parent_id = op_id;
+            }
+        }
+
+        self.integrate_ops(operations, db)?;
+        Ok(())
+    }
+
+    fn integrate_ops<S: Store>(&mut self, ops: Vec<Operation>, db: &S) -> Result<(), S::ReadError> {
+        let mut metadata = Vec::new();
+        let mut parent_refs = Vec::new();
+        let mut child_refs = Vec::new();
+
+        for op in ops {
+            match op {
+                Operation::InsertDir {
+                    op_id,
+                    timestamp,
+                    parent_id,
+                    name,
+                } => {
+                    metadata.push(Metadata {
+                        file_id: op_id,
+                        is_dir: true,
+                        inode: None,
+                    });
+                    parent_refs.push(ParentRef {
+                        child_id: op_id,
+                        ref_id: op_id,
+                        timestamp,
+                        op_id,
+                        parent: Some((parent_id, name.clone())),
+                    });
+                    child_refs.push(ChildRef {
+                        parent_id,
+                        name,
+                        timestamp,
+                        ref_id: op_id,
+                        op_id,
+                        child_id: op_id,
+                        deletions: SmallVec::new(),
+                    })
+                }
+            }
+        }
+
+        self.metadata = interleave(&self.metadata, metadata, db.metadata_store())?;
+        self.parent_refs = interleave(&self.parent_refs, parent_refs, db.parent_ref_store())?;
+        self.child_refs = interleave(&self.child_refs, child_refs, db.child_ref_store())?;
+
+        Ok(())
     }
 }
 
+fn interleave<T, S>(
+    old_tree: &btree::Tree<T>,
+    mut new_items: Vec<T>,
+    db: &S,
+) -> Result<btree::Tree<T>, S::ReadError>
+where
+    T: btree::Item + Keyed,
+    T::Key: btree::Dimension<T::Summary> + Default,
+    S: NodeStore<T>,
+{
+    new_items.sort_unstable_by_key(|item| item.key());
+
+    let mut old_cursor = old_tree.cursor();
+    let mut new_tree = btree::Tree::new();
+    let mut buffered_items = Vec::new();
+
+    old_cursor.seek(&T::Key::default(), SeekBias::Left, db)?;
+    for new_item in new_items {
+        let new_item_key = new_item.key();
+        let mut old_item = old_cursor.item(db)?;
+        if old_item
+            .as_ref()
+            .map_or(false, |old_item| old_item.key() < new_item_key)
+        {
+            new_tree.extend(buffered_items.drain(..), db)?;
+            new_tree.push_tree(old_cursor.slice(&new_item_key, SeekBias::Left, db)?, db)?;
+            old_item = old_cursor.item(db)?;
+        }
+        if old_item.map_or(false, |old_item| old_item.key() == new_item_key) {
+            old_cursor.next(db)?;
+        }
+        buffered_items.push(new_item);
+    }
+    new_tree.extend(buffered_items, db)?;
+    new_tree.push_tree(old_cursor.suffix::<T::Key, _>(db)?, db)?;
+
+    Ok(new_tree)
+}
+
 impl TreeCursor {
-    fn depth(&self) -> usize {
+    pub fn depth(&self) -> usize {
         self.stack.len()
     }
 
-    fn name<S: Store>(&self, db: &S) -> Result<Option<Arc<OsString>>, S::ReadError> {
+    pub fn path(&self) -> Option<&Path> {
+        if self.stack.is_empty() {
+            None
+        } else {
+            Some(&self.path)
+        }
+    }
+
+    pub fn name<S: Store>(&self, db: &S) -> Result<Option<Arc<OsString>>, S::ReadError> {
         let db = db.child_ref_store();
 
         if self.stack.is_empty() {
@@ -253,37 +310,53 @@ impl TreeCursor {
         }
     }
 
-    fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
+    pub fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
         Ok(self
             .metadata_cursor
             .item(db.metadata_store())?
             .and_then(|metadata| metadata.inode))
     }
 
-    fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
+    pub fn is_dir<S: Store>(&self, db: &S) -> Result<Option<bool>, S::ReadError> {
+        Ok(self
+            .metadata_cursor
+            .item(db.metadata_store())?
+            .map(|metadata| metadata.is_dir))
+    }
+
+    pub fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
         while self.stack.len() > 0 {
             let metadata = self.metadata_cursor.item(db.metadata_store())?.unwrap();
             if metadata.is_dir {
-                let child_ref_cursor = self.stack.last().unwrap().clone();
-                let dir_id = child_ref_cursor
-                    .item(db.child_ref_store())?
-                    .unwrap()
-                    .child_id;
-                if self.descend(child_ref_cursor, dir_id, db)? || self.next_sibling(db)? {
+                if self.descend(db)? || self.next_sibling(db)? {
                     break;
                 }
             } else if self.next_sibling(db)? {
                 break;
             }
 
-            self.path.pop();
-            self.stack.pop();
+            loop {
+                self.path.pop();
+                self.stack.pop();
+                if self.stack.is_empty() || self.next_sibling(db)? {
+                    break;
+                }
+            }
         }
 
         Ok(())
     }
 
-    fn descend<S: Store>(
+    fn descend<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
+        let child_ref_cursor = self.stack.last().unwrap().clone();
+        let dir_id = child_ref_cursor
+            .item(db.child_ref_store())?
+            .unwrap()
+            .child_id;
+        self.descend_into(child_ref_cursor, dir_id, db)
+    }
+
+    fn descend_into<S: Store>(
         &mut self,
         mut child_ref_cursor: btree::Cursor<ChildRef>,
         dir_id: id::Unique,
@@ -343,8 +416,349 @@ impl TreeCursor {
     }
 }
 
-// impl Iterator for TreeDiff {
-//     type Item = TreeDiffItem;
-//
-//     fn next(&mut self) -> Option<Self::Item> {}
-// }
+impl btree::Item for Metadata {
+    type Summary = id::Unique;
+
+    fn summarize(&self) -> Self::Summary {
+        self.file_id
+    }
+}
+
+impl btree::Dimension<id::Unique> for id::Unique {
+    fn from_summary(summary: &id::Unique) -> Self {
+        *summary
+    }
+}
+
+impl Keyed for Metadata {
+    type Key = id::Unique;
+
+    fn key(&self) -> Self::Key {
+        self.file_id
+    }
+}
+
+impl btree::Item for ParentRef {
+    type Summary = ParentRefKey;
+
+    fn summarize(&self) -> Self::Summary {
+        self.key()
+    }
+}
+
+impl Keyed for ParentRef {
+    type Key = ParentRefKey;
+
+    fn key(&self) -> Self::Key {
+        ParentRefKey {
+            child_id: self.child_id,
+            ref_id: self.ref_id,
+            timestamp: self.timestamp,
+        }
+    }
+}
+
+impl btree::Dimension<ParentRefKey> for ParentRefKey {
+    fn from_summary(summary: &ParentRefKey) -> ParentRefKey {
+        summary.clone()
+    }
+}
+
+impl Ord for ParentRefKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.child_id
+            .cmp(&other.child_id)
+            .then_with(|| self.ref_id.cmp(&other.ref_id))
+            .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
+    }
+}
+
+impl PartialOrd for ParentRefKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for ParentRefKey {
+    fn add_assign(&mut self, other: &Self) {
+        debug_assert!(*self < *other);
+        *self = other.clone();
+    }
+}
+
+impl<'a> Add<&'a Self> for ParentRefKey {
+    type Output = Self;
+
+    fn add(self, other: &Self) -> Self {
+        debug_assert!(self < *other);
+        other.clone()
+    }
+}
+
+impl ChildRef {
+    fn is_visible(&self) -> bool {
+        self.deletions.is_empty()
+    }
+}
+
+impl btree::Item for ChildRef {
+    type Summary = ChildRefSummary;
+
+    fn summarize(&self) -> Self::Summary {
+        ChildRefSummary {
+            parent_id: self.parent_id,
+            name: self.name.clone(),
+            timestamp: self.timestamp,
+            visible_count: if self.deletions.is_empty() { 1 } else { 0 },
+        }
+    }
+}
+
+impl Keyed for ChildRef {
+    type Key = ChildRefKey;
+
+    fn key(&self) -> Self::Key {
+        ChildRefKey {
+            parent_id: self.parent_id,
+            name: self.name.clone(),
+            timestamp: self.timestamp,
+        }
+    }
+}
+
+impl Ord for ChildRefSummary {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.parent_id
+            .cmp(&other.parent_id)
+            .then_with(|| self.name.cmp(&other.name))
+            .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
+    }
+}
+
+impl PartialOrd for ChildRefSummary {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for ChildRefSummary {
+    fn add_assign(&mut self, other: &Self) {
+        debug_assert!(*self < *other);
+        self.parent_id = other.parent_id;
+        self.name = other.name.clone();
+        self.timestamp = other.timestamp;
+        self.visible_count += other.visible_count;
+    }
+}
+
+impl btree::Dimension<ChildRefSummary> for ChildRefKey {
+    fn from_summary(summary: &ChildRefSummary) -> ChildRefKey {
+        ChildRefKey {
+            parent_id: summary.parent_id,
+            name: summary.name.clone(),
+            timestamp: summary.timestamp,
+        }
+    }
+}
+
+impl Ord for ChildRefKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.parent_id
+            .cmp(&other.parent_id)
+            .then_with(|| self.name.cmp(&other.name))
+            .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
+    }
+}
+
+impl PartialOrd for ChildRefKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for ChildRefKey {
+    fn add_assign(&mut self, other: &Self) {
+        debug_assert!(*self < *other);
+        *self = other.clone();
+    }
+}
+
+impl<'a> Add<&'a Self> for ChildRefKey {
+    type Output = Self;
+
+    fn add(self, other: &Self) -> Self {
+        debug_assert!(self < *other);
+        other.clone()
+    }
+}
+
+impl btree::Dimension<ChildRefSummary> for ParentIdAndName {
+    fn from_summary(summary: &ChildRefSummary) -> Self {
+        ParentIdAndName(summary.parent_id, summary.name.clone())
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for ParentIdAndName {
+    fn add_assign(&mut self, other: &Self) {
+        debug_assert!(*self < *other);
+        *self = other.clone();
+    }
+}
+
+impl<'a> Add<&'a Self> for ParentIdAndName {
+    type Output = Self;
+
+    fn add(self, other: &Self) -> Self {
+        debug_assert!(self < *other);
+        other.clone()
+    }
+}
+
+impl btree::Dimension<ChildRefSummary> for id::Unique {
+    fn from_summary(summary: &ChildRefSummary) -> Self {
+        summary.parent_id
+    }
+}
+
+impl btree::Dimension<ChildRefSummary> for VisibleCount {
+    fn from_summary(summary: &ChildRefSummary) -> Self {
+        summary.visible_count
+    }
+}
+
+impl LamportTimestamp {
+    pub fn new(replica_id: id::ReplicaId) -> Self {
+        Self {
+            value: 0,
+            replica_id,
+        }
+    }
+
+    pub fn max_value() -> Self {
+        Self {
+            value: u64::max_value(),
+            replica_id: id::ReplicaId::max_value(),
+        }
+    }
+
+    pub fn inc(self) -> Self {
+        Self {
+            value: self.value + 1,
+            replica_id: self.replica_id,
+        }
+    }
+
+    pub fn update(self, other: Self) -> Self {
+        Self {
+            value: cmp::max(self.value, other.value) + 1,
+            replica_id: self.replica_id,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn test_insert_dirs() {
+        let db = NullStore::new(1);
+        let mut tree = Tree::new();
+        tree.insert_dirs("a/b/", &db).unwrap();
+        assert_eq!(tree.paths(&db), ["a/", "a/b/"]);
+    }
+
+    struct NullStore {
+        next_id: Cell<id::Unique>,
+        lamport_clock: Cell<LamportTimestamp>,
+    }
+
+    impl NullStore {
+        fn new(replica_id: id::ReplicaId) -> Self {
+            Self {
+                next_id: Cell::new(id::Unique::new(replica_id)),
+                lamport_clock: Cell::new(LamportTimestamp::new(replica_id)),
+            }
+        }
+    }
+
+    impl Store for NullStore {
+        type ReadError = ();
+        type MetadataStore = NullStore;
+        type ParentRefStore = NullStore;
+        type ChildRefStore = NullStore;
+
+        fn gen_id(&self) -> id::Unique {
+            let next_id = self.next_id.get();
+            self.next_id.replace(next_id.next());
+            next_id
+        }
+
+        fn gen_timestamp(&self) -> LamportTimestamp {
+            self.lamport_clock.replace(self.lamport_clock.get().inc());
+            self.lamport_clock.get()
+        }
+
+        fn recv_timestamp(&self, timestamp: LamportTimestamp) {
+            self.lamport_clock
+                .set(self.lamport_clock.get().update(timestamp));
+        }
+
+        fn metadata_store(&self) -> &Self::MetadataStore {
+            self
+        }
+
+        fn parent_ref_store(&self) -> &Self::ParentRefStore {
+            self
+        }
+
+        fn child_ref_store(&self) -> &Self::ParentRefStore {
+            self
+        }
+    }
+
+    impl btree::NodeStore<Metadata> for NullStore {
+        type ReadError = ();
+
+        fn get(&self, _id: btree::NodeId) -> Result<Arc<btree::Node<Metadata>>, Self::ReadError> {
+            unreachable!()
+        }
+    }
+
+    impl btree::NodeStore<ParentRef> for NullStore {
+        type ReadError = ();
+
+        fn get(&self, _id: btree::NodeId) -> Result<Arc<btree::Node<ParentRef>>, Self::ReadError> {
+            unreachable!()
+        }
+    }
+
+    impl btree::NodeStore<ChildRef> for NullStore {
+        type ReadError = ();
+
+        fn get(&self, _id: btree::NodeId) -> Result<Arc<btree::Node<ChildRef>>, Self::ReadError> {
+            unreachable!()
+        }
+    }
+
+    impl Tree {
+        fn paths<S: Store>(&self, db: &S) -> Vec<String> {
+            let mut cursor = self.cursor(db).unwrap();
+            let mut paths = Vec::new();
+            loop {
+                if let Some(path) = cursor.path() {
+                    let mut path = path.to_string_lossy().into_owned();
+                    if cursor.is_dir(db).unwrap().unwrap() {
+                        path += "/";
+                    }
+                    paths.push(path);
+                } else {
+                    break;
+                }
+                cursor.next(db).unwrap();
+            }
+            paths
+        }
+    }
+}
