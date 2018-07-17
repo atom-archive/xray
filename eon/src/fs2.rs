@@ -187,7 +187,12 @@ impl Tree {
             if entry_exists {
                 let key = ParentIdAndName(parent_id, name.clone());
                 if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
-                    parent_id = cursor.item(child_ref_db)?.unwrap().child_id;
+                    let child_ref = cursor.item(child_ref_db)?.unwrap();
+                    if child_ref.is_visible() {
+                        parent_id = child_ref.child_id;
+                    } else {
+                        entry_exists = false;
+                    }
                 } else {
                     entry_exists = false;
                 }
@@ -222,7 +227,12 @@ impl Tree {
             let name = Arc::new(OsString::from(name.as_os_str()));
             let key = ParentIdAndName(child_id, name);
             if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
-                child_id = cursor.item(child_ref_db)?.unwrap().child_id;
+                let child_ref = cursor.item(child_ref_db)?.unwrap();
+                if child_ref.is_visible() {
+                    child_id = child_ref.child_id;
+                } else {
+                    panic!("Directory does not exist");
+                }
             } else {
                 panic!("Directory does not exist");
             }
@@ -700,7 +710,7 @@ impl btree::Dimension<ChildRefSummary> for ParentIdAndName {
 
 impl<'a> AddAssign<&'a Self> for ParentIdAndName {
     fn add_assign(&mut self, other: &Self) {
-        debug_assert!(*self < *other);
+        debug_assert!(*self <= *other);
         *self = other.clone();
     }
 }
@@ -709,7 +719,7 @@ impl<'a> Add<&'a Self> for ParentIdAndName {
     type Output = Self;
 
     fn add(self, other: &Self) -> Self {
-        debug_assert!(self < *other);
+        debug_assert!(self <= *other);
         other.clone()
     }
 }
@@ -782,6 +792,13 @@ mod tests {
 
         tree.remove_dir("a/b1", &db).unwrap();
         assert_eq!(tree.paths(&db), ["a/", "a/b2/"]);
+
+        tree.insert_dirs("a/b1/c", &db).unwrap();
+        tree.insert_dirs("a/b1/d", &db).unwrap();
+        assert_eq!(
+            tree.paths(&db),
+            ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
+        );
     }
 
     struct NullStore {
