@@ -14,6 +14,8 @@ pub trait Store {
     type ParentRefStore: NodeStore<ParentRef, ReadError = Self::ReadError>;
     type ChildRefStore: NodeStore<ChildRef, ReadError = Self::ReadError>;
 
+    fn replica_id(&self) -> id::ReplicaId;
+
     fn metadata_store(&self) -> &Self::MetadataStore;
     fn parent_ref_store(&self) -> &Self::ParentRefStore;
     fn child_ref_store(&self) -> &Self::ChildRefStore;
@@ -52,28 +54,6 @@ pub struct TreeCursor {
     path: PathBuf,
     stack: Vec<btree::Cursor<ChildRef>>,
     metadata_cursor: btree::Cursor<Metadata>,
-}
-
-struct TreeDiff {
-    tree: Tree,
-    prev_tree: Tree,
-}
-
-pub enum TreeDiffItem {
-    Keep {
-        depth: usize,
-        name: Arc<OsString>,
-    },
-    Insert {
-        depth: usize,
-        name: Arc<OsString>,
-        src_path: Option<PathBuf>,
-    },
-    Remove {
-        depth: usize,
-        name: Arc<OsString>,
-        dst_path: Option<PathBuf>,
-    },
 }
 
 #[derive(Clone)]
@@ -156,6 +136,10 @@ impl Tree {
             parent_refs: btree::Tree::new(),
             child_refs: btree::Tree::new(),
         }
+    }
+
+    pub fn is_empty<S: Store>(&self, db: &S) -> Result<bool, S::ReadError> {
+        Ok(self.cursor(db)?.depth() == 0)
     }
 
     pub fn cursor<S: Store>(&self, db: &S) -> Result<TreeCursor, S::ReadError> {
@@ -849,7 +833,6 @@ mod tests {
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
     use std::cell::Cell;
-    use std::collections::HashSet;
 
     #[test]
     fn test_local_dir_ops() {
@@ -895,17 +878,18 @@ mod tests {
     fn test_replication_random() {
         use std::iter::FromIterator;
         use std::mem;
+        const PEERS: usize = 2;
 
-        for seed in 0..10000 {
-            const PEERS: usize = 2;
-            println!("{:?}", seed);
+        for seed in 0..100000 {
+            // let seed = 1326;
+            println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
             let db = Vec::from_iter((0..PEERS).map(|i| NullStore::new(i as u64 + 1)));
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
-            for _ in 0..4 {
+            for _ in 0..2 {
                 let replica_index = rng.gen_range(0, PEERS);
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
@@ -969,6 +953,10 @@ mod tests {
         type ParentRefStore = NullStore;
         type ChildRefStore = NullStore;
 
+        fn replica_id(&self) -> id::ReplicaId {
+            self.lamport_clock.get().replica_id
+        }
+
         fn gen_id(&self) -> id::Unique {
             let next_id = self.next_id.get();
             self.next_id.replace(next_id.next());
@@ -1028,26 +1016,89 @@ mod tests {
             S: Store,
         {
             let mut ops = Vec::new();
-            let mut paths: HashSet<_> = self.paths(db).into_iter().collect();
             for _ in 0..rng.gen_range(1, 5) {
                 let k = rng.gen_range(0, 3);
-                if paths.len() == 0 || k == 0 {
-                    let path = gen_path(rng, &paths);
+                if self.is_empty(db).unwrap() || k == 0 {
+                    let path = self.gen_path(rng, db);
+                    // println!("{:?} Inserting {:?}", db.replica_id(), path);
                     ops.extend(self.insert_dirs(&path, db).unwrap());
-                    paths.insert(path);
+                // println!("{:#?} ", self.child_refs.items(db.child_ref_store()));
                 } else if k == 1 {
-                    let path = select_path(rng, &paths).unwrap();
+                    let path = self.select_path(rng, db).unwrap();
+                    // println!("{:?} Removing {:?}", db.replica_id(), path);
                     ops.push(self.remove_dir(&path, db).unwrap());
-                    paths.remove(&path);
+                // println!("{:#?} ", self.child_refs.items(db.child_ref_store()));
                 } else {
-                    let old_path = select_path(rng, &paths).unwrap();
-                    let new_path = gen_path(rng, &paths);
+                    let (old_path, new_path) = loop {
+                        let old_path = self.select_path(rng, db).unwrap();
+                        let new_path = self.gen_path(rng, db);
+                        if !new_path.starts_with(&old_path) {
+                            break (old_path, new_path);
+                        }
+                    };
+
+                    // println!("{:?} Moving {:?} to {:?}", db.replica_id(), old_path, new_path);
                     ops.push(self.move_dir(&old_path, &new_path, db).unwrap());
-                    paths.remove(&old_path);
-                    paths.insert(new_path);
+                    // println!("{:#?} ", self.child_refs.items(db.child_ref_store()));
                 }
             }
             ops
+        }
+
+        fn gen_path<S: Store, T: Rng>(&self, rng: &mut T, db: &S) -> String {
+            loop {
+                let path = if self.is_empty(db).unwrap() || rng.gen_weighted_bool(8) {
+                    gen_name(rng)
+                } else {
+                    self.select_path(rng, db).unwrap()
+                };
+
+                if self.id_for_path(&path, db).unwrap().is_none() {
+                    return path;
+                }
+            }
+        }
+
+        fn select_path<S: Store, T: Rng>(&self, rng: &mut T, db: &S) -> Option<String> {
+            if self.is_empty(db).unwrap() {
+                None
+            } else {
+                let child_ref_db = db.child_ref_store();
+                let mut depth = 0;
+                let mut path = PathBuf::new();
+                let mut cursor = self.child_refs.cursor();
+                let mut parent_id = ROOT_ID;
+
+                loop {
+                    cursor
+                        .seek(&parent_id, SeekBias::Left, child_ref_db)
+                        .unwrap();
+                    let mut child_refs = Vec::new();
+                    while let Some(child_ref) = cursor.item(child_ref_db).unwrap() {
+                        if child_ref.parent_id == parent_id {
+                            if child_ref.is_visible() {
+                                child_refs.push(child_ref);
+                            }
+                            let next_visible_index =
+                                cursor.end::<usize, _>(child_ref_db).unwrap() + 1;
+                            cursor
+                                .seek_forward(&next_visible_index, SeekBias::Left, child_ref_db)
+                                .unwrap();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if child_refs.len() == 0 || depth > 0 && rng.gen_weighted_bool(5) {
+                        return Some(path.to_string_lossy().into_owned());
+                    } else {
+                        let child_ref = rng.choose(&child_refs).unwrap();
+                        path.push(child_ref.name.as_os_str());
+                        parent_id = child_ref.child_id;
+                        depth += 1;
+                    }
+                }
+            }
         }
 
         fn paths<S: Store>(&self, db: &S) -> Vec<String> {
@@ -1074,37 +1125,6 @@ mod tests {
                 .map(|path| (self.id_for_path(&path, db).unwrap().unwrap(), path))
                 .collect()
         }
-    }
-
-    fn gen_path<T: Rng>(rng: &mut T, paths: &HashSet<String>) -> String {
-        if let Some(path) = paths
-            .iter()
-            .skip(rng.gen_range(0, paths.len() + 1))
-            .next()
-            .cloned()
-        {
-            loop {
-                let new_path = format!("{}{}/", path, gen_name(rng));
-                if !paths.contains(&new_path) {
-                    return new_path;
-                }
-            }
-        } else {
-            loop {
-                let new_path = format!("{}/", gen_name(rng));
-                if !paths.contains(&new_path) {
-                    return new_path;
-                }
-            }
-        }
-    }
-
-    fn select_path<T: Rng>(rng: &mut T, paths: &HashSet<String>) -> Option<String> {
-        paths
-            .iter()
-            .skip(rng.gen_range(0, paths.len()))
-            .next()
-            .cloned()
     }
 
     fn gen_name<T: Rng>(rng: &mut T) -> String {
