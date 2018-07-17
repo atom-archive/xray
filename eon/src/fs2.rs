@@ -168,7 +168,7 @@ impl Tree {
         Ok(cursor)
     }
 
-    pub fn insert_dirs<I, S>(&mut self, path: I, db: &S) -> Result<(), S::ReadError>
+    pub fn insert_dirs<I, S>(&mut self, path: I, db: &S) -> Result<Vec<Operation>, S::ReadError>
     where
         I: Into<PathBuf>,
         S: Store,
@@ -208,11 +208,11 @@ impl Tree {
             }
         }
 
-        self.integrate_ops(operations, db)?;
-        Ok(())
+        self.integrate_ops(&operations, db)?;
+        Ok(operations)
     }
 
-    pub fn remove_dir<I, S>(&mut self, path: I, db: &S) -> Result<(), S::ReadError>
+    pub fn remove_dir<I, S>(&mut self, path: I, db: &S) -> Result<Operation, S::ReadError>
     where
         I: Into<PathBuf>,
         S: Store,
@@ -228,11 +228,11 @@ impl Tree {
             prev_timestamp: prev_parent_ref.timestamp,
             new_location: None,
         };
-        self.integrate_ops(Some(operation), db)?;
-        Ok(())
+        self.integrate_ops(Some(&operation), db)?;
+        Ok(operation)
     }
 
-    pub fn move_dir<F, S, T>(&mut self, from: F, to: T, db: &S) -> Result<(), S::ReadError>
+    pub fn move_dir<F, S, T>(&mut self, from: F, to: T, db: &S) -> Result<Operation, S::ReadError>
     where
         F: Into<PathBuf>,
         S: Store,
@@ -257,18 +257,18 @@ impl Tree {
             prev_timestamp: prev_parent_ref.timestamp,
             new_location: Some((new_parent_id, new_name)),
         };
-        self.integrate_ops(Some(operation), db)?;
-        Ok(())
+        self.integrate_ops(Some(&operation), db)?;
+        Ok(operation)
     }
 
-    fn integrate_ops<I, S>(&mut self, ops: I, db: &S) -> Result<Vec<Operation>, S::ReadError>
+    fn integrate_ops<'a, I, S>(&mut self, ops: I, db: &S) -> Result<Vec<Operation>, S::ReadError>
     where
-        I: IntoIterator<Item = Operation>,
+        I: IntoIterator<Item = &'a Operation>,
         S: Store,
     {
         let mut fixup_ops = Vec::new();
         for op in ops {
-            fixup_ops.extend(self.integrate_op(op, db)?);
+            fixup_ops.extend(self.integrate_op(op.clone(), db)?);
         }
         Ok(fixup_ops)
     }
@@ -849,6 +849,7 @@ mod tests {
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
     use std::cell::Cell;
+    use std::collections::HashSet;
 
     #[test]
     fn test_local_dir_ops() {
@@ -911,12 +912,12 @@ mod tests {
                     let db = &db[replica_index];
                     let tree = &mut trees[replica_index];
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = tree.integrate_ops(ops, db).unwrap();
+                    let fixup_ops = tree.integrate_ops(&ops, db).unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 } else {
                     let db = &db[replica_index];
                     let tree = &mut trees[replica_index];
-                    let ops = tree.mutate(&mut rng);
+                    let ops = tree.mutate(&mut rng, db);
                     deliver_ops(replica_index, &mut inboxes, ops);
                 }
             }
@@ -926,7 +927,7 @@ mod tests {
                     let db = &db[replica_index];
                     let tree = &mut trees[replica_index];
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = tree.integrate_ops(ops, db).unwrap();
+                    let fixup_ops = tree.integrate_ops(&ops, db).unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 }
             }
@@ -1022,8 +1023,31 @@ mod tests {
     }
 
     impl Tree {
-        fn mutate(&mut self, rng: &mut Rng) -> Vec<Operation> {
-            Vec::new()
+        fn mutate<S, T: Rng>(&mut self, rng: &mut T, db: &S) -> Vec<Operation>
+        where
+            S: Store,
+        {
+            let mut ops = Vec::new();
+            let mut paths: HashSet<_> = self.paths(db).into_iter().collect();
+            for _ in 0..rng.gen_range(1, 5) {
+                let k = rng.gen_range(0, 3);
+                if paths.len() == 0 || k == 0 {
+                    let path = gen_path(rng, &paths);
+                    ops.extend(self.insert_dirs(&path, db).unwrap());
+                    paths.insert(path);
+                } else if k == 1 {
+                    let path = select_path(rng, &paths).unwrap();
+                    ops.push(self.remove_dir(&path, db).unwrap());
+                    paths.remove(&path);
+                } else {
+                    let old_path = select_path(rng, &paths).unwrap();
+                    let new_path = gen_path(rng, &paths);
+                    ops.push(self.move_dir(&old_path, &new_path, db).unwrap());
+                    paths.remove(&old_path);
+                    paths.insert(new_path);
+                }
+            }
+            ops
         }
 
         fn paths<S: Store>(&self, db: &S) -> Vec<String> {
@@ -1050,5 +1074,44 @@ mod tests {
                 .map(|path| (self.id_for_path(&path, db).unwrap().unwrap(), path))
                 .collect()
         }
+    }
+
+    fn gen_path<T: Rng>(rng: &mut T, paths: &HashSet<String>) -> String {
+        if let Some(path) = paths
+            .iter()
+            .skip(rng.gen_range(0, paths.len() + 1))
+            .next()
+            .cloned()
+        {
+            loop {
+                let new_path = format!("{}{}/", path, gen_name(rng));
+                if !paths.contains(&new_path) {
+                    return new_path;
+                }
+            }
+        } else {
+            loop {
+                let new_path = format!("{}/", gen_name(rng));
+                if !paths.contains(&new_path) {
+                    return new_path;
+                }
+            }
+        }
+    }
+
+    fn select_path<T: Rng>(rng: &mut T, paths: &HashSet<String>) -> Option<String> {
+        paths
+            .iter()
+            .skip(rng.gen_range(0, paths.len()))
+            .next()
+            .cloned()
+    }
+
+    fn gen_name<T: Rng>(rng: &mut T) -> String {
+        let mut name = String::new();
+        for _ in 0..rng.gen_range(1, 4) {
+            name.push(rng.gen_range(b'a', b'z' + 1).into());
+        }
+        name
     }
 }
