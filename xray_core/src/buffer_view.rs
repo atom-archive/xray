@@ -1783,6 +1783,23 @@ mod tests {
                 selection((0, 6), (0, 6)),
             ]
         );
+
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor
+            .buffer
+            .borrow_mut()
+            .edit(&[0..0], "123");
+
+        editor.edit("ä");
+        editor.edit("a");
+
+        assert_eq!(editor.buffer.borrow().to_string(), "äa123");
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 2), (0, 2)),
+            ]
+        );
     }
 
     #[test]
