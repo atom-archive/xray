@@ -990,7 +990,7 @@ mod tests {
         const PEERS: usize = 2;
 
         for seed in 0..100000 {
-            // let seed = 1326;
+            let seed = 20429;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
