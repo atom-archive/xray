@@ -83,6 +83,12 @@ pub enum Operation {
         parent_id: id::Unique,
         name: Arc<OsString>,
     },
+    RemoveDir {
+        op_id: id::Unique,
+        child_id: id::Unique,
+        timestamp: LamportTimestamp,
+        prev_timestamp: LamportTimestamp,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,6 +103,7 @@ pub struct ParentRef {
     child_id: id::Unique,
     ref_id: id::Unique,
     timestamp: LamportTimestamp,
+    prev_timestamp: LamportTimestamp,
     op_id: id::Unique,
     parent: Option<(id::Unique, Arc<OsString>)>,
 }
@@ -167,7 +174,7 @@ impl Tree {
         path: I,
         db: &S,
     ) -> Result<(), S::ReadError> {
-        let path: PathBuf = path.into();
+        let path = path.into();
         let child_ref_db = db.child_ref_store();
 
         let mut operations = Vec::new();
@@ -197,11 +204,51 @@ impl Tree {
             }
         }
 
-        self.integrate_ops(operations, db)?;
-        Ok(())
+        self.integrate_ops(operations, db)
     }
 
-    fn integrate_ops<S: Store>(&mut self, ops: Vec<Operation>, db: &S) -> Result<(), S::ReadError> {
+    pub fn remove_dir<I: Into<PathBuf>, S: Store>(
+        &mut self,
+        path: I,
+        db: &S,
+    ) -> Result<(), S::ReadError> {
+        let path = path.into();
+        let child_ref_db = db.child_ref_store();
+        let parent_ref_db = db.parent_ref_store();
+
+        let mut cursor = self.child_refs.cursor();
+        let mut child_id = ROOT_ID;
+        for name in path.components() {
+            let name = Arc::new(OsString::from(name.as_os_str()));
+            let key = ParentIdAndName(child_id, name);
+            if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
+                child_id = cursor.item(child_ref_db)?.unwrap().child_id;
+            } else {
+                panic!("Directory does not exist");
+            }
+        }
+
+        let mut parent_ref_cursor = self.parent_refs.cursor();
+        parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
+        let prev_parent_ref = parent_ref_cursor.item(parent_ref_db)?.unwrap();
+        let operation = Operation::RemoveDir {
+            op_id: db.gen_id(),
+            child_id,
+            timestamp: db.gen_timestamp(),
+            prev_timestamp: prev_parent_ref.timestamp,
+        };
+        self.integrate_ops(Some(operation), db)
+    }
+
+    fn integrate_ops<I, S>(&mut self, ops: I, db: &S) -> Result<(), S::ReadError>
+    where
+        I: IntoIterator<Item = Operation>,
+        S: Store,
+    {
+        let metadata_db = db.metadata_store();
+        let parent_ref_db = db.parent_ref_store();
+        let child_ref_db = db.child_ref_store();
+
         let mut metadata = Vec::new();
         let mut parent_refs = Vec::new();
         let mut child_refs = Vec::new();
@@ -223,6 +270,7 @@ impl Tree {
                         child_id: op_id,
                         ref_id: op_id,
                         timestamp,
+                        prev_timestamp: timestamp,
                         op_id,
                         parent: Some((parent_id, name.clone())),
                     });
@@ -234,14 +282,54 @@ impl Tree {
                         op_id,
                         child_id: op_id,
                         deletions: SmallVec::new(),
-                    })
+                    });
+                }
+                Operation::RemoveDir {
+                    op_id,
+                    child_id,
+                    timestamp,
+                    prev_timestamp,
+                } => {
+                    let new_parent_ref = ParentRef {
+                        child_id,
+                        ref_id: child_id,
+                        timestamp,
+                        prev_timestamp,
+                        op_id,
+                        parent: None,
+                    };
+
+                    let mut child_ref_cursor = self.child_refs.cursor();
+                    let mut parent_ref_cursor = self.parent_refs.cursor();
+                    parent_ref_cursor.seek(&new_parent_ref.key(), SeekBias::Left, parent_ref_db)?;
+                    while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
+                        if parent_ref.child_id != child_id {
+                            break;
+                        } else if parent_ref.timestamp >= prev_timestamp {
+                            if let Some(child_ref_key) = parent_ref.to_child_ref_key() {
+                                child_ref_cursor.seek(
+                                    &child_ref_key,
+                                    SeekBias::Left,
+                                    child_ref_db,
+                                )?;
+                                let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
+                                child_ref.deletions.push(op_id);
+                                child_refs.push(child_ref);
+                            }
+                            parent_ref_cursor.next(parent_ref_db)?;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    parent_refs.push(new_parent_ref);
                 }
             }
         }
 
-        self.metadata = interleave(&self.metadata, metadata, db.metadata_store())?;
-        self.parent_refs = interleave(&self.parent_refs, parent_refs, db.parent_ref_store())?;
-        self.child_refs = interleave(&self.child_refs, child_refs, db.child_ref_store())?;
+        self.metadata = interleave(&self.metadata, metadata, metadata_db)?;
+        self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
+        self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
 
         Ok(())
     }
@@ -434,6 +522,16 @@ impl Keyed for Metadata {
     }
 }
 
+impl ParentRef {
+    fn to_child_ref_key(&self) -> Option<ChildRefKey> {
+        self.parent.as_ref().map(|(parent_id, name)| ChildRefKey {
+            parent_id: *parent_id,
+            name: name.clone(),
+            timestamp: self.timestamp,
+        })
+    }
+}
+
 impl btree::Item for ParentRef {
     type Summary = ParentRefKey;
 
@@ -451,6 +549,12 @@ impl Keyed for ParentRef {
             ref_id: self.ref_id,
             timestamp: self.timestamp,
         }
+    }
+}
+
+impl btree::Dimension<ParentRefKey> for id::Unique {
+    fn from_summary(summary: &ParentRefKey) -> Self {
+        summary.child_id
     }
 }
 
@@ -672,6 +776,12 @@ mod tests {
             tree.paths(&db),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
         );
+
+        tree.remove_dir("a/b1/c", &db).unwrap();
+        assert_eq!(tree.paths(&db), ["a/", "a/b1/", "a/b1/d/", "a/b2/"]);
+
+        tree.remove_dir("a/b1", &db).unwrap();
+        assert_eq!(tree.paths(&db), ["a/", "a/b2/"]);
     }
 
     struct NullStore {
