@@ -83,19 +83,12 @@ pub enum Operation {
         parent_id: id::Unique,
         name: Arc<OsString>,
     },
-    RemoveDir {
-        op_id: id::Unique,
-        child_id: id::Unique,
-        timestamp: LamportTimestamp,
-        prev_timestamp: LamportTimestamp,
-    },
     MoveDir {
         op_id: id::Unique,
         child_id: id::Unique,
         timestamp: LamportTimestamp,
         prev_timestamp: LamportTimestamp,
-        new_parent_id: id::Unique,
-        new_name: Arc<OsString>,
+        new_location: Option<(id::Unique, Arc<OsString>)>,
     },
 }
 
@@ -226,11 +219,12 @@ impl Tree {
 
         let child_id = self.id_for_path(&path, db)?.unwrap();
         let prev_parent_ref = self.find_cur_parent_ref(child_id, db)?.unwrap();
-        let operation = Operation::RemoveDir {
+        let operation = Operation::MoveDir {
             op_id: db.gen_id(),
             child_id,
             timestamp: db.gen_timestamp(),
             prev_timestamp: prev_parent_ref.timestamp,
+            new_location: None,
         };
         self.integrate_ops(Some(operation), db)
     }
@@ -258,8 +252,7 @@ impl Tree {
             child_id: from_id,
             timestamp: db.gen_timestamp(),
             prev_timestamp: prev_parent_ref.timestamp,
-            new_parent_id,
-            new_name,
+            new_location: Some((new_parent_id, new_name)),
         };
         self.integrate_ops(Some(operation), db)
     }
@@ -306,61 +299,22 @@ impl Tree {
                         deletions: SmallVec::new(),
                     });
                 }
-                Operation::RemoveDir {
-                    op_id,
-                    child_id,
-                    timestamp,
-                    prev_timestamp,
-                } => {
-                    let new_parent_ref = ParentRef {
-                        child_id,
-                        timestamp,
-                        prev_timestamp,
-                        op_id,
-                        parent: None,
-                    };
-
-                    let mut child_ref_cursor = self.child_refs.cursor();
-                    let mut parent_ref_cursor = self.parent_refs.cursor();
-                    parent_ref_cursor.seek(&new_parent_ref.key(), SeekBias::Left, parent_ref_db)?;
-                    while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
-                        if parent_ref.child_id != child_id {
-                            break;
-                        } else if parent_ref.timestamp >= prev_timestamp {
-                            if let Some(child_ref_key) = parent_ref.to_child_ref_key() {
-                                child_ref_cursor.seek(
-                                    &child_ref_key,
-                                    SeekBias::Left,
-                                    child_ref_db,
-                                )?;
-                                let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
-                                child_ref.deletions.push(op_id);
-                                child_refs.push(child_ref);
-                            }
-                            parent_ref_cursor.next(parent_ref_db)?;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    parent_refs.push(new_parent_ref);
-                }
                 Operation::MoveDir {
                     op_id,
                     child_id,
                     timestamp,
                     prev_timestamp,
-                    new_parent_id,
-                    new_name,
+                    new_location,
                 } => {
-                    let mut new_child_ref = ChildRef {
-                        parent_id: new_parent_id,
-                        name: new_name.clone(),
-                        timestamp,
-                        op_id,
-                        child_id,
-                        deletions: SmallVec::new(),
-                    };
+                    let mut new_child_ref =
+                        new_location.as_ref().map(|(parent_id, name)| ChildRef {
+                            parent_id: *parent_id,
+                            name: name.clone(),
+                            timestamp,
+                            op_id,
+                            child_id,
+                            deletions: SmallVec::new(),
+                        });
 
                     let mut child_ref_cursor = self.child_refs.cursor();
                     let mut parent_ref_cursor = self.parent_refs.cursor();
@@ -371,7 +325,9 @@ impl Tree {
                         } else if parent_ref.timestamp > timestamp
                             && parent_ref.prev_timestamp < timestamp
                         {
-                            new_child_ref.deletions.push(parent_ref.op_id);
+                            if let Some(new_child_ref) = new_child_ref.as_mut() {
+                                new_child_ref.deletions.push(parent_ref.op_id);
+                            }
                         } else if parent_ref.timestamp >= prev_timestamp {
                             if let Some(child_ref_key) = parent_ref.to_child_ref_key() {
                                 child_ref_cursor.seek(
@@ -394,9 +350,11 @@ impl Tree {
                         timestamp,
                         prev_timestamp,
                         op_id,
-                        parent: Some((new_parent_id, new_name)),
+                        parent: new_location,
                     });
-                    child_refs.push(new_child_ref);
+                    if let Some(new_child_ref) = new_child_ref {
+                        child_refs.push(new_child_ref);
+                    }
                 }
             }
         }
@@ -910,6 +868,9 @@ mod tests {
 
         tree.move_dir("a/b1", "b", &db).unwrap();
         assert_eq!(tree.paths(&db), ["a/", "a/b2/", "b/", "b/c/", "b/d/"]);
+
+        tree.move_dir("b/d", "a/b2/d", &db).unwrap();
+        assert_eq!(tree.paths(&db), ["a/", "a/b2/", "a/b2/d/", "b/", "b/c/"]);
     }
 
     struct NullStore {
