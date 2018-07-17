@@ -178,8 +178,8 @@ impl Tree {
         for name in path.components() {
             let name = Arc::new(OsString::from(name.as_os_str()));
             if entry_exists {
-                let key = &ParentIdAndName(parent_id, name.clone());
-                if cursor.seek(key, SeekBias::Left, child_ref_db)? {
+                let key = ParentIdAndName(parent_id, name.clone());
+                if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
                     parent_id = cursor.item(child_ref_db)?.unwrap().child_id;
                 } else {
                     entry_exists = false;
@@ -325,26 +325,22 @@ impl TreeCursor {
     }
 
     pub fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
-        while self.stack.len() > 0 {
+        if self.stack.is_empty() {
+            Ok(())
+        } else {
             let metadata = self.metadata_cursor.item(db.metadata_store())?.unwrap();
-            if metadata.is_dir {
-                if self.descend(db)? || self.next_sibling(db)? {
-                    break;
-                }
-            } else if self.next_sibling(db)? {
-                break;
-            }
-
-            loop {
-                self.path.pop();
-                self.stack.pop();
-                if self.stack.is_empty() || self.next_sibling(db)? {
-                    break;
+            if (metadata.is_dir && self.descend(db)?) || self.next_sibling(db)? {
+                Ok(())
+            } else {
+                loop {
+                    self.path.pop();
+                    self.stack.pop();
+                    if self.stack.is_empty() || self.next_sibling(db)? {
+                        return Ok(());
+                    }
                 }
             }
         }
-
-        Ok(())
     }
 
     fn descend<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
@@ -665,8 +661,17 @@ mod tests {
     fn test_insert_dirs() {
         let db = NullStore::new(1);
         let mut tree = Tree::new();
-        tree.insert_dirs("a/b/", &db).unwrap();
-        assert_eq!(tree.paths(&db), ["a/", "a/b/"]);
+        tree.insert_dirs("a/b2/", &db).unwrap();
+        assert_eq!(tree.paths(&db), ["a/", "a/b2/"]);
+
+        tree.insert_dirs("a/b1/c", &db).unwrap();
+        assert_eq!(tree.paths(&db), ["a/", "a/b1/", "a/b1/c/", "a/b2/"]);
+
+        tree.insert_dirs("a/b1/d", &db).unwrap();
+        assert_eq!(
+            tree.paths(&db),
+            ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
+        );
     }
 
     struct NullStore {
