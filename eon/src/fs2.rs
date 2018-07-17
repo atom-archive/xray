@@ -366,10 +366,12 @@ impl Tree {
         Ok(())
     }
 
-    fn id_for_path<S>(&self, path: &Path, db: &S) -> Result<Option<id::Unique>, S::ReadError>
+    fn id_for_path<P, S>(&self, path: P, db: &S) -> Result<Option<id::Unique>, S::ReadError>
     where
+        P: Into<PathBuf>,
         S: Store,
     {
+        let path = path.into();
         let child_ref_db = db.child_ref_store();
 
         let mut cursor = self.child_refs.cursor();
@@ -866,11 +868,15 @@ mod tests {
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
         );
 
+        let moved_id = tree.id_for_path("a/b1", &db).unwrap().unwrap();
         tree.move_dir("a/b1", "b", &db).unwrap();
         assert_eq!(tree.paths(&db), ["a/", "a/b2/", "b/", "b/c/", "b/d/"]);
+        assert_eq!(tree.id_for_path("b", &db).unwrap().unwrap(), moved_id);
 
+        let moved_id = tree.id_for_path("b/d", &db).unwrap().unwrap();
         tree.move_dir("b/d", "a/b2/d", &db).unwrap();
         assert_eq!(tree.paths(&db), ["a/", "a/b2/", "a/b2/d/", "b/", "b/c/"]);
+        assert_eq!(tree.id_for_path("a/b2/d", &db).unwrap().unwrap(), moved_id);
     }
 
     struct NullStore {
