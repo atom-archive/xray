@@ -468,14 +468,12 @@ impl TreeCursor {
                         db.metadata_store(),
                     )?;
                     Ok(true)
+                } else if self.next_sibling(db)? {
+                    Ok(true)
                 } else {
-                    if self.next_sibling(db)? {
-                        Ok(true)
-                    } else {
-                        self.path.pop();
-                        self.stack.pop();
-                        Ok(false)
-                    }
+                    self.path.pop();
+                    self.stack.pop();
+                    Ok(false)
                 }
             } else {
                 Ok(false)
