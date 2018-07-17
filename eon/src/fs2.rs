@@ -76,6 +76,7 @@ pub enum TreeDiffItem {
     },
 }
 
+#[derive(Clone)]
 pub enum Operation {
     InsertDir {
         op_id: id::Unique,
@@ -207,7 +208,8 @@ impl Tree {
             }
         }
 
-        self.integrate_ops(operations, db)
+        self.integrate_ops(operations, db)?;
+        Ok(())
     }
 
     pub fn remove_dir<I, S>(&mut self, path: I, db: &S) -> Result<(), S::ReadError>
@@ -226,7 +228,8 @@ impl Tree {
             prev_timestamp: prev_parent_ref.timestamp,
             new_location: None,
         };
-        self.integrate_ops(Some(operation), db)
+        self.integrate_ops(Some(operation), db)?;
+        Ok(())
     }
 
     pub fn move_dir<F, S, T>(&mut self, from: F, to: T, db: &S) -> Result<(), S::ReadError>
@@ -254,12 +257,24 @@ impl Tree {
             prev_timestamp: prev_parent_ref.timestamp,
             new_location: Some((new_parent_id, new_name)),
         };
-        self.integrate_ops(Some(operation), db)
+        self.integrate_ops(Some(operation), db)?;
+        Ok(())
     }
 
-    fn integrate_ops<I, S>(&mut self, ops: I, db: &S) -> Result<(), S::ReadError>
+    fn integrate_ops<I, S>(&mut self, ops: I, db: &S) -> Result<Vec<Operation>, S::ReadError>
     where
         I: IntoIterator<Item = Operation>,
+        S: Store,
+    {
+        let mut fixup_ops = Vec::new();
+        for op in ops {
+            fixup_ops.extend(self.integrate_op(op, db)?);
+        }
+        Ok(fixup_ops)
+    }
+
+    fn integrate_op<S>(&mut self, op: Operation, db: &S) -> Result<Option<Operation>, S::ReadError>
+    where
         S: Store,
     {
         let metadata_db = db.metadata_store();
@@ -270,91 +285,84 @@ impl Tree {
         let mut parent_refs = Vec::new();
         let mut child_refs = Vec::new();
 
-        for op in ops {
-            match op {
-                Operation::InsertDir {
-                    op_id,
+        match op {
+            Operation::InsertDir {
+                op_id,
+                timestamp,
+                parent_id,
+                name,
+            } => {
+                metadata.push(Metadata {
+                    file_id: op_id,
+                    is_dir: true,
+                    inode: None,
+                });
+                parent_refs.push(ParentRef {
+                    child_id: op_id,
                     timestamp,
+                    prev_timestamp: timestamp,
+                    op_id,
+                    parent: Some((parent_id, name.clone())),
+                });
+                child_refs.push(ChildRef {
                     parent_id,
                     name,
-                } => {
-                    metadata.push(Metadata {
-                        file_id: op_id,
-                        is_dir: true,
-                        inode: None,
-                    });
-                    parent_refs.push(ParentRef {
-                        child_id: op_id,
-                        timestamp,
-                        prev_timestamp: timestamp,
-                        op_id,
-                        parent: Some((parent_id, name.clone())),
-                    });
-                    child_refs.push(ChildRef {
-                        parent_id,
-                        name,
-                        timestamp,
-                        op_id,
-                        child_id: op_id,
-                        deletions: SmallVec::new(),
-                    });
-                }
-                Operation::MoveDir {
+                    timestamp,
                     op_id,
+                    child_id: op_id,
+                    deletions: SmallVec::new(),
+                });
+            }
+            Operation::MoveDir {
+                op_id,
+                child_id,
+                timestamp,
+                prev_timestamp,
+                new_location,
+            } => {
+                let mut new_child_ref = new_location.as_ref().map(|(parent_id, name)| ChildRef {
+                    parent_id: *parent_id,
+                    name: name.clone(),
+                    timestamp,
+                    op_id,
+                    child_id,
+                    deletions: SmallVec::new(),
+                });
+
+                let mut child_ref_cursor = self.child_refs.cursor();
+                let mut parent_ref_cursor = self.parent_refs.cursor();
+                parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
+                while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
+                    if parent_ref.child_id != child_id {
+                        break;
+                    } else if parent_ref.timestamp > timestamp
+                        && parent_ref.prev_timestamp < timestamp
+                    {
+                        if let Some(new_child_ref) = new_child_ref.as_mut() {
+                            new_child_ref.deletions.push(parent_ref.op_id);
+                        }
+                    } else if parent_ref.timestamp >= prev_timestamp {
+                        if let Some(child_ref_key) = parent_ref.to_child_ref_key() {
+                            child_ref_cursor.seek(&child_ref_key, SeekBias::Left, child_ref_db)?;
+                            let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
+                            child_ref.deletions.push(op_id);
+                            child_refs.push(child_ref);
+                        }
+                        parent_ref_cursor.next(parent_ref_db)?;
+                    } else {
+                        break;
+                    }
+                }
+
+                parent_refs.push(ParentRef {
                     child_id,
                     timestamp,
                     prev_timestamp,
-                    new_location,
-                } => {
-                    let mut new_child_ref =
-                        new_location.as_ref().map(|(parent_id, name)| ChildRef {
-                            parent_id: *parent_id,
-                            name: name.clone(),
-                            timestamp,
-                            op_id,
-                            child_id,
-                            deletions: SmallVec::new(),
-                        });
-
-                    let mut child_ref_cursor = self.child_refs.cursor();
-                    let mut parent_ref_cursor = self.parent_refs.cursor();
-                    parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
-                    while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
-                        if parent_ref.child_id != child_id {
-                            break;
-                        } else if parent_ref.timestamp > timestamp
-                            && parent_ref.prev_timestamp < timestamp
-                        {
-                            if let Some(new_child_ref) = new_child_ref.as_mut() {
-                                new_child_ref.deletions.push(parent_ref.op_id);
-                            }
-                        } else if parent_ref.timestamp >= prev_timestamp {
-                            if let Some(child_ref_key) = parent_ref.to_child_ref_key() {
-                                child_ref_cursor.seek(
-                                    &child_ref_key,
-                                    SeekBias::Left,
-                                    child_ref_db,
-                                )?;
-                                let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
-                                child_ref.deletions.push(op_id);
-                                child_refs.push(child_ref);
-                            }
-                            parent_ref_cursor.next(parent_ref_db)?;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    parent_refs.push(ParentRef {
-                        child_id,
-                        timestamp,
-                        prev_timestamp,
-                        op_id,
-                        parent: new_location,
-                    });
-                    if let Some(new_child_ref) = new_child_ref {
-                        child_refs.push(new_child_ref);
-                    }
+                    op_id,
+                    parent: new_location,
+                });
+                if let Some(new_child_ref) = new_child_ref {
+                    child_refs.push(new_child_ref);
                 }
             }
         }
@@ -363,7 +371,7 @@ impl Tree {
         self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
         self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
 
-        Ok(())
+        Ok(None)
     }
 
     fn id_for_path<P, S>(&self, path: P, db: &S) -> Result<Option<id::Unique>, S::ReadError>
@@ -836,6 +844,9 @@ impl LamportTimestamp {
 
 #[cfg(test)]
 mod tests {
+    extern crate rand;
+
+    use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
     use std::cell::Cell;
 
@@ -877,6 +888,64 @@ mod tests {
         tree.move_dir("b/d", "a/b2/d", &db).unwrap();
         assert_eq!(tree.paths(&db), ["a/", "a/b2/", "a/b2/d/", "b/", "b/c/"]);
         assert_eq!(tree.id_for_path("a/b2/d", &db).unwrap().unwrap(), moved_id);
+    }
+
+    #[test]
+    fn test_replication_random() {
+        use std::iter::FromIterator;
+        use std::mem;
+
+        for seed in 0..10000 {
+            const PEERS: usize = 2;
+            println!("{:?}", seed);
+            let mut rng = StdRng::from_seed(&[seed]);
+
+            let db = Vec::from_iter((0..PEERS).map(|i| NullStore::new(i as u64 + 1)));
+            let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
+            let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
+
+            for _ in 0..4 {
+                let replica_index = rng.gen_range(0, PEERS);
+
+                if !inboxes[replica_index].is_empty() && rng.gen() {
+                    let db = &db[replica_index];
+                    let tree = &mut trees[replica_index];
+                    let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
+                    let fixup_ops = tree.integrate_ops(ops, db).unwrap();
+                    deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                } else {
+                    let db = &db[replica_index];
+                    let tree = &mut trees[replica_index];
+                    let ops = tree.mutate(&mut rng);
+                    deliver_ops(replica_index, &mut inboxes, ops);
+                }
+            }
+
+            while inboxes.iter().any(|inbox| !inbox.is_empty()) {
+                for replica_index in 0..PEERS {
+                    let db = &db[replica_index];
+                    let tree = &mut trees[replica_index];
+                    let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
+                    let fixup_ops = tree.integrate_ops(ops, db).unwrap();
+                    deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                }
+            }
+
+            for i in 0..PEERS - 1 {
+                assert_eq!(
+                    trees[i].paths_with_ids(&db[i]),
+                    trees[i + 1].paths_with_ids(&db[i + 1])
+                );
+            }
+
+            fn deliver_ops(sender: usize, inboxes: &mut Vec<Vec<Operation>>, ops: Vec<Operation>) {
+                for (i, inbox) in inboxes.iter_mut().enumerate() {
+                    if i != sender {
+                        inbox.extend(ops.iter().cloned());
+                    }
+                }
+            }
+        }
     }
 
     struct NullStore {
@@ -953,6 +1022,10 @@ mod tests {
     }
 
     impl Tree {
+        fn mutate(&mut self, rng: &mut Rng) -> Vec<Operation> {
+            Vec::new()
+        }
+
         fn paths<S: Store>(&self, db: &S) -> Vec<String> {
             let mut cursor = self.cursor(db).unwrap();
             let mut paths = Vec::new();
@@ -969,6 +1042,13 @@ mod tests {
                 cursor.next(db).unwrap();
             }
             paths
+        }
+
+        fn paths_with_ids<S: Store>(&self, db: &S) -> Vec<(id::Unique, String)> {
+            self.paths(db)
+                .into_iter()
+                .map(|path| (self.id_for_path(&path, db).unwrap().unwrap(), path))
+                .collect()
         }
     }
 }
