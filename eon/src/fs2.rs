@@ -89,6 +89,14 @@ pub enum Operation {
         timestamp: LamportTimestamp,
         prev_timestamp: LamportTimestamp,
     },
+    MoveDir {
+        op_id: id::Unique,
+        child_id: id::Unique,
+        timestamp: LamportTimestamp,
+        prev_timestamp: LamportTimestamp,
+        new_parent_id: id::Unique,
+        new_name: Arc<OsString>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,7 +109,6 @@ pub struct Metadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParentRef {
     child_id: id::Unique,
-    ref_id: id::Unique,
     timestamp: LamportTimestamp,
     prev_timestamp: LamportTimestamp,
     op_id: id::Unique,
@@ -111,7 +118,6 @@ pub struct ParentRef {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ParentRefKey {
     child_id: id::Unique,
-    ref_id: id::Unique,
     timestamp: LamportTimestamp,
 }
 
@@ -120,7 +126,6 @@ pub struct ChildRef {
     parent_id: id::Unique,
     name: Arc<OsString>,
     timestamp: LamportTimestamp,
-    ref_id: id::Unique,
     op_id: id::Unique,
     child_id: id::Unique,
     deletions: SmallVec<[id::Unique; 1]>,
@@ -169,11 +174,11 @@ impl Tree {
         Ok(cursor)
     }
 
-    pub fn insert_dirs<I: Into<PathBuf>, S: Store>(
-        &mut self,
-        path: I,
-        db: &S,
-    ) -> Result<(), S::ReadError> {
+    pub fn insert_dirs<I, S>(&mut self, path: I, db: &S) -> Result<(), S::ReadError>
+    where
+        I: Into<PathBuf>,
+        S: Store,
+    {
         let path = path.into();
         let child_ref_db = db.child_ref_store();
 
@@ -212,40 +217,49 @@ impl Tree {
         self.integrate_ops(operations, db)
     }
 
-    pub fn remove_dir<I: Into<PathBuf>, S: Store>(
-        &mut self,
-        path: I,
-        db: &S,
-    ) -> Result<(), S::ReadError> {
+    pub fn remove_dir<I, S>(&mut self, path: I, db: &S) -> Result<(), S::ReadError>
+    where
+        I: Into<PathBuf>,
+        S: Store,
+    {
         let path = path.into();
-        let child_ref_db = db.child_ref_store();
-        let parent_ref_db = db.parent_ref_store();
 
-        let mut cursor = self.child_refs.cursor();
-        let mut child_id = ROOT_ID;
-        for name in path.components() {
-            let name = Arc::new(OsString::from(name.as_os_str()));
-            let key = ParentIdAndName(child_id, name);
-            if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
-                let child_ref = cursor.item(child_ref_db)?.unwrap();
-                if child_ref.is_visible() {
-                    child_id = child_ref.child_id;
-                } else {
-                    panic!("Directory does not exist");
-                }
-            } else {
-                panic!("Directory does not exist");
-            }
-        }
-
-        let mut parent_ref_cursor = self.parent_refs.cursor();
-        parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
-        let prev_parent_ref = parent_ref_cursor.item(parent_ref_db)?.unwrap();
+        let child_id = self.id_for_path(&path, db)?.unwrap();
+        let prev_parent_ref = self.find_cur_parent_ref(child_id, db)?.unwrap();
         let operation = Operation::RemoveDir {
             op_id: db.gen_id(),
             child_id,
             timestamp: db.gen_timestamp(),
             prev_timestamp: prev_parent_ref.timestamp,
+        };
+        self.integrate_ops(Some(operation), db)
+    }
+
+    pub fn move_dir<F, S, T>(&mut self, from: F, to: T, db: &S) -> Result<(), S::ReadError>
+    where
+        F: Into<PathBuf>,
+        S: Store,
+        T: Into<PathBuf>,
+    {
+        let from = from.into();
+        let to = to.into();
+
+        let from_id = self.id_for_path(&from, db)?.unwrap();
+        let new_parent_id = if let Some(parent_path) = to.parent() {
+            self.id_for_path(parent_path, db)?.unwrap()
+        } else {
+            ROOT_ID
+        };
+        let new_name = Arc::new(OsString::from(to.file_name().unwrap()));
+
+        let prev_parent_ref = self.find_cur_parent_ref(from_id, db)?.unwrap();
+        let operation = Operation::MoveDir {
+            op_id: db.gen_id(),
+            child_id: from_id,
+            timestamp: db.gen_timestamp(),
+            prev_timestamp: prev_parent_ref.timestamp,
+            new_parent_id,
+            new_name,
         };
         self.integrate_ops(Some(operation), db)
     }
@@ -278,7 +292,6 @@ impl Tree {
                     });
                     parent_refs.push(ParentRef {
                         child_id: op_id,
-                        ref_id: op_id,
                         timestamp,
                         prev_timestamp: timestamp,
                         op_id,
@@ -288,7 +301,6 @@ impl Tree {
                         parent_id,
                         name,
                         timestamp,
-                        ref_id: op_id,
                         op_id,
                         child_id: op_id,
                         deletions: SmallVec::new(),
@@ -302,7 +314,6 @@ impl Tree {
                 } => {
                     let new_parent_ref = ParentRef {
                         child_id,
-                        ref_id: child_id,
                         timestamp,
                         prev_timestamp,
                         op_id,
@@ -334,6 +345,59 @@ impl Tree {
 
                     parent_refs.push(new_parent_ref);
                 }
+                Operation::MoveDir {
+                    op_id,
+                    child_id,
+                    timestamp,
+                    prev_timestamp,
+                    new_parent_id,
+                    new_name,
+                } => {
+                    let mut new_child_ref = ChildRef {
+                        parent_id: new_parent_id,
+                        name: new_name.clone(),
+                        timestamp,
+                        op_id,
+                        child_id,
+                        deletions: SmallVec::new(),
+                    };
+
+                    let mut child_ref_cursor = self.child_refs.cursor();
+                    let mut parent_ref_cursor = self.parent_refs.cursor();
+                    parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
+                    while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
+                        if parent_ref.child_id != child_id {
+                            break;
+                        } else if parent_ref.timestamp > timestamp
+                            && parent_ref.prev_timestamp < timestamp
+                        {
+                            new_child_ref.deletions.push(parent_ref.op_id);
+                        } else if parent_ref.timestamp >= prev_timestamp {
+                            if let Some(child_ref_key) = parent_ref.to_child_ref_key() {
+                                child_ref_cursor.seek(
+                                    &child_ref_key,
+                                    SeekBias::Left,
+                                    child_ref_db,
+                                )?;
+                                let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
+                                child_ref.deletions.push(op_id);
+                                child_refs.push(child_ref);
+                            }
+                            parent_ref_cursor.next(parent_ref_db)?;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    parent_refs.push(ParentRef {
+                        child_id,
+                        timestamp,
+                        prev_timestamp,
+                        op_id,
+                        parent: Some((new_parent_id, new_name)),
+                    });
+                    child_refs.push(new_child_ref);
+                }
             }
         }
 
@@ -342,6 +406,54 @@ impl Tree {
         self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
 
         Ok(())
+    }
+
+    fn id_for_path<S>(&self, path: &Path, db: &S) -> Result<Option<id::Unique>, S::ReadError>
+    where
+        S: Store,
+    {
+        let child_ref_db = db.child_ref_store();
+
+        let mut cursor = self.child_refs.cursor();
+        let mut child_id = ROOT_ID;
+        for name in path.components() {
+            let name = Arc::new(OsString::from(name.as_os_str()));
+            let key = ParentIdAndName(child_id, name);
+            if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
+                let child_ref = cursor.item(child_ref_db)?.unwrap();
+                if child_ref.is_visible() {
+                    child_id = child_ref.child_id;
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+
+        Ok(Some(child_id))
+    }
+
+    fn find_cur_parent_ref<S>(
+        &self,
+        child_id: id::Unique,
+        db: &S,
+    ) -> Result<Option<ParentRef>, S::ReadError>
+    where
+        S: Store,
+    {
+        let parent_ref_db = db.parent_ref_store();
+        let mut cursor = self.parent_refs.cursor();
+        cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
+        let parent_ref = cursor.item(parent_ref_db)?;
+        if parent_ref
+            .as_ref()
+            .map_or(false, |parent_ref| parent_ref.child_id == child_id)
+        {
+            Ok(parent_ref)
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -554,7 +666,6 @@ impl Keyed for ParentRef {
     fn key(&self) -> Self::Key {
         ParentRefKey {
             child_id: self.child_id,
-            ref_id: self.ref_id,
             timestamp: self.timestamp,
         }
     }
@@ -576,7 +687,6 @@ impl Ord for ParentRefKey {
     fn cmp(&self, other: &Self) -> Ordering {
         self.child_id
             .cmp(&other.child_id)
-            .then_with(|| self.ref_id.cmp(&other.ref_id))
             .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
     }
 }
@@ -770,7 +880,7 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn test_insert_dirs() {
+    fn test_local_dir_ops() {
         let db = NullStore::new(1);
         let mut tree = Tree::new();
         tree.insert_dirs("a/b2/", &db).unwrap();
@@ -797,6 +907,9 @@ mod tests {
             tree.paths(&db),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
         );
+
+        tree.move_dir("a/b1", "b", &db).unwrap();
+        assert_eq!(tree.paths(&db), ["a/", "a/b2/", "b/", "b/c/", "b/d/"]);
     }
 
     struct NullStore {
