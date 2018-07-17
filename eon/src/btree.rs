@@ -817,7 +817,11 @@ impl<T: Item> Cursor<T> {
             }
         }
 
-        Ok(pos == *target)
+        if bias == SeekBias::Left {
+            Ok(*target == self.end::<D, _>(db)?)
+        } else {
+            Ok(*target == self.start::<D>())
+        }
     }
 }
 
