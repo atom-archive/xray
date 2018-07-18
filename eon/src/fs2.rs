@@ -275,6 +275,7 @@ impl Tree {
         let mut parent_refs = Vec::new();
         let mut child_refs = Vec::new();
         let mut new_child_ref;
+        let received_timestamp;
 
         match op {
             Operation::InsertDir {
@@ -305,7 +306,8 @@ impl Tree {
                     op_id,
                     parent: Some((parent_id, name)),
                 });
-                child_refs.extend(new_child_ref.clone())
+                child_refs.extend(new_child_ref.clone());
+                received_timestamp = timestamp;
             }
             Operation::MoveDir {
                 op_id,
@@ -358,12 +360,16 @@ impl Tree {
                     parent: new_location,
                 });
                 child_refs.extend(new_child_ref.clone());
+                received_timestamp = timestamp;
             }
         }
 
         self.metadata = interleave(&self.metadata, metadata, metadata_db)?;
         self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
         self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
+        if db.replica_id() != received_timestamp.replica_id {
+            db.recv_timestamp(received_timestamp);
+        }
 
         // println!("{:#?}", self.child_refs.items(child_ref_db)?);
 
