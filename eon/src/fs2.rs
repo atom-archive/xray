@@ -374,7 +374,11 @@ impl Tree {
         // println!("{:#?}", self.child_refs.items(child_ref_db)?);
 
         if let Some(child_ref) = new_child_ref {
-            self.fix_name_conflicts(child_ref.parent_id, child_ref.name, db)
+            if child_ref.is_visible() {
+                self.fix_name_conflicts(child_ref.parent_id, child_ref.name, db)
+            } else {
+                Ok(None)
+            }
         } else {
             Ok(None)
         }
