@@ -1133,7 +1133,8 @@ mod tests {
             for _ in 0..rng.gen_range(1, 5) {
                 let k = rng.gen_range(0, 3);
                 if self.is_empty(db).unwrap() || k == 0 {
-                    let path = self.gen_path(rng, db);
+                    let subtree_depth = rng.gen_range(1, 5);
+                    let path = self.gen_path(rng, subtree_depth, db);
                     // println!("{:?} Inserting {:?}", db.replica_id(), path);
                     ops.extend(self.insert_dirs(&path, db).unwrap());
                 // println!("{:#?} ", self.child_refs.items(db.child_ref_store()));
@@ -1145,7 +1146,7 @@ mod tests {
                 } else {
                     let (old_path, new_path) = loop {
                         let old_path = self.select_path(rng, db).unwrap();
-                        let new_path = self.gen_path(rng, db);
+                        let new_path = self.gen_path(rng, 1, db);
                         if !new_path.starts_with(&old_path) {
                             break (old_path, new_path);
                         }
@@ -1164,12 +1165,18 @@ mod tests {
             ops
         }
 
-        fn gen_path<S: Store, T: Rng>(&self, rng: &mut T, db: &S) -> String {
+        fn gen_path<S: Store, T: Rng>(&self, rng: &mut T, depth: usize, db: &S) -> String {
             loop {
+                let mut new_tree = String::new();
+                for _ in 0..depth {
+                    new_tree.push_str(&gen_name(rng));
+                    new_tree.push('/');
+                }
+
                 let path = if self.is_empty(db).unwrap() || rng.gen_weighted_bool(8) {
-                    gen_name(rng)
+                    new_tree
                 } else {
-                    self.select_path(rng, db).unwrap()
+                    format!("{}/{}", self.select_path(rng, db).unwrap(), new_tree)
                 };
 
                 if self.id_for_path(&path, db).unwrap().is_none() {
