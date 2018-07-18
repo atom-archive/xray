@@ -333,10 +333,9 @@ impl Tree {
                 while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
                     if parent_ref.child_id != child_id {
                         break;
-                    } else if parent_ref.timestamp > timestamp
-                        && parent_ref.prev_timestamp < timestamp
-                    {
-                        if let Some(new_child_ref) = new_child_ref.as_mut() {
+                    } else if parent_ref.timestamp > timestamp {
+                        if parent_ref.prev_timestamp < timestamp && new_child_ref.is_some() {
+                            let new_child_ref = new_child_ref.as_mut().unwrap();
                             new_child_ref.deletions.push(parent_ref.op_id);
                         }
                     } else if parent_ref.timestamp >= prev_timestamp {
@@ -1004,7 +1003,7 @@ mod tests {
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let replica_index = rng.gen_range(0, PEERS);
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
