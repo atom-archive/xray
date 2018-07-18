@@ -401,7 +401,16 @@ impl Tree {
                 // Append tildes to the name until we don't have a name conflict.
                 loop {
                     Arc::make_mut(&mut key.name).push("~");
-                    if !cursor.seek_forward(&key, SeekBias::Left, child_ref_db)? {
+
+                    cursor.seek_forward(&key, SeekBias::Left, child_ref_db)?;
+                    if let Some(conflicting_child_ref) = cursor.item(child_ref_db)? {
+                        if !conflicting_child_ref.is_visible()
+                            || conflicting_child_ref.parent_id != parent_id
+                            || conflicting_child_ref.name != key.name
+                        {
+                            break;
+                        }
+                    } else {
                         break;
                     }
                 }
