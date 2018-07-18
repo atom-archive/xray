@@ -971,35 +971,23 @@ mod tests {
         tree_2_ops.push(tree_2.remove_dir("a", &db_2).unwrap());
         let id_2 = tree_2.id_for_path("a~", &db_2).unwrap().unwrap();
 
-        tree_1_ops.extend(
-            tree_1
-                .integrate_ops(&tree_2_ops.drain(..).collect::<Vec<_>>(), &db_1)
-                .unwrap(),
-        );
-
-        assert!(!tree_1_ops.is_empty());
-
-        tree_2_ops.extend(
-            tree_2
-                .integrate_ops(&tree_1_ops.drain(..).collect::<Vec<_>>(), &db_2)
-                .unwrap(),
-        );
-
-        assert!(!tree_2_ops.is_empty());
-
-        tree_1_ops.extend(
-            tree_1
-                .integrate_ops(&tree_2_ops.drain(..).collect::<Vec<_>>(), &db_1)
-                .unwrap(),
-        );
-
-        assert!(tree_1_ops.is_empty());
-        assert!(tree_2_ops.is_empty());
+        while !tree_1_ops.is_empty() || !tree_2_ops.is_empty() {
+            tree_1_ops.extend(
+                tree_1
+                    .integrate_ops(&tree_2_ops.drain(..).collect::<Vec<_>>(), &db_1)
+                    .unwrap(),
+            );
+            tree_2_ops.extend(
+                tree_2
+                    .integrate_ops(&tree_1_ops.drain(..).collect::<Vec<_>>(), &db_2)
+                    .unwrap(),
+            );
+        }
 
         assert_eq!(tree_1.paths_with_ids(&db_1), tree_2.paths_with_ids(&db_2));
-        assert_eq!(tree_1.paths(&db_1), ["a~/", "a~~/"]);
+        assert_eq!(tree_1.paths(&db_1), ["a~~/", "a~~~/"]);
         assert_eq!(tree_1.id_for_path("a~~", &db_1).unwrap().unwrap(), id_1);
-        assert_eq!(tree_1.id_for_path("a~", &db_1).unwrap().unwrap(), id_2);
+        assert_eq!(tree_1.id_for_path("a~~~", &db_1).unwrap().unwrap(), id_2);
     }
 
     #[test]
