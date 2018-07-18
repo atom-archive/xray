@@ -997,7 +997,6 @@ mod tests {
         const PEERS: usize = 2;
 
         for seed in 0..100000 {
-            let seed = 20429;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1005,7 +1004,7 @@ mod tests {
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let replica_index = rng.gen_range(0, PEERS);
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
@@ -1253,6 +1252,12 @@ mod tests {
         for _ in 0..rng.gen_range(1, 4) {
             name.push(rng.gen_range(b'a', b'z' + 1).into());
         }
+        if rng.gen_weighted_bool(5) {
+            for _ in 0..rng.gen_range(1, 2) {
+                name.push('~');
+            }
+        }
+
         name
     }
 }
