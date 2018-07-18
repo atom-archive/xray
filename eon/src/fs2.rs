@@ -2,6 +2,7 @@ use btree::{self, NodeStore, SeekBias};
 use id;
 use smallvec::SmallVec;
 use std::cmp::{self, Ordering};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::ops::{Add, AddAssign};
@@ -251,19 +252,28 @@ impl Tree {
         Ok(operation)
     }
 
-    fn integrate_ops<'a, I, S>(&mut self, ops: I, db: &S) -> Result<Vec<Operation>, S::ReadError>
+    pub fn integrate_ops<'a, I, S>(
+        &mut self,
+        ops: I,
+        db: &S,
+    ) -> Result<Vec<Operation>, S::ReadError>
     where
         I: IntoIterator<Item = &'a Operation>,
         S: Store,
     {
         let mut fixup_ops = Vec::new();
         for op in ops {
-            fixup_ops.extend(self.integrate_op(op.clone(), db)?);
+            fixup_ops.extend(self.integrate_op(op.clone(), true, db)?);
         }
         Ok(fixup_ops)
     }
 
-    fn integrate_op<S>(&mut self, op: Operation, db: &S) -> Result<Option<Operation>, S::ReadError>
+    fn integrate_op<S>(
+        &mut self,
+        op: Operation,
+        fix_conflicts: bool,
+        db: &S,
+    ) -> Result<Vec<Operation>, S::ReadError>
     where
         S: Store,
     {
@@ -275,6 +285,7 @@ impl Tree {
         let mut parent_refs = Vec::new();
         let mut child_refs = Vec::new();
         let mut new_child_ref;
+        let moved;
         let received_timestamp;
 
         match op {
@@ -308,6 +319,7 @@ impl Tree {
                 });
                 child_refs.extend(new_child_ref.clone());
                 received_timestamp = timestamp;
+                moved = false;
             }
             Operation::MoveDir {
                 op_id,
@@ -360,6 +372,7 @@ impl Tree {
                 });
                 child_refs.extend(new_child_ref.clone());
                 received_timestamp = timestamp;
+                moved = true;
             }
         }
 
@@ -371,36 +384,163 @@ impl Tree {
         }
 
         // println!("{:#?}", self.child_refs.items(child_ref_db)?);
-
-        if let Some(child_ref) = new_child_ref {
-            if child_ref.is_visible() {
-                self.fix_name_conflicts(child_ref.parent_id, child_ref.name, db)
-            } else {
-                Ok(None)
+        let mut fixup_ops = Vec::new();
+        if let Some(new_child_ref) = new_child_ref {
+            if fix_conflicts && new_child_ref.is_visible() {
+                fixup_ops.extend(self.fix_conflicts(new_child_ref, moved, db)?);
             }
-        } else {
-            Ok(None)
         }
+
+        Ok(fixup_ops)
     }
 
-    fn fix_name_conflicts<S: Store>(
+    fn fix_conflicts<S: Store>(
+        &mut self,
+        new_child_ref: ChildRef,
+        moved: bool,
+        db: &S,
+    ) -> Result<Vec<Operation>, S::ReadError> {
+        let mut fixup_ops = Vec::new();
+        let mut reverted_moves: HashMap<id::Unique, LamportTimestamp> = HashMap::new();
+
+        // If the child was moved, check for cycles
+        if moved {
+            let parent_ref_db = db.parent_ref_store();
+            let mut visited = HashSet::new();
+            let mut latest_move: Option<ParentRef> = None;
+            let mut cursor = self.parent_refs.cursor();
+            cursor.seek(&new_child_ref.child_id, SeekBias::Left, parent_ref_db)?;
+
+            loop {
+                let mut parent_ref = cursor.item(parent_ref_db)?.unwrap();
+                if visited.contains(&parent_ref.child_id) {
+                    // Cycle detected. Revert the most recent move contributing to the cycle.
+                    cursor.seek(
+                        &latest_move.as_ref().unwrap().key(),
+                        SeekBias::Right,
+                        parent_ref_db,
+                    )?;
+
+                    // Find the previous value for this parent ref that isn't a deletion and store
+                    // its timestamp in our reverted_moves map.
+                    loop {
+                        let parent_ref = cursor.item(parent_ref_db)?.unwrap();
+                        if parent_ref.parent.is_some() {
+                            reverted_moves.insert(parent_ref.child_id, parent_ref.timestamp);
+                            break;
+                        } else {
+                            cursor.next(parent_ref_db)?;
+                        }
+                    }
+
+                    // Reverting this move may not have been enough to break the cycle. We clear
+                    // the visited set but continue looping, potentially reverting multiple moves.
+                    latest_move = None;
+                    visited.clear();
+                } else {
+                    visited.insert(parent_ref.child_id);
+
+                    // If we have already reverted this parent ref to a previous value, interpret
+                    // it as having the value we reverted to.
+                    if let Some(prev_timestamp) = reverted_moves.get(&parent_ref.child_id) {
+                        while parent_ref.timestamp > *prev_timestamp {
+                            cursor.next(parent_ref_db)?;
+                            parent_ref = cursor.item(parent_ref_db)?.unwrap();
+                        }
+                    }
+
+                    // Check if this parent ref is a move and has the latest timestamp of any move
+                    // we have seen so far. If so, it is a candidate to be reverted.
+                    if latest_move
+                        .as_ref()
+                        .map_or(true, |m| parent_ref.timestamp > m.timestamp)
+                    {
+                        cursor.next(parent_ref_db)?;
+                        if cursor
+                            .item(parent_ref_db)?
+                            .map_or(false, |next_parent_ref| {
+                                next_parent_ref.child_id == parent_ref.child_id
+                            }) {
+                            latest_move = Some(parent_ref.clone());
+                        }
+                    }
+
+                    // Walk up to the next parent or break if none exists or the parent is the root
+                    if let Some((parent_id, _)) = parent_ref.parent {
+                        if parent_id == ROOT_ID {
+                            break;
+                        } else {
+                            cursor.seek(&parent_id, SeekBias::Left, parent_ref_db)?;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Convert the reverted moves into new move operations.
+            let mut new_locations = Vec::new();
+            for (child_id, timestamp) in &reverted_moves {
+                cursor.seek(child_id, SeekBias::Left, parent_ref_db)?;
+                let prev_timestamp = cursor.item(parent_ref_db)?.unwrap().timestamp;
+                cursor.seek_forward(
+                    &ParentRefKey {
+                        child_id: *child_id,
+                        timestamp: *timestamp,
+                    },
+                    SeekBias::Left,
+                    parent_ref_db,
+                )?;
+                let new_location = cursor.item(parent_ref_db)?.unwrap().parent;
+                new_locations.push(new_location.clone().unwrap());
+
+                fixup_ops.push(Operation::MoveDir {
+                    op_id: db.gen_id(),
+                    child_id: *child_id,
+                    timestamp: db.gen_timestamp(),
+                    prev_timestamp,
+                    new_location,
+                });
+            }
+
+            for op in &fixup_ops {
+                self.integrate_op(op.clone(), false, db)?;
+            }
+            for (parent_id, name) in new_locations {
+                fixup_ops.extend(self.fix_name_conflict(parent_id, name, db)?);
+            }
+        }
+
+        if !reverted_moves.contains_key(&new_child_ref.child_id) {
+            fixup_ops.extend(self.fix_name_conflict(
+                new_child_ref.parent_id,
+                new_child_ref.name,
+                db,
+            )?);
+        }
+
+        Ok(fixup_ops)
+    }
+
+    fn fix_name_conflict<S: Store>(
         &mut self,
         parent_id: id::Unique,
         name: Arc<OsString>,
         db: &S,
     ) -> Result<Option<Operation>, S::ReadError> {
         let child_ref_db = db.child_ref_store();
+
         let mut cursor = self.child_refs.cursor();
         let mut key = ParentIdAndName { parent_id, name };
         cursor.seek(&key, SeekBias::Left, child_ref_db)?;
         let next_visible_index = cursor.end::<usize, _>(child_ref_db)? + 1;
         cursor.seek_forward(&next_visible_index, SeekBias::Left, child_ref_db)?;
         if let Some(child_ref) = cursor.item(child_ref_db)? {
+            // If the next child ref has the same parent_id and name, we have a conflict
             if child_ref.parent_id == parent_id && child_ref.name == key.name {
-                // Append tildes to the name until we don't have a name conflict.
+                // Append tildes to the name until we find a name that doesn't already exist
                 loop {
                     Arc::make_mut(&mut key.name).push("~");
-
                     cursor.seek_forward(&key, SeekBias::Left, child_ref_db)?;
                     if let Some(conflicting_child_ref) = cursor.item(child_ref_db)? {
                         if !conflicting_child_ref.is_visible()
@@ -414,19 +554,19 @@ impl Tree {
                     }
                 }
 
-                // Move the conflicting child ref to the new name.
-                let operation = Some(Operation::MoveDir {
+                // Generate a move operation with the non-conflicting name
+                let fixup_op = Operation::MoveDir {
                     op_id: db.gen_id(),
                     child_id: child_ref.child_id,
                     timestamp: db.gen_timestamp(),
                     prev_timestamp: child_ref.timestamp,
                     new_location: Some((parent_id, key.name)),
-                });
-                self.integrate_ops(&operation, db)?;
-
-                return Ok(operation);
+                };
+                self.integrate_op(fixup_op.clone(), false, db)?;
+                return Ok(Some(fixup_op));
             }
         }
+
         Ok(None)
     }
 
@@ -990,12 +1130,45 @@ mod tests {
     }
 
     #[test]
+    fn test_cycle_fixups() {
+        let db_1 = NullStore::new(1);
+        let mut tree_1 = Tree::new();
+        tree_1.insert_dirs("a", &db_1).unwrap();
+        tree_1.insert_dirs("b", &db_1).unwrap();
+        let mut tree_1_ops = Vec::new();
+
+        let db_2 = NullStore::new(2);
+        let mut tree_2 = tree_1.clone();
+        let mut tree_2_ops = Vec::new();
+
+        tree_1_ops.push(tree_1.move_dir("a", "b/a", &db_1).unwrap());
+        tree_2_ops.push(tree_2.move_dir("b", "a/b", &db_1).unwrap());
+
+        while !tree_1_ops.is_empty() || !tree_2_ops.is_empty() {
+            tree_1_ops.extend(
+                tree_1
+                    .integrate_ops(&tree_2_ops.drain(..).collect::<Vec<_>>(), &db_1)
+                    .unwrap(),
+            );
+            tree_2_ops.extend(
+                tree_2
+                    .integrate_ops(&tree_1_ops.drain(..).collect::<Vec<_>>(), &db_2)
+                    .unwrap(),
+            );
+        }
+
+        assert_eq!(tree_1.paths_with_ids(&db_1), tree_2.paths_with_ids(&db_2));
+        assert_eq!(tree_1.paths(&db_1), ["b/", "b/a/"]);
+    }
+
+    #[test]
     fn test_replication_random() {
         use std::iter::FromIterator;
         use std::mem;
         const PEERS: usize = 2;
 
         for seed in 0..100000 {
+            // let seed = 204;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1003,7 +1176,7 @@ mod tests {
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
-            for _ in 0..4 {
+            for _ in 0..7 {
                 let replica_index = rng.gen_range(0, PEERS);
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
