@@ -1174,7 +1174,7 @@ mod tests {
         use std::mem;
         const PEERS: usize = 2;
 
-        for seed in 0..100000 {
+        for seed in 0..100 {
             // let seed = 204;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
@@ -1183,7 +1183,7 @@ mod tests {
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
-            for _ in 0..7 {
+            for _ in 0..10 {
                 let replica_index = rng.gen_range(0, PEERS);
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
