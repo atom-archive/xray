@@ -386,7 +386,7 @@ impl Tree {
         // println!("{:#?}", self.child_refs.items(child_ref_db)?);
         let mut fixup_ops = Vec::new();
         if let Some(new_child_ref) = new_child_ref {
-            if fix_conflicts && new_child_ref.is_visible() {
+            if fix_conflicts {
                 fixup_ops.extend(self.fix_conflicts(new_child_ref, moved, db)?);
             }
         }
@@ -404,7 +404,7 @@ impl Tree {
         let mut reverted_moves: HashMap<id::Unique, LamportTimestamp> = HashMap::new();
 
         // If the child was moved, check for cycles
-        if moved {
+        if moved && new_child_ref.is_visible() {
             let parent_ref_db = db.parent_ref_store();
             let mut visited = HashSet::new();
             let mut latest_move: Option<ParentRef> = None;
@@ -507,14 +507,16 @@ impl Tree {
                 self.integrate_op(op.clone(), false, db)?;
             }
             for (parent_id, name) in new_locations {
-                fixup_ops.extend(self.fix_name_conflict(parent_id, name, db)?);
+                fixup_ops.extend(self.fix_name_conflict(parent_id, name, true, db)?);
             }
         }
 
         if !reverted_moves.contains_key(&new_child_ref.child_id) {
+            let visible = new_child_ref.is_visible();
             fixup_ops.extend(self.fix_name_conflict(
                 new_child_ref.parent_id,
                 new_child_ref.name,
+                visible,
                 db,
             )?);
         }
@@ -526,6 +528,7 @@ impl Tree {
         &mut self,
         parent_id: id::Unique,
         name: Arc<OsString>,
+        visible: bool,
         db: &S,
     ) -> Result<Option<Operation>, S::ReadError> {
         let child_ref_db = db.child_ref_store();
@@ -538,19 +541,23 @@ impl Tree {
         if let Some(child_ref) = cursor.item(child_ref_db)? {
             // If the next child ref has the same parent_id and name, we have a conflict
             if child_ref.parent_id == parent_id && child_ref.name == key.name {
-                // Append tildes to the name until we find a name that doesn't already exist
-                loop {
-                    Arc::make_mut(&mut key.name).push("~");
-                    cursor.seek_forward(&key, SeekBias::Left, child_ref_db)?;
-                    if let Some(conflicting_child_ref) = cursor.item(child_ref_db)? {
-                        if !conflicting_child_ref.is_visible()
-                            || conflicting_child_ref.parent_id != parent_id
-                            || conflicting_child_ref.name != key.name
-                        {
+                // If the new child ref is visible, append tildes to the name until we find a name
+                // that doesn't already exist. If it's invisible, we just want to generate a new
+                // move to ensure the new deleted child ref doesn't clobber an existing entry.
+                if visible {
+                    loop {
+                        Arc::make_mut(&mut key.name).push("~");
+                        cursor.seek_forward(&key, SeekBias::Left, child_ref_db)?;
+                        if let Some(conflicting_child_ref) = cursor.item(child_ref_db)? {
+                            if !conflicting_child_ref.is_visible()
+                                || conflicting_child_ref.parent_id != parent_id
+                                || conflicting_child_ref.name != key.name
+                            {
+                                break;
+                            }
+                        } else {
                             break;
                         }
-                    } else {
-                        break;
                     }
                 }
 
