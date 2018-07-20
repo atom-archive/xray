@@ -53,8 +53,16 @@ pub struct Tree {
 
 pub struct TreeCursor {
     path: PathBuf,
-    stack: Vec<btree::Cursor<ChildRef>>,
+    stack: Vec<TreeCursorStackEntry>,
     metadata_cursor: btree::Cursor<Metadata>,
+    visited_dir_ids: HashSet<id::Unique>,
+}
+
+#[derive(Clone)]
+struct TreeCursorStackEntry {
+    cursor: btree::Cursor<ChildRef>,
+    jump: bool,
+    depth: usize,
 }
 
 pub struct TreeDiffCursor {
@@ -172,8 +180,9 @@ impl Tree {
             path: PathBuf::new(),
             stack: Vec::new(),
             metadata_cursor: self.metadata.cursor(),
+            visited_dir_ids: HashSet::new(),
         };
-        cursor.descend_into(self.child_refs.cursor(), ROOT_ID, db)?;
+        cursor.descend_into(self.child_refs.cursor(), ROOT_ID, None, db)?;
         Ok(cursor)
     }
 
@@ -736,7 +745,7 @@ where
 
 impl TreeCursor {
     pub fn depth(&self) -> usize {
-        self.stack.len()
+        self.stack.last().map_or(0, |entry| entry.depth)
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -753,8 +762,8 @@ impl TreeCursor {
         if self.stack.is_empty() {
             Ok(None)
         } else {
-            let child_ref = self.stack.last().unwrap().item(db)?.unwrap();
-            Ok(Some(child_ref.name.clone()))
+            let stack_entry = self.stack.last().unwrap();
+            Ok(Some(stack_entry.cursor.item(db)?.unwrap().name.clone()))
         }
     }
 
@@ -780,17 +789,29 @@ impl TreeCursor {
     }
 
     pub fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
+        let metadata_db = db.metadata_store();
+        let child_ref_db = db.child_ref_store();
+
         if self.stack.is_empty() {
             Ok(())
         } else {
-            let metadata = self.metadata_cursor.item(db.metadata_store())?.unwrap();
+            let metadata = self.metadata_cursor.item(metadata_db)?.unwrap();
             if (metadata.is_dir && self.descend(db)?) || self.next_sibling(db)? {
                 Ok(())
             } else {
                 loop {
                     self.path.pop();
-                    self.stack.pop();
-                    if self.stack.is_empty() || self.next_sibling(db)? {
+                    if self.stack.pop().map_or(false, |entry| entry.jump) {
+                        if let Some(entry) = self.stack.last() {
+                            let child_ref = entry.cursor.item(child_ref_db)?.unwrap();
+                            self.metadata_cursor.seek(
+                                &child_ref.child_id,
+                                SeekBias::Left,
+                                metadata_db,
+                            )?;
+                        }
+                        return Ok(());
+                    } else if self.stack.is_empty() || self.next_sibling(db)? {
                         return Ok(());
                     }
                 }
@@ -798,32 +819,51 @@ impl TreeCursor {
         }
     }
 
+    pub fn jump<S: Store>(
+        &mut self,
+        child_id: id::Unique,
+        depth: usize,
+        db: &S,
+    ) -> Result<bool, S::ReadError> {
+        let stack_entry = self.stack.last().unwrap().clone();
+        self.visited_dir_ids.insert(child_id);
+        self.descend_into(stack_entry.cursor, child_id, Some(depth), db)
+    }
+
     fn descend<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
-        let child_ref_cursor = self.stack.last().unwrap().clone();
-        let dir_id = child_ref_cursor
+        let stack_entry = self.stack.last().unwrap().clone();
+        let dir_id = stack_entry
+            .cursor
             .item(db.child_ref_store())?
             .unwrap()
             .child_id;
-        self.descend_into(child_ref_cursor, dir_id, db)
+        self.descend_into(stack_entry.cursor, dir_id, None, db)
     }
 
     fn descend_into<S: Store>(
         &mut self,
         mut child_ref_cursor: btree::Cursor<ChildRef>,
         dir_id: id::Unique,
+        depth: Option<usize>,
         db: &S,
     ) -> Result<bool, S::ReadError> {
         child_ref_cursor.seek(&dir_id, SeekBias::Left, db.child_ref_store())?;
         if let Some(child_ref) = child_ref_cursor.item(db.child_ref_store())? {
             if child_ref.parent_id == dir_id {
+                let prev_depth = self.depth();
                 self.path.push(child_ref.name.as_os_str());
-                self.stack.push(child_ref_cursor);
-                if child_ref.is_visible() {
+                self.stack.push(TreeCursorStackEntry {
+                    cursor: child_ref_cursor.clone(),
+                    jump: depth.is_some(),
+                    depth: depth.unwrap_or(prev_depth) + 1,
+                });
+                if child_ref.is_visible() && !self.visited_dir_ids.contains(&child_ref.child_id) {
                     self.metadata_cursor.seek(
                         &child_ref.child_id,
                         SeekBias::Left,
                         db.metadata_store(),
                     )?;
+                    self.visited_dir_ids.insert(child_ref.child_id);
                     Ok(true)
                 } else if self.next_sibling(db)? {
                     Ok(true)
@@ -842,26 +882,36 @@ impl TreeCursor {
 
     fn next_sibling<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
         let child_ref_db = db.child_ref_store();
-        let child_ref_cursor = self.stack.last_mut().unwrap();
-        let parent_id = child_ref_cursor.item(child_ref_db)?.unwrap().parent_id;
-        let next_visible_index: usize = child_ref_cursor.end(child_ref_db)?;
-        child_ref_cursor.seek(&next_visible_index, SeekBias::Right, child_ref_db)?;
-        if let Some(child_ref) = child_ref_cursor.item(child_ref_db)? {
+        let stack_entry = self.stack.last_mut().unwrap();
+        let parent_id = stack_entry.cursor.item(child_ref_db)?.unwrap().parent_id;
+        let next_visible_index: usize = stack_entry.cursor.end(child_ref_db)?;
+        stack_entry
+            .cursor
+            .seek(&next_visible_index, SeekBias::Right, child_ref_db)?;
+        while let Some(child_ref) = stack_entry.cursor.item(child_ref_db)? {
             if child_ref.parent_id == parent_id {
-                self.path.pop();
-                self.path.push(child_ref.name.as_os_str());
-                self.metadata_cursor.seek(
-                    &child_ref.child_id,
-                    SeekBias::Left,
-                    db.metadata_store(),
-                )?;
-                Ok(true)
+                if self.visited_dir_ids.contains(&child_ref.child_id) {
+                    let next_visible_index: usize = stack_entry.cursor.end(child_ref_db)?;
+                    stack_entry
+                        .cursor
+                        .seek(&next_visible_index, SeekBias::Right, child_ref_db)?;
+                } else {
+                    self.path.pop();
+                    self.path.push(child_ref.name.as_os_str());
+                    self.metadata_cursor.seek(
+                        &child_ref.child_id,
+                        SeekBias::Left,
+                        db.metadata_store(),
+                    )?;
+                    self.visited_dir_ids.insert(child_ref.child_id);
+                    return Ok(true);
+                }
             } else {
-                Ok(false)
+                break;
             }
-        } else {
-            Ok(false)
         }
+
+        Ok(false)
     }
 }
 
@@ -901,18 +951,39 @@ impl TreeDiffCursor {
     }
 
     fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
-        match self.cmp_cursors(db)? {
-            Ordering::Less => {
-                self.new_cursor.next(db)?;
-            }
-            Ordering::Equal => {
-                self.new_cursor.next(db)?;
-                self.old_cursor.next(db)?;
-            }
-            Ordering::Greater => {
-                self.old_cursor.next(db)?;
+        if let Some(item) = self.item(db)? {
+            match &item.status {
+                TreeDiffStatus::Inserted { src_path } if src_path.is_some() => {
+                    self.old_cursor.jump(
+                        self.new_cursor.file_id(db)?.unwrap(),
+                        self.new_cursor.depth(),
+                        db,
+                    )?;
+                    self.new_cursor.next(db)?;
+                }
+                TreeDiffStatus::Removed { dst_path } if dst_path.is_some() => {
+                    self.new_cursor.jump(
+                        self.old_cursor.file_id(db)?.unwrap(),
+                        self.old_cursor.depth(),
+                        db,
+                    )?;
+                    self.old_cursor.next(db)?;
+                }
+                _ => match self.cmp_cursors(db)? {
+                    Ordering::Less => {
+                        self.new_cursor.next(db)?;
+                    }
+                    Ordering::Equal => {
+                        self.new_cursor.next(db)?;
+                        self.old_cursor.next(db)?;
+                    }
+                    Ordering::Greater => {
+                        self.old_cursor.next(db)?;
+                    }
+                },
             }
         }
+
         Ok(())
     }
 
@@ -1237,20 +1308,27 @@ mod tests {
         let mut old_tree = Tree::new();
         old_tree.insert_dirs("a/b1/", &db).unwrap();
         old_tree.insert_dirs("a/b2/", &db).unwrap();
-        old_tree.insert_dirs("a/b3/", &db).unwrap();
+        old_tree.insert_dirs("a/b3/x/y/z", &db).unwrap();
 
-        let mut new_tree_1 = old_tree.clone();
-        new_tree_1.insert_dirs("a/b1/c", &db).unwrap();
-        new_tree_1.move_dir("a/b3", "a/b1/d", &db).unwrap();
-        new_tree_1.remove_dir("a/b2", &db).unwrap();
-        new_tree_1.insert_dirs("a/b4", &db).unwrap();
+        let mut new_tree = old_tree.clone();
+        new_tree.insert_dirs("a/b1/c", &db).unwrap();
+        new_tree.move_dir("a/b3", "a/b1/d", &db).unwrap();
+        new_tree.remove_dir("a/b2", &db).unwrap();
+        new_tree.insert_dirs("a/b4", &db).unwrap();
 
-        let mut new_tree_2 = old_tree.clone();
+        let mut new_tree_from_old_tree_cursor = new_tree.diff(&old_tree, &db).unwrap();
+        let mut old_tree_from_new_tree_cursor = old_tree.diff(&new_tree, &db).unwrap();
 
-        let mut diff_cursor = new_tree_1.diff(&old_tree, &db).unwrap();
-        while let Some(diff) = diff_cursor.item(&db).unwrap() {
+        while let Some(diff) = new_tree_from_old_tree_cursor.item(&db).unwrap() {
             println!("{:?}", diff);
-            diff_cursor.next(&db).unwrap();
+            new_tree_from_old_tree_cursor.next(&db).unwrap();
+        }
+
+        println!("=====================",);
+
+        while let Some(diff) = old_tree_from_new_tree_cursor.item(&db).unwrap() {
+            println!("{:?}", diff);
+            old_tree_from_new_tree_cursor.next(&db).unwrap();
         }
     }
 
