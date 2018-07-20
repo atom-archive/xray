@@ -3,7 +3,7 @@ use id;
 use smallvec::SmallVec;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::path::{Path, PathBuf};
@@ -76,14 +76,18 @@ pub struct TreeDiffCursor {
 pub struct TreeDiffItem {
     pub depth: usize,
     pub name: Arc<OsString>,
-    pub status: TreeDiffStatus,
+    pub operation: LocalOperation,
 }
 
 #[derive(Debug)]
-pub enum TreeDiffStatus {
-    Same,
-    Inserted { src_path: Option<PathBuf> },
-    Removed { dst_path: Option<PathBuf> },
+pub enum LocalOperation {
+    Keep,
+    Insert { src_path: Option<PathBuf> },
+    Remove { dst_path: Option<PathBuf> },
+}
+
+pub struct TreeReconciler {
+    diff_cursor: TreeDiffCursor,
 }
 
 #[derive(Clone, Debug)]
@@ -790,33 +794,32 @@ impl TreeCursor {
 
     pub fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
         let metadata_db = db.metadata_store();
-        let child_ref_db = db.child_ref_store();
 
-        if self.stack.is_empty() {
-            Ok(())
-        } else {
+        if !self.stack.is_empty() {
             let metadata = self.metadata_cursor.item(metadata_db)?.unwrap();
-            if (metadata.is_dir && self.descend(db)?) || self.next_sibling(db)? {
-                Ok(())
-            } else {
-                loop {
-                    self.path.pop();
-                    if self.stack.pop().map_or(false, |entry| entry.jump) {
-                        if let Some(entry) = self.stack.last() {
-                            let child_ref = entry.cursor.item(child_ref_db)?.unwrap();
-                            self.metadata_cursor.seek(
-                                &child_ref.child_id,
-                                SeekBias::Left,
-                                metadata_db,
-                            )?;
-                        }
-                        return Ok(());
-                    } else if self.stack.is_empty() || self.next_sibling(db)? {
-                        return Ok(());
-                    }
-                }
+            if !metadata.is_dir || !self.descend(db)? {
+                self.next_sibling_or_cousin(db)?;
             }
         }
+        Ok(())
+    }
+
+    pub fn next_sibling_or_cousin<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
+        let metadata_db = db.metadata_store();
+        let child_ref_db = db.child_ref_store();
+
+        while !self.stack.is_empty() && !self.next_sibling(db)? {
+            self.path.pop();
+            if self.stack.pop().map_or(false, |entry| entry.jump) {
+                if let Some(entry) = self.stack.last() {
+                    let child_ref = entry.cursor.item(child_ref_db)?.unwrap();
+                    self.metadata_cursor
+                        .seek(&child_ref.child_id, SeekBias::Left, metadata_db)?;
+                }
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 
     pub fn jump<S: Store>(
@@ -925,14 +928,14 @@ impl TreeDiffCursor {
                 Ok(Some(TreeDiffItem {
                     depth: self.new_cursor.depth(),
                     name: self.new_cursor.name(db)?.unwrap(),
-                    status: TreeDiffStatus::Inserted { src_path },
+                    operation: LocalOperation::Insert { src_path },
                 }))
             }
             Ordering::Equal => if self.new_cursor.depth() > 0 {
                 Ok(Some(TreeDiffItem {
                     depth: self.new_cursor.depth(),
                     name: self.new_cursor.name(db)?.unwrap(),
-                    status: TreeDiffStatus::Same,
+                    operation: LocalOperation::Keep,
                 }))
             } else {
                 Ok(None)
@@ -944,7 +947,7 @@ impl TreeDiffCursor {
                 Ok(Some(TreeDiffItem {
                     depth: self.old_cursor.depth(),
                     name: self.old_cursor.name(db)?.unwrap(),
-                    status: TreeDiffStatus::Removed { dst_path },
+                    operation: LocalOperation::Remove { dst_path },
                 }))
             }
         }
@@ -952,8 +955,8 @@ impl TreeDiffCursor {
 
     fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
         if let Some(item) = self.item(db)? {
-            match &item.status {
-                TreeDiffStatus::Inserted { src_path } if src_path.is_some() => {
+            match &item.operation {
+                LocalOperation::Insert { src_path } if src_path.is_some() => {
                     self.old_cursor.jump(
                         self.new_cursor.file_id(db)?.unwrap(),
                         self.new_cursor.depth(),
@@ -961,13 +964,8 @@ impl TreeDiffCursor {
                     )?;
                     self.new_cursor.next(db)?;
                 }
-                TreeDiffStatus::Removed { dst_path } if dst_path.is_some() => {
-                    self.new_cursor.jump(
-                        self.old_cursor.file_id(db)?.unwrap(),
-                        self.old_cursor.depth(),
-                        db,
-                    )?;
-                    self.old_cursor.next(db)?;
+                LocalOperation::Remove { dst_path } if dst_path.is_some() => {
+                    self.old_cursor.next_sibling_or_cousin(db)?;
                 }
                 _ => match self.cmp_cursors(db)? {
                     Ordering::Less => {
@@ -994,6 +992,20 @@ impl TreeDiffCursor {
         } else {
             Ok(ordering)
         }
+    }
+}
+
+impl TreeReconciler {
+    pub fn visit<S>(
+        &mut self,
+        depth: usize,
+        name: &OsStr,
+        db: &S,
+    ) -> Result<LocalOperation, S::ReadError>
+    where
+        S: Store,
+    {
+        unimplemented!()
     }
 }
 
