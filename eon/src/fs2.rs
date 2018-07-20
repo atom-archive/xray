@@ -57,6 +57,27 @@ pub struct TreeCursor {
     metadata_cursor: btree::Cursor<Metadata>,
 }
 
+pub struct TreeDiffCursor {
+    old_tree: Tree,
+    old_cursor: TreeCursor,
+    new_tree: Tree,
+    new_cursor: TreeCursor,
+}
+
+#[derive(Debug)]
+pub struct TreeDiffItem {
+    pub depth: usize,
+    pub name: Arc<OsString>,
+    pub status: TreeDiffStatus,
+}
+
+#[derive(Debug)]
+pub enum TreeDiffStatus {
+    Same,
+    Inserted { src_path: Option<PathBuf> },
+    Removed { dst_path: Option<PathBuf> },
+}
+
 #[derive(Clone, Debug)]
 pub enum Operation {
     InsertDir {
@@ -154,6 +175,19 @@ impl Tree {
         };
         cursor.descend_into(self.child_refs.cursor(), ROOT_ID, db)?;
         Ok(cursor)
+    }
+
+    pub fn diff<S: Store>(&self, old_tree: &Tree, db: &S) -> Result<TreeDiffCursor, S::ReadError> {
+        let new_cursor = self.cursor(db)?;
+        let new_tree = self.clone();
+        let old_cursor = old_tree.cursor(db)?;
+        let old_tree = old_tree.clone();
+        Ok(TreeDiffCursor {
+            old_tree,
+            old_cursor,
+            new_tree,
+            new_cursor,
+        })
     }
 
     pub fn insert_dirs<I, S>(&mut self, path: I, db: &S) -> Result<Vec<Operation>, S::ReadError>
@@ -608,6 +642,36 @@ impl Tree {
         Ok(Some(child_id))
     }
 
+    fn path_for_id<S>(&self, child_id: id::Unique, db: &S) -> Result<Option<PathBuf>, S::ReadError>
+    where
+        S: Store,
+    {
+        let parent_ref_db = db.parent_ref_store();
+
+        let mut path_components = Vec::new();
+
+        let mut cursor = self.parent_refs.cursor();
+        cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
+        loop {
+            if let Some((parent_id, name)) = cursor.item(parent_ref_db)?.and_then(|r| r.parent) {
+                path_components.push(name);
+                if parent_id == ROOT_ID {
+                    break;
+                } else {
+                    cursor.seek(&parent_id, SeekBias::Left, parent_ref_db)?;
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+
+        let mut path = PathBuf::new();
+        for component in path_components.into_iter().rev() {
+            path.push(component.as_ref());
+        }
+        Ok(Some(path))
+    }
+
     fn find_cur_parent_ref<S>(
         &self,
         child_id: id::Unique,
@@ -692,6 +756,13 @@ impl TreeCursor {
             let child_ref = self.stack.last().unwrap().item(db)?.unwrap();
             Ok(Some(child_ref.name.clone()))
         }
+    }
+
+    pub fn file_id<S: Store>(&self, db: &S) -> Result<Option<id::Unique>, S::ReadError> {
+        Ok(self
+            .metadata_cursor
+            .item(db.metadata_store())?
+            .map(|metadata| metadata.file_id))
     }
 
     pub fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
@@ -790,6 +861,67 @@ impl TreeCursor {
             }
         } else {
             Ok(false)
+        }
+    }
+}
+
+impl TreeDiffCursor {
+    fn item<S: Store>(&self, db: &S) -> Result<Option<TreeDiffItem>, S::ReadError> {
+        match self.cmp_cursors(db)? {
+            Ordering::Less => {
+                let src_path = self
+                    .old_tree
+                    .path_for_id(self.new_cursor.file_id(db)?.unwrap(), db)?;
+                Ok(Some(TreeDiffItem {
+                    depth: self.new_cursor.depth(),
+                    name: self.new_cursor.name(db)?.unwrap(),
+                    status: TreeDiffStatus::Inserted { src_path },
+                }))
+            }
+            Ordering::Equal => if self.new_cursor.depth() > 0 {
+                Ok(Some(TreeDiffItem {
+                    depth: self.new_cursor.depth(),
+                    name: self.new_cursor.name(db)?.unwrap(),
+                    status: TreeDiffStatus::Same,
+                }))
+            } else {
+                Ok(None)
+            },
+            Ordering::Greater => {
+                let dst_path = self
+                    .new_tree
+                    .path_for_id(self.old_cursor.file_id(db)?.unwrap(), db)?;
+                Ok(Some(TreeDiffItem {
+                    depth: self.old_cursor.depth(),
+                    name: self.old_cursor.name(db)?.unwrap(),
+                    status: TreeDiffStatus::Removed { dst_path },
+                }))
+            }
+        }
+    }
+
+    fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
+        match self.cmp_cursors(db)? {
+            Ordering::Less => {
+                self.new_cursor.next(db)?;
+            }
+            Ordering::Equal => {
+                self.new_cursor.next(db)?;
+                self.old_cursor.next(db)?;
+            }
+            Ordering::Greater => {
+                self.old_cursor.next(db)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn cmp_cursors<S: Store>(&self, db: &S) -> Result<Ordering, S::ReadError> {
+        let ordering = self.old_cursor.depth().cmp(&self.new_cursor.depth());
+        if ordering == Ordering::Equal {
+            Ok(self.new_cursor.name(db)?.cmp(&self.old_cursor.name(db)?))
+        } else {
+            Ok(ordering)
         }
     }
 }
@@ -1097,6 +1229,29 @@ mod tests {
         tree.move_dir("b/d", "a/b2/d", &db).unwrap();
         assert_eq!(tree.paths(&db), ["a/", "a/b2/", "a/b2/d/", "b/", "b/c/"]);
         assert_eq!(tree.id_for_path("a/b2/d", &db).unwrap().unwrap(), moved_id);
+    }
+
+    #[test]
+    fn test_diff() {
+        let db = NullStore::new(1);
+        let mut old_tree = Tree::new();
+        old_tree.insert_dirs("a/b1/", &db).unwrap();
+        old_tree.insert_dirs("a/b2/", &db).unwrap();
+        old_tree.insert_dirs("a/b3/", &db).unwrap();
+
+        let mut new_tree_1 = old_tree.clone();
+        new_tree_1.insert_dirs("a/b1/c", &db).unwrap();
+        new_tree_1.move_dir("a/b3", "a/b1/d", &db).unwrap();
+        new_tree_1.remove_dir("a/b2", &db).unwrap();
+        new_tree_1.insert_dirs("a/b4", &db).unwrap();
+
+        let mut new_tree_2 = old_tree.clone();
+
+        let mut diff_cursor = new_tree_1.diff(&old_tree, &db).unwrap();
+        while let Some(diff) = diff_cursor.item(&db).unwrap() {
+            println!("{:?}", diff);
+            diff_cursor.next(&db).unwrap();
+        }
     }
 
     #[test]
