@@ -65,13 +65,6 @@ struct TreeCursorStackEntry {
     depth: usize,
 }
 
-pub struct TreeDiffCursor {
-    old_tree: Tree,
-    old_cursor: TreeCursor,
-    new_tree: Tree,
-    new_cursor: TreeCursor,
-}
-
 #[derive(Debug)]
 pub struct TreeDiffItem {
     pub depth: usize,
@@ -86,10 +79,11 @@ pub enum LocalOperation {
     Remove { dst_path: Option<PathBuf> },
 }
 
-pub struct TreeReconciler {
-    diff_cursor: TreeDiffCursor,
-    pending_moves: Vec<PendingMove>,
-    remove_pending: bool,
+pub struct TreeUpdater {
+    cursor: TreeCursor,
+    dir_stack: Vec<id::Unique>,
+    visited_inodes: HashSet<Inode>,
+    dir_changes: HashMap<id::Unique, DirChange>,
 }
 
 struct PendingMove {
@@ -211,12 +205,8 @@ impl Tree {
         })
     }
 
-    pub fn reconcile<S: Store>(
-        &self,
-        old_tree: &Tree,
-        db: &S,
-    ) -> Result<TreeReconciler, S::ReadError> {
-        Ok(TreeReconciler {
+    pub fn update<S: Store>(&self, old_tree: &Tree, db: &S) -> Result<TreeUpdater, S::ReadError> {
+        Ok(TreeUpdater {
             diff_cursor: self.diff(old_tree, db)?,
             pending_moves: Vec::new(),
             remove_pending: false,
@@ -798,18 +788,16 @@ impl TreeCursor {
             .map(|metadata| metadata.file_id))
     }
 
-    pub fn inode<S: Store>(&self, db: &S) -> Result<Option<Inode>, S::ReadError> {
-        Ok(self
-            .metadata_cursor
-            .item(db.metadata_store())?
-            .and_then(|metadata| metadata.inode))
+    fn metadata<S: Store>(&self, db: &S) -> Result<Option<Metadata>, S::ReadError> {
+        self.metadata_cursor.item(db.metadata_store())
     }
 
-    pub fn is_dir<S: Store>(&self, db: &S) -> Result<Option<bool>, S::ReadError> {
-        Ok(self
-            .metadata_cursor
-            .item(db.metadata_store())?
-            .map(|metadata| metadata.is_dir))
+    fn child_ref<S: Store>(&self, db: &S) -> Result<Option<ChildRef>, S::ReadError> {
+        if let Some(entry) = self.stack.last() {
+            entry.cursor.item(db.child_ref_store())
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
@@ -938,157 +926,56 @@ impl TreeCursor {
     }
 }
 
-impl TreeDiffCursor {
-    fn item<S: Store>(&self, db: &S) -> Result<Option<TreeDiffItem>, S::ReadError> {
-        match self.cmp_cursors(db)? {
-            Ordering::Less => {
-                let src_path = self
-                    .old_tree
-                    .path_for_id(self.new_cursor.file_id(db)?.unwrap(), db)?;
-                Ok(Some(TreeDiffItem {
-                    depth: self.new_cursor.depth(),
-                    name: self.new_cursor.name(db)?.unwrap(),
-                    operation: LocalOperation::Insert { src_path },
-                }))
-            }
-            Ordering::Equal => if self.new_cursor.depth() > 0 {
-                Ok(Some(TreeDiffItem {
-                    depth: self.new_cursor.depth(),
-                    name: self.new_cursor.name(db)?.unwrap(),
-                    operation: LocalOperation::Keep,
-                }))
-            } else {
-                Ok(None)
-            },
-            Ordering::Greater => {
-                let dst_path = self
-                    .new_tree
-                    .path_for_id(self.old_cursor.file_id(db)?.unwrap(), db)?;
-                Ok(Some(TreeDiffItem {
-                    depth: self.old_cursor.depth(),
-                    name: self.old_cursor.name(db)?.unwrap(),
-                    operation: LocalOperation::Remove { dst_path },
-                }))
-            }
-        }
+impl TreeUpdater {
+    pub fn new<S: Store>(tree: &Tree, db: &S) -> Result<Self, S::ReadError> {
+        let cursor = tree.cursor(db)?;
+        Ok(TreeUpdater { cursor })
     }
 
-    fn path<S: Store>(&self, db: &S) -> Result<Option<&Path>, S::ReadError> {
-        match self.cmp_cursors(db)? {
-            Ordering::Less | Ordering::Equal => Ok(self.new_cursor.path()),
-            Ordering::Greater => Ok(self.old_cursor.path()),
-        }
-    }
-
-    fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
-        if let Some(item) = self.item(db)? {
-            match &item.operation {
-                LocalOperation::Insert { src_path } if src_path.is_some() => {
-                    self.new_cursor.next_sibling_or_cousin(db)?;
-                    println!("new cursor next sibling");
-                }
-                LocalOperation::Remove { dst_path } if dst_path.is_some() => {
-                    self.new_cursor.jump(
-                        self.old_cursor.file_id(db)?.unwrap(),
-                        self.old_cursor.depth(),
-                        db,
-                    )?;
-                    println!("new cursor jump");
-                }
-                _ => match self.cmp_cursors(db)? {
-                    Ordering::Less => {
-                        self.new_cursor.next(db)?;
-                        println!("new cursor next {:?}", self.new_cursor.path());
-                    }
-                    Ordering::Equal => {
-                        self.new_cursor.next(db)?;
-                        self.old_cursor.next(db)?;
-                        println!("both cursors next {:?} {:?}", self.new_cursor.path(), self.old_cursor.path());
-
-                    }
-                    Ordering::Greater => {
-                        self.old_cursor.next(db)?;
-                        println!("old cursor next {:?}", self.old_cursor.path());
-                    }
-                },
-            }
-        }
-
-        Ok(())
-    }
-
-    fn cmp_cursors<S: Store>(&self, db: &S) -> Result<Ordering, S::ReadError> {
-        let ordering = self
-            .new_cursor
-            .depth()
-            .cmp(&self.old_cursor.depth())
-            .reverse();
-        if ordering == Ordering::Equal {
-            Ok(self.new_cursor.name(db)?.cmp(&self.old_cursor.name(db)?))
-        } else {
-            Ok(ordering)
-        }
-    }
-}
-
-impl TreeReconciler {
     pub fn visit<F, S>(
         &mut self,
-        depth: usize,
-        name: &OsStr,
-        fs: &mut F,
+        new_depth: usize,
+        new_name: &OsStr,
+        new_inode: Inode,
         db: &S,
     ) -> Result<(), S::ReadError>
     where
         F: FileSystem,
         S: Store,
     {
-        self.flush_pending_moves(depth, fs);
+        debug_assert!(new_depth > 0);
+
+        self.dir_stack.truncate(new_depth - 1);
+
+        // Delete old entries that precede the entry we are visiting. If we find an equivalent
+        // entry, update it if its inode has changed and return.
         loop {
-            let inserted = {
-                let path = self.diff_cursor.path(db)?.unwrap();
-                let item = self.diff_cursor.item(db)?.unwrap();
-                match item.operation {
-                    LocalOperation::Keep => {
-                        println!("keep");
-
-                        // For now, assume the file system matches the state of the old tree
-                        assert_eq!(item.name.as_ref(), name);
-                        assert_eq!(item.depth, depth);
-                        false
-                    }
-                    LocalOperation::Insert { src_path } => {
-                        println!("insert {:?} from {:?}", path, src_path);
-                        if let Some(_src_path) = src_path {
-                            // fs.move_dir(&src_path, path);
-                        } else {
-                            fs.insert_dirs(path);
-                        }
-                        true
-                    }
-                    LocalOperation::Remove { dst_path } => {
-                        println!("move {:?} to {:?}", path, dst_path);
-
-                        // For now, assume the file system matches the state of the old tree
-                        assert_eq!(item.name.as_ref(), name);
-                        assert_eq!(item.depth, depth);
-
-                        if dst_path.is_some() || !self.remove_pending {
-                            self.remove_pending = dst_path.is_none();
-                            self.pending_moves.push(PendingMove {
-                                src_depth: item.depth,
-                                src_path: path.into(),
-                                dst_path,
-                            });
-                        }
-                        false
-                    }
-                }
-            };
-
-            self.diff_cursor.next(db)?;
-            if !inserted {
+            let old_depth = self.cursor.depth();
+            if old_depth < new_depth {
                 break;
+            }
+
+            let old_metadata = self.cursor.metadata(db)?.unwrap();
+            let old_child_ref = self.cursor.child_ref(db)?.unwrap();
+
+            if old_depth == new_depth {
+                match old_child_ref.name.as_os_str().cmp(new_name) {
+                    Ordering::Less => {}
+                    Ordering::Equal => {
+                        if let Some(old_inode) = old_metadata.inode {
+                            if !self.visited_inodes.contains(&old_inode) {
+                                self.visited_inodes.insert(old_inode);
+                                self.visited_inodes.insert(new_inode);
+                                if new_inode != old_inode {
+
+                                }
+                            }
+                        } else {
+                            unimplemented!()
+                        }
+                    }
+                    Ordering::Greater => break,
+                }
             }
         }
 
@@ -1096,23 +983,7 @@ impl TreeReconciler {
     }
 
     pub fn finish<F: FileSystem>(&mut self, fs: &mut F) {
-        self.flush_pending_moves(0, fs);
-    }
-
-    fn flush_pending_moves<F: FileSystem>(&mut self, depth: usize, fs: &mut F) {
-        while self
-            .pending_moves
-            .last()
-            .map_or(false, |pending_move| pending_move.src_depth >= depth)
-        {
-            let pending_move = self.pending_moves.pop().unwrap();
-            if let Some(dst_path) = pending_move.dst_path {
-                fs.move_dir(&pending_move.src_path, &dst_path)
-            } else {
-                fs.remove_dir(&pending_move.src_path);
-                self.remove_pending = false;
-            }
-        }
+        unimplemented!()
     }
 }
 
@@ -1452,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reconciliation_random() {
+    fn test_updater_random() {
         for seed in 0..100 {
             let seed = 3;
             println!("SEED: {:?}", seed);
@@ -1464,21 +1335,19 @@ mod tests {
             println!("fs paths {:?}", fs.paths());
 
             let db = NullStore::new(1);
-            let old_index = fs.tree.clone();
-            let mut new_index = old_index.clone();
-            for _ in 0..1 {
-                new_index.mutate(&mut rng, &db);
-            }
+            let index = fs.tree.clone();
 
-            let mut reconciler = new_index.reconcile(&old_index, &db).unwrap();
+            fs.mutate(&mut rng, 2);
+
+            let mut updater = TreeUpdater::new(&index, &db).unwrap();
             while let Some(entry) = fs.next() {
                 println!("visit {:?} {:?}", entry.depth, entry.name);
-                reconciler
+                updater
                     .visit(entry.depth, entry.name.as_ref(), &mut fs, &db)
                     .unwrap();
             }
             println!("finish");
-            reconciler.finish(&mut fs);
+            updater.finish(&mut fs);
         }
     }
 
@@ -1885,7 +1754,7 @@ mod tests {
             loop {
                 if let Some(path) = cursor.path() {
                     let mut path = path.to_string_lossy().into_owned();
-                    if cursor.is_dir(db).unwrap().unwrap() {
+                    if cursor.metadata(db).unwrap().unwrap().is_dir {
                         path += "/";
                     }
                     paths.push(path);
