@@ -49,6 +49,7 @@ pub struct Tree {
     metadata: btree::Tree<Metadata>,
     parent_refs: btree::Tree<ParentRef>,
     child_refs: btree::Tree<ChildRef>,
+    inodes_to_file_ids: HashMap<Inode, id::Unique>,
 }
 
 pub struct TreeCursor {
@@ -65,31 +66,33 @@ struct TreeCursorStackEntry {
     depth: usize,
 }
 
-#[derive(Debug)]
-pub struct TreeDiffItem {
-    pub depth: usize,
-    pub name: Arc<OsString>,
-    pub operation: LocalOperation,
-}
-
-#[derive(Debug)]
-pub enum LocalOperation {
-    Keep,
-    Insert { src_path: Option<PathBuf> },
-    Remove { dst_path: Option<PathBuf> },
-}
-
 pub struct TreeUpdater {
+    tree: Tree,
     cursor: TreeCursor,
     dir_stack: Vec<id::Unique>,
     visited_inodes: HashSet<Inode>,
     dir_changes: HashMap<id::Unique, DirChange>,
+    inodes_to_file_ids: HashMap<Inode, id::Unique>,
+    next_change_timestamp: usize,
 }
 
-struct PendingMove {
-    src_depth: usize,
-    src_path: PathBuf,
-    dst_path: Option<PathBuf>,
+struct DirChange {
+    timestamp: usize,
+    kind: DirChangeKind,
+}
+
+enum DirChangeKind {
+    Insert {
+        inode: Inode,
+        parent_id: id::Unique,
+        name: Arc<OsString>,
+    },
+    Update {
+        inode: Inode,
+    },
+    Move {
+        new_location: Option<(id::Unique, Arc<OsString>)>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +177,7 @@ impl Tree {
             metadata: btree::Tree::new(),
             parent_refs: btree::Tree::new(),
             child_refs: btree::Tree::new(),
+            inodes_to_file_ids: HashMap::new(),
         }
     }
 
@@ -192,24 +196,15 @@ impl Tree {
         Ok(cursor)
     }
 
-    pub fn diff<S: Store>(&self, old_tree: &Tree, db: &S) -> Result<TreeDiffCursor, S::ReadError> {
-        let new_cursor = self.cursor(db)?;
-        let new_tree = self.clone();
-        let old_cursor = old_tree.cursor(db)?;
-        let old_tree = old_tree.clone();
-        Ok(TreeDiffCursor {
-            old_tree,
-            old_cursor,
-            new_tree,
-            new_cursor,
-        })
-    }
-
-    pub fn update<S: Store>(&self, old_tree: &Tree, db: &S) -> Result<TreeUpdater, S::ReadError> {
+    pub fn update<S: Store>(&self, db: &S) -> Result<TreeUpdater, S::ReadError> {
         Ok(TreeUpdater {
-            diff_cursor: self.diff(old_tree, db)?,
-            pending_moves: Vec::new(),
-            remove_pending: false,
+            cursor: self.cursor(db)?,
+            tree: self.clone(),
+            dir_stack: Vec::new(),
+            visited_inodes: HashSet::new(),
+            dir_changes: HashMap::new(),
+            inodes_to_file_ids: self.inodes_to_file_ids.clone(),
+            next_change_timestamp: 0,
         })
     }
 
@@ -716,6 +711,19 @@ impl Tree {
             Ok(None)
         }
     }
+
+    fn find_child_ref<S>(&self, key: ChildRefKey, db: &S) -> Result<Option<ChildRef>, S::ReadError>
+    where
+        S: Store,
+    {
+        let child_ref_db = db.child_ref_store();
+        let mut cursor = self.child_refs.cursor();
+        if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
+            cursor.item(child_ref_db)
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 fn interleave<T, S>(
@@ -927,11 +935,6 @@ impl TreeCursor {
 }
 
 impl TreeUpdater {
-    pub fn new<S: Store>(tree: &Tree, db: &S) -> Result<Self, S::ReadError> {
-        let cursor = tree.cursor(db)?;
-        Ok(TreeUpdater { cursor })
-    }
-
     pub fn visit<F, S>(
         &mut self,
         new_depth: usize,
@@ -967,8 +970,19 @@ impl TreeUpdater {
                                 self.visited_inodes.insert(old_inode);
                                 self.visited_inodes.insert(new_inode);
                                 if new_inode != old_inode {
-
+                                    let timestamp = self.gen_change_timestamp();
+                                    self.dir_changes.insert(
+                                        old_child_ref.child_id,
+                                        DirChange {
+                                            timestamp,
+                                            kind: DirChangeKind::Update { inode: new_inode },
+                                        },
+                                    );
                                 }
+
+                                self.dir_stack.push(old_metadata.file_id);
+                                self.cursor.next(db)?;
+                                return Ok(());
                             }
                         } else {
                             unimplemented!()
@@ -977,13 +991,185 @@ impl TreeUpdater {
                     Ordering::Greater => break,
                 }
             }
+
+            let timestamp = self.gen_change_timestamp();
+            self.dir_changes
+                .entry(old_metadata.file_id)
+                .or_insert(DirChange {
+                    timestamp,
+                    kind: DirChangeKind::Move { new_location: None },
+                });
+            self.cursor.next_sibling_or_cousin(db)?;
         }
 
+        let parent_id = self.dir_stack.last().cloned().unwrap_or(ROOT_ID);
+        let child_id = {
+            let child_id = self.inodes_to_file_ids.get(&new_inode).cloned();
+            if self.visited_inodes.contains(&new_inode) || child_id.is_none() {
+                let child_id = db.gen_id();
+                let timestamp = self.gen_change_timestamp();
+                self.dir_changes.insert(
+                    child_id,
+                    DirChange {
+                        timestamp,
+                        kind: DirChangeKind::Insert {
+                            inode: new_inode,
+                            parent_id,
+                            name: Arc::new(new_name.into()),
+                        },
+                    },
+                );
+                self.inodes_to_file_ids.insert(new_inode, child_id);
+                child_id
+            } else {
+                let child_id = child_id.unwrap();
+                let timestamp = self.gen_change_timestamp();
+                self.dir_changes.insert(
+                    child_id,
+                    DirChange {
+                        timestamp,
+                        kind: DirChangeKind::Move {
+                            new_location: Some((parent_id, Arc::new(new_name.into()))),
+                        },
+                    },
+                );
+                self.cursor.jump(child_id, new_depth, db)?;
+                child_id
+            }
+        };
+
+        self.dir_stack.push(child_id);
+        self.visited_inodes.insert(new_inode);
         Ok(())
     }
 
-    pub fn finish<F: FileSystem>(&mut self, fs: &mut F) {
-        unimplemented!()
+    pub fn finish<F, S>(
+        mut self,
+        db: &S,
+        fs: &mut F,
+    ) -> Result<(Tree, Vec<Operation>), S::ReadError>
+    where
+        F: FileSystem,
+        S: Store,
+    {
+        let metadata_db = db.metadata_store();
+        let parent_ref_db = db.parent_ref_store();
+        let child_ref_db = db.child_ref_store();
+
+        while let Some(metadata) = self.cursor.metadata(db)? {
+            let timestamp = self.gen_change_timestamp();
+            self.dir_changes
+                .entry(metadata.file_id)
+                .or_insert(DirChange {
+                    timestamp,
+                    kind: DirChangeKind::Move { new_location: None },
+                });
+            self.cursor.next_sibling_or_cousin(db)?;
+        }
+
+        let mut dir_changes = self.dir_changes.into_iter().collect::<Vec<_>>();
+        dir_changes.sort_unstable_by_key(|(_, change)| change.timestamp);
+
+        let mut operations = Vec::new();
+        let mut metadata = Vec::new();
+        let mut parent_refs = Vec::new();
+        let mut child_refs = Vec::new();
+
+        for (child_id, change) in dir_changes {
+            match change.kind {
+                DirChangeKind::Insert {
+                    inode,
+                    parent_id,
+                    name,
+                } => {
+                    let timestamp = db.gen_timestamp();
+                    metadata.push(Metadata {
+                        file_id: child_id,
+                        is_dir: true,
+                        inode: Some(inode),
+                    });
+                    parent_refs.push(ParentRef {
+                        child_id,
+                        timestamp,
+                        prev_timestamp: timestamp,
+                        op_id: child_id,
+                        parent: Some((parent_id, name.clone())),
+                    });
+                    child_refs.push(ChildRef {
+                        parent_id,
+                        name: name.clone(),
+                        timestamp,
+                        op_id: child_id,
+                        child_id,
+                        deletions: SmallVec::new(),
+                    });
+                    operations.push(Operation::InsertDir {
+                        op_id: child_id,
+                        timestamp,
+                        parent_id,
+                        name,
+                    });
+                }
+                DirChangeKind::Update { inode } => {
+                    metadata.push(Metadata {
+                        file_id: child_id,
+                        is_dir: true,
+                        inode: Some(inode),
+                    });
+                }
+                DirChangeKind::Move { new_location } => {
+                    let timestamp = db.gen_timestamp();
+                    let op_id = db.gen_id();
+
+                    let prev_parent_ref = self.tree.find_cur_parent_ref(child_id, db)?.unwrap();
+                    parent_refs.push(ParentRef {
+                        child_id,
+                        timestamp,
+                        prev_timestamp: prev_parent_ref.timestamp,
+                        op_id,
+                        parent: new_location.clone(),
+                    });
+
+                    let mut prev_child_ref = self
+                        .tree
+                        .find_child_ref(prev_parent_ref.to_child_ref_key().unwrap(), db)?
+                        .unwrap();
+                    prev_child_ref.deletions.push(op_id);
+                    child_refs.push(prev_child_ref);
+
+                    if let Some((new_parent_id, new_name)) = new_location.as_ref() {
+                        child_refs.push(ChildRef {
+                            parent_id: *new_parent_id,
+                            name: new_name.clone(),
+                            timestamp,
+                            op_id,
+                            child_id,
+                            deletions: SmallVec::new(),
+                        });
+                    }
+
+                    operations.push(Operation::MoveDir {
+                        op_id,
+                        child_id,
+                        timestamp,
+                        prev_timestamp: prev_parent_ref.timestamp,
+                        new_location,
+                    });
+                }
+            }
+        }
+
+        self.tree.metadata = interleave(&self.tree.metadata, metadata, metadata_db)?;
+        self.tree.parent_refs = interleave(&self.tree.parent_refs, parent_refs, parent_ref_db)?;
+        self.tree.child_refs = interleave(&self.tree.child_refs, child_refs, child_ref_db)?;
+        self.tree.inodes_to_file_ids = self.inodes_to_file_ids;
+        Ok((self.tree, operations))
+    }
+
+    fn gen_change_timestamp(&mut self) -> usize {
+        let timestamp = self.next_change_timestamp;
+        self.next_change_timestamp += 1;
+        timestamp
     }
 }
 
