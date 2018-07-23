@@ -10,11 +10,11 @@ We're actively developing a subcomponent of Xray called [Eon](https://github.com
 
 ## Updates
 
+* [July 23, 2018](./docs/updates/2018_07_23.md)
 * [July 16, 2018](./docs/updates/2018_07_16.md)
 * [July 10, 2018](./docs/updates/2018_07_10.md)
 * [May 28, 2018](./docs/updates/2018_05_28.md)
 * [May 14, 2018](./docs/updates/2018_05_14.md)
-* [May 7, 2018](./docs/updates/2018_05_07.md)
 * [Archives](./docs/updates/)
 
 ## Foundational priorities
