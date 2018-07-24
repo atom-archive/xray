@@ -163,13 +163,17 @@ impl Tree {
     }
 
     pub fn cursor<S: Store>(&self, db: &S) -> Result<TreeCursor, S::ReadError> {
+        self.cursor_at(ROOT_ID, db)
+    }
+
+    pub fn cursor_at<S: Store>(&self, id: id::Unique, db: &S) -> Result<TreeCursor, S::ReadError> {
         let mut cursor = TreeCursor {
             path: PathBuf::new(),
             stack: Vec::new(),
             metadata_cursor: self.metadata.cursor(),
             visited_dir_ids: HashSet::new(),
         };
-        cursor.descend_into(self.child_refs.cursor(), ROOT_ID, None, db)?;
+        cursor.descend_into(self.child_refs.cursor(), id, None, db)?;
         Ok(cursor)
     }
 
@@ -224,6 +228,7 @@ impl Tree {
                         }
                     }
                 }
+                dir_stack.push(file_id);
             } else {
                 let file_id = db.gen_id();
                 dir_changes.insert(
@@ -236,28 +241,36 @@ impl Tree {
                     },
                 );
                 self.inodes_to_file_ids.insert(entry.inode(), file_id);
+                dir_stack.push(file_id);
             }
         }
 
         let mut dir_changes = dir_changes.into_iter().collect::<Vec<_>>();
         dir_changes.sort_unstable_by_key(|(_, change)| change.order_key);
 
-        let mut cursor = self.cursor(db)?;
-        while let Some(Metadata { file_id, inode, .. }) = cursor.metadata(db)? {
-            let inode = inode.unwrap();
-            if visited_inodes.contains(&inode) {
-                cursor.next(db)?;
-            } else {
-                dir_changes.push((
-                    file_id,
-                    DirChange {
-                        order_key: 0,
-                        inode,
-                        parent: None,
-                        moved: true,
-                    },
-                ));
-                cursor.next_sibling_or_cousin(db)?;
+        {
+            let visited_parent_ids = Some(ROOT_ID).into_iter().chain(
+                visited_inodes
+                    .iter()
+                    .map(|inode| *self.inodes_to_file_ids.get(&inode).unwrap()),
+            );
+            for parent_id in visited_parent_ids {
+                let mut cursor = self.cursor_at(parent_id, db)?;
+                while let Some(Metadata { file_id, inode, .. }) = cursor.metadata(db)? {
+                    let inode = inode.unwrap();
+                    if !visited_inodes.contains(&inode) {
+                        dir_changes.push((
+                            file_id,
+                            DirChange {
+                                order_key: 0,
+                                inode,
+                                parent: None,
+                                moved: true,
+                            },
+                        ));
+                    }
+                    cursor.next_sibling_or_cousin(db)?;
+                }
             }
         }
 
@@ -395,15 +408,17 @@ impl Tree {
             if !entry_exists {
                 let op_id = db.gen_id();
                 let timestamp = db.gen_timestamp();
+                let inode = next_inode.as_mut().map(|next_inode| {
+                    let inode = **next_inode;
+                    **next_inode += 1;
+                    self.inodes_to_file_ids.insert(inode, op_id);
+                    inode
+                });
 
                 metadata.push(Metadata {
                     file_id: op_id,
                     is_dir: true,
-                    inode: next_inode.as_mut().map(|next_inode| {
-                        let inode = **next_inode;
-                        **next_inode += 1;
-                        inode
-                    }),
+                    inode,
                 });
                 parent_refs.push(ParentRef {
                     child_id: op_id,
@@ -1425,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn test_updater_random() {
+    fn test_read_from_fs() {
         for seed in 0..1000 {
             // let seed = 5;
             println!("SEED: {:?}", seed);
@@ -1440,7 +1455,7 @@ mod tests {
             fs.mutate(&mut rng, 10);
             let mut index_before_read = index.clone();
             let operations = index.read_from_fs(fs.by_ref(), &db).unwrap();
-            assert_eq!(index.paths_with_ids(&db), fs.tree.paths_with_ids(&db));
+            assert_eq!(index.paths(&db), fs.tree.paths(&db));
 
             index_before_read.integrate_ops(&operations, &db).unwrap();
             assert_eq!(
