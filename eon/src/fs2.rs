@@ -33,6 +33,12 @@ pub trait FileSystem {
     fn move_dir(&mut self, from: &Path, to: &Path);
 }
 
+pub trait FileSystemEntry {
+    fn depth(&self) -> usize;
+    fn name(&self) -> &OsStr;
+    fn inode(&self) -> Inode;
+}
+
 trait Keyed {
     type Key: Ord;
 
@@ -64,35 +70,6 @@ struct TreeCursorStackEntry {
     cursor: btree::Cursor<ChildRef>,
     jump: bool,
     depth: usize,
-}
-
-pub struct TreeUpdater {
-    tree: Tree,
-    cursor: TreeCursor,
-    dir_stack: Vec<id::Unique>,
-    visited_inodes: HashSet<Inode>,
-    dir_changes: HashMap<id::Unique, DirChange>,
-    inodes_to_file_ids: HashMap<Inode, id::Unique>,
-    next_change_timestamp: usize,
-}
-
-struct DirChange {
-    timestamp: usize,
-    kind: DirChangeKind,
-}
-
-enum DirChangeKind {
-    Insert {
-        inode: Inode,
-        parent_id: id::Unique,
-        name: Arc<OsString>,
-    },
-    Update {
-        inode: Inode,
-    },
-    Move {
-        new_location: Option<(id::Unique, Arc<OsString>)>,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -196,16 +173,173 @@ impl Tree {
         Ok(cursor)
     }
 
-    pub fn update<S: Store>(&self, db: &S) -> Result<TreeUpdater, S::ReadError> {
-        Ok(TreeUpdater {
-            cursor: self.cursor(db)?,
-            tree: self.clone(),
-            dir_stack: Vec::new(),
-            visited_inodes: HashSet::new(),
-            dir_changes: HashMap::new(),
-            inodes_to_file_ids: self.inodes_to_file_ids.clone(),
-            next_change_timestamp: 0,
-        })
+    pub fn read_from_fs<'a, F, I, S>(
+        &mut self,
+        entries: I,
+        db: &S,
+    ) -> Result<Vec<Operation>, S::ReadError>
+    where
+        F: FileSystemEntry,
+        I: IntoIterator<Item = F>,
+        S: Store,
+    {
+        struct DirChange {
+            order_key: usize,
+            inode: Inode,
+            parent: Option<(id::Unique, Arc<OsString>)>,
+            moved: bool,
+        }
+
+        let metadata_db = db.metadata_store();
+        let parent_ref_db = db.parent_ref_store();
+        let child_ref_db = db.child_ref_store();
+
+        let mut dir_stack = vec![ROOT_ID];
+        let mut visited_inodes = HashSet::new();
+        let mut dir_changes: HashMap<id::Unique, DirChange> = HashMap::new();
+
+        for (order_key, entry) in entries.into_iter().enumerate() {
+            debug_assert!(entry.depth() > 0);
+            dir_stack.truncate(entry.depth());
+            visited_inodes.insert(entry.inode());
+
+            let new_parent_id = *dir_stack.last().unwrap();
+            if let Some(file_id) = self.inodes_to_file_ids.get(&entry.inode()).cloned() {
+                if dir_changes.contains_key(&file_id) {
+                    let dir_change = dir_changes.get_mut(&file_id).unwrap();
+                    dir_change.parent = Some((new_parent_id, Arc::new(entry.name().into())));
+                } else {
+                    let parent_ref = self.find_cur_parent_ref(file_id, db)?.unwrap();
+                    if let Some((old_parent_id, old_name)) = parent_ref.parent {
+                        if old_parent_id != new_parent_id || old_name.as_ref() != entry.name() {
+                            dir_changes.insert(
+                                file_id,
+                                DirChange {
+                                    order_key,
+                                    inode: entry.inode(),
+                                    parent: Some((new_parent_id, Arc::new(entry.name().into()))),
+                                    moved: true,
+                                },
+                            );
+                        }
+                    }
+                }
+            } else {
+                let file_id = db.gen_id();
+                dir_changes.insert(
+                    file_id,
+                    DirChange {
+                        order_key,
+                        inode: entry.inode(),
+                        parent: Some((new_parent_id, Arc::new(entry.name().into()))),
+                        moved: false,
+                    },
+                );
+                self.inodes_to_file_ids.insert(entry.inode(), file_id);
+            }
+        }
+
+        let mut dir_changes = dir_changes.into_iter().collect::<Vec<_>>();
+        dir_changes.sort_unstable_by_key(|(_, change)| change.order_key);
+
+        let mut cursor = self.cursor(db)?;
+        while let Some(Metadata { file_id, inode, .. }) = cursor.metadata(db)? {
+            let inode = inode.unwrap();
+            if visited_inodes.contains(&inode) {
+                cursor.next(db)?;
+            } else {
+                dir_changes.push((
+                    file_id,
+                    DirChange {
+                        order_key: 0,
+                        inode,
+                        parent: None,
+                        moved: true,
+                    },
+                ));
+                cursor.next_sibling_or_cousin(db)?;
+            }
+        }
+
+        let mut operations = Vec::new();
+        let mut metadata = Vec::new();
+        let mut parent_refs = Vec::new();
+        let mut child_refs = Vec::new();
+
+        for (child_id, change) in dir_changes {
+            if change.moved {
+                let timestamp = db.gen_timestamp();
+                let op_id = db.gen_id();
+
+                let prev_parent_ref = self.find_cur_parent_ref(child_id, db)?.unwrap();
+                parent_refs.push(ParentRef {
+                    child_id,
+                    timestamp,
+                    prev_timestamp: prev_parent_ref.timestamp,
+                    op_id,
+                    parent: change.parent.clone(),
+                });
+
+                let mut prev_child_ref = self
+                    .find_child_ref(prev_parent_ref.to_child_ref_key().unwrap(), db)?
+                    .unwrap();
+                prev_child_ref.deletions.push(op_id);
+                child_refs.push(prev_child_ref);
+
+                if let Some((new_parent_id, new_name)) = change.parent.as_ref() {
+                    child_refs.push(ChildRef {
+                        parent_id: *new_parent_id,
+                        name: new_name.clone(),
+                        timestamp,
+                        op_id,
+                        child_id,
+                        deletions: SmallVec::new(),
+                    });
+                }
+
+                operations.push(Operation::MoveDir {
+                    op_id,
+                    child_id,
+                    timestamp,
+                    prev_timestamp: prev_parent_ref.timestamp,
+                    new_location: change.parent,
+                });
+            } else {
+                let timestamp = db.gen_timestamp();
+                let (parent_id, name) = change.parent.unwrap();
+                metadata.push(Metadata {
+                    file_id: child_id,
+                    is_dir: true,
+                    inode: Some(change.inode),
+                });
+                parent_refs.push(ParentRef {
+                    child_id,
+                    timestamp,
+                    prev_timestamp: timestamp,
+                    op_id: child_id,
+                    parent: Some((parent_id, name.clone())),
+                });
+                child_refs.push(ChildRef {
+                    parent_id,
+                    name: name.clone(),
+                    timestamp,
+                    op_id: child_id,
+                    child_id,
+                    deletions: SmallVec::new(),
+                });
+                operations.push(Operation::InsertDir {
+                    op_id: child_id,
+                    timestamp,
+                    parent_id,
+                    name,
+                });
+            }
+        }
+
+        self.metadata = interleave(&self.metadata, metadata, metadata_db)?;
+        self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
+        self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
+        Ok(operations)
     }
 
     pub fn insert_dirs<I, S>(&mut self, path: I, db: &S) -> Result<Vec<Operation>, S::ReadError>
@@ -213,10 +347,29 @@ impl Tree {
         I: Into<PathBuf>,
         S: Store,
     {
+        self.insert_dirs_internal(path, &mut None, db)
+    }
+
+    fn insert_dirs_internal<I, S>(
+        &mut self,
+        path: I,
+        next_inode: &mut Option<&mut Inode>,
+        db: &S,
+    ) -> Result<Vec<Operation>, S::ReadError>
+    where
+        I: Into<PathBuf>,
+        S: Store,
+    {
         let path = path.into();
+        let metadata_db = db.metadata_store();
+        let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
 
         let mut operations = Vec::new();
+        let mut metadata = Vec::new();
+        let mut parent_refs = Vec::new();
+        let mut child_refs = Vec::new();
+
         let mut cursor = self.child_refs.cursor();
         let mut parent_id = ROOT_ID;
         let mut entry_exists = true;
@@ -241,9 +394,35 @@ impl Tree {
             }
             if !entry_exists {
                 let op_id = db.gen_id();
+                let timestamp = db.gen_timestamp();
+
+                metadata.push(Metadata {
+                    file_id: op_id,
+                    is_dir: true,
+                    inode: next_inode.as_mut().map(|next_inode| {
+                        let inode = **next_inode;
+                        **next_inode += 1;
+                        inode
+                    }),
+                });
+                parent_refs.push(ParentRef {
+                    child_id: op_id,
+                    timestamp,
+                    prev_timestamp: timestamp,
+                    op_id,
+                    parent: Some((parent_id, name.clone())),
+                });
+                child_refs.push(ChildRef {
+                    parent_id,
+                    name: name.clone(),
+                    timestamp,
+                    op_id,
+                    child_id: op_id,
+                    deletions: SmallVec::new(),
+                });
                 operations.push(Operation::InsertDir {
                     op_id,
-                    timestamp: db.gen_timestamp(),
+                    timestamp,
                     parent_id,
                     name,
                 });
@@ -251,7 +430,9 @@ impl Tree {
             }
         }
 
-        self.integrate_ops(&operations, db)?;
+        self.metadata = interleave(&self.metadata, metadata, metadata_db)?;
+        self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
+        self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
         Ok(operations)
     }
 
@@ -797,7 +978,11 @@ impl TreeCursor {
     }
 
     fn metadata<S: Store>(&self, db: &S) -> Result<Option<Metadata>, S::ReadError> {
-        self.metadata_cursor.item(db.metadata_store())
+        if self.stack.is_empty() {
+            Ok(None)
+        } else {
+            self.metadata_cursor.item(db.metadata_store())
+        }
     }
 
     fn child_ref<S: Store>(&self, db: &S) -> Result<Option<ChildRef>, S::ReadError> {
@@ -931,245 +1116,6 @@ impl TreeCursor {
         }
 
         Ok(false)
-    }
-}
-
-impl TreeUpdater {
-    pub fn visit<F, S>(
-        &mut self,
-        new_depth: usize,
-        new_name: &OsStr,
-        new_inode: Inode,
-        db: &S,
-    ) -> Result<(), S::ReadError>
-    where
-        F: FileSystem,
-        S: Store,
-    {
-        debug_assert!(new_depth > 0);
-
-        self.dir_stack.truncate(new_depth - 1);
-
-        // Delete old entries that precede the entry we are visiting. If we find an equivalent
-        // entry, update it if its inode has changed and return.
-        loop {
-            let old_depth = self.cursor.depth();
-            if old_depth < new_depth {
-                break;
-            }
-
-            let old_metadata = self.cursor.metadata(db)?.unwrap();
-            let old_child_ref = self.cursor.child_ref(db)?.unwrap();
-
-            if old_depth == new_depth {
-                match old_child_ref.name.as_os_str().cmp(new_name) {
-                    Ordering::Less => {}
-                    Ordering::Equal => {
-                        if let Some(old_inode) = old_metadata.inode {
-                            if !self.visited_inodes.contains(&old_inode) {
-                                self.visited_inodes.insert(old_inode);
-                                self.visited_inodes.insert(new_inode);
-                                if new_inode != old_inode {
-                                    let timestamp = self.gen_change_timestamp();
-                                    self.dir_changes.insert(
-                                        old_child_ref.child_id,
-                                        DirChange {
-                                            timestamp,
-                                            kind: DirChangeKind::Update { inode: new_inode },
-                                        },
-                                    );
-                                }
-
-                                self.dir_stack.push(old_metadata.file_id);
-                                self.cursor.next(db)?;
-                                return Ok(());
-                            }
-                        } else {
-                            unimplemented!()
-                        }
-                    }
-                    Ordering::Greater => break,
-                }
-            }
-
-            let timestamp = self.gen_change_timestamp();
-            self.dir_changes
-                .entry(old_metadata.file_id)
-                .or_insert(DirChange {
-                    timestamp,
-                    kind: DirChangeKind::Move { new_location: None },
-                });
-            self.cursor.next_sibling_or_cousin(db)?;
-        }
-
-        let parent_id = self.dir_stack.last().cloned().unwrap_or(ROOT_ID);
-        let child_id = {
-            let child_id = self.inodes_to_file_ids.get(&new_inode).cloned();
-            if self.visited_inodes.contains(&new_inode) || child_id.is_none() {
-                let child_id = db.gen_id();
-                let timestamp = self.gen_change_timestamp();
-                self.dir_changes.insert(
-                    child_id,
-                    DirChange {
-                        timestamp,
-                        kind: DirChangeKind::Insert {
-                            inode: new_inode,
-                            parent_id,
-                            name: Arc::new(new_name.into()),
-                        },
-                    },
-                );
-                self.inodes_to_file_ids.insert(new_inode, child_id);
-                child_id
-            } else {
-                let child_id = child_id.unwrap();
-                let timestamp = self.gen_change_timestamp();
-                self.dir_changes.insert(
-                    child_id,
-                    DirChange {
-                        timestamp,
-                        kind: DirChangeKind::Move {
-                            new_location: Some((parent_id, Arc::new(new_name.into()))),
-                        },
-                    },
-                );
-                self.cursor.jump(child_id, new_depth, db)?;
-                child_id
-            }
-        };
-
-        self.dir_stack.push(child_id);
-        self.visited_inodes.insert(new_inode);
-        Ok(())
-    }
-
-    pub fn finish<F, S>(
-        mut self,
-        db: &S,
-        fs: &mut F,
-    ) -> Result<(Tree, Vec<Operation>), S::ReadError>
-    where
-        F: FileSystem,
-        S: Store,
-    {
-        let metadata_db = db.metadata_store();
-        let parent_ref_db = db.parent_ref_store();
-        let child_ref_db = db.child_ref_store();
-
-        while let Some(metadata) = self.cursor.metadata(db)? {
-            let timestamp = self.gen_change_timestamp();
-            self.dir_changes
-                .entry(metadata.file_id)
-                .or_insert(DirChange {
-                    timestamp,
-                    kind: DirChangeKind::Move { new_location: None },
-                });
-            self.cursor.next_sibling_or_cousin(db)?;
-        }
-
-        let mut dir_changes = self.dir_changes.into_iter().collect::<Vec<_>>();
-        dir_changes.sort_unstable_by_key(|(_, change)| change.timestamp);
-
-        let mut operations = Vec::new();
-        let mut metadata = Vec::new();
-        let mut parent_refs = Vec::new();
-        let mut child_refs = Vec::new();
-
-        for (child_id, change) in dir_changes {
-            match change.kind {
-                DirChangeKind::Insert {
-                    inode,
-                    parent_id,
-                    name,
-                } => {
-                    let timestamp = db.gen_timestamp();
-                    metadata.push(Metadata {
-                        file_id: child_id,
-                        is_dir: true,
-                        inode: Some(inode),
-                    });
-                    parent_refs.push(ParentRef {
-                        child_id,
-                        timestamp,
-                        prev_timestamp: timestamp,
-                        op_id: child_id,
-                        parent: Some((parent_id, name.clone())),
-                    });
-                    child_refs.push(ChildRef {
-                        parent_id,
-                        name: name.clone(),
-                        timestamp,
-                        op_id: child_id,
-                        child_id,
-                        deletions: SmallVec::new(),
-                    });
-                    operations.push(Operation::InsertDir {
-                        op_id: child_id,
-                        timestamp,
-                        parent_id,
-                        name,
-                    });
-                }
-                DirChangeKind::Update { inode } => {
-                    metadata.push(Metadata {
-                        file_id: child_id,
-                        is_dir: true,
-                        inode: Some(inode),
-                    });
-                }
-                DirChangeKind::Move { new_location } => {
-                    let timestamp = db.gen_timestamp();
-                    let op_id = db.gen_id();
-
-                    let prev_parent_ref = self.tree.find_cur_parent_ref(child_id, db)?.unwrap();
-                    parent_refs.push(ParentRef {
-                        child_id,
-                        timestamp,
-                        prev_timestamp: prev_parent_ref.timestamp,
-                        op_id,
-                        parent: new_location.clone(),
-                    });
-
-                    let mut prev_child_ref = self
-                        .tree
-                        .find_child_ref(prev_parent_ref.to_child_ref_key().unwrap(), db)?
-                        .unwrap();
-                    prev_child_ref.deletions.push(op_id);
-                    child_refs.push(prev_child_ref);
-
-                    if let Some((new_parent_id, new_name)) = new_location.as_ref() {
-                        child_refs.push(ChildRef {
-                            parent_id: *new_parent_id,
-                            name: new_name.clone(),
-                            timestamp,
-                            op_id,
-                            child_id,
-                            deletions: SmallVec::new(),
-                        });
-                    }
-
-                    operations.push(Operation::MoveDir {
-                        op_id,
-                        child_id,
-                        timestamp,
-                        prev_timestamp: prev_parent_ref.timestamp,
-                        new_location,
-                    });
-                }
-            }
-        }
-
-        self.tree.metadata = interleave(&self.tree.metadata, metadata, metadata_db)?;
-        self.tree.parent_refs = interleave(&self.tree.parent_refs, parent_refs, parent_ref_db)?;
-        self.tree.child_refs = interleave(&self.tree.child_refs, child_refs, child_ref_db)?;
-        self.tree.inodes_to_file_ids = self.inodes_to_file_ids;
-        Ok((self.tree, operations))
-    }
-
-    fn gen_change_timestamp(&mut self) -> usize {
-        let timestamp = self.next_change_timestamp;
-        self.next_change_timestamp += 1;
-        timestamp
     }
 }
 
@@ -1479,61 +1425,28 @@ mod tests {
     }
 
     #[test]
-    fn test_diff() {
-        let db = NullStore::new(1);
-        let mut old_tree = Tree::new();
-        old_tree.insert_dirs("a/b1/", &db).unwrap();
-        old_tree.insert_dirs("a/b2/", &db).unwrap();
-        old_tree.insert_dirs("a/b3/x/y/z", &db).unwrap();
-
-        let mut new_tree = old_tree.clone();
-        new_tree.insert_dirs("a/b1/c", &db).unwrap();
-        new_tree.move_dir("a/b3", "a/b1/d", &db).unwrap();
-        new_tree.remove_dir("a/b2", &db).unwrap();
-        new_tree.insert_dirs("a/b4", &db).unwrap();
-
-        let mut new_tree_from_old_tree_cursor = new_tree.diff(&old_tree, &db).unwrap();
-        let mut old_tree_from_new_tree_cursor = old_tree.diff(&new_tree, &db).unwrap();
-
-        while let Some(diff) = new_tree_from_old_tree_cursor.item(&db).unwrap() {
-            println!("{:?}", diff);
-            new_tree_from_old_tree_cursor.next(&db).unwrap();
-        }
-
-        println!("=====================",);
-
-        while let Some(diff) = old_tree_from_new_tree_cursor.item(&db).unwrap() {
-            println!("{:?}", diff);
-            old_tree_from_new_tree_cursor.next(&db).unwrap();
-        }
-    }
-
-    #[test]
     fn test_updater_random() {
-        for seed in 0..100 {
-            let seed = 3;
+        for seed in 0..1000 {
+            // let seed = 5;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut fs = FakeFileSystem::new();
-            fs.mutate(&mut rng, 2);
+            fs.mutate(&mut rng, 10);
 
-            println!("fs paths {:?}", fs.paths());
+            let db = NullStore::new(2);
+            let mut index = fs.tree.clone();
 
-            let db = NullStore::new(1);
-            let index = fs.tree.clone();
+            fs.mutate(&mut rng, 10);
+            let mut index_before_read = index.clone();
+            let operations = index.read_from_fs(fs.by_ref(), &db).unwrap();
+            assert_eq!(index.paths_with_ids(&db), fs.tree.paths_with_ids(&db));
 
-            fs.mutate(&mut rng, 2);
-
-            let mut updater = TreeUpdater::new(&index, &db).unwrap();
-            while let Some(entry) = fs.next() {
-                println!("visit {:?} {:?}", entry.depth, entry.name);
-                updater
-                    .visit(entry.depth, entry.name.as_ref(), &mut fs, &db)
-                    .unwrap();
-            }
-            println!("finish");
-            updater.finish(&mut fs);
+            index_before_read.integrate_ops(&operations, &db).unwrap();
+            assert_eq!(
+                index_before_read.paths_with_ids(&db),
+                index.paths_with_ids(&db)
+            );
         }
     }
 
@@ -1633,7 +1546,7 @@ mod tests {
                 } else {
                     let db = &db[replica_index];
                     let tree = &mut trees[replica_index];
-                    let ops = tree.mutate(&mut rng, db);
+                    let ops = tree.mutate(&mut rng, &mut None, db);
                     deliver_ops(replica_index, &mut inboxes, ops);
                 }
             }
@@ -1667,7 +1580,8 @@ mod tests {
 
     struct FakeFileSystem {
         tree: Tree,
-        cursor: TreeCursor,
+        cursor: Option<TreeCursor>,
+        next_inode: Inode,
         db: NullStore,
     }
 
@@ -1675,6 +1589,7 @@ mod tests {
     struct FakeFileSystemEntry {
         depth: usize,
         name: Arc<OsString>,
+        inode: Inode,
     }
 
     struct NullStore {
@@ -1686,13 +1601,18 @@ mod tests {
         fn new() -> Self {
             let db = NullStore::new(1);
             let tree = Tree::new();
-            let cursor = tree.cursor(&db).unwrap();
-            Self { tree, cursor, db }
+            Self {
+                tree,
+                cursor: None,
+                next_inode: 0,
+                db,
+            }
         }
 
         fn mutate<T: Rng>(&mut self, rng: &mut T, times: usize) {
             for _ in 0..times {
-                self.tree.mutate(rng, &self.db);
+                self.tree
+                    .mutate(rng, &mut Some(&mut self.next_inode), &self.db);
             }
             self.refresh_cursor();
         }
@@ -1702,42 +1622,44 @@ mod tests {
         }
 
         fn refresh_cursor(&mut self) {
-            let mut new_cursor = self.tree.cursor(&self.db).unwrap();
-            loop {
-                let advance = if let (Some(new_path), Some(old_path)) =
-                    (new_cursor.path(), self.cursor.path())
-                {
-                    new_path < old_path
-                } else {
-                    false
-                };
+            if let Some(old_cursor) = self.cursor.as_mut() {
+                let mut new_cursor = self.tree.cursor(&self.db).unwrap();
+                loop {
+                    let advance = if let (Some(new_path), Some(old_path)) =
+                        (new_cursor.path(), old_cursor.path())
+                    {
+                        new_path < old_path
+                    } else {
+                        false
+                    };
 
-                if advance {
-                    new_cursor.next(&self.db).unwrap();
-                } else {
-                    break;
+                    if advance {
+                        new_cursor.next(&self.db).unwrap();
+                    } else {
+                        break;
+                    }
                 }
+                *old_cursor = new_cursor;
             }
-            self.cursor = new_cursor;
         }
     }
 
     impl FileSystem for FakeFileSystem {
         fn insert_dirs(&mut self, path: &Path) -> Inode {
-            println!("file insert {:?}", path);
+            // println!("file insert {:?}", path);
             self.tree.insert_dirs(path, &self.db).unwrap();
             self.refresh_cursor();
             0
         }
 
         fn remove_dir(&mut self, path: &Path) {
-            println!("file remove {:?}", path);
+            // println!("file remove {:?}", path);
             self.tree.remove_dir(path, &self.db).unwrap();
             self.refresh_cursor();
         }
 
         fn move_dir(&mut self, from: &Path, to: &Path) {
-            println!("file system move {:?} to {:?}", from, to);
+            // println!("file system move {:?} to {:?}", from, to);
             self.tree.move_dir(from, to, &self.db).unwrap();
             self.refresh_cursor();
         }
@@ -1747,15 +1669,35 @@ mod tests {
         type Item = FakeFileSystemEntry;
 
         fn next(&mut self) -> Option<Self::Item> {
-            let depth = self.cursor.depth();
+            if self.cursor.is_none() {
+                self.cursor = Some(self.tree.cursor(&self.db).unwrap());
+            }
+
+            let cursor = self.cursor.as_mut().unwrap();
+            let depth = cursor.depth();
             if depth == 0 {
                 None
             } else {
                 let db = NullStore::new(0);
-                let name = self.cursor.name(&db).unwrap().unwrap();
-                self.cursor.next(&db).unwrap();
-                Some(FakeFileSystemEntry { depth, name })
+                let name = cursor.name(&db).unwrap().unwrap();
+                let inode = cursor.metadata(&db).unwrap().unwrap().inode.unwrap();
+                cursor.next(&db).unwrap();
+                Some(FakeFileSystemEntry { depth, name, inode })
             }
+        }
+    }
+
+    impl FileSystemEntry for FakeFileSystemEntry {
+        fn depth(&self) -> usize {
+            self.depth
+        }
+
+        fn name(&self) -> &OsStr {
+            self.name.as_ref()
+        }
+
+        fn inode(&self) -> Inode {
+            self.inode
         }
     }
 
@@ -1832,7 +1774,12 @@ mod tests {
     }
 
     impl Tree {
-        fn mutate<S, T: Rng>(&mut self, rng: &mut T, db: &S) -> Vec<Operation>
+        fn mutate<S, T: Rng>(
+            &mut self,
+            rng: &mut T,
+            next_inode: &mut Option<&mut Inode>,
+            db: &S,
+        ) -> Vec<Operation>
         where
             S: Store,
         {
@@ -1843,7 +1790,7 @@ mod tests {
                     let subtree_depth = rng.gen_range(1, 5);
                     let path = self.gen_path(rng, subtree_depth, db);
                     // println!("{:?} Inserting {:?}", db.replica_id(), path);
-                    ops.extend(self.insert_dirs(&path, db).unwrap());
+                    ops.extend(self.insert_dirs_internal(&path, next_inode, db).unwrap());
                 // println!("{:#?} ", self.child_refs.items(db.child_ref_store()));
                 } else if k == 1 {
                     let path = self.select_path(rng, db).unwrap();
