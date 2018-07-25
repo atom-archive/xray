@@ -412,6 +412,9 @@ impl Tree {
         let mut parent_refs = Vec::new();
         let mut child_refs = Vec::new();
 
+        // println!("{:?}", path);
+        // println!("{:#?}", self.child_refs.items(child_ref_db)?);
+        // println!("{:#?}", self.child_refs.items(child_ref_db)?);
         let child_id = self.id_for_path(&path, db)?.unwrap();
         let operation = self.local_move(child_id, None, &mut parent_refs, &mut child_refs, db)?;
 
@@ -468,19 +471,38 @@ impl Tree {
         O: IntoIterator<Item = &'a Operation>,
         S: Store,
     {
-        let mut fixup_ops = Vec::new();
+        let old_tree = self.clone();
+
+        let mut changed_ids = HashMap::new();
         for op in ops {
-            fixup_ops.extend(self.integrate_op(op.clone(), true, db)?);
+            match op {
+                Operation::InsertDir { op_id, .. } => {
+                    changed_ids.insert(*op_id, false);
+                }
+                Operation::MoveDir {
+                    child_id,
+                    new_parent,
+                    ..
+                } => {
+                    if new_parent.is_some() {
+                        changed_ids.insert(*child_id, true);
+                    } else {
+                        changed_ids.insert(*child_id, false);
+                    }
+                }
+            }
+            self.integrate_op(op.clone(), db)?;
         }
+
+        let mut fixup_ops = Vec::new();
+        for (child_id, moved) in changed_ids {
+            fixup_ops.extend(self.fix_conflicts(child_id, moved, &old_tree, db)?);
+        }
+
         Ok(fixup_ops)
     }
 
-    fn integrate_op<S>(
-        &mut self,
-        op: Operation,
-        fix_conflicts: bool,
-        db: &S,
-    ) -> Result<Vec<Operation>, S::ReadError>
+    fn integrate_op<S>(&mut self, op: Operation, db: &S) -> Result<(), S::ReadError>
     where
         S: Store,
     {
@@ -492,7 +514,6 @@ impl Tree {
         let mut parent_refs = Vec::new();
         let mut child_refs = Vec::new();
         let mut new_child_ref;
-        let moved;
         let received_timestamp;
 
         match op {
@@ -526,7 +547,6 @@ impl Tree {
                 });
                 child_refs.extend(new_child_ref.clone());
                 received_timestamp = timestamp;
-                moved = false;
             }
             Operation::MoveDir {
                 op_id,
@@ -579,7 +599,6 @@ impl Tree {
                 });
                 child_refs.extend(new_child_ref.clone());
                 received_timestamp = timestamp;
-                moved = true;
             }
         }
 
@@ -589,34 +608,27 @@ impl Tree {
         if db.replica_id() != received_timestamp.replica_id {
             db.recv_timestamp(received_timestamp);
         }
-
         // println!("{:#?}", self.child_refs.items(child_ref_db)?);
-        let mut fixup_ops = Vec::new();
-        if let Some(new_child_ref) = new_child_ref {
-            if fix_conflicts {
-                fixup_ops.extend(self.fix_conflicts(new_child_ref, moved, db)?);
-            }
-        }
-
-        Ok(fixup_ops)
+        Ok(())
     }
 
     fn fix_conflicts<S: Store>(
         &mut self,
-        new_child_ref: ChildRef,
+        child_id: id::Unique,
         moved: bool,
+        old_tree: &Tree,
         db: &S,
     ) -> Result<Vec<Operation>, S::ReadError> {
         let mut fixup_ops = Vec::new();
         let mut reverted_moves: HashMap<id::Unique, LamportTimestamp> = HashMap::new();
 
         // If the child was moved, check for cycles
-        if moved && new_child_ref.is_visible() {
+        if moved {
             let parent_ref_db = db.parent_ref_store();
             let mut visited = HashSet::new();
             let mut latest_move: Option<ParentRef> = None;
             let mut cursor = self.parent_refs.cursor();
-            cursor.seek(&new_child_ref.child_id, SeekBias::Left, parent_ref_db)?;
+            cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
 
             loop {
                 let mut parent_ref = cursor.item(parent_ref_db)?.unwrap();
@@ -686,7 +698,7 @@ impl Tree {
             }
 
             // Convert the reverted moves into new move operations.
-            let mut new_parents = Vec::new();
+            let mut moved_child_ids = Vec::new();
             for (child_id, timestamp) in &reverted_moves {
                 cursor.seek(child_id, SeekBias::Left, parent_ref_db)?;
                 let prev_timestamp = cursor.item(parent_ref_db)?.unwrap().timestamp;
@@ -699,8 +711,6 @@ impl Tree {
                     parent_ref_db,
                 )?;
                 let new_parent = cursor.item(parent_ref_db)?.unwrap().parent;
-                new_parents.push(new_parent.clone().unwrap());
-
                 fixup_ops.push(Operation::MoveDir {
                     op_id: db.gen_id(),
                     child_id: *child_id,
@@ -708,80 +718,142 @@ impl Tree {
                     prev_timestamp,
                     new_parent,
                 });
+                moved_child_ids.push(*child_id);
             }
 
             for op in &fixup_ops {
-                self.integrate_op(op.clone(), false, db)?;
+                self.integrate_op(op.clone(), db)?;
             }
-            for (parent_id, name) in new_parents {
-                fixup_ops.extend(self.fix_name_conflict(parent_id, name, true, db)?);
+            for child_id in moved_child_ids {
+                fixup_ops.extend(self.fix_name_conflicts(child_id, old_tree, db)?);
             }
         }
 
-        if !reverted_moves.contains_key(&new_child_ref.child_id) {
-            let visible = new_child_ref.is_visible();
-            fixup_ops.extend(self.fix_name_conflict(
-                new_child_ref.parent_id,
-                new_child_ref.name,
-                visible,
-                db,
-            )?);
+        if !reverted_moves.contains_key(&child_id) {
+            fixup_ops.extend(self.fix_name_conflicts(child_id, old_tree, db)?);
         }
 
         Ok(fixup_ops)
     }
 
-    fn fix_name_conflict<S: Store>(
+    fn fix_name_conflicts<S: Store>(
         &mut self,
-        parent_id: id::Unique,
-        name: Arc<OsString>,
-        visible: bool,
+        child_id: id::Unique,
+        old_tree: &Tree,
         db: &S,
-    ) -> Result<Option<Operation>, S::ReadError> {
+    ) -> Result<Vec<Operation>, S::ReadError> {
+        let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
 
-        let mut cursor = self.child_refs.cursor();
-        let mut key = ParentIdAndName { parent_id, name };
-        cursor.seek(&key, SeekBias::Left, child_ref_db)?;
-        let next_visible_index = cursor.end::<usize, _>(child_ref_db)? + 1;
-        cursor.seek_forward(&next_visible_index, SeekBias::Left, child_ref_db)?;
-        if let Some(child_ref) = cursor.item(child_ref_db)? {
-            // If the next child ref has the same parent_id and name, we have a conflict
-            if child_ref.parent_id == parent_id && child_ref.name == key.name {
-                // If the new child ref is visible, append tildes to the name until we find a name
-                // that doesn't already exist. If it's invisible, we just want to generate a new
-                // move to ensure the new deleted child ref doesn't clobber an existing entry.
-                if visible {
-                    loop {
-                        Arc::make_mut(&mut key.name).push("~");
-                        cursor.seek_forward(&key, SeekBias::Left, child_ref_db)?;
-                        if let Some(conflicting_child_ref) = cursor.item(child_ref_db)? {
-                            if !conflicting_child_ref.is_visible()
-                                || conflicting_child_ref.parent_id != parent_id
-                                || conflicting_child_ref.name != key.name
-                            {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                }
+        let mut fixup_ops = Vec::new();
 
-                // Generate a move operation with the non-conflicting name
-                let fixup_op = Operation::MoveDir {
-                    op_id: db.gen_id(),
-                    child_id: child_ref.child_id,
-                    timestamp: db.gen_timestamp(),
-                    prev_timestamp: child_ref.timestamp,
-                    new_parent: Some((parent_id, key.name)),
-                };
-                self.integrate_op(fixup_op.clone(), false, db)?;
-                return Ok(Some(fixup_op));
+        // What was the timestamp of the parent ref in the previous version of the tree? Any
+        // overwritten parent refs more recent than that may point to a deleted child ref that
+        // shadows a live child ref. We'll need to check those locations for this kind of conflict.
+        let mut old_parent_ref_cursor = old_tree.parent_refs.cursor();
+        old_parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
+        let prev_timestamp = old_parent_ref_cursor
+            .item(parent_ref_db)?
+            .map(|parent_ref| parent_ref.timestamp);
+
+        // Collect the parent_id and name for all versions of the child's parent ref that were
+        // changed in the new tree.
+        let mut parent_ref_cursor = self.parent_refs.cursor();
+        parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
+        let mut potential_conflicts = Vec::new();
+        while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
+            if parent_ref.child_id == child_id {
+                if let Some(ref parent) = parent_ref.parent {
+                    potential_conflicts.push(parent.clone());
+                }
+                if prev_timestamp.map_or(false, |prev_timestamp| {
+                    parent_ref.timestamp == prev_timestamp
+                }) {
+                    break;
+                } else {
+                    parent_ref_cursor.next(parent_ref_db)?;
+                }
+            } else {
+                break;
             }
         }
 
-        Ok(None)
+        for (parent_id, name) in potential_conflicts {
+            let mut cursor = self.child_refs.cursor();
+            cursor.seek(
+                &ParentIdAndName {
+                    parent_id,
+                    name: name.clone(),
+                },
+                SeekBias::Left,
+                child_ref_db,
+            )?;
+
+            let mut found_child_ref = false;
+            let mut found_visible_child_ref = false;
+            let mut unique_name = name.clone();
+            loop {
+                if let Some(child_ref) = cursor.item(child_ref_db)? {
+                    if child_ref.parent_id == parent_id && child_ref.name == name {
+                        if child_ref.is_visible() {
+                            if found_child_ref {
+                                if found_visible_child_ref {
+                                    loop {
+                                        Arc::make_mut(&mut unique_name).push("~");
+                                        cursor.seek_forward(
+                                            &ParentIdAndName {
+                                                parent_id,
+                                                name: unique_name.clone(),
+                                            },
+                                            SeekBias::Left,
+                                            child_ref_db,
+                                        )?;
+                                        if let Some(conflicting_child_ref) = cursor.item(child_ref_db)?
+                                        {
+                                            if !conflicting_child_ref.is_visible()
+                                                || conflicting_child_ref.parent_id != parent_id
+                                                || conflicting_child_ref.name != unique_name
+                                            {
+                                                break;
+                                            }
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // println!("{:?} {:?}", parent_id, name);
+
+                                // println!("BEFORE {:#?}", self.child_refs.items(child_ref_db)?);
+                                let fixup_op = Operation::MoveDir {
+                                    op_id: db.gen_id(),
+                                    child_id: child_ref.child_id,
+                                    timestamp: db.gen_timestamp(),
+                                    prev_timestamp: child_ref.timestamp,
+                                    new_parent: Some((parent_id, unique_name.clone())),
+                                };
+                                self.integrate_op(fixup_op.clone(), db)?;
+                                // println!("AFTER {:#?}", self.child_refs.items(child_ref_db)?);
+                                // println!("{:?}", fixup_op);
+                                fixup_ops.push(fixup_op);
+                            }
+
+                            found_visible_child_ref = true;
+                        }
+
+                        found_child_ref = true;
+                        let visible_index = cursor.end::<usize, _>(child_ref_db)?;
+                        cursor.seek_forward(&visible_index, SeekBias::Right, child_ref_db)?;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(fixup_ops)
     }
 
     fn id_for_path<P, S>(&self, path: P, db: &S) -> Result<Option<id::Unique>, S::ReadError>
@@ -1575,8 +1647,8 @@ mod tests {
         use std::mem;
         const PEERS: usize = 2;
 
-        for seed in 0..100 {
-            // let seed = 204;
+        for seed in 0..10000000 {
+            // let seed = 23328;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1584,7 +1656,7 @@ mod tests {
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
-            for _ in 0..10 {
+            for _ in 0..5 {
                 let replica_index = rng.gen_range(0, PEERS);
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
