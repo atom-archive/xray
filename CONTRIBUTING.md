@@ -60,6 +60,8 @@ That assumes you built with `--release`. To run the debug version, use `xray_deb
 XRAY_SRC_PATH=. script/xray_debug .
 ```
 
+Once a blank window has opened, press <kbd>cmd-t</kbd> to open the file selection menu. Search for a file, and press <kbd>enter</kbd> to open it. The contents of the file should appear in the window. If something does not go as expected, check the dev tools (<kbd>cmd-shift-i</kbd>) for errors.
+
 ## Running tests and benchmarks
 
 * All tests: `script/test`
