@@ -130,6 +130,7 @@ pub struct ChildRef {
 pub struct ChildRefSummary {
     parent_id: id::Unique,
     name: Arc<OsString>,
+    visible: bool,
     timestamp: LamportTimestamp,
     visible_count: VisibleCount,
 }
@@ -138,6 +139,7 @@ pub struct ChildRefSummary {
 pub struct ChildRefKey {
     parent_id: id::Unique,
     name: Arc<OsString>,
+    visible: bool,
     timestamp: LamportTimestamp,
 }
 
@@ -151,6 +153,12 @@ pub struct ParentIdAndName {
 pub struct LamportTimestamp {
     value: u64,
     replica_id: id::ReplicaId,
+}
+
+#[derive(Debug)]
+enum TreeEdit<T: Keyed> {
+    Insert(T),
+    Remove(T),
 }
 
 impl Tree {
@@ -278,8 +286,6 @@ impl Tree {
             }
         }
 
-        // println!("{:?}", dir_changes);
-
         let mut operations = Vec::new();
         let mut metadata = Vec::new();
         let mut parent_refs = Vec::new();
@@ -311,9 +317,9 @@ impl Tree {
             }
         }
 
-        self.metadata = interleave(&self.metadata, metadata, metadata_db)?;
-        self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
-        self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
+        self.metadata = edit_tree(&self.metadata, metadata, metadata_db)?;
+        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
+        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
         Ok(operations)
     }
 
@@ -393,9 +399,9 @@ impl Tree {
             }
         }
 
-        self.metadata = interleave(&self.metadata, metadata, metadata_db)?;
-        self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
-        self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
+        self.metadata = edit_tree(&self.metadata, metadata, metadata_db)?;
+        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
+        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
         Ok(operations)
     }
 
@@ -412,14 +418,11 @@ impl Tree {
         let mut parent_refs = Vec::new();
         let mut child_refs = Vec::new();
 
-        // println!("{:?}", path);
-        // println!("{:#?}", self.child_refs.items(child_ref_db)?);
-        // println!("{:#?}", self.child_refs.items(child_ref_db)?);
         let child_id = self.id_for_path(&path, db)?.unwrap();
         let operation = self.local_move(child_id, None, &mut parent_refs, &mut child_refs, db)?;
 
-        self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
-        self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
+        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
+        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
 
         Ok(operation)
     }
@@ -454,8 +457,8 @@ impl Tree {
             db,
         )?;
 
-        self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
-        self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
+        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
+        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
 
         Ok(operation)
     }
@@ -471,8 +474,6 @@ impl Tree {
         O: IntoIterator<Item = &'a Operation>,
         S: Store,
     {
-        let old_tree = self.clone();
-
         let mut changed_ids = HashMap::new();
         for op in ops {
             match op {
@@ -496,7 +497,7 @@ impl Tree {
 
         let mut fixup_ops = Vec::new();
         for (child_id, moved) in changed_ids {
-            fixup_ops.extend(self.fix_conflicts(child_id, moved, &old_tree, db)?);
+            fixup_ops.extend(self.fix_conflicts(child_id, moved, db)?);
         }
 
         Ok(fixup_ops)
@@ -516,6 +517,8 @@ impl Tree {
         let mut new_child_ref;
         let received_timestamp;
 
+        // println!("{:?} – integrate op {:?}", db.replica_id(), op);
+
         match op {
             Operation::InsertDir {
                 op_id,
@@ -523,7 +526,6 @@ impl Tree {
                 parent_id,
                 name,
             } => {
-                // println!("integrate insertion {:?}", op_id);
                 new_child_ref = Some(ChildRef {
                     parent_id,
                     name: name.clone(),
@@ -533,19 +535,19 @@ impl Tree {
                     deletions: SmallVec::new(),
                 });
 
-                metadata.push(Metadata {
+                metadata.push(TreeEdit::Insert(Metadata {
                     file_id: op_id,
                     is_dir: true,
                     inode: None,
-                });
-                parent_refs.push(ParentRef {
+                }));
+                parent_refs.push(TreeEdit::Insert(ParentRef {
                     child_id: op_id,
                     timestamp,
                     prev_timestamp: timestamp,
                     op_id,
                     parent: Some((parent_id, name)),
-                });
-                child_refs.extend(new_child_ref.clone());
+                }));
+                child_refs.push(TreeEdit::Insert(new_child_ref.clone().unwrap()));
                 received_timestamp = timestamp;
             }
             Operation::MoveDir {
@@ -555,8 +557,6 @@ impl Tree {
                 prev_timestamp,
                 new_parent,
             } => {
-                // println!("integrate move {:?}", op_id);
-
                 new_child_ref = new_parent.as_ref().map(|(parent_id, name)| ChildRef {
                     parent_id: *parent_id,
                     name: name.clone(),
@@ -581,8 +581,9 @@ impl Tree {
                         if let Some(child_ref_key) = parent_ref.to_child_ref_key() {
                             child_ref_cursor.seek(&child_ref_key, SeekBias::Left, child_ref_db)?;
                             let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
+                            child_refs.push(TreeEdit::Remove(child_ref.clone()));
                             child_ref.deletions.push(op_id);
-                            child_refs.push(child_ref);
+                            child_refs.push(TreeEdit::Insert(child_ref));
                         }
                     } else {
                         break;
@@ -590,25 +591,26 @@ impl Tree {
                     parent_ref_cursor.next(parent_ref_db)?;
                 }
 
-                parent_refs.push(ParentRef {
+                parent_refs.push(TreeEdit::Insert(ParentRef {
                     child_id,
                     timestamp,
                     prev_timestamp,
                     op_id,
                     parent: new_parent,
-                });
-                child_refs.extend(new_child_ref.clone());
+                }));
+                if let Some(new_child_ref)  = new_child_ref {
+                    child_refs.push(TreeEdit::Insert(new_child_ref.clone()));
+                }
                 received_timestamp = timestamp;
             }
         }
 
-        self.metadata = interleave(&self.metadata, metadata, metadata_db)?;
-        self.parent_refs = interleave(&self.parent_refs, parent_refs, parent_ref_db)?;
-        self.child_refs = interleave(&self.child_refs, child_refs, child_ref_db)?;
+        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
+        self.metadata = edit_tree(&self.metadata, metadata, metadata_db)?;
+        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
         if db.replica_id() != received_timestamp.replica_id {
             db.recv_timestamp(received_timestamp);
         }
-        // println!("{:#?}", self.child_refs.items(child_ref_db)?);
         Ok(())
     }
 
@@ -616,7 +618,6 @@ impl Tree {
         &mut self,
         child_id: id::Unique,
         moved: bool,
-        old_tree: &Tree,
         db: &S,
     ) -> Result<Vec<Operation>, S::ReadError> {
         let mut fixup_ops = Vec::new();
@@ -725,12 +726,12 @@ impl Tree {
                 self.integrate_op(op.clone(), db)?;
             }
             for child_id in moved_child_ids {
-                fixup_ops.extend(self.fix_name_conflicts(child_id, old_tree, db)?);
+                fixup_ops.extend(self.fix_name_conflicts(child_id, db)?);
             }
         }
 
         if !reverted_moves.contains_key(&child_id) {
-            fixup_ops.extend(self.fix_name_conflicts(child_id, old_tree, db)?);
+            fixup_ops.extend(self.fix_name_conflicts(child_id, db)?);
         }
 
         Ok(fixup_ops)
@@ -739,48 +740,16 @@ impl Tree {
     fn fix_name_conflicts<S: Store>(
         &mut self,
         child_id: id::Unique,
-        old_tree: &Tree,
         db: &S,
     ) -> Result<Vec<Operation>, S::ReadError> {
-        let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
 
         let mut fixup_ops = Vec::new();
 
-        // What was the timestamp of the parent ref in the previous version of the tree? Any
-        // overwritten parent refs more recent than that may point to a deleted child ref that
-        // shadows a live child ref. We'll need to check those locations for this kind of conflict.
-        let mut old_parent_ref_cursor = old_tree.parent_refs.cursor();
-        old_parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
-        let prev_timestamp = old_parent_ref_cursor
-            .item(parent_ref_db)?
-            .map(|parent_ref| parent_ref.timestamp);
-
-        // Collect the parent_id and name for all versions of the child's parent ref that were
-        // changed in the new tree.
-        let mut parent_ref_cursor = self.parent_refs.cursor();
-        parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
-        let mut potential_conflicts = Vec::new();
-        while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
-            if parent_ref.child_id == child_id {
-                if let Some(ref parent) = parent_ref.parent {
-                    potential_conflicts.push(parent.clone());
-                }
-                if prev_timestamp.map_or(false, |prev_timestamp| {
-                    parent_ref.timestamp == prev_timestamp
-                }) {
-                    break;
-                } else {
-                    parent_ref_cursor.next(parent_ref_db)?;
-                }
-            } else {
-                break;
-            }
-        }
-
-        for (parent_id, name) in potential_conflicts {
-            let mut cursor = self.child_refs.cursor();
-            cursor.seek(
+        let parent_ref = self.find_cur_parent_ref(child_id, db)?.unwrap();
+        if let Some((parent_id, name)) = parent_ref.parent {
+            let mut cursor_1 = self.child_refs.cursor();
+            cursor_1.seek(
                 &ParentIdAndName {
                     parent_id,
                     name: name.clone(),
@@ -788,65 +757,50 @@ impl Tree {
                 SeekBias::Left,
                 child_ref_db,
             )?;
+            cursor_1.next(child_ref_db)?;
 
-            let mut found_child_ref = false;
-            let mut found_visible_child_ref = false;
+            let mut cursor_2 = cursor_1.clone();
             let mut unique_name = name.clone();
-            loop {
-                if let Some(child_ref) = cursor.item(child_ref_db)? {
-                    if child_ref.parent_id == parent_id && child_ref.name == name {
-                        if child_ref.is_visible() {
-                            if found_child_ref {
-                                if found_visible_child_ref {
-                                    loop {
-                                        Arc::make_mut(&mut unique_name).push("~");
-                                        cursor.seek_forward(
-                                            &ParentIdAndName {
-                                                parent_id,
-                                                name: unique_name.clone(),
-                                            },
-                                            SeekBias::Left,
-                                            child_ref_db,
-                                        )?;
-                                        if let Some(conflicting_child_ref) = cursor.item(child_ref_db)?
-                                        {
-                                            if !conflicting_child_ref.is_visible()
-                                                || conflicting_child_ref.parent_id != parent_id
-                                                || conflicting_child_ref.name != unique_name
-                                            {
-                                                break;
-                                            }
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                }
 
-                                // println!("{:?} {:?}", parent_id, name);
-
-                                // println!("BEFORE {:#?}", self.child_refs.items(child_ref_db)?);
-                                let fixup_op = Operation::MoveDir {
-                                    op_id: db.gen_id(),
-                                    child_id: child_ref.child_id,
-                                    timestamp: db.gen_timestamp(),
-                                    prev_timestamp: child_ref.timestamp,
-                                    new_parent: Some((parent_id, unique_name.clone())),
-                                };
-                                self.integrate_op(fixup_op.clone(), db)?;
-                                // println!("AFTER {:#?}", self.child_refs.items(child_ref_db)?);
-                                // println!("{:?}", fixup_op);
-                                fixup_ops.push(fixup_op);
+            while let Some(child_ref) = cursor_1.item(child_ref_db)? {
+                if child_ref.is_visible()
+                    && child_ref.parent_id == parent_id
+                    && child_ref.name == name
+                {
+                    loop {
+                        Arc::make_mut(&mut unique_name).push("~");
+                        cursor_2.seek_forward(
+                            &ParentIdAndName {
+                                parent_id,
+                                name: unique_name.clone(),
+                            },
+                            SeekBias::Left,
+                            child_ref_db,
+                        )?;
+                        if let Some(conflicting_child_ref) = cursor_2.item(child_ref_db)? {
+                            if !conflicting_child_ref.is_visible()
+                                || conflicting_child_ref.parent_id != parent_id
+                                || conflicting_child_ref.name != unique_name
+                            {
+                                break;
                             }
-
-                            found_visible_child_ref = true;
+                        } else {
+                            break;
                         }
-
-                        found_child_ref = true;
-                        let visible_index = cursor.end::<usize, _>(child_ref_db)?;
-                        cursor.seek_forward(&visible_index, SeekBias::Right, child_ref_db)?;
-                    } else {
-                        break;
                     }
+
+                    let fixup_op = Operation::MoveDir {
+                        op_id: db.gen_id(),
+                        child_id: child_ref.child_id,
+                        timestamp: db.gen_timestamp(),
+                        prev_timestamp: child_ref.timestamp,
+                        new_parent: Some((parent_id, unique_name.clone())),
+                    };
+                    self.integrate_op(fixup_op.clone(), db)?;
+                    fixup_ops.push(fixup_op);
+
+                    let visible_index = cursor_1.end::<usize, _>(child_ref_db)?;
+                    cursor_1.seek_forward(&visible_index, SeekBias::Right, child_ref_db)?;
                 } else {
                     break;
                 }
@@ -893,33 +847,33 @@ impl Tree {
         name: Arc<OsString>,
         child_id: id::Unique,
         inode: Option<Inode>,
-        metadata: &mut Vec<Metadata>,
-        parent_refs: &mut Vec<ParentRef>,
-        child_refs: &mut Vec<ChildRef>,
+        metadata: &mut Vec<TreeEdit<Metadata>>,
+        parent_refs: &mut Vec<TreeEdit<ParentRef>>,
+        child_refs: &mut Vec<TreeEdit<ChildRef>>,
         db: &S,
     ) -> Result<Operation, S::ReadError> {
         let timestamp = db.gen_timestamp();
 
-        metadata.push(Metadata {
+        metadata.push(TreeEdit::Insert(Metadata {
             file_id: child_id,
             is_dir: true,
             inode,
-        });
-        parent_refs.push(ParentRef {
+        }));
+        parent_refs.push(TreeEdit::Insert(ParentRef {
             child_id,
             timestamp,
             prev_timestamp: timestamp,
             op_id: child_id,
             parent: Some((parent_id, name.clone())),
-        });
-        child_refs.push(ChildRef {
+        }));
+        child_refs.push(TreeEdit::Insert(ChildRef {
             parent_id,
             name: name.clone(),
             timestamp,
             op_id: child_id,
             child_id,
             deletions: SmallVec::new(),
-        });
+        }));
         Ok(Operation::InsertDir {
             op_id: child_id,
             timestamp,
@@ -932,37 +886,39 @@ impl Tree {
         &self,
         child_id: id::Unique,
         new_parent: Option<(id::Unique, Arc<OsString>)>,
-        parent_refs: &mut Vec<ParentRef>,
-        child_refs: &mut Vec<ChildRef>,
+        parent_refs: &mut Vec<TreeEdit<ParentRef>>,
+        child_refs: &mut Vec<TreeEdit<ChildRef>>,
         db: &S,
     ) -> Result<Operation, S::ReadError> {
         let timestamp = db.gen_timestamp();
         let op_id = db.gen_id();
 
         let prev_parent_ref = self.find_cur_parent_ref(child_id, db)?.unwrap();
-        parent_refs.push(ParentRef {
+        parent_refs.push(TreeEdit::Insert(ParentRef {
             child_id,
             timestamp,
             prev_timestamp: prev_parent_ref.timestamp,
             op_id,
             parent: new_parent.clone(),
-        });
+        }));
 
         let mut prev_child_ref = self
             .find_child_ref(prev_parent_ref.to_child_ref_key().unwrap(), db)?
             .unwrap();
+
+        child_refs.push(TreeEdit::Remove(prev_child_ref.clone()));
         prev_child_ref.deletions.push(op_id);
-        child_refs.push(prev_child_ref);
+        child_refs.push(TreeEdit::Insert(prev_child_ref));
 
         if let Some((new_parent_id, new_name)) = new_parent.as_ref() {
-            child_refs.push(ChildRef {
+            child_refs.push(TreeEdit::Insert(ChildRef {
                 parent_id: *new_parent_id,
                 name: new_name.clone(),
                 timestamp,
                 op_id,
                 child_id,
                 deletions: SmallVec::new(),
-            });
+            }));
         }
 
         Ok(Operation::MoveDir {
@@ -1038,45 +994,6 @@ impl Tree {
             Ok(None)
         }
     }
-}
-
-fn interleave<T, S>(
-    old_tree: &btree::Tree<T>,
-    mut new_items: Vec<T>,
-    db: &S,
-) -> Result<btree::Tree<T>, S::ReadError>
-where
-    T: btree::Item + Keyed,
-    T::Key: btree::Dimension<T::Summary> + Default,
-    S: NodeStore<T>,
-{
-    new_items.sort_unstable_by_key(|item| item.key());
-
-    let mut old_cursor = old_tree.cursor();
-    let mut new_tree = btree::Tree::new();
-    let mut buffered_items = Vec::new();
-
-    old_cursor.seek(&T::Key::default(), SeekBias::Left, db)?;
-    for new_item in new_items {
-        let new_item_key = new_item.key();
-        let mut old_item = old_cursor.item(db)?;
-        if old_item
-            .as_ref()
-            .map_or(false, |old_item| old_item.key() < new_item_key)
-        {
-            new_tree.extend(buffered_items.drain(..), db)?;
-            new_tree.push_tree(old_cursor.slice(&new_item_key, SeekBias::Left, db)?, db)?;
-            old_item = old_cursor.item(db)?;
-        }
-        if old_item.map_or(false, |old_item| old_item.key() == new_item_key) {
-            old_cursor.next(db)?;
-        }
-        buffered_items.push(new_item);
-    }
-    new_tree.extend(buffered_items, db)?;
-    new_tree.push_tree(old_cursor.suffix::<T::Key, _>(db)?, db)?;
-
-    Ok(new_tree)
 }
 
 impl TreeCursor {
@@ -1271,6 +1188,7 @@ impl ParentRef {
         self.parent.as_ref().map(|(parent_id, name)| ChildRefKey {
             parent_id: *parent_id,
             name: name.clone(),
+            visible: true,
             timestamp: self.timestamp,
         })
     }
@@ -1350,8 +1268,9 @@ impl btree::Item for ChildRef {
         ChildRefSummary {
             parent_id: self.parent_id,
             name: self.name.clone(),
+            visible: self.is_visible(),
             timestamp: self.timestamp,
-            visible_count: if self.deletions.is_empty() { 1 } else { 0 },
+            visible_count: if self.is_visible() { 1 } else { 0 },
         }
     }
 }
@@ -1363,6 +1282,7 @@ impl Keyed for ChildRef {
         ChildRefKey {
             parent_id: self.parent_id,
             name: self.name.clone(),
+            visible: self.is_visible(),
             timestamp: self.timestamp,
         }
     }
@@ -1373,6 +1293,7 @@ impl Ord for ChildRefSummary {
         self.parent_id
             .cmp(&other.parent_id)
             .then_with(|| self.name.cmp(&other.name))
+            .then_with(|| self.visible.cmp(&other.visible).reverse())
             .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
     }
 }
@@ -1386,8 +1307,10 @@ impl PartialOrd for ChildRefSummary {
 impl<'a> AddAssign<&'a Self> for ChildRefSummary {
     fn add_assign(&mut self, other: &Self) {
         debug_assert!(*self < *other);
+
         self.parent_id = other.parent_id;
         self.name = other.name.clone();
+        self.visible = other.visible;
         self.timestamp = other.timestamp;
         self.visible_count += other.visible_count;
     }
@@ -1398,6 +1321,7 @@ impl btree::Dimension<ChildRefSummary> for ChildRefKey {
         ChildRefKey {
             parent_id: summary.parent_id,
             name: summary.name.clone(),
+            visible: summary.visible,
             timestamp: summary.timestamp,
         }
     }
@@ -1408,6 +1332,7 @@ impl Ord for ChildRefKey {
         self.parent_id
             .cmp(&other.parent_id)
             .then_with(|| self.name.cmp(&other.name))
+            .then_with(|| self.visible.cmp(&other.visible).reverse())
             .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
     }
 }
@@ -1499,6 +1424,61 @@ impl LamportTimestamp {
             replica_id: self.replica_id,
         }
     }
+}
+
+impl<T: Keyed> TreeEdit<T> {
+    fn key(&self) -> T::Key {
+        match self {
+            TreeEdit::Insert(item) | TreeEdit::Remove(item) => item.key(),
+        }
+    }
+}
+
+fn edit_tree<T, S>(
+    old_tree: &btree::Tree<T>,
+    mut ops: Vec<TreeEdit<T>>,
+    db: &S,
+) -> Result<btree::Tree<T>, S::ReadError>
+where
+    T: btree::Item + Keyed,
+    T::Key: btree::Dimension<T::Summary> + Default,
+    S: NodeStore<T>,
+{
+    ops.sort_unstable_by_key(|item| item.key());
+
+    let mut old_cursor = old_tree.cursor();
+    let mut new_tree = btree::Tree::new();
+    let mut buffered_items = Vec::new();
+
+    old_cursor.seek(&T::Key::default(), SeekBias::Left, db)?;
+    for op in ops {
+        let new_key = op.key();
+        let mut old_item = old_cursor.item(db)?;
+
+        if old_item
+            .as_ref()
+            .map_or(false, |old_item| old_item.key() < new_key)
+        {
+            new_tree.extend(buffered_items.drain(..), db)?;
+            let slice = old_cursor.slice(&new_key, SeekBias::Left, db)?;
+            new_tree.push_tree(slice, db)?;
+            old_item = old_cursor.item(db)?;
+        }
+        if old_item.map_or(false, |old_item| old_item.key() == new_key) {
+            old_cursor.next(db)?;
+        }
+        match op {
+            TreeEdit::Insert(item) => {
+                buffered_items.push(item);
+            }
+            TreeEdit::Remove(_) => {}
+        }
+    }
+
+    new_tree.extend(buffered_items, db)?;
+    new_tree.push_tree(old_cursor.suffix::<T::Key, _>(db)?, db)?;
+
+    Ok(new_tree)
 }
 
 #[cfg(test)]
@@ -1647,8 +1627,8 @@ mod tests {
         use std::mem;
         const PEERS: usize = 2;
 
-        for seed in 0..10000000 {
-            // let seed = 23328;
+        for seed in 0..100 {
+            // let seed = 1997;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1656,7 +1636,7 @@ mod tests {
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
-            for _ in 0..5 {
+            for _ in 0..10 {
                 let replica_index = rng.gen_range(0, PEERS);
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
@@ -1771,20 +1751,17 @@ mod tests {
         type EntriesIterator = Self;
 
         fn insert_dirs(&mut self, path: &Path) -> Inode {
-            // println!("file insert {:?}", path);
             self.tree.insert_dirs(path, self.db).unwrap();
             self.refresh_cursor();
             0
         }
 
         fn remove_dir(&mut self, path: &Path) {
-            // println!("file remove {:?}", path);
             self.tree.remove_dir(path, self.db).unwrap();
             self.refresh_cursor();
         }
 
         fn move_dir(&mut self, from: &Path, to: &Path) {
-            // println!("file system move {:?} to {:?}", from, to);
             self.tree.move_dir(from, to, self.db).unwrap();
             self.refresh_cursor();
         }
@@ -1919,12 +1896,10 @@ mod tests {
                     let path = self.gen_path(rng, subtree_depth, db);
                     // println!("{:?} Inserting {:?}", db.replica_id(), path);
                     ops.extend(self.insert_dirs_internal(&path, next_inode, db).unwrap());
-                // println!("{:#?} ", self.child_refs.items(db.child_ref_store()));
                 } else if k == 1 {
                     let path = self.select_path(rng, db).unwrap();
                     // println!("{:?} Removing {:?}", db.replica_id(), path);
                     ops.push(self.remove_dir(&path, db).unwrap());
-                // println!("{:#?} ", self.child_refs.items(db.child_ref_store()));
                 } else {
                     let (old_path, new_path) = loop {
                         let old_path = self.select_path(rng, db).unwrap();
@@ -1941,7 +1916,6 @@ mod tests {
                     //     new_path
                     // );
                     ops.push(self.move_dir(&old_path, &new_path, db).unwrap());
-                    // println!("{:#?} ", self.child_refs.items(db.child_ref_store()));
                 }
             }
             ops
