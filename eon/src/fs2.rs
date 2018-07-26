@@ -585,7 +585,9 @@ impl Tree {
                         {
                             child_ref_cursor.seek(&child_ref_key, SeekBias::Left, child_ref_db)?;
                             let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
-                            child_refs.push(TreeEdit::Remove(child_ref.clone()));
+                            if child_ref.is_visible() {
+                                child_refs.push(TreeEdit::Remove(child_ref.clone()));
+                            }
                             child_ref.deletions.push(op_id);
                             child_refs.push(TreeEdit::Insert(child_ref));
                         }
