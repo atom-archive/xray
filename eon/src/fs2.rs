@@ -569,6 +569,8 @@ impl Tree {
                 let mut child_ref_cursor = self.child_refs.cursor();
                 let mut parent_ref_cursor = self.parent_refs.cursor();
                 parent_ref_cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
+                let mut is_latest_parent_ref = true;
+
                 while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
                     if parent_ref.child_id != child_id {
                         break;
@@ -578,7 +580,9 @@ impl Tree {
                             new_child_ref.deletions.push(parent_ref.op_id);
                         }
                     } else if parent_ref.timestamp >= prev_timestamp {
-                        if let Some(child_ref_key) = parent_ref.to_child_ref_key() {
+                        if let Some(mut child_ref_key) =
+                            parent_ref.to_child_ref_key(is_latest_parent_ref)
+                        {
                             child_ref_cursor.seek(&child_ref_key, SeekBias::Left, child_ref_db)?;
                             let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
                             child_refs.push(TreeEdit::Remove(child_ref.clone()));
@@ -589,6 +593,7 @@ impl Tree {
                         break;
                     }
                     parent_ref_cursor.next(parent_ref_db)?;
+                    is_latest_parent_ref = false;
                 }
 
                 parent_refs.push(TreeEdit::Insert(ParentRef {
@@ -903,7 +908,7 @@ impl Tree {
         }));
 
         let mut prev_child_ref = self
-            .find_child_ref(prev_parent_ref.to_child_ref_key().unwrap(), db)?
+            .find_child_ref(prev_parent_ref.to_child_ref_key(true).unwrap(), db)?
             .unwrap();
 
         child_refs.push(TreeEdit::Remove(prev_child_ref.clone()));
@@ -1184,11 +1189,11 @@ impl Keyed for Metadata {
 }
 
 impl ParentRef {
-    fn to_child_ref_key(&self) -> Option<ChildRefKey> {
+    fn to_child_ref_key(&self, visible: bool) -> Option<ChildRefKey> {
         self.parent.as_ref().map(|(parent_id, name)| ChildRefKey {
             parent_id: *parent_id,
             name: name.clone(),
-            visible: true,
+            visible,
             timestamp: self.timestamp,
         })
     }
