@@ -598,7 +598,7 @@ impl Tree {
                     op_id,
                     parent: new_parent,
                 }));
-                if let Some(new_child_ref)  = new_child_ref {
+                if let Some(new_child_ref) = new_child_ref {
                     child_refs.push(TreeEdit::Insert(new_child_ref.clone()));
                 }
                 received_timestamp = timestamp;
@@ -1567,8 +1567,8 @@ mod tests {
 
         tree_2_ops.extend(tree_2.insert_dirs("a", &db_2).unwrap());
         tree_2_ops.extend(tree_2.insert_dirs("a~", &db_2).unwrap());
-        tree_2_ops.push(tree_2.remove_dir("a", &db_2).unwrap());
-        let id_2 = tree_2.id_for_path("a~", &db_2).unwrap().unwrap();
+        let id_2 = tree_2.id_for_path("a", &db_2).unwrap().unwrap();
+        let id_3 = tree_2.id_for_path("a~", &db_2).unwrap().unwrap();
 
         while !tree_1_ops.is_empty() || !tree_2_ops.is_empty() {
             tree_1_ops.extend(
@@ -1584,9 +1584,10 @@ mod tests {
         }
 
         assert_eq!(tree_1.paths_with_ids(&db_1), tree_2.paths_with_ids(&db_2));
-        assert_eq!(tree_1.paths(&db_1), ["a~~/", "a~~~/"]);
+        assert_eq!(tree_1.paths(&db_1), ["a/", "a~/", "a~~/"]);
+        assert_eq!(tree_1.id_for_path("a", &db_1).unwrap().unwrap(), id_2);
+        assert_eq!(tree_1.id_for_path("a~", &db_1).unwrap().unwrap(), id_3);
         assert_eq!(tree_1.id_for_path("a~~", &db_1).unwrap().unwrap(), id_1);
-        assert_eq!(tree_1.id_for_path("a~~~", &db_1).unwrap().unwrap(), id_2);
     }
 
     #[test]
