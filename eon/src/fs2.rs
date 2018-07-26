@@ -1531,24 +1531,26 @@ mod tests {
 
     #[test]
     fn test_read_from_fs() {
-        for seed in 0..1000 {
+        for seed in 0..100 {
             // let seed = 121;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
             let db = NullStore::new(1);
             let mut fs = FakeFileSystem::new(&db);
-            fs.mutate(&mut rng, 1);
+            fs.mutate(&mut rng, 3);
 
             let mut index = fs.tree.clone();
             let mut index_before_read = index.clone();
-            fs.mutate(&mut rng, 1);
+            fs.mutate(&mut rng, 3);
             let operations = index.read_from_fs(fs.by_ref(), &db).unwrap();
             assert_eq!(index.paths(&db), fs.tree.paths(&db));
 
-            // let fixup_ops = index_before_read.integrate_ops(&operations, &db).unwrap();
-            // assert!(fixup_ops.is_empty());
-            // assert_eq!(index_before_read.paths(&db), index.paths(&db));
+            index_before_read.integrate_ops(&operations, &db).unwrap();
+            assert_eq!(
+                index_before_read.paths_with_ids(&db),
+                index.paths_with_ids(&db)
+            );
         }
     }
 
