@@ -31,9 +31,9 @@ pub trait FileSystem {
     type Entry: FileSystemEntry;
     type EntriesIterator: Iterator<Item = Self::Entry>;
 
-    fn insert_dir(&mut self, path: &Path);
-    fn remove_dir(&mut self, path: &Path);
-    fn move_dir(&mut self, from: &Path, to: &Path);
+    fn insert_dir(&mut self, path: &Path) -> bool;
+    fn remove_dir(&mut self, path: &Path) -> bool;
+    fn move_dir(&mut self, from: &Path, to: &Path) -> bool;
     fn inode_for_path(&self, path: &Path) -> Option<Inode>;
     fn entries(&self) -> Self::EntriesIterator;
 }
@@ -406,8 +406,7 @@ impl Tree {
         Ok(operations)
     }
 
-    // TODO: Return an error if the operation is invalid (e.g. name conflict, non-existent path)
-    pub fn remove_dir<I, S>(&mut self, path: I, db: &S) -> Result<Operation, S::ReadError>
+    pub fn remove_dir<I, S>(&mut self, path: I, db: &S) -> Result<Option<Operation>, S::ReadError>
     where
         I: Into<PathBuf>,
         S: Store,
@@ -419,17 +418,17 @@ impl Tree {
         let mut parent_refs = Vec::new();
         let mut child_refs = Vec::new();
 
-        let child_id = self.id_for_path(&path, db)?.unwrap();
-        let operation = self.local_move(child_id, None, &mut parent_refs, &mut child_refs, db)?;
-
-        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
-        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
-
-        Ok(operation)
+        if let Some(child_id) = self.id_for_path(&path, db)? {
+            let operation = self.local_move(child_id, None, &mut parent_refs, &mut child_refs, db)?;
+            self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
+            self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
+            Ok(Some(operation))
+        } else {
+            Ok(None)
+        }
     }
 
-    // TODO: Return an error if the operation is invalid (e.g. name conflict, non-existent path)
-    pub fn move_dir<F, S, T>(&mut self, from: F, to: T, db: &S) -> Result<Operation, S::ReadError>
+    pub fn move_dir<F, S, T>(&mut self, from: F, to: T, db: &S) -> Result<Option<Operation>, S::ReadError>
     where
         F: Into<PathBuf>,
         S: Store,
@@ -440,28 +439,37 @@ impl Tree {
         let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
 
-        let mut parent_refs = Vec::new();
-        let mut child_refs = Vec::new();
+        if self.id_for_path(&to, db)?.is_some() {
+            return Ok(None)
+        }
 
-        let from_id = self.id_for_path(&from, db)?.unwrap();
+        let from_id = self.id_for_path(&from, db)?;
         let new_parent_id = if let Some(parent_path) = to.parent() {
-            self.id_for_path(parent_path, db)?.unwrap()
+            self.id_for_path(parent_path, db)?
         } else {
-            ROOT_ID
+            Some(ROOT_ID)
         };
-        let new_name = Arc::new(OsString::from(to.file_name().unwrap()));
-        let operation = self.local_move(
-            from_id,
-            Some((new_parent_id, new_name)),
-            &mut parent_refs,
-            &mut child_refs,
-            db,
-        )?;
 
-        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
-        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
+        if let (Some(from_id), Some(new_parent_id)) = (from_id, new_parent_id) {
+            let mut parent_refs = Vec::new();
+            let mut child_refs = Vec::new();
 
-        Ok(operation)
+            let new_name = Arc::new(OsString::from(to.file_name().unwrap()));
+            let operation = self.local_move(
+                from_id,
+                Some((new_parent_id, new_name)),
+                &mut parent_refs,
+                &mut child_refs,
+                db,
+            )?;
+
+            self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
+            self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
+
+            Ok(Some(operation))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn integrate_ops<'a, F, O, S>(
@@ -1719,7 +1727,7 @@ mod tests {
             let mut fs_2 = fs_1.clone();
             let mut index_1 = fs_1.tree();
             let mut index_2 = index_1.clone();
-            fs_1.mutate(3);
+            fs_1.mutate(1);
             let operations = index_1.read_from_fs(fs_1.entries(), &db).unwrap();
             assert_eq!(index_1.paths(&db), fs_1.tree().paths(&db));
 
@@ -1791,8 +1799,8 @@ mod tests {
         let mut tree_2 = tree_1.clone();
         let mut tree_2_ops = Vec::new();
 
-        tree_1_ops.push(tree_1.move_dir("a", "b/a", &db_1).unwrap());
-        tree_2_ops.push(tree_2.move_dir("b", "a/b", &db_1).unwrap());
+        tree_1_ops.push(tree_1.move_dir("a", "b/a", &db_1).unwrap().unwrap());
+        tree_2_ops.push(tree_2.move_dir("b", "a/b", &db_1).unwrap().unwrap());
         while !tree_1_ops.is_empty() || !tree_2_ops.is_empty() {
             let ops_from_tree_2_to_tree_1 = tree_2_ops.drain(..).collect::<Vec<_>>();
             let ops_from_tree_1_to_tree_2 = tree_1_ops.drain(..).collect::<Vec<_>>();
@@ -1929,16 +1937,16 @@ mod tests {
         type Entry = FakeFileSystemEntry;
         type EntriesIterator = FakeFileSystemState<'a, T>;
 
-        fn insert_dir(&mut self, path: &Path) {
-            self.0.borrow_mut().insert_dir(path);
+        fn insert_dir(&mut self, path: &Path) -> bool {
+            self.0.borrow_mut().insert_dir(path)
         }
 
-        fn remove_dir(&mut self, path: &Path) {
-            self.0.borrow_mut().remove_dir(path);
+        fn remove_dir(&mut self, path: &Path) -> bool {
+            self.0.borrow_mut().remove_dir(path)
         }
 
-        fn move_dir(&mut self, from: &Path, to: &Path) {
-            self.0.borrow_mut().move_dir(from, to);
+        fn move_dir(&mut self, from: &Path, to: &Path) -> bool {
+            self.0.borrow_mut().move_dir(from, to)
         }
 
         fn inode_for_path(&self, path: &Path) -> Option<Inode> {
@@ -1996,40 +2004,52 @@ mod tests {
             }
         }
 
-        fn insert_dir(&mut self, path: &Path) {
+        fn insert_dir(&mut self, path: &Path) -> bool {
             if self.rng.gen_weighted_bool(5) {
                 self.mutate(1);
             }
 
             // println!("FileSystem: insert {:?}", path);
-            let operations = self
-                .tree
+            let mut new_tree = self.tree.clone();
+            let operations = new_tree
                 .insert_dirs_internal(path, &mut Some(&mut self.next_inode), self.db)
                 .unwrap();
-            if operations.len() != 1 {
-                panic!("Invalid path {:?}", path)
+
+            if operations.len() == 1 {
+                self.tree = new_tree;
+                self.refresh_cursor();
+                true
+            } else {
+                false
             }
-            self.refresh_cursor();
         }
 
-        fn remove_dir(&mut self, path: &Path) {
+        fn remove_dir(&mut self, path: &Path) -> bool {
             if self.rng.gen_weighted_bool(5) {
                 self.mutate(1);
             }
 
             // println!("FileSystem: remove {:?}", path);
-            self.tree.remove_dir(path, self.db).unwrap();
-            self.refresh_cursor();
+            if self.tree.remove_dir(path, self.db).unwrap().is_some() {
+                self.refresh_cursor();
+                true
+            } else {
+                false
+            }
         }
 
-        fn move_dir(&mut self, from: &Path, to: &Path) {
+        fn move_dir(&mut self, from: &Path, to: &Path) -> bool {
             if self.rng.gen_weighted_bool(5) {
                 self.mutate(1);
             }
 
             // println!("FileSystem: move from {:?} to {:?}", from, to);
-            self.tree.move_dir(from, to, self.db).unwrap();
-            self.refresh_cursor();
+            if self.tree.move_dir(from, to, self.db).unwrap().is_some() {
+                self.refresh_cursor();
+                true
+            } else {
+                false
+            }
         }
 
         fn inode_for_path(&mut self, path: &Path) -> Option<Inode> {
@@ -2173,7 +2193,7 @@ mod tests {
                 } else if k == 1 {
                     let path = self.select_path(rng, db).unwrap();
                     // println!("{:?} Removing {:?}", db.replica_id(), path);
-                    ops.push(self.remove_dir(&path, db).unwrap());
+                    ops.push(self.remove_dir(&path, db).unwrap().unwrap());
                 } else {
                     let (old_path, new_path) = loop {
                         let old_path = self.select_path(rng, db).unwrap();
@@ -2189,7 +2209,7 @@ mod tests {
                     //     old_path,
                     //     new_path
                     // );
-                    ops.push(self.move_dir(&old_path, &new_path, db).unwrap());
+                    ops.push(self.move_dir(&old_path, &new_path, db).unwrap().unwrap());
                 }
             }
             ops
