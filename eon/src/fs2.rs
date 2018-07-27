@@ -31,7 +31,7 @@ pub trait FileSystem {
     type Entry: FileSystemEntry;
     type EntriesIterator: Iterator<Item = Self::Entry>;
 
-    fn insert_dirs(&mut self, path: &Path) -> Inode;
+    fn insert_dir(&mut self, path: &Path) -> Inode;
     fn remove_dir(&mut self, path: &Path);
     fn move_dir(&mut self, from: &Path, to: &Path);
     fn entries(&self) -> Self::EntriesIterator;
@@ -463,19 +463,30 @@ impl Tree {
         Ok(operation)
     }
 
-    pub fn integrate_ops<'a, /*F, */ O, S>(
+    pub fn integrate_ops<'a, F, O, S>(
         &mut self,
         ops: O,
-        // fs: Option<&mut F>,
+        fs: Option<&mut F>,
         db: &S,
     ) -> Result<Vec<Operation>, S::ReadError>
     where
-        // F: FileSystem,
-        O: IntoIterator<Item = &'a Operation>,
+        F: FileSystem,
+        O: IntoIterator<Item = &'a Operation> + Clone,
         S: Store,
     {
+        #[derive(Debug)]
+        struct Change {
+            depth: Option<usize>,
+            parent_ref: ParentRef,
+        }
+
+        let mut old_tree = self.clone();
+
         let mut changed_ids = HashMap::new();
-        for op in ops {
+
+        for op in ops.clone() {
+            // println!("integrating op {:#?}", op);
+
             match op {
                 Operation::InsertDir { op_id, .. } => {
                     changed_ids.insert(*op_id, false);
@@ -500,7 +511,130 @@ impl Tree {
             fixup_ops.extend(self.fix_conflicts(child_id, moved, db)?);
         }
 
+        if let Some(fs) = fs {
+            let mut changes = HashMap::new();
+            for op in ops.into_iter().map(|op| &*op).chain(&fixup_ops) {
+                match op {
+                    Operation::InsertDir {
+                        op_id: child_id, ..
+                    }
+                    | Operation::MoveDir { child_id, .. } => {
+                        if !changes.contains_key(child_id) {
+                            changes.insert(
+                                *child_id,
+                                Change {
+                                    depth: self.depth_for_id(*child_id, db)?,
+                                    parent_ref: self.find_cur_parent_ref(*child_id, db)?.unwrap(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            let mut changes = changes.into_iter().collect::<Vec<_>>();
+            changes.sort_unstable_by(|(_, a), (_, b)| {
+                if a.depth.is_none() {
+                    Ordering::Greater
+                } else if b.depth.is_none() {
+                    Ordering::Less
+                } else {
+                    a.depth.cmp(&b.depth)
+                }
+            });
+
+            let mut files_with_temp_name = HashSet::new();
+            for (child_id, change) in changes {
+                let parent_ref = change.parent_ref;
+
+                let old_path = old_tree.path_for_id(child_id, db)?;
+                if change.depth.is_some() {
+                    let (parent_id, mut name) = parent_ref.parent.as_ref().cloned().unwrap();
+                    let mut new_path = old_tree.path_for_id(parent_id, db)?.unwrap();
+                    new_path.push(name.as_ref());
+
+                    while old_tree.id_for_path(&new_path, db)?.is_some() {
+                        files_with_temp_name.insert(child_id);
+
+                        let name = Arc::make_mut(&mut name);
+                        name.push("~");
+                        new_path.set_file_name(name);
+                    }
+
+                    if let Some(old_path) = old_path {
+                        fs.move_dir(&old_path, &new_path);
+                        old_tree.integrate_op(
+                            Operation::MoveDir {
+                                op_id: parent_ref.op_id,
+                                child_id,
+                                timestamp: parent_ref.timestamp,
+                                prev_timestamp: parent_ref.prev_timestamp,
+                                new_parent: Some((parent_id, name)),
+                            },
+                            db,
+                        )?;
+                    } else {
+                        fs.insert_dir(&new_path);
+                        old_tree.integrate_op(
+                            Operation::InsertDir {
+                                op_id: child_id,
+                                timestamp: parent_ref.timestamp,
+                                parent_id,
+                                name,
+                            },
+                            db,
+                        )?;
+                    }
+                } else if let Some(old_path) = old_path {
+                    fs.remove_dir(&old_path);
+                    old_tree.integrate_op(
+                        Operation::MoveDir {
+                            op_id: parent_ref.op_id,
+                            child_id,
+                            timestamp: parent_ref.timestamp,
+                            prev_timestamp: parent_ref.prev_timestamp,
+                            new_parent: None,
+                        },
+                        db,
+                    )?;
+                }
+            }
+
+            for child_id in files_with_temp_name {
+                let old_path = old_tree.path_for_id(child_id, db)?.unwrap();
+                let new_path = self.path_for_id(child_id, db)?.unwrap();
+                fs.move_dir(&old_path, &new_path);
+            }
+        }
+
         Ok(fixup_ops)
+    }
+
+    #[cfg(test)]
+    pub fn paths<S: Store>(&self, db: &S) -> Vec<String> {
+        let mut cursor = self.cursor(db).unwrap();
+        let mut paths = Vec::new();
+        loop {
+            if let Some(path) = cursor.path() {
+                let mut path = path.to_string_lossy().into_owned();
+                if cursor.metadata(db).unwrap().unwrap().is_dir {
+                    path += "/";
+                }
+                paths.push(path);
+            } else {
+                break;
+            }
+            cursor.next(db).unwrap();
+        }
+        paths
+    }
+
+    #[cfg(test)]
+    fn paths_with_ids<S: Store>(&self, db: &S) -> Vec<(id::Unique, String)> {
+        self.paths(db)
+            .into_iter()
+            .map(|path| (self.id_for_path(&path, db).unwrap().unwrap(), path))
+            .collect()
     }
 
     fn integrate_op<S>(&mut self, op: Operation, db: &S) -> Result<(), S::ReadError>
@@ -941,30 +1075,64 @@ impl Tree {
     where
         S: Store,
     {
+        let mut path_components = Vec::new();
+        if self.visit_ancestors(child_id, |name| path_components.push(name), db)? {
+            let mut path = PathBuf::new();
+            for component in path_components.into_iter().rev() {
+                path.push(component.as_ref());
+            }
+            Ok(Some(path))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn depth_for_id<S>(&self, child_id: id::Unique, db: &S) -> Result<Option<usize>, S::ReadError>
+    where
+        S: Store,
+    {
+        let mut depth = 0;
+        if self.visit_ancestors(child_id, |_| depth += 1, db)? {
+            Ok(Some(depth))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn visit_ancestors<F, S>(
+        &self,
+        child_id: id::Unique,
+        mut f: F,
+        db: &S,
+    ) -> Result<bool, S::ReadError>
+    where
+        F: FnMut(Arc<OsString>),
+        S: Store,
+    {
         let parent_ref_db = db.parent_ref_store();
 
-        let mut path_components = Vec::new();
-
         let mut cursor = self.parent_refs.cursor();
-        cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
-        loop {
-            if let Some((parent_id, name)) = cursor.item(parent_ref_db)?.and_then(|r| r.parent) {
-                path_components.push(name);
-                if parent_id == ROOT_ID {
-                    break;
+        if child_id == ROOT_ID {
+            Ok(true)
+        } else if cursor.seek(&child_id, SeekBias::Left, parent_ref_db)? {
+            loop {
+                if let Some((parent_id, name)) = cursor.item(parent_ref_db)?.and_then(|r| r.parent)
+                {
+                    f(name);
+                    if parent_id == ROOT_ID {
+                        break;
+                    } else {
+                        cursor.seek(&parent_id, SeekBias::Left, parent_ref_db)?;
+                    }
                 } else {
-                    cursor.seek(&parent_id, SeekBias::Left, parent_ref_db)?;
+                    return Ok(false);
                 }
-            } else {
-                return Ok(None);
             }
-        }
 
-        let mut path = PathBuf::new();
-        for component in path_components.into_iter().rev() {
-            path.push(component.as_ref());
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(Some(path))
     }
 
     fn find_cur_parent_ref<S>(
@@ -1537,27 +1705,28 @@ mod tests {
     }
 
     #[test]
-    fn test_read_from_fs() {
+    fn test_fs_sync_random() {
         for seed in 0..100 {
-            // let seed = 121;
+            // let seed = 1672;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
             let db = NullStore::new(1);
-            let mut fs = FakeFileSystem::new(&db);
-            fs.mutate(&mut rng, 3);
+            let mut fs_1 = FakeFileSystem::new(&db);
+            fs_1.mutate(&mut rng, 3);
 
-            let mut index = fs.tree.clone();
-            let mut index_before_read = index.clone();
-            fs.mutate(&mut rng, 3);
-            let operations = index.read_from_fs(fs.by_ref(), &db).unwrap();
-            assert_eq!(index.paths(&db), fs.tree.paths(&db));
+            let mut fs_2 = fs_1.clone();
+            let mut index_1 = fs_1.tree.clone();
+            let mut index_2 = index_1.clone();
+            fs_1.mutate(&mut rng, 3);
+            let operations = index_1.read_from_fs(fs_1.by_ref(), &db).unwrap();
+            assert_eq!(index_1.paths(&db), fs_1.tree.paths(&db));
 
-            index_before_read.integrate_ops(&operations, &db).unwrap();
-            assert_eq!(
-                index_before_read.paths_with_ids(&db),
-                index.paths_with_ids(&db)
-            );
+            index_2
+                .integrate_ops(&operations, Some(&mut fs_2), &db)
+                .unwrap();
+            assert_eq!(index_2.paths_with_ids(&db), index_1.paths_with_ids(&db));
+            assert_eq!(fs_2.paths(), fs_1.paths());
         }
     }
 
@@ -1580,14 +1749,16 @@ mod tests {
         let id_3 = tree_2.id_for_path("a~", &db_2).unwrap().unwrap();
 
         while !tree_1_ops.is_empty() || !tree_2_ops.is_empty() {
+            let ops_from_tree_2_to_tree_1 = tree_2_ops.drain(..).collect::<Vec<_>>();
+            let ops_from_tree_1_to_tree_2 = tree_1_ops.drain(..).collect::<Vec<_>>();
             tree_1_ops.extend(
                 tree_1
-                    .integrate_ops(&tree_2_ops.drain(..).collect::<Vec<_>>(), &db_1)
+                    .integrate_ops::<FakeFileSystem, _, _>(&ops_from_tree_2_to_tree_1, None, &db_1)
                     .unwrap(),
             );
             tree_2_ops.extend(
                 tree_2
-                    .integrate_ops(&tree_1_ops.drain(..).collect::<Vec<_>>(), &db_2)
+                    .integrate_ops::<FakeFileSystem, _, _>(&ops_from_tree_1_to_tree_2, None, &db_2)
                     .unwrap(),
             );
         }
@@ -1613,16 +1784,17 @@ mod tests {
 
         tree_1_ops.push(tree_1.move_dir("a", "b/a", &db_1).unwrap());
         tree_2_ops.push(tree_2.move_dir("b", "a/b", &db_1).unwrap());
-
         while !tree_1_ops.is_empty() || !tree_2_ops.is_empty() {
+            let ops_from_tree_2_to_tree_1 = tree_2_ops.drain(..).collect::<Vec<_>>();
+            let ops_from_tree_1_to_tree_2 = tree_1_ops.drain(..).collect::<Vec<_>>();
             tree_1_ops.extend(
                 tree_1
-                    .integrate_ops(&tree_2_ops.drain(..).collect::<Vec<_>>(), &db_1)
+                    .integrate_ops::<FakeFileSystem, _, _>(&ops_from_tree_2_to_tree_1, None, &db_1)
                     .unwrap(),
             );
             tree_2_ops.extend(
                 tree_2
-                    .integrate_ops(&tree_1_ops.drain(..).collect::<Vec<_>>(), &db_2)
+                    .integrate_ops::<FakeFileSystem, _, _>(&ops_from_tree_1_to_tree_2, None, &db_2)
                     .unwrap(),
             );
         }
@@ -1653,7 +1825,9 @@ mod tests {
                     let db = &db[replica_index];
                     let tree = &mut trees[replica_index];
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = tree.integrate_ops(&ops, db).unwrap();
+                    let fixup_ops = tree
+                        .integrate_ops::<FakeFileSystem, _, _>(&ops, None, db)
+                        .unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 } else {
                     let db = &db[replica_index];
@@ -1668,7 +1842,9 @@ mod tests {
                     let db = &db[replica_index];
                     let tree = &mut trees[replica_index];
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = tree.integrate_ops(&ops, db).unwrap();
+                    let fixup_ops = tree
+                        .integrate_ops::<FakeFileSystem, _, _>(&ops, None, db)
+                        .unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 }
             }
@@ -1760,18 +1936,24 @@ mod tests {
         type Entry = FakeFileSystemEntry;
         type EntriesIterator = Self;
 
-        fn insert_dirs(&mut self, path: &Path) -> Inode {
-            self.tree.insert_dirs(path, self.db).unwrap();
+        fn insert_dir(&mut self, path: &Path) -> Inode {
+            // println!("FileSystem: insert {:?}", path);
+            let operations = self.tree.insert_dirs(path, self.db).unwrap();
+            if operations.len() != 1 {
+                panic!("Invalid path {:?}", path)
+            }
             self.refresh_cursor();
             0
         }
 
         fn remove_dir(&mut self, path: &Path) {
+            // println!("FileSystem: remove {:?}", path);
             self.tree.remove_dir(path, self.db).unwrap();
             self.refresh_cursor();
         }
 
         fn move_dir(&mut self, from: &Path, to: &Path) {
+            // println!("FileSystem: move from {:?} to {:?}", from, to);
             self.tree.move_dir(from, to, self.db).unwrap();
             self.refresh_cursor();
         }
@@ -1991,31 +2173,6 @@ mod tests {
                     }
                 }
             }
-        }
-
-        fn paths<S: Store>(&self, db: &S) -> Vec<String> {
-            let mut cursor = self.cursor(db).unwrap();
-            let mut paths = Vec::new();
-            loop {
-                if let Some(path) = cursor.path() {
-                    let mut path = path.to_string_lossy().into_owned();
-                    if cursor.metadata(db).unwrap().unwrap().is_dir {
-                        path += "/";
-                    }
-                    paths.push(path);
-                } else {
-                    break;
-                }
-                cursor.next(db).unwrap();
-            }
-            paths
-        }
-
-        fn paths_with_ids<S: Store>(&self, db: &S) -> Vec<(id::Unique, String)> {
-            self.paths(db)
-                .into_iter()
-                .map(|path| (self.id_for_path(&path, db).unwrap().unwrap(), path))
-                .collect()
         }
     }
 
