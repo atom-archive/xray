@@ -31,9 +31,10 @@ pub trait FileSystem {
     type Entry: FileSystemEntry;
     type EntriesIterator: Iterator<Item = Self::Entry>;
 
-    fn insert_dir(&mut self, path: &Path) -> Inode;
+    fn insert_dir(&mut self, path: &Path);
     fn remove_dir(&mut self, path: &Path);
     fn move_dir(&mut self, from: &Path, to: &Path);
+    fn inode_for_path(&self, path: &Path) -> Option<Inode>;
     fn entries(&self) -> Self::EntriesIterator;
 }
 
@@ -1662,7 +1663,7 @@ mod tests {
 
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     #[test]
     fn test_local_dir_ops() {
@@ -1716,11 +1717,11 @@ mod tests {
             fs_1.mutate(3);
 
             let mut fs_2 = fs_1.clone();
-            let mut index_1 = fs_1.tree.clone();
+            let mut index_1 = fs_1.tree();
             let mut index_2 = index_1.clone();
             fs_1.mutate(3);
-            let operations = index_1.read_from_fs(fs_1.by_ref(), &db).unwrap();
-            assert_eq!(index_1.paths(&db), fs_1.tree.paths(&db));
+            let operations = index_1.read_from_fs(fs_1.entries(), &db).unwrap();
+            assert_eq!(index_1.paths(&db), fs_1.tree().paths(&db));
 
             index_2
                 .integrate_ops(&operations, Some(&mut fs_2), &db)
@@ -1883,7 +1884,10 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct FakeFileSystem<'a, T: Rng + Clone> {
+    struct FakeFileSystem<'a, T: Rng + Clone>(RefCell<FakeFileSystemState<'a, T>>);
+
+    #[derive(Clone)]
+    struct FakeFileSystemState<'a, T: Rng + Clone> {
         tree: Tree,
         cursor: Option<TreeCursor>,
         next_inode: Inode,
@@ -1904,6 +1908,49 @@ mod tests {
     }
 
     impl<'a, T: Rng + Clone> FakeFileSystem<'a, T> {
+        fn new(db: &'a NullStore, rng: T) -> Self {
+            FakeFileSystem(RefCell::new(FakeFileSystemState::new(db, rng)))
+        }
+
+        fn mutate(&self, times: usize) {
+            self.0.borrow_mut().mutate(times);
+        }
+
+        fn tree(&self) -> Tree {
+            self.0.borrow().tree.clone()
+        }
+
+        fn paths(&self) -> Vec<String> {
+            self.0.borrow().paths()
+        }
+    }
+
+    impl<'a, T: Rng + Clone> FileSystem for FakeFileSystem<'a, T> {
+        type Entry = FakeFileSystemEntry;
+        type EntriesIterator = FakeFileSystemState<'a, T>;
+
+        fn insert_dir(&mut self, path: &Path) {
+            self.0.borrow_mut().insert_dir(path);
+        }
+
+        fn remove_dir(&mut self, path: &Path) {
+            self.0.borrow_mut().remove_dir(path);
+        }
+
+        fn move_dir(&mut self, from: &Path, to: &Path) {
+            self.0.borrow_mut().move_dir(from, to);
+        }
+
+        fn inode_for_path(&self, path: &Path) -> Option<Inode> {
+            self.0.borrow_mut().inode_for_path(path)
+        }
+
+        fn entries(&self) -> Self::EntriesIterator {
+            self.0.borrow().clone()
+        }
+    }
+
+    impl<'a, T: Rng + Clone> FakeFileSystemState<'a, T> {
         fn new(db: &'a NullStore, rng: T) -> Self {
             let tree = Tree::new();
             Self {
@@ -1948,40 +1995,57 @@ mod tests {
                 *old_cursor = new_cursor;
             }
         }
-    }
 
-    impl<'a, T: Rng + Clone> FileSystem for FakeFileSystem<'a, T> {
-        type Entry = FakeFileSystemEntry;
-        type EntriesIterator = Self;
+        fn insert_dir(&mut self, path: &Path) {
+            if self.rng.gen_weighted_bool(5) {
+                self.mutate(1);
+            }
 
-        fn insert_dir(&mut self, path: &Path) -> Inode {
             // println!("FileSystem: insert {:?}", path);
-            let operations = self.tree.insert_dirs(path, self.db).unwrap();
+            let operations = self
+                .tree
+                .insert_dirs_internal(path, &mut Some(&mut self.next_inode), self.db)
+                .unwrap();
             if operations.len() != 1 {
                 panic!("Invalid path {:?}", path)
             }
             self.refresh_cursor();
-            0
         }
 
         fn remove_dir(&mut self, path: &Path) {
+            if self.rng.gen_weighted_bool(5) {
+                self.mutate(1);
+            }
+
             // println!("FileSystem: remove {:?}", path);
             self.tree.remove_dir(path, self.db).unwrap();
             self.refresh_cursor();
         }
 
         fn move_dir(&mut self, from: &Path, to: &Path) {
+            if self.rng.gen_weighted_bool(5) {
+                self.mutate(1);
+            }
+
             // println!("FileSystem: move from {:?} to {:?}", from, to);
             self.tree.move_dir(from, to, self.db).unwrap();
             self.refresh_cursor();
         }
 
-        fn entries(&self) -> Self::EntriesIterator {
-            self.clone()
+        fn inode_for_path(&mut self, path: &Path) -> Option<Inode> {
+            if self.rng.gen_weighted_bool(5) {
+                self.mutate(1);
+            }
+
+            self.tree.id_for_path(path, self.db).unwrap().map(|id| {
+                let mut cursor = self.tree.metadata.cursor();
+                cursor.seek(&id, SeekBias::Left, self.db).unwrap();
+                cursor.item(self.db).unwrap().unwrap().inode.unwrap()
+            })
         }
     }
 
-    impl<'a, T: Rng + Clone> Iterator for FakeFileSystem<'a, T> {
+    impl<'a, T: Rng + Clone> Iterator for FakeFileSystemState<'a, T> {
         type Item = FakeFileSystemEntry;
 
         fn next(&mut self) -> Option<Self::Item> {
