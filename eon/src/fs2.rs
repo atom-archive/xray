@@ -1712,13 +1712,13 @@ mod tests {
             let mut rng = StdRng::from_seed(&[seed]);
 
             let db = NullStore::new(1);
-            let mut fs_1 = FakeFileSystem::new(&db);
-            fs_1.mutate(&mut rng, 3);
+            let mut fs_1 = FakeFileSystem::new(&db, rng.clone());
+            fs_1.mutate(3);
 
             let mut fs_2 = fs_1.clone();
             let mut index_1 = fs_1.tree.clone();
             let mut index_2 = index_1.clone();
-            fs_1.mutate(&mut rng, 3);
+            fs_1.mutate(3);
             let operations = index_1.read_from_fs(fs_1.by_ref(), &db).unwrap();
             assert_eq!(index_1.paths(&db), fs_1.tree.paths(&db));
 
@@ -1753,12 +1753,20 @@ mod tests {
             let ops_from_tree_1_to_tree_2 = tree_1_ops.drain(..).collect::<Vec<_>>();
             tree_1_ops.extend(
                 tree_1
-                    .integrate_ops::<FakeFileSystem, _, _>(&ops_from_tree_2_to_tree_1, None, &db_1)
+                    .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+                        &ops_from_tree_2_to_tree_1,
+                        None,
+                        &db_1,
+                    )
                     .unwrap(),
             );
             tree_2_ops.extend(
                 tree_2
-                    .integrate_ops::<FakeFileSystem, _, _>(&ops_from_tree_1_to_tree_2, None, &db_2)
+                    .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+                        &ops_from_tree_1_to_tree_2,
+                        None,
+                        &db_2,
+                    )
                     .unwrap(),
             );
         }
@@ -1789,12 +1797,20 @@ mod tests {
             let ops_from_tree_1_to_tree_2 = tree_1_ops.drain(..).collect::<Vec<_>>();
             tree_1_ops.extend(
                 tree_1
-                    .integrate_ops::<FakeFileSystem, _, _>(&ops_from_tree_2_to_tree_1, None, &db_1)
+                    .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+                        &ops_from_tree_2_to_tree_1,
+                        None,
+                        &db_1,
+                    )
                     .unwrap(),
             );
             tree_2_ops.extend(
                 tree_2
-                    .integrate_ops::<FakeFileSystem, _, _>(&ops_from_tree_1_to_tree_2, None, &db_2)
+                    .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+                        &ops_from_tree_1_to_tree_2,
+                        None,
+                        &db_2,
+                    )
                     .unwrap(),
             );
         }
@@ -1826,7 +1842,7 @@ mod tests {
                     let tree = &mut trees[replica_index];
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
                     let fixup_ops = tree
-                        .integrate_ops::<FakeFileSystem, _, _>(&ops, None, db)
+                        .integrate_ops::<FakeFileSystem<StdRng>, _, _>(&ops, None, db)
                         .unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 } else {
@@ -1843,7 +1859,7 @@ mod tests {
                     let tree = &mut trees[replica_index];
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
                     let fixup_ops = tree
-                        .integrate_ops::<FakeFileSystem, _, _>(&ops, None, db)
+                        .integrate_ops::<FakeFileSystem<StdRng>, _, _>(&ops, None, db)
                         .unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 }
@@ -1867,11 +1883,12 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct FakeFileSystem<'a> {
+    struct FakeFileSystem<'a, T: Rng + Clone> {
         tree: Tree,
         cursor: Option<TreeCursor>,
         next_inode: Inode,
         db: &'a NullStore,
+        rng: T,
     }
 
     #[derive(Debug)]
@@ -1886,21 +1903,22 @@ mod tests {
         lamport_clock: Cell<LamportTimestamp>,
     }
 
-    impl<'a> FakeFileSystem<'a> {
-        fn new(db: &'a NullStore) -> Self {
+    impl<'a, T: Rng + Clone> FakeFileSystem<'a, T> {
+        fn new(db: &'a NullStore, rng: T) -> Self {
             let tree = Tree::new();
             Self {
                 tree,
                 cursor: None,
                 next_inode: 0,
                 db,
+                rng,
             }
         }
 
-        fn mutate<T: Rng>(&mut self, rng: &mut T, times: usize) {
+        fn mutate(&mut self, times: usize) {
             for _ in 0..times {
                 self.tree
-                    .mutate(rng, &mut Some(&mut self.next_inode), self.db);
+                    .mutate(&mut self.rng, &mut Some(&mut self.next_inode), self.db);
             }
             self.refresh_cursor();
         }
@@ -1932,7 +1950,7 @@ mod tests {
         }
     }
 
-    impl<'a, 'b> FileSystem for FakeFileSystem<'a> {
+    impl<'a, T: Rng + Clone> FileSystem for FakeFileSystem<'a, T> {
         type Entry = FakeFileSystemEntry;
         type EntriesIterator = Self;
 
@@ -1963,7 +1981,7 @@ mod tests {
         }
     }
 
-    impl<'a> Iterator for FakeFileSystem<'a> {
+    impl<'a, T: Rng + Clone> Iterator for FakeFileSystem<'a, T> {
         type Item = FakeFileSystemEntry;
 
         fn next(&mut self) -> Option<Self::Item> {
