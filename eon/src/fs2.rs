@@ -525,13 +525,7 @@ impl Tree {
         if let Some(fs) = fs {
             let mut files_with_temp_name = HashSet::new();
             let mut changed_ids = self
-                .sort_file_ids_by_path_depth(
-                    ops.into_iter().map(|op| match op {
-                        Operation::InsertDir { op_id, .. } => *op_id,
-                        Operation::MoveDir { child_id, .. } => *child_id,
-                    }),
-                    db,
-                )?
+                .sort_file_ids_by_path_depth(ops.into_iter().map(|op| op.child_id()), db)?
                 .into_iter()
                 .peekable();
 
@@ -636,9 +630,15 @@ impl Tree {
 
                 if changed_ids.peek().is_some() {
                     let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
-
-                    // FIXME: Integrating these operations can invalidate unprocessed changed_ids.
                     let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
+                    for op in &fs_ops {
+                        let child_id = op.child_id();
+                        self.set_inode_for_id(
+                            child_id,
+                            old_tree.inode_for_id(child_id, db)?.unwrap(),
+                            db,
+                        )?;
+                    }
 
                     changed_ids = self
                         .sort_file_ids_by_path_depth(changed_ids.map(|(file_id, _)| file_id), db)?
@@ -1455,6 +1455,15 @@ impl TreeCursor {
     }
 }
 
+impl Operation {
+    fn child_id(&self) -> id::Unique {
+        match self {
+            Operation::InsertDir { op_id, .. } => *op_id,
+            Operation::MoveDir { child_id, .. } => *child_id,
+        }
+    }
+}
+
 impl btree::Item for Metadata {
     type Summary = id::Unique;
 
@@ -1825,8 +1834,8 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        for seed in 0..1 {
-            let seed = 10;
+        for seed in 0..1000 {
+            // let seed = 14;
             println!(
                 "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! SEED: {:?}",
                 seed
@@ -1843,40 +1852,40 @@ mod tests {
             let mut index_1 = fs_1.tree();
             let mut index_2 = index_1.clone();
             fs_1.mutate(1);
+            let mut prev_fs_1_version = fs_1.version();
 
             println!("read from fs {:?}", fs_1.0.borrow().tree.paths(&db));
 
             let operations = index_1.read_from_fs(fs_1.entries(), &db).unwrap();
             assert_eq!(index_1.paths(&db), fs_1.tree().paths(&db));
 
-            println!("apply to index {:?}", operations);
-
-            let mut fixup_ops_2 = index_2
+            let mut ops_2 = index_2
                 .integrate_ops(&operations, Some(&mut fs_2), &db)
                 .unwrap();
-            let mut fixup_ops_1 = Vec::new();
+            let mut prev_fs_2_version = fs_2.version();
+            ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
+            let mut ops_1 = Vec::new();
 
-            println!("flush fixup ops {:?}", fixup_ops_2);
-
-            while !fixup_ops_1.is_empty() || !fixup_ops_2.is_empty() {
-                fixup_ops_1.extend(
+            while !ops_1.is_empty() || !ops_2.is_empty() {
+                ops_1.extend(
                     index_1
-                        .integrate_ops(
-                            &fixup_ops_2.drain(..).collect::<Vec<_>>(),
-                            Some(&mut fs_1),
-                            &db,
-                        )
+                        .integrate_ops(&ops_2.drain(..).collect::<Vec<_>>(), Some(&mut fs_1), &db)
                         .unwrap(),
                 );
-                fixup_ops_2.extend(
+                ops_2.extend(
                     index_2
-                        .integrate_ops(
-                            &fixup_ops_1.drain(..).collect::<Vec<_>>(),
-                            Some(&mut fs_2),
-                            &db,
-                        )
+                        .integrate_ops(&ops_1.drain(..).collect::<Vec<_>>(), Some(&mut fs_2), &db)
                         .unwrap(),
                 );
+
+                if fs_1.version() > prev_fs_1_version {
+                    prev_fs_1_version = fs_1.version();
+                    ops_1.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
+                }
+                if fs_2.version() > prev_fs_2_version {
+                    prev_fs_2_version = fs_2.version();
+                    ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
+                }
             }
 
             assert_eq!(index_2.paths_with_ids(&db), index_1.paths_with_ids(&db));
@@ -2047,6 +2056,7 @@ mod tests {
         next_inode: Inode,
         db: &'a NullStore,
         rng: T,
+        version: usize,
     }
 
     #[derive(Debug)]
@@ -2076,6 +2086,10 @@ mod tests {
 
         fn paths(&self) -> Vec<String> {
             self.0.borrow().paths()
+        }
+
+        fn version(&self) -> usize {
+            self.0.borrow().version
         }
     }
 
@@ -2113,10 +2127,12 @@ mod tests {
                 next_inode: 0,
                 db,
                 rng,
+                version: 0,
             }
         }
 
         fn mutate(&mut self, count: usize) {
+            self.version += 1;
             self.tree.mutate(
                 &mut self.rng,
                 count,
@@ -2156,6 +2172,8 @@ mod tests {
             if self.rng.gen_weighted_bool(10) {
                 println!("mutate before insert_dir");
                 self.mutate(1);
+            } else {
+                self.version += 1;
             }
 
             println!("FileSystem: insert {:?}", path);
@@ -2177,6 +2195,8 @@ mod tests {
             if self.rng.gen_weighted_bool(10) {
                 println!("mutate before remove_dir");
                 self.mutate(1);
+            } else {
+                self.version += 1;
             }
 
             println!("FileSystem: remove {:?}", path);
@@ -2192,6 +2212,8 @@ mod tests {
             if self.rng.gen_weighted_bool(10) {
                 println!("mutate before move_dir");
                 self.mutate(1);
+            } else {
+                self.version += 1;
             }
 
             println!("FileSystem: move from {:?} to {:?}", from, to);
