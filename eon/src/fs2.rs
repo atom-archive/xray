@@ -275,17 +275,18 @@ impl Tree {
             for parent_id in visited_parent_ids {
                 let mut cursor = self.cursor_at(parent_id, db)?;
                 while let Some(Metadata { file_id, inode, .. }) = cursor.metadata(db)? {
-                    let inode = inode.unwrap();
-                    if !visited_inodes.contains(&inode) {
-                        dir_changes.push((
-                            file_id,
-                            DirChange {
-                                order_key: 0,
-                                inode,
-                                parent: None,
-                                moved: true,
-                            },
-                        ));
+                    if let Some(inode) = inode {
+                        if !visited_inodes.contains(&inode) {
+                            dir_changes.push((
+                                file_id,
+                                DirChange {
+                                    order_key: 0,
+                                    inode,
+                                    parent: None,
+                                    moved: true,
+                                },
+                            ));
+                        }
                     }
                     cursor.next_sibling_or_cousin(db)?;
                 }
@@ -501,8 +502,6 @@ impl Tree {
         for op in ops.clone() {
             // println!("integrate op {:#?}", op);
 
-            // println!("integrating op {:#?}", op);
-
             match op {
                 Operation::InsertDir { op_id, .. } => {
                     changed_ids.insert(*op_id, false);
@@ -513,6 +512,14 @@ impl Tree {
                     ..
                 } => {
                     if new_parent.is_some() {
+                        // If we're moving a previously invisible directory back into visible,
+                        // territory, add all of its descendants to the changed_ids.
+                        if self.depth_for_id(*child_id, db)?.is_none() {
+                            println!("RESURRECTING {:?} !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", child_id);
+                            self.visit_descendants(*child_id, |descendant_id| {
+                                changed_ids.insert(descendant_id, false);
+                            }, db)?;
+                        }
                         changed_ids.insert(*child_id, true);
                     } else {
                         changed_ids.insert(*child_id, false);
@@ -523,19 +530,22 @@ impl Tree {
         }
 
         let mut fixup_ops = Vec::new();
-        for (child_id, moved) in changed_ids {
-            fixup_ops.extend(self.fix_conflicts(child_id, moved, db)?);
+        for (child_id, moved) in &changed_ids {
+            fixup_ops.extend(self.fix_conflicts(*child_id, *moved, db)?);
         }
 
         if let Some(fs) = fs {
             let mut files_with_temp_name = BTreeSet::new();
             let mut changed_ids = self
-                .sort_file_ids_by_path_depth(ops.into_iter().map(|op| op.child_id()), db)?
+                .sort_file_ids_by_path_depth(changed_ids.keys().cloned(), db)?
                 .into_iter()
                 .peekable();
 
             while changed_ids.peek().is_some() {
                 while let Some((child_id, depth)) = changed_ids.peek().cloned() {
+
+                    println!("flush change for {:?}", child_id);
+
                     let old_path = old_tree.path_for_id(child_id, db)?;
                     if let Some(old_path) = old_path.as_ref() {
                         if fs.inode_for_path(old_path) != old_tree.inode_for_id(child_id, db)? {
@@ -704,7 +714,7 @@ impl Tree {
         }
 
         let mut sorted_file_ids = changed_id_to_depths.into_iter().collect::<Vec<_>>();
-        sorted_file_ids.sort_unstable_by(|(_, depth_a), (_, depth_b)| {
+        sorted_file_ids.sort_by(|(_, depth_a), (_, depth_b)| {
             if depth_a.is_none() {
                 Ordering::Greater
             } else if depth_b.is_none() {
@@ -776,6 +786,7 @@ impl Tree {
                     deletions: SmallVec::new(),
                 });
 
+                println!("push metadata {:?} {:?}", name, op_id);
                 metadata.push(TreeEdit::Insert(Metadata {
                     file_id: op_id,
                     is_dir: true,
@@ -1150,13 +1161,12 @@ impl Tree {
             parent: new_parent.clone(),
         }));
 
-        let mut prev_child_ref = self
-            .find_child_ref(prev_parent_ref.to_child_ref_key(true).unwrap(), db)?
-            .unwrap();
-
-        child_refs.push(TreeEdit::Remove(prev_child_ref.clone()));
-        prev_child_ref.deletions.push(op_id);
-        child_refs.push(TreeEdit::Insert(prev_child_ref));
+        if let Some(prev_child_ref_key) = prev_parent_ref.to_child_ref_key(true) {
+            let mut prev_child_ref = self.find_child_ref(prev_child_ref_key, db)?.unwrap();
+            child_refs.push(TreeEdit::Remove(prev_child_ref.clone()));
+            prev_child_ref.deletions.push(op_id);
+            child_refs.push(TreeEdit::Insert(prev_child_ref));
+        }
 
         if let Some((new_parent_id, new_name)) = new_parent.as_ref() {
             child_refs.push(TreeEdit::Insert(ChildRef {
@@ -1242,6 +1252,25 @@ impl Tree {
         }
     }
 
+    fn visit_descendants<F, S>(
+        &self,
+        parent_id: id::Unique,
+        mut f: F,
+        db: &S,
+    ) -> Result<(), S::ReadError>
+    where
+        F: FnMut(id::Unique),
+        S: Store,
+    {
+        let mut cursor = self.cursor_at(parent_id, db)?;
+        while let Some(file_id) = cursor.file_id(db)? {
+            println!("descendant {:?} {:?}", file_id, cursor.path());
+            f(file_id);
+            cursor.next(db)?;
+        }
+        Ok(())
+    }
+
     fn inode_for_id<S: Store>(
         &self,
         child_id: id::Unique,
@@ -1272,6 +1301,7 @@ impl Tree {
                 vec![TreeEdit::Insert(metadata)],
                 metadata_db,
             )?;
+            println!("set inode for id {:?} {:?}", inode, child_id);
             self.inodes_to_file_ids.insert(inode, child_id);
             Ok(true)
         } else {
@@ -1340,10 +1370,7 @@ impl TreeCursor {
     }
 
     pub fn file_id<S: Store>(&self, db: &S) -> Result<Option<id::Unique>, S::ReadError> {
-        Ok(self
-            .metadata_cursor
-            .item(db.metadata_store())?
-            .map(|metadata| metadata.file_id))
+        Ok(self.metadata(db)?.map(|metadata| metadata.file_id))
     }
 
     fn metadata<S: Store>(&self, db: &S) -> Result<Option<Metadata>, S::ReadError> {
@@ -1859,8 +1886,8 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        for seed in 0..10000 {
-            // let seed = 445;
+        for seed in 0..1 {
+            let seed = 4368;
             println!(
                 "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! SEED: {:?}",
                 seed
@@ -1887,9 +1914,11 @@ mod tests {
             let operations = index_1.read_from_fs(fs_1.entries(), &db).unwrap();
             assert_eq!(index_1.paths(&db), fs_1.tree().paths(&db));
 
+            println!("+++++ integrate into index 2");
             let mut ops_2 = index_2
                 .integrate_ops(&operations, Some(&mut fs_2), &db)
                 .unwrap();
+            println!("--- index 2 metadata {:?}", index_2.metadata.items(db.metadata_store()).unwrap());
 
             println!("fs 2 paths {:?}", fs_2.paths());
 
@@ -1900,19 +1929,21 @@ mod tests {
             let mut ops_1 = Vec::new();
 
             while !ops_1.is_empty() || !ops_2.is_empty() {
-                println!("------ integrate into index 1");
+                println!("------ integrate into index 1 {:?}", ops_2);
                 println!("fs 1 paths {:?}", fs_1.paths());
                 ops_1.extend(
                     index_1
                         .integrate_ops(&ops_2.drain(..).collect::<Vec<_>>(), Some(&mut fs_1), &db)
                         .unwrap(),
                 );
-                println!("------ integrate into index 2");
+                println!("------ integrate into index 2 {:?}", ops_1);
                 ops_2.extend(
                     index_2
                         .integrate_ops(&ops_1.drain(..).collect::<Vec<_>>(), Some(&mut fs_2), &db)
                         .unwrap(),
                 );
+
+                println!("--- index 2 metadata {:?}", index_2.metadata.items(db.metadata_store()).unwrap());
 
                 if fs_1.version() > prev_fs_1_version {
                     println!("------ refresh index 1");
