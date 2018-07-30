@@ -2,7 +2,9 @@ use btree::{self, NodeStore, SeekBias};
 use id;
 use smallvec::SmallVec;
 use std::cmp::{self, Ordering};
-use std::collections::{HashMap, HashSet};
+// TODO: Replace BTree-based collections with Hash-based collections.
+// We're using the B-tree versions to enforce deterministic ordering behavior during development.
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::ops::{Add, AddAssign};
@@ -491,7 +493,7 @@ impl Tree {
         println!("integrate ops >>>>>>>>>>>>");
         let mut old_tree = self.clone();
 
-        let mut changed_ids = HashMap::new();
+        let mut changed_ids = BTreeMap::new();
 
         for op in ops.clone() {
             // println!("integrate op {:#?}", op);
@@ -523,7 +525,7 @@ impl Tree {
         }
 
         if let Some(fs) = fs {
-            let mut files_with_temp_name = HashSet::new();
+            let mut files_with_temp_name = BTreeSet::new();
             let mut changed_ids = self
                 .sort_file_ids_by_path_depth(ops.into_iter().map(|op| op.child_id()), db)?
                 .into_iter()
@@ -629,32 +631,35 @@ impl Tree {
                 }
 
                 if changed_ids.peek().is_some() {
-                    let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
-                    let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
-                    for op in &fs_ops {
-                        let child_id = op.child_id();
-                        self.set_inode_for_id(
-                            child_id,
-                            old_tree.inode_for_id(child_id, db)?.unwrap(),
-                            db,
-                        )?;
-                    }
-
+                    self.refresh_old_tree(&mut old_tree, fs, &mut fixup_ops, db)?;
                     changed_ids = self
                         .sort_file_ids_by_path_depth(changed_ids.map(|(file_id, _)| file_id), db)?
                         .into_iter()
                         .peekable();
-
-                    fixup_ops.extend(fs_ops);
-                    fixup_ops.extend(fs_fixup_ops);
                 }
             }
 
-            for child_id in files_with_temp_name {
-                let old_path = old_tree.path_for_id(child_id, db)?.unwrap();
-                let new_path = self.path_for_id(child_id, db)?.unwrap();
-                if !fs.move_dir(&old_path, &new_path) {
-                    unimplemented!("Synthesize another fixup op")
+            println!("moving {} files with temp names", files_with_temp_name.len());
+            let mut files_with_temp_name = files_with_temp_name.into_iter().peekable();
+            while let Some(child_id) = files_with_temp_name.peek().cloned() {
+                if let Some(old_path) = old_tree.path_for_id(child_id, db)? {
+                    let new_path = self.path_for_id(child_id, db)?.unwrap();
+
+                    println!("restoring name {:?} {:?}", old_path, new_path);
+
+                    if old_tree.id_for_path(&new_path, db)?.is_some() {
+                        // Name conflict, synthesize fixup and preserve old name.
+                        unimplemented!("Synthesize another fixup op");
+                        // files_with_temp_name.next();
+                    } else {
+                        if fs.move_dir(&old_path, &new_path) {
+                            files_with_temp_name.next();
+                        } else {
+                            self.refresh_old_tree(&mut old_tree, fs, &mut fixup_ops, db)?;
+                        }
+                    }
+                } else {
+                    println!("no old path for new path {:?}", self.path_for_id(child_id, db)?);
                 }
             }
         }
@@ -662,6 +667,28 @@ impl Tree {
         println!("integrate ops <<<<<<<<<<<<");
 
         Ok(fixup_ops)
+    }
+
+    fn refresh_old_tree<F, S>(
+        &mut self,
+        old_tree: &mut Tree,
+        fs: &mut F,
+        fixup_ops: &mut Vec<Operation>,
+        db: &S,
+    ) -> Result<(), S::ReadError>
+    where
+        F: FileSystem,
+        S: Store,
+    {
+        let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
+        let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
+        for op in &fs_ops {
+            let child_id = op.child_id();
+            self.set_inode_for_id(child_id, old_tree.inode_for_id(child_id, db)?.unwrap(), db)?;
+        }
+        fixup_ops.extend(fs_ops);
+        fixup_ops.extend(fs_fixup_ops);
+        Ok(())
     }
 
     fn sort_file_ids_by_path_depth<I, S>(
@@ -673,7 +700,7 @@ impl Tree {
         I: Iterator<Item = id::Unique>,
         S: Store,
     {
-        let mut changed_id_to_depths = HashMap::new();
+        let mut changed_id_to_depths = BTreeMap::new();
         for file_id in file_ids {
             changed_id_to_depths.insert(file_id, self.depth_for_id(file_id, db)?);
         }
