@@ -514,6 +514,9 @@ impl Tree {
                     if new_parent.is_some() {
                         // If we're moving a previously invisible directory back into visible,
                         // territory, add all of its descendants to the changed_ids.
+
+                        // FIXME: this will loop on cycles because it assumes the tree is consistent.
+                        // We need a better way to detect resurrected directories.
                         if self.depth_for_id(*child_id, db)?.is_none() {
                             println!("RESURRECTING {:?} !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", child_id);
                             self.visit_descendants(*child_id, |descendant_id| {
@@ -1886,8 +1889,8 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        for seed in 0..1 {
-            let seed = 4368;
+        for seed in 0..1000 {
+            let seed = 4207;
             println!(
                 "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! SEED: {:?}",
                 seed
