@@ -38,6 +38,9 @@ pub trait FileSystem {
     fn move_dir(&mut self, from: &Path, to: &Path) -> bool;
     fn inode_for_path(&self, path: &Path) -> Option<Inode>;
     fn entries(&self) -> Self::EntriesIterator;
+
+    // TODO: Remove this
+    fn paths(&self) -> Vec<String>;
 }
 
 pub trait FileSystemEntry {
@@ -639,28 +642,23 @@ impl Tree {
                 }
             }
 
-            println!("moving {} files with temp names", files_with_temp_name.len());
-            let mut files_with_temp_name = files_with_temp_name.into_iter().peekable();
-            while let Some(child_id) = files_with_temp_name.peek().cloned() {
+            println!(
+                "moving {} files with temp names",
+                files_with_temp_name.len()
+            );
+            let mut errored = false;
+            for child_id in files_with_temp_name {
                 if let Some(old_path) = old_tree.path_for_id(child_id, db)? {
                     let new_path = self.path_for_id(child_id, db)?.unwrap();
-
-                    println!("restoring name {:?} {:?}", old_path, new_path);
-
-                    if old_tree.id_for_path(&new_path, db)?.is_some() {
-                        // Name conflict, synthesize fixup and preserve old name.
-                        unimplemented!("Synthesize another fixup op");
-                        // files_with_temp_name.next();
+                    if fs.move_dir(&old_path, &new_path) {
+                        old_tree.move_dir(&old_path, &new_path, db)?;
                     } else {
-                        if fs.move_dir(&old_path, &new_path) {
-                            files_with_temp_name.next();
-                        } else {
-                            self.refresh_old_tree(&mut old_tree, fs, &mut fixup_ops, db)?;
-                        }
+                        errored = true;
                     }
-                } else {
-                    println!("no old path for new path {:?}", self.path_for_id(child_id, db)?);
                 }
+            }
+            if errored {
+                self.refresh_old_tree(&mut old_tree, fs, &mut fixup_ops, db)?;
             }
         }
 
@@ -1861,8 +1859,8 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        for seed in 0..1000 {
-            // let seed = 14;
+        for seed in 0..10000 {
+            // let seed = 445;
             println!(
                 "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! SEED: {:?}",
                 seed
@@ -1873,7 +1871,7 @@ mod tests {
             let mut fs_1 = FakeFileSystem::new(&db, rng.clone());
             fs_1.mutate(1);
 
-            println!("clone index ----------------");
+            println!("------------- clone index");
 
             let mut fs_2 = fs_1.clone();
             let mut index_1 = fs_1.tree();
@@ -1881,7 +1879,10 @@ mod tests {
             fs_1.mutate(1);
             let mut prev_fs_1_version = fs_1.version();
 
-            println!("read from fs {:?}", fs_1.0.borrow().tree.paths(&db));
+            println!(
+                "------------- read from fs {:?}",
+                fs_1.0.borrow().tree.paths(&db)
+            );
 
             let operations = index_1.read_from_fs(fs_1.entries(), &db).unwrap();
             assert_eq!(index_1.paths(&db), fs_1.tree().paths(&db));
@@ -1889,16 +1890,24 @@ mod tests {
             let mut ops_2 = index_2
                 .integrate_ops(&operations, Some(&mut fs_2), &db)
                 .unwrap();
+
+            println!("fs 2 paths {:?}", fs_2.paths());
+
+            println!("------------- read new fs 2 changes");
+
             let mut prev_fs_2_version = fs_2.version();
             ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
             let mut ops_1 = Vec::new();
 
             while !ops_1.is_empty() || !ops_2.is_empty() {
+                println!("------ integrate into index 1");
+                println!("fs 1 paths {:?}", fs_1.paths());
                 ops_1.extend(
                     index_1
                         .integrate_ops(&ops_2.drain(..).collect::<Vec<_>>(), Some(&mut fs_1), &db)
                         .unwrap(),
                 );
+                println!("------ integrate into index 2");
                 ops_2.extend(
                     index_2
                         .integrate_ops(&ops_1.drain(..).collect::<Vec<_>>(), Some(&mut fs_2), &db)
@@ -1906,10 +1915,12 @@ mod tests {
                 );
 
                 if fs_1.version() > prev_fs_1_version {
+                    println!("------ refresh index 1");
                     prev_fs_1_version = fs_1.version();
                     ops_1.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
                 }
                 if fs_2.version() > prev_fs_2_version {
+                    println!("------ refresh index 2");
                     prev_fs_2_version = fs_2.version();
                     ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
                 }
@@ -2111,9 +2122,9 @@ mod tests {
             self.0.borrow().tree.clone()
         }
 
-        fn paths(&self) -> Vec<String> {
-            self.0.borrow().paths()
-        }
+        // fn paths(&self) -> Vec<String> {
+        //     self.0.borrow().paths()
+        // }
 
         fn version(&self) -> usize {
             self.0.borrow().version
@@ -2123,6 +2134,10 @@ mod tests {
     impl<'a, T: Rng + Clone> FileSystem for FakeFileSystem<'a, T> {
         type Entry = FakeFileSystemEntry;
         type EntriesIterator = FakeFileSystemState<'a, T>;
+
+        fn paths(&self) -> Vec<String> {
+            self.0.borrow().paths()
+        }
 
         fn insert_dir(&mut self, path: &Path) -> bool {
             self.0.borrow_mut().insert_dir(path)
