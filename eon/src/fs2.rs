@@ -512,17 +512,6 @@ impl Tree {
                     ..
                 } => {
                     if new_parent.is_some() {
-                        // If we're moving a previously invisible directory back into visible,
-                        // territory, add all of its descendants to the changed_ids.
-
-                        // FIXME: this will loop on cycles because it assumes the tree is consistent.
-                        // We need a better way to detect resurrected directories.
-                        if self.depth_for_id(*child_id, db)?.is_none() {
-                            println!("RESURRECTING {:?} !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", child_id);
-                            self.visit_descendants(*child_id, |descendant_id| {
-                                changed_ids.insert(descendant_id, false);
-                            }, db)?;
-                        }
                         changed_ids.insert(*child_id, true);
                     } else {
                         changed_ids.insert(*child_id, false);
@@ -539,14 +528,32 @@ impl Tree {
 
         if let Some(fs) = fs {
             let mut files_with_temp_name = BTreeSet::new();
+
+            let mut resurrected_descendants = BTreeSet::new();
+            for (id, moved) in &changed_ids {
+                if *moved && old_tree.depth_for_id(*id, db)?.is_none() {
+                    let mut cursor = self.cursor_at(*id, db)?;
+                    while let Some(descendant_id) = cursor.file_id(db)? {
+                        println!("resurrecting descendant {:?} {:?}", descendant_id, cursor.path());
+                        resurrected_descendants.insert(descendant_id);
+                        cursor.next(db)?;
+                    }
+                }
+            }
+
             let mut changed_ids = self
-                .sort_file_ids_by_path_depth(changed_ids.keys().cloned(), db)?
+                .sort_file_ids_by_path_depth(
+                    changed_ids
+                        .keys()
+                        .cloned()
+                        .chain(resurrected_descendants.into_iter()),
+                    db,
+                )?
                 .into_iter()
                 .peekable();
 
             while changed_ids.peek().is_some() {
                 while let Some((child_id, depth)) = changed_ids.peek().cloned() {
-
                     println!("flush change for {:?}", child_id);
 
                     let old_path = old_tree.path_for_id(child_id, db)?;
@@ -1255,25 +1262,6 @@ impl Tree {
         }
     }
 
-    fn visit_descendants<F, S>(
-        &self,
-        parent_id: id::Unique,
-        mut f: F,
-        db: &S,
-    ) -> Result<(), S::ReadError>
-    where
-        F: FnMut(id::Unique),
-        S: Store,
-    {
-        let mut cursor = self.cursor_at(parent_id, db)?;
-        while let Some(file_id) = cursor.file_id(db)? {
-            println!("descendant {:?} {:?}", file_id, cursor.path());
-            f(file_id);
-            cursor.next(db)?;
-        }
-        Ok(())
-    }
-
     fn inode_for_id<S: Store>(
         &self,
         child_id: id::Unique,
@@ -1889,8 +1877,8 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        for seed in 0..1000 {
-            let seed = 4207;
+        for seed in 0..10000 {
+            let seed = 4890;
             println!(
                 "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! SEED: {:?}",
                 seed
@@ -1921,7 +1909,10 @@ mod tests {
             let mut ops_2 = index_2
                 .integrate_ops(&operations, Some(&mut fs_2), &db)
                 .unwrap();
-            println!("--- index 2 metadata {:?}", index_2.metadata.items(db.metadata_store()).unwrap());
+            println!(
+                "--- index 2 metadata {:?}",
+                index_2.metadata.items(db.metadata_store()).unwrap()
+            );
 
             println!("fs 2 paths {:?}", fs_2.paths());
 
@@ -1946,7 +1937,10 @@ mod tests {
                         .unwrap(),
                 );
 
-                println!("--- index 2 metadata {:?}", index_2.metadata.items(db.metadata_store()).unwrap());
+                println!(
+                    "--- index 2 metadata {:?}",
+                    index_2.metadata.items(db.metadata_store()).unwrap()
+                );
 
                 if fs_1.version() > prev_fs_1_version {
                     println!("------ refresh index 1");
