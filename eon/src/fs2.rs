@@ -234,18 +234,20 @@ impl Tree {
                     dir_change.parent = Some((new_parent_id, Arc::new(entry.name().into())));
                 } else {
                     let parent_ref = self.find_cur_parent_ref(file_id, db)?.unwrap();
-                    if let Some((old_parent_id, old_name)) = parent_ref.parent {
-                        if old_parent_id != new_parent_id || old_name.as_ref() != entry.name() {
-                            dir_changes.insert(
-                                file_id,
-                                DirChange {
-                                    order_key,
-                                    inode: entry.inode(),
-                                    parent: Some((new_parent_id, Arc::new(entry.name().into()))),
-                                    moved: true,
-                                },
-                            );
-                        }
+                    let parent = parent_ref
+                        .parent
+                        .as_ref()
+                        .map(|(parent_id, name)| (parent_id, name.as_os_str()));
+                    if parent != Some((&new_parent_id, entry.name())) {
+                        dir_changes.insert(
+                            file_id,
+                            DirChange {
+                                order_key,
+                                inode: entry.inode(),
+                                parent: Some((new_parent_id, Arc::new(entry.name().into()))),
+                                moved: true,
+                            },
+                        );
                     }
                 }
                 dir_stack.push(file_id);
