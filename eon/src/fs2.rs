@@ -545,6 +545,10 @@ impl Tree {
                     }
                 }
             }
+            for op in &fixup_ops {
+                ids_to_write.insert(op.child_id());
+            }
+
 
             let mut sorted_ids = self
                 .sort_file_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
@@ -1247,6 +1251,7 @@ impl Tree {
     {
         let parent_ref_db = db.parent_ref_store();
 
+        let mut visited = HashSet::new();
         let mut cursor = self.parent_refs.cursor();
         if child_id == ROOT_ID {
             Ok(true)
@@ -1254,6 +1259,13 @@ impl Tree {
             loop {
                 if let Some((parent_id, name)) = cursor.item(parent_ref_db)?.and_then(|r| r.parent)
                 {
+                    // TODO: Only check for cycles in debug mode
+                    if visited.contains(&parent_id) {
+                        panic!("Cycle detected when visiting ancestors");
+                    } else {
+                        visited.insert(parent_id);
+                    }
+
                     f(name);
                     if parent_id == ROOT_ID {
                         break;
@@ -2290,7 +2302,9 @@ mod tests {
             }
 
             // println!("FileSystem: move from {:?} to {:?}", from, to);
-            if self.tree.move_dir(from, to, self.db).unwrap().is_some() {
+            if let Some(op) = self.tree.move_dir(from, to, self.db).unwrap() {
+                // Blow up if we introduced cycles.
+                self.tree.depth_for_id(op.child_id(), self.db).unwrap();
                 self.refresh_cursor();
                 true
             } else {
