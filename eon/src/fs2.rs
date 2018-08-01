@@ -209,7 +209,7 @@ impl Tree {
         #[derive(Debug)]
         struct DirChange {
             order_key: usize,
-            inode: Inode,
+            inode: Option<Inode>,
             parent: Option<(id::Unique, Arc<OsString>)>,
             moved: bool,
         }
@@ -243,7 +243,7 @@ impl Tree {
                             file_id,
                             DirChange {
                                 order_key,
-                                inode: entry.inode(),
+                                inode: Some(entry.inode()),
                                 parent: Some((new_parent_id, Arc::new(entry.name().into()))),
                                 moved: true,
                             },
@@ -257,7 +257,7 @@ impl Tree {
                     file_id,
                     DirChange {
                         order_key,
-                        inode: entry.inode(),
+                        inode: Some(entry.inode()),
                         parent: Some((new_parent_id, Arc::new(entry.name().into()))),
                         moved: false,
                     },
@@ -277,18 +277,16 @@ impl Tree {
             for parent_id in visited_parent_ids {
                 let mut cursor = self.cursor_at(parent_id, db)?;
                 while let Some(Metadata { file_id, inode, .. }) = cursor.metadata(db)? {
-                    if let Some(inode) = inode {
-                        if !visited_inodes.contains(&inode) {
-                            dir_changes.push((
-                                file_id,
-                                DirChange {
-                                    order_key: 0,
-                                    inode,
-                                    parent: None,
-                                    moved: true,
-                                },
-                            ));
-                        }
+                    if inode.map_or(true, |inode| !visited_inodes.contains(&inode)) {
+                        dir_changes.push((
+                            file_id,
+                            DirChange {
+                                order_key: 0,
+                                inode,
+                                parent: None,
+                                moved: true,
+                            },
+                        ));
                     }
                     cursor.next_sibling_or_cousin(db)?;
                 }
@@ -316,7 +314,7 @@ impl Tree {
                     parent_id,
                     name,
                     child_id,
-                    Some(change.inode),
+                    change.inode,
                     &mut metadata,
                     &mut parent_refs,
                     &mut child_refs,
@@ -711,8 +709,12 @@ impl Tree {
         let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
         let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
         for op in &fs_ops {
-            let child_id = op.child_id();
-            self.set_inode_for_id(child_id, old_tree.inode_for_id(child_id, db)?.unwrap(), db)?;
+            match op {
+                Operation::InsertDir { op_id, .. } => {
+                    self.set_inode_for_id(*op_id, old_tree.inode_for_id(*op_id, db)?.unwrap(), db)?;
+                }
+                _ => {}
+            }
         }
         fixup_ops.extend(fs_ops);
         for op in &fs_fixup_ops {
