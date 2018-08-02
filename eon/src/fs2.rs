@@ -425,7 +425,8 @@ impl Tree {
         let mut child_refs = Vec::new();
 
         if let Some(child_id) = self.id_for_path(&path, db)? {
-            let operation = self.local_move(child_id, None, &mut parent_refs, &mut child_refs, db)?;
+            let operation =
+                self.local_move(child_id, None, &mut parent_refs, &mut child_refs, db)?;
             self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
             self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
             Ok(Some(operation))
@@ -547,7 +548,6 @@ impl Tree {
                 ids_to_write.insert(op.child_id());
             }
 
-
             let mut sorted_ids = self
                 .sort_file_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
                 .into_iter()
@@ -659,8 +659,14 @@ impl Tree {
                 }
 
                 if sorted_ids.peek().is_some() {
-                    // println!("refreshing old tree, cur changed ids: {:?}", changed_ids.by_ref().collect::<Vec<_>>());
-                    self.refresh_old_tree(&mut old_tree, fs, &mut fixup_ops, &mut ids_to_write, db)?;
+                    // println!("refreshing old tree - paths: {:?}", fs.paths());
+                    self.refresh_old_tree(
+                        &mut old_tree,
+                        fs,
+                        &mut fixup_ops,
+                        &mut ids_to_write,
+                        db,
+                    )?;
                     sorted_ids = self
                         .sort_file_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
                         .into_iter()
@@ -1856,6 +1862,7 @@ mod tests {
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
     #[test]
     fn test_local_dir_ops() {
@@ -1916,15 +1923,17 @@ mod tests {
             let mut fs_2 = fs_1.clone();
             let mut index_1 = fs_1.tree();
             let mut index_2 = index_1.clone();
-            fs_1.mutate(5);
             let mut prev_fs_1_version = fs_1.version();
+            let mut prev_fs_2_version = fs_2.version();
+            fs_1.mutate(5);
 
-            // println!(
-            //     "------------- read from fs {:?}",
-            //     fs_1.0.borrow().tree.paths(&db)
-            // );
+            let mut operations = Vec::new();
+            while fs_1.version() > prev_fs_1_version {
+                // println!("------ refresh index 1");
+                prev_fs_1_version = fs_1.version();
+                operations.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
+            }
 
-            let operations = index_1.read_from_fs(fs_1.entries(), &db).unwrap();
             assert_eq!(index_1.paths(&db), fs_1.tree().paths(&db));
 
             // println!("+++++ integrate into index 2");
@@ -1933,14 +1942,15 @@ mod tests {
                 .unwrap();
 
             // println!("fs 2 paths {:?}", fs_2.paths());
-
             // println!("------------- read new fs 2 changes");
 
-            let mut prev_fs_2_version = fs_2.version();
-            ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
+            while fs_2.version() > prev_fs_2_version {
+                prev_fs_2_version = fs_2.version();
+                ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
+            }
             let mut ops_1 = Vec::new();
 
-            while !ops_1.is_empty() || !ops_2.is_empty() {
+            loop {
                 // println!("------ integrate into index 1 {:?}", ops_2);
                 // println!("--- fs 1 paths {:?}", fs_1.paths());
                 ops_1.extend(
@@ -1956,15 +1966,19 @@ mod tests {
                 );
                 // println!("--- fs 2 paths {:?}", fs_2.paths());
 
-                if fs_1.version() > prev_fs_1_version {
+                while fs_1.version() > prev_fs_1_version {
                     // println!("------ refresh index 1");
                     prev_fs_1_version = fs_1.version();
                     ops_1.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
                 }
-                if fs_2.version() > prev_fs_2_version {
+                while fs_2.version() > prev_fs_2_version {
                     // println!("------ refresh index 2");
                     prev_fs_2_version = fs_2.version();
                     ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
+                }
+
+                if ops_1.is_empty() && ops_2.is_empty() {
+                    break;
                 }
             }
 
@@ -2000,8 +2014,7 @@ mod tests {
                         &ops_from_tree_2_to_tree_1,
                         None,
                         &db_1,
-                    )
-                    .unwrap(),
+                    ).unwrap(),
             );
             tree_2_ops.extend(
                 tree_2
@@ -2009,8 +2022,7 @@ mod tests {
                         &ops_from_tree_1_to_tree_2,
                         None,
                         &db_2,
-                    )
-                    .unwrap(),
+                    ).unwrap(),
             );
         }
 
@@ -2044,8 +2056,7 @@ mod tests {
                         &ops_from_tree_2_to_tree_1,
                         None,
                         &db_1,
-                    )
-                    .unwrap(),
+                    ).unwrap(),
             );
             tree_2_ops.extend(
                 tree_2
@@ -2053,8 +2064,7 @@ mod tests {
                         &ops_from_tree_1_to_tree_2,
                         None,
                         &db_2,
-                    )
-                    .unwrap(),
+                    ).unwrap(),
             );
         }
 
@@ -2126,17 +2136,21 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct FakeFileSystem<'a, T: Rng + Clone>(RefCell<FakeFileSystemState<'a, T>>);
+    struct FakeFileSystem<'a, T: Rng + Clone>(Rc<RefCell<FakeFileSystemState<'a, T>>>);
 
     #[derive(Clone)]
     struct FakeFileSystemState<'a, T: Rng + Clone> {
         tree: Tree,
-        cursor: Option<TreeCursor>,
         next_inode: Inode,
         db: &'a NullStore,
         rng: T,
         version: usize,
+    }
+
+    struct FakeFileSystemIter<'a, T: Rng + Clone> {
+        state: Rc<RefCell<FakeFileSystemState<'a, T>>>,
+        version: usize,
+        cursor: Option<TreeCursor>,
     }
 
     #[derive(Debug)]
@@ -2153,7 +2167,7 @@ mod tests {
 
     impl<'a, T: Rng + Clone> FakeFileSystem<'a, T> {
         fn new(db: &'a NullStore, rng: T) -> Self {
-            FakeFileSystem(RefCell::new(FakeFileSystemState::new(db, rng)))
+            FakeFileSystem(Rc::new(RefCell::new(FakeFileSystemState::new(db, rng))))
         }
 
         fn mutate(&self, count: usize) {
@@ -2173,9 +2187,15 @@ mod tests {
         }
     }
 
+    impl<'a, T: Rng + Clone> Clone for FakeFileSystem<'a, T> {
+        fn clone(&self) -> Self {
+            FakeFileSystem(Rc::new(RefCell::new(self.0.borrow().clone())))
+        }
+    }
+
     impl<'a, T: Rng + Clone> FileSystem for FakeFileSystem<'a, T> {
         type Entry = FakeFileSystemEntry;
-        type EntriesIterator = FakeFileSystemState<'a, T>;
+        type EntriesIterator = FakeFileSystemIter<'a, T>;
 
         fn paths(&self) -> Vec<String> {
             self.0.borrow().paths()
@@ -2198,7 +2218,11 @@ mod tests {
         }
 
         fn entries(&self) -> Self::EntriesIterator {
-            self.0.borrow().clone()
+            FakeFileSystemIter {
+                state: self.0.clone(),
+                version: self.0.borrow().version,
+                cursor: None,
+            }
         }
     }
 
@@ -2207,7 +2231,6 @@ mod tests {
             let tree = Tree::new();
             Self {
                 tree,
-                cursor: None,
                 next_inode: 0,
                 db,
                 rng,
@@ -2223,33 +2246,10 @@ mod tests {
                 &mut Some(&mut self.next_inode),
                 self.db,
             );
-            self.refresh_cursor();
         }
 
         fn paths(&self) -> Vec<String> {
             self.tree.paths(self.db)
-        }
-
-        fn refresh_cursor(&mut self) {
-            if let Some(old_cursor) = self.cursor.as_mut() {
-                let mut new_cursor = self.tree.cursor(self.db).unwrap();
-                loop {
-                    let advance = if let (Some(new_path), Some(old_path)) =
-                        (new_cursor.path(), old_cursor.path())
-                    {
-                        new_path < old_path
-                    } else {
-                        false
-                    };
-
-                    if advance {
-                        new_cursor.next(self.db).unwrap();
-                    } else {
-                        break;
-                    }
-                }
-                *old_cursor = new_cursor;
-            }
         }
 
         fn insert_dir(&mut self, path: &Path) -> bool {
@@ -2268,7 +2268,6 @@ mod tests {
 
             if operations.len() == 1 {
                 self.tree = new_tree;
-                self.refresh_cursor();
                 true
             } else {
                 false
@@ -2285,7 +2284,6 @@ mod tests {
 
             // println!("FileSystem: remove {:?}", path);
             if self.tree.remove_dir(path, self.db).unwrap().is_some() {
-                self.refresh_cursor();
                 true
             } else {
                 false
@@ -2304,7 +2302,6 @@ mod tests {
             if let Some(op) = self.tree.move_dir(from, to, self.db).unwrap() {
                 // Blow up if we introduced cycles.
                 self.tree.depth_for_id(op.child_id(), self.db).unwrap();
-                self.refresh_cursor();
                 true
             } else {
                 false
@@ -2325,22 +2322,60 @@ mod tests {
         }
     }
 
-    impl<'a, T: Rng + Clone> Iterator for FakeFileSystemState<'a, T> {
+    impl<'a, T: Rng + Clone> FakeFileSystemIter<'a, T> {
+        fn build_tree_cursor(&self) -> TreeCursor {
+            let state = self.state.borrow();
+            let mut new_cursor = state.tree.cursor(state.db).unwrap();
+            if let Some(old_cursor) = self.cursor.as_ref() {
+                loop {
+                    let advance = if let (Some(new_path), Some(old_path)) =
+                        (new_cursor.path(), old_cursor.path())
+                    {
+                        new_path < old_path
+                    } else {
+                        false
+                    };
+
+                    if advance {
+                        new_cursor.next(state.db).unwrap();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            new_cursor
+        }
+    }
+
+    impl<'a, T: Rng + Clone> Iterator for FakeFileSystemIter<'a, T> {
         type Item = FakeFileSystemEntry;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.cursor.is_none() {
-                self.cursor = Some(self.tree.cursor(self.db).unwrap());
+            {
+                let mut state = self.state.borrow_mut();
+                if state.rng.gen_weighted_bool(100) {
+                    // println!("mutate while scanning entries");
+                    state.mutate(1);
+                }
+            }
+
+            let state = self.state.borrow();
+
+            if self.cursor.is_none() || self.version < state.version {
+                self.cursor = Some(self.build_tree_cursor());
+                self.version = state.version;
+            } else {
+                self.cursor.as_mut().unwrap().next(state.db).unwrap();
             }
 
             let cursor = self.cursor.as_mut().unwrap();
+
             let depth = cursor.depth();
             if depth == 0 {
                 None
             } else {
-                let name = cursor.name(self.db).unwrap().unwrap();
-                let inode = cursor.metadata(self.db).unwrap().unwrap().inode.unwrap();
-                cursor.next(self.db).unwrap();
+                let name = cursor.name(state.db).unwrap().unwrap();
+                let inode = cursor.metadata(state.db).unwrap().unwrap().inode.unwrap();
                 Some(FakeFileSystemEntry { depth, name, inode })
             }
         }
