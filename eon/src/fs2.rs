@@ -1906,8 +1906,11 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        for seed in 0..100 {
-            // let seed = 35804;
+        // let mut seed = 0;
+        // loop {
+        for seed in 0..1 {
+            // seed += 1;
+            let seed = 32888;
             println!(
                 "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! SEED: {:?}",
                 seed
@@ -1916,7 +1919,7 @@ mod tests {
 
             let db = NullStore::new(1);
             let mut fs_1 = FakeFileSystem::new(&db, rng.clone());
-            fs_1.mutate(5);
+            fs_1.mutate(1);
 
             // println!("------------- clone index");
 
@@ -1925,7 +1928,7 @@ mod tests {
             let mut index_2 = index_1.clone();
             let mut prev_fs_1_version = fs_1.version();
             let mut prev_fs_2_version = fs_2.version();
-            fs_1.mutate(5);
+            fs_1.mutate(1);
 
             let mut operations = Vec::new();
             while fs_1.version() > prev_fs_1_version {
