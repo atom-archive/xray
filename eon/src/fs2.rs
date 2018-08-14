@@ -2334,7 +2334,7 @@ mod tests {
                     let advance = if let (Some(new_path), Some(old_path)) =
                         (new_cursor.path(), old_cursor.path())
                     {
-                        new_path < old_path
+                        new_path <= old_path
                     } else {
                         false
                     };
