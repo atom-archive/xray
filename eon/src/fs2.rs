@@ -1315,6 +1315,10 @@ impl Tree {
         let mut cursor = self.metadata.cursor();
         if cursor.seek(&child_id, SeekBias::Left, metadata_db)? {
             let mut metadata = cursor.item(metadata_db)?.unwrap();
+            if let Some(inode) = metadata.inode {
+                self.inodes_to_file_ids.remove(&inode);
+            }
+
             metadata.inode = Some(inode);
             self.metadata = edit_tree(
                 &self.metadata,
@@ -1906,11 +1910,8 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        // let mut seed = 0;
-        // loop {
-        for seed in 0..1 {
-            // seed += 1;
-            let seed = 32888;
+        for seed in 0..100 {
+            // let seed = 32888;
             println!(
                 "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! SEED: {:?}",
                 seed
@@ -1919,7 +1920,7 @@ mod tests {
 
             let db = NullStore::new(1);
             let mut fs_1 = FakeFileSystem::new(&db, rng.clone());
-            fs_1.mutate(1);
+            fs_1.mutate(5);
 
             // println!("------------- clone index");
 
@@ -1928,7 +1929,7 @@ mod tests {
             let mut index_2 = index_1.clone();
             let mut prev_fs_1_version = fs_1.version();
             let mut prev_fs_2_version = fs_2.version();
-            fs_1.mutate(1);
+            fs_1.mutate(5);
 
             let mut operations = Vec::new();
             while fs_1.version() > prev_fs_1_version {
@@ -1945,23 +1946,22 @@ mod tests {
                 .unwrap();
 
             // println!("fs 2 paths {:?}", fs_2.paths());
-            // println!("------------- read new fs 2 changes");
-
             while fs_2.version() > prev_fs_2_version {
+                // println!("------ refresh index 2");
                 prev_fs_2_version = fs_2.version();
                 ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
             }
             let mut ops_1 = Vec::new();
 
             loop {
-                // println!("------ integrate into index 1 {:?}", ops_2);
+                // println!("------ integrate into index 1 {:?}", ops_2.len());
                 // println!("--- fs 1 paths {:?}", fs_1.paths());
                 ops_1.extend(
                     index_1
                         .integrate_ops(&ops_2.drain(..).collect::<Vec<_>>(), Some(&mut fs_1), &db)
                         .unwrap(),
                 );
-                // println!("------ integrate into index 2 {:?}", ops_1);
+                // println!("------ integrate into index 2 {:?}", ops_1.len());
                 ops_2.extend(
                     index_2
                         .integrate_ops(&ops_1.drain(..).collect::<Vec<_>>(), Some(&mut fs_2), &db)
