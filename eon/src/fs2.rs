@@ -597,12 +597,14 @@ impl Tree {
 
                             if let Some(old_path) = old_path {
                                 if fs.move_dir(&old_path, &new_path) {
+                                    let prev_parent_ref =
+                                        old_tree.find_cur_parent_ref(child_id, db)?.unwrap();
                                     old_tree.integrate_op(
                                         Operation::MoveDir {
                                             op_id: parent_ref.op_id,
                                             child_id,
                                             timestamp: parent_ref.timestamp,
-                                            prev_timestamp: parent_ref.prev_timestamp,
+                                            prev_timestamp: prev_parent_ref.timestamp,
                                             new_parent: Some((parent_id, name)),
                                         },
                                         db,
@@ -638,12 +640,14 @@ impl Tree {
                         }
                     } else if let Some(old_path) = old_path {
                         if fs.remove_dir(&old_path) {
+                            let prev_parent_ref =
+                                old_tree.find_cur_parent_ref(child_id, db)?.unwrap();
                             old_tree.integrate_op(
                                 Operation::MoveDir {
                                     op_id: parent_ref.op_id,
                                     child_id,
                                     timestamp: parent_ref.timestamp,
-                                    prev_timestamp: parent_ref.prev_timestamp,
+                                    prev_timestamp: prev_parent_ref.timestamp,
                                     new_parent: None,
                                 },
                                 db,
@@ -1987,6 +1991,7 @@ mod tests {
 
             assert_eq!(index_2.paths_with_ids(&db), index_1.paths_with_ids(&db));
             assert_eq!(fs_2.paths(), fs_1.paths());
+            assert_eq!(index_1.paths(&db), fs_1.paths());
         }
     }
 
