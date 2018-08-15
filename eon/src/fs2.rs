@@ -609,7 +609,6 @@ impl Tree {
                                         },
                                         db,
                                     )?;
-                                    old_tree.path_for_id(parent_ref.op_id, db)?;
                                 } else {
                                     // println!("BREAK B");
                                     break;
@@ -618,15 +617,26 @@ impl Tree {
                                 if fs.insert_dir(&new_path) {
                                     if let Some(inode) = fs.inode_for_path(&new_path) {
                                         self.set_inode_for_id(child_id, inode, db)?;
-                                        old_tree.integrate_op(
+
+                                        let operation = if let Some(prev_parent_ref) =
+                                            old_tree.find_cur_parent_ref(child_id, db)?
+                                        {
+                                            Operation::MoveDir {
+                                                op_id: parent_ref.op_id,
+                                                child_id,
+                                                timestamp: parent_ref.timestamp,
+                                                prev_timestamp: prev_parent_ref.timestamp,
+                                                new_parent: Some((parent_id, name)),
+                                            }
+                                        } else {
                                             Operation::InsertDir {
                                                 op_id: child_id,
                                                 timestamp: parent_ref.timestamp,
                                                 parent_id,
                                                 name,
-                                            },
-                                            db,
-                                        )?;
+                                            }
+                                        };
+                                        old_tree.integrate_op(operation, db)?;
                                         old_tree.set_inode_for_id(child_id, inode, db)?;
                                     } else {
                                         // println!("BREAK C");
