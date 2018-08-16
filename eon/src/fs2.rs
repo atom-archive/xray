@@ -2116,8 +2116,12 @@ mod tests {
         use std::mem;
         const PEERS: usize = 2;
 
-        for seed in 0..100 {
-            // let seed = 1997;
+        // for seed in 0..100 {
+        let mut seed = 0;
+        // loop {
+        //     seed += 1;
+        {
+            seed = 26925;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
