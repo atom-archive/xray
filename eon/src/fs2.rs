@@ -721,6 +721,10 @@ impl Tree {
             for child_id in files_with_temp_name {
                 if let Some(old_path) = old_tree.path_for_id(child_id, db)? {
                     let new_path = self.path_for_id(child_id, db)?.unwrap();
+                    let new_name = new_path.file_name().unwrap();
+                    let mut new_path = old_path.clone();
+                    new_path.set_file_name(new_name);
+
                     if new_path != old_path {
                         if fs.inode_for_path(&old_path) == old_tree.inode_for_id(child_id, db)?
                             && fs.move_dir(&old_path, &new_path)
