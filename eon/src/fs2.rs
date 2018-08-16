@@ -2122,46 +2122,72 @@ mod tests {
             let mut rng = StdRng::from_seed(&[seed]);
 
             let db = Vec::from_iter((0..PEERS).map(|i| NullStore::new(i as u64 + 1)));
+            let mut fs = Vec::from_iter((0..PEERS).map(|i| FakeFileSystem::new(&db[i], rng)));
+            let mut prev_fs_versions = Vec::from_iter((0..PEERS).map(|_| 0));
             let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
+            // Generate and deliver random mutations
             for _ in 0..10 {
                 let replica_index = rng.gen_range(0, PEERS);
+                let db = &db[replica_index];
+                let fs = &mut fs[replica_index];
+                let tree = &mut trees[replica_index];
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
-                    let db = &db[replica_index];
-                    let tree = &mut trees[replica_index];
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = tree
-                        .integrate_ops::<FakeFileSystem<StdRng>, _, _>(&ops, None, db)
-                        .unwrap();
+                    let fixup_ops = tree.integrate_ops(&ops, Some(fs), db).unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 } else {
-                    let db = &db[replica_index];
-                    let tree = &mut trees[replica_index];
-                    let count = rng.gen_range(1, 5);
-                    let ops = tree.mutate(&mut rng, count, &mut None, db);
+                    if prev_fs_versions[replica_index] == fs.version() || rng.gen() {
+                        fs.mutate(rng.gen_range(1, 5));
+                    }
+
+                    prev_fs_versions[replica_index] = fs.version();
+                    let ops = tree.read_from_fs(fs.entries(), db).unwrap();
                     deliver_ops(replica_index, &mut inboxes, ops);
                 }
             }
 
-            while inboxes.iter().any(|inbox| !inbox.is_empty()) {
+            // Allow system to quiesce
+            loop {
+                let mut done = true;
                 for replica_index in 0..PEERS {
                     let db = &db[replica_index];
+                    let fs = &mut fs[replica_index];
                     let tree = &mut trees[replica_index];
+
+                    if prev_fs_versions[replica_index] < fs.version() {
+                        prev_fs_versions[replica_index] = fs.version();
+                        let ops = tree.read_from_fs(fs.entries(), db).unwrap();
+                        deliver_ops(replica_index, &mut inboxes, ops);
+                        done = false;
+                    }
+
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = tree
-                        .integrate_ops::<FakeFileSystem<StdRng>, _, _>(&ops, None, db)
-                        .unwrap();
-                    deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                    if !ops.is_empty() {
+                        let fixup_ops = tree.integrate_ops(&ops, Some(fs), db).unwrap();
+                        deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                        done = false;
+                    }
+                }
+
+                if done {
+                    break;
                 }
             }
 
+            // Ensure all trees have the same contents
             for i in 0..PEERS - 1 {
                 assert_eq!(
                     trees[i].paths_with_ids(&db[i]),
                     trees[i + 1].paths_with_ids(&db[i + 1])
                 );
+            }
+
+            // Ensure all trees match their underlying file system
+            for i in 0..PEERS {
+                assert_eq!(trees[i].paths(&db[i]), fs[i].paths());
             }
 
             fn deliver_ops(sender: usize, inboxes: &mut Vec<Vec<Operation>>, ops: Vec<Operation>) {
