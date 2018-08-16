@@ -731,6 +731,7 @@ impl Tree {
                         {
                             old_tree.move_dir(&old_path, &new_path, db)?;
                         } else {
+                            // println!("move_dir {:?} {:?}", new_path, old_path);
                             let operation = self.move_dir(new_path, old_path, db)?.unwrap();
                             fixup_ops.push(operation);
                         }
@@ -825,7 +826,7 @@ impl Tree {
         paths
     }
 
-    // #[cfg(test)]
+    #[cfg(test)]
     fn paths_with_ids<S: Store>(&self, db: &S) -> Vec<(id::Unique, String)> {
         self.paths(db)
             .into_iter()
@@ -1959,56 +1960,61 @@ mod tests {
     #[test]
     fn test_fs_sync_random() {
         for seed in 0..100 {
-            // let seed = 32888;
-            println!(
-                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! SEED: {:?}",
-                seed
-            );
-            let rng = StdRng::from_seed(&[seed]);
+            println!("SEED: {:?}", seed);
 
+            let mut rng = StdRng::from_seed(&[seed]);
             let db = NullStore::new(1);
+
             let mut fs_1 = FakeFileSystem::new(&db, rng.clone());
             fs_1.mutate(5);
-
-            // println!("------------- clone index");
-
             let mut fs_2 = fs_1.clone();
-            let mut index_1 = fs_1.tree();
-            let mut index_2 = index_1.clone();
             let mut prev_fs_1_version = fs_1.version();
             let mut prev_fs_2_version = fs_2.version();
-            fs_1.mutate(5);
-
+            let mut index_1 = fs_1.tree();
+            let mut index_2 = index_1.clone();
             let mut ops_1 = Vec::new();
             let mut ops_2 = Vec::new();
-            loop {
-                // println!("------ integrate into index 1 {:?}", ops_2.len());
-                // println!("--- fs 1 paths {:?}", fs_1.paths());
-                ops_1.extend(
-                    index_1
-                        .integrate_ops(&ops_2.drain(..).collect::<Vec<_>>(), Some(&mut fs_1), &db)
-                        .unwrap(),
-                );
-                // println!("------ integrate into index 2 {:?}", ops_1.len());
-                ops_2.extend(
-                    index_2
-                        .integrate_ops(&ops_1.drain(..).collect::<Vec<_>>(), Some(&mut fs_2), &db)
-                        .unwrap(),
-                );
-                // println!("--- fs 2 paths {:?}", fs_2.paths());
 
-                while fs_1.version() > prev_fs_1_version {
-                    // println!("------ refresh index 1");
+            fs_1.mutate(5);
+
+            loop {
+                if fs_1.version() > prev_fs_1_version && rng.gen() {
                     prev_fs_1_version = fs_1.version();
                     ops_1.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
                 }
-                while fs_2.version() > prev_fs_2_version {
-                    // println!("------ refresh index 2");
+
+                if fs_2.version() > prev_fs_2_version && rng.gen() {
                     prev_fs_2_version = fs_2.version();
                     ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
                 }
 
-                if ops_1.is_empty() && ops_2.is_empty() {
+                if !ops_2.is_empty() && rng.gen() {
+                    ops_1.extend(
+                        index_1
+                            .integrate_ops(
+                                &ops_2.drain(..).collect::<Vec<_>>(),
+                                Some(&mut fs_1),
+                                &db,
+                            ).unwrap(),
+                    );
+                }
+
+                if !ops_1.is_empty() && rng.gen() {
+                    ops_2.extend(
+                        index_2
+                            .integrate_ops(
+                                &ops_1.drain(..).collect::<Vec<_>>(),
+                                Some(&mut fs_2),
+                                &db,
+                            ).unwrap(),
+                    );
+                }
+
+                if ops_1.is_empty()
+                    && ops_2.is_empty()
+                    && fs_1.version() == prev_fs_1_version
+                    && fs_2.version() == prev_fs_2_version
+                {
                     break;
                 }
             }
