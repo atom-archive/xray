@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 use std::cmp::{self, Ordering};
 // TODO: Replace BTree-based collections with Hash-based collections.
 // We're using the B-tree versions to enforce deterministic ordering behavior during development.
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::ops::{Add, AddAssign};
@@ -65,7 +65,7 @@ pub struct Tree {
     metadata: btree::Tree<Metadata>,
     parent_refs: btree::Tree<ParentRef>,
     child_refs: btree::Tree<ChildRef>,
-    inodes_to_file_ids: HashMap<Inode, id::Unique>,
+    inodes_to_file_ids: BTreeMap<Inode, id::Unique>,
 }
 
 #[derive(Clone)]
@@ -73,7 +73,7 @@ pub struct TreeCursor {
     path: PathBuf,
     stack: Vec<TreeCursorStackEntry>,
     metadata_cursor: btree::Cursor<Metadata>,
-    visited_dir_ids: HashSet<id::Unique>,
+    visited_dir_ids: BTreeSet<id::Unique>,
 }
 
 #[derive(Clone)]
@@ -173,7 +173,7 @@ impl Tree {
             metadata: btree::Tree::new(),
             parent_refs: btree::Tree::new(),
             child_refs: btree::Tree::new(),
-            inodes_to_file_ids: HashMap::new(),
+            inodes_to_file_ids: BTreeMap::new(),
         }
     }
 
@@ -190,7 +190,7 @@ impl Tree {
             path: PathBuf::new(),
             stack: Vec::new(),
             metadata_cursor: self.metadata.cursor(),
-            visited_dir_ids: HashSet::new(),
+            visited_dir_ids: BTreeSet::new(),
         };
         cursor.descend_into(self.child_refs.cursor(), id, None, db)?;
         Ok(cursor)
@@ -219,11 +219,11 @@ impl Tree {
         let child_ref_db = db.child_ref_store();
 
         let mut dir_stack = vec![ROOT_ID];
-        let mut visited_inodes = HashSet::new();
-        let mut dir_changes: HashMap<id::Unique, DirChange> = HashMap::new();
+        let mut visited_inodes = BTreeSet::new();
+        let mut dir_changes: BTreeMap<id::Unique, DirChange> = BTreeMap::new();
 
         for (order_key, entry) in entries.into_iter().enumerate() {
-            debug_assert!(entry.depth() > 0);
+            assert!(entry.depth() > 0);
             dir_stack.truncate(entry.depth());
             visited_inodes.insert(entry.inode());
 
@@ -587,15 +587,34 @@ impl Tree {
                             let mut new_path = parent_path;
                             new_path.push(name.as_ref());
 
-                            while old_tree.id_for_path(&new_path, db)?.is_some() {
-                                files_with_temp_name.insert(child_id);
+                            if let Some(old_path) = old_path.as_ref() {
+                                if new_path == *old_path {
+                                    continue;
+                                }
+                            }
 
-                                let name = Arc::make_mut(&mut name);
-                                name.push("~");
-                                new_path.set_file_name(name);
+                            let assigned_temp_name;
+                            if old_tree.id_for_path(&new_path, db)?.is_some() {
+                                loop {
+                                    let name = Arc::make_mut(&mut name);
+                                    name.push("~");
+                                    new_path.set_file_name(name);
+
+                                    if old_tree.id_for_path(&new_path, db)?.is_none()
+                                        && self.id_for_path(&new_path, db)?.is_none()
+                                    {
+                                        break;
+                                    }
+                                }
+                                assigned_temp_name = true;
+                            } else {
+                                assigned_temp_name = false;
                             }
 
                             if let Some(old_path) = old_path {
+                                if assigned_temp_name {
+                                    files_with_temp_name.insert(child_id);
+                                }
                                 if fs.move_dir(&old_path, &new_path) {
                                     let prev_parent_ref =
                                         old_tree.find_cur_parent_ref(child_id, db)?.unwrap();
@@ -615,6 +634,9 @@ impl Tree {
                                 }
                             } else {
                                 if fs.insert_dir(&new_path) {
+                                    if assigned_temp_name {
+                                        files_with_temp_name.insert(child_id);
+                                    }
                                     if let Some(inode) = fs.inode_for_path(&new_path) {
                                         self.set_inode_for_id(child_id, inode, db)?;
 
@@ -679,6 +701,7 @@ impl Tree {
                         fs,
                         &mut fixup_ops,
                         &mut ids_to_write,
+                        &mut files_with_temp_name,
                         db,
                     )?;
                     sorted_ids = self
@@ -688,24 +711,27 @@ impl Tree {
                 }
             }
 
-            // println!(
-            //     "moving {} files with temp names",
-            //     files_with_temp_name.len()
-            // );
-            let mut errored = false;
+            if !files_with_temp_name.is_empty() {
+                // println!(
+                //     "moving {} files with temp names",
+                //     files_with_temp_name.len()
+                // );
+            }
+            // println!("Starting to rename...");
             for child_id in files_with_temp_name {
                 if let Some(old_path) = old_tree.path_for_id(child_id, db)? {
                     let new_path = self.path_for_id(child_id, db)?.unwrap();
-                    if fs.move_dir(&old_path, &new_path) {
-                        old_tree.move_dir(&old_path, &new_path, db)?;
-                    } else {
-                        errored = true;
+                    if new_path != old_path {
+                        if fs.inode_for_path(&old_path) == old_tree.inode_for_id(child_id, db)?
+                            && fs.move_dir(&old_path, &new_path)
+                        {
+                            old_tree.move_dir(&old_path, &new_path, db)?;
+                        } else {
+                            let operation = self.move_dir(new_path, old_path, db)?.unwrap();
+                            fixup_ops.push(operation);
+                        }
                     }
                 }
-            }
-            if errored {
-                self.refresh_old_tree(&mut old_tree, fs, &mut fixup_ops, &mut ids_to_write, db)?;
-                debug_assert!(ids_to_write.is_empty());
             }
         }
 
@@ -720,6 +746,7 @@ impl Tree {
         fs: &mut F,
         fixup_ops: &mut Vec<Operation>,
         ids_to_write: &mut BTreeSet<id::Unique>,
+        files_with_temp_name: &mut BTreeSet<id::Unique>,
         db: &S,
     ) -> Result<(), S::ReadError>
     where
@@ -733,12 +760,15 @@ impl Tree {
                 Operation::InsertDir { op_id, .. } => {
                     self.set_inode_for_id(*op_id, old_tree.inode_for_id(*op_id, db)?.unwrap(), db)?;
                 }
-                _ => {}
+                Operation::MoveDir { child_id, .. } => {
+                    files_with_temp_name.remove(child_id);
+                }
             }
         }
         fixup_ops.extend(fs_ops);
         for op in &fs_fixup_ops {
             ids_to_write.insert(op.child_id());
+            files_with_temp_name.remove(&op.child_id());
         }
         fixup_ops.extend(fs_fixup_ops);
         Ok(())
@@ -791,7 +821,7 @@ impl Tree {
         paths
     }
 
-    #[cfg(test)]
+    // #[cfg(test)]
     fn paths_with_ids<S: Store>(&self, db: &S) -> Vec<(id::Unique, String)> {
         self.paths(db)
             .into_iter()
@@ -924,12 +954,12 @@ impl Tree {
         db: &S,
     ) -> Result<Vec<Operation>, S::ReadError> {
         let mut fixup_ops = Vec::new();
-        let mut reverted_moves: HashMap<id::Unique, LamportTimestamp> = HashMap::new();
+        let mut reverted_moves: BTreeMap<id::Unique, LamportTimestamp> = BTreeMap::new();
 
         // If the child was moved, check for cycles
         if moved {
             let parent_ref_db = db.parent_ref_store();
-            let mut visited = HashSet::new();
+            let mut visited = BTreeSet::new();
             let mut latest_move: Option<ParentRef> = None;
             let mut cursor = self.parent_refs.cursor();
             cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
@@ -1273,7 +1303,7 @@ impl Tree {
     {
         let parent_ref_db = db.parent_ref_store();
 
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut cursor = self.parent_refs.cursor();
         if child_id == ROOT_ID {
             Ok(true)
@@ -1633,7 +1663,7 @@ impl PartialOrd for ParentRefKey {
 
 impl<'a> AddAssign<&'a Self> for ParentRefKey {
     fn add_assign(&mut self, other: &Self) {
-        debug_assert!(*self < *other);
+        assert!(*self < *other);
         *self = other.clone();
     }
 }
@@ -1642,7 +1672,7 @@ impl<'a> Add<&'a Self> for ParentRefKey {
     type Output = Self;
 
     fn add(self, other: &Self) -> Self {
-        debug_assert!(self < *other);
+        assert!(self < *other);
         other.clone()
     }
 }
@@ -1698,7 +1728,7 @@ impl PartialOrd for ChildRefSummary {
 
 impl<'a> AddAssign<&'a Self> for ChildRefSummary {
     fn add_assign(&mut self, other: &Self) {
-        debug_assert!(*self < *other);
+        assert!(*self < *other, "{:?} < {:?}", self, other);
 
         self.parent_id = other.parent_id;
         self.name = other.name.clone();
@@ -1737,7 +1767,7 @@ impl PartialOrd for ChildRefKey {
 
 impl<'a> AddAssign<&'a Self> for ChildRefKey {
     fn add_assign(&mut self, other: &Self) {
-        debug_assert!(*self < *other);
+        assert!(*self < *other);
         *self = other.clone();
     }
 }
@@ -1746,7 +1776,7 @@ impl<'a> Add<&'a Self> for ChildRefKey {
     type Output = Self;
 
     fn add(self, other: &Self) -> Self {
-        debug_assert!(self < *other);
+        assert!(self < *other);
         other.clone()
     }
 }
@@ -1762,7 +1792,7 @@ impl btree::Dimension<ChildRefSummary> for ParentIdAndName {
 
 impl<'a> AddAssign<&'a Self> for ParentIdAndName {
     fn add_assign(&mut self, other: &Self) {
-        debug_assert!(*self <= *other);
+        assert!(*self <= *other);
         *self = other.clone();
     }
 }
@@ -1771,7 +1801,7 @@ impl<'a> Add<&'a Self> for ParentIdAndName {
     type Output = Self;
 
     fn add(self, other: &Self) -> Self {
-        debug_assert!(self <= *other);
+        assert!(self <= *other);
         other.clone()
     }
 }
@@ -1945,28 +1975,8 @@ mod tests {
             let mut prev_fs_2_version = fs_2.version();
             fs_1.mutate(5);
 
-            let mut operations = Vec::new();
-            while fs_1.version() > prev_fs_1_version {
-                // println!("------ refresh index 1");
-                prev_fs_1_version = fs_1.version();
-                operations.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
-            }
-
-            assert_eq!(index_1.paths(&db), fs_1.tree().paths(&db));
-
-            // println!("+++++ integrate into index 2");
-            let mut ops_2 = index_2
-                .integrate_ops(&operations, Some(&mut fs_2), &db)
-                .unwrap();
-
-            // println!("fs 2 paths {:?}", fs_2.paths());
-            while fs_2.version() > prev_fs_2_version {
-                // println!("------ refresh index 2");
-                prev_fs_2_version = fs_2.version();
-                ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
-            }
             let mut ops_1 = Vec::new();
-
+            let mut ops_2 = Vec::new();
             loop {
                 // println!("------ integrate into index 1 {:?}", ops_2.len());
                 // println!("--- fs 1 paths {:?}", fs_1.paths());
@@ -2371,7 +2381,7 @@ mod tests {
         fn next(&mut self) -> Option<Self::Item> {
             {
                 let mut state = self.state.borrow_mut();
-                if state.rng.gen_weighted_bool(100) {
+                if state.rng.gen_weighted_bool(20) {
                     // println!("mutate while scanning entries");
                     state.mutate(1);
                 }
