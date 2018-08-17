@@ -196,6 +196,203 @@ impl Tree {
         Ok(cursor)
     }
 
+    fn write_to_fs<F, S>(
+        &mut self,
+        mut ids_to_write: BTreeSet<id::Unique>,
+        mut old_tree: Tree,
+        fs: &mut F,
+        db: &S,
+    ) -> Result<Vec<Operation>, S::ReadError>
+    where
+        F: FileSystem,
+        S: Store,
+    {
+        let mut fixup_ops = Vec::new();
+        let mut files_with_temp_name = BTreeSet::new();
+        let mut sorted_ids_to_write = self
+            .sort_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
+            .into_iter()
+            .peekable();
+
+        while sorted_ids_to_write.peek().is_some() {
+            while let Some((child_id, depth)) = sorted_ids_to_write.peek().cloned() {
+                // println!("flush change for {:?}", child_id);
+                let old_path = old_tree.path_for_id(child_id, db)?;
+                if let Some(old_path) = old_path.as_ref() {
+                    if fs.inode_for_path(old_path) != old_tree.inode_for_id(child_id, db)? {
+                        break;
+                    }
+                }
+
+                let parent_ref = self.find_cur_parent_ref(child_id, db)?.unwrap();
+                if depth.is_some() {
+                    let (parent_id, mut name) = parent_ref.parent.as_ref().cloned().unwrap();
+
+                    if let Some(parent_path) = old_tree.path_for_id(parent_id, db)? {
+                        if parent_id != ROOT_ID
+                            && fs.inode_for_path(&parent_path)
+                                != old_tree.inode_for_id(parent_id, db)?
+                        {
+                            // println!("BREAK A");
+                            // println!("old tree paths {:?}", old_tree.paths(db));
+                            // println!(
+                            //     "{:?} {:?}",
+                            //     fs.inode_for_path(&parent_path),
+                            //     old_tree.inode_for_id(parent_id, db)
+                            // );
+                            break;
+                        }
+                        let mut new_path = parent_path;
+                        new_path.push(name.as_ref());
+
+                        if let Some(old_path) = old_path.as_ref() {
+                            if new_path == *old_path {
+                                continue;
+                            }
+                        }
+
+                        let assigned_temp_name;
+                        if old_tree.id_for_path(&new_path, db)?.is_some() {
+                            loop {
+                                let name = Arc::make_mut(&mut name);
+                                name.push("~");
+                                new_path.set_file_name(name);
+
+                                if old_tree.id_for_path(&new_path, db)?.is_none()
+                                    && self.id_for_path(&new_path, db)?.is_none()
+                                {
+                                    break;
+                                }
+                            }
+                            assigned_temp_name = true;
+                        } else {
+                            assigned_temp_name = false;
+                        }
+
+                        if let Some(old_path) = old_path {
+                            if assigned_temp_name {
+                                files_with_temp_name.insert(child_id);
+                            }
+                            if fs.move_dir(&old_path, &new_path) {
+                                let prev_parent_ref =
+                                    old_tree.find_cur_parent_ref(child_id, db)?.unwrap();
+                                old_tree.integrate_op(
+                                    Operation::MoveDir {
+                                        op_id: parent_ref.op_id,
+                                        child_id,
+                                        timestamp: parent_ref.timestamp,
+                                        prev_timestamp: prev_parent_ref.timestamp,
+                                        new_parent: Some((parent_id, name)),
+                                    },
+                                    db,
+                                )?;
+                            } else {
+                                // println!("BREAK B");
+                                break;
+                            }
+                        } else {
+                            if fs.insert_dir(&new_path) {
+                                if assigned_temp_name {
+                                    files_with_temp_name.insert(child_id);
+                                }
+                                if let Some(inode) = fs.inode_for_path(&new_path) {
+                                    self.set_inode_for_id(child_id, inode, db)?;
+
+                                    let operation = if let Some(prev_parent_ref) =
+                                        old_tree.find_cur_parent_ref(child_id, db)?
+                                    {
+                                        Operation::MoveDir {
+                                            op_id: parent_ref.op_id,
+                                            child_id,
+                                            timestamp: parent_ref.timestamp,
+                                            prev_timestamp: prev_parent_ref.timestamp,
+                                            new_parent: Some((parent_id, name)),
+                                        }
+                                    } else {
+                                        Operation::InsertDir {
+                                            op_id: child_id,
+                                            timestamp: parent_ref.timestamp,
+                                            parent_id,
+                                            name,
+                                        }
+                                    };
+                                    old_tree.integrate_op(operation, db)?;
+                                    old_tree.set_inode_for_id(child_id, inode, db)?;
+                                } else {
+                                    // println!("BREAK C");
+                                    break;
+                                }
+                            } else {
+                                // println!("BREAK D");
+                                break;
+                            }
+                        }
+                    }
+                } else if let Some(old_path) = old_path {
+                    if fs.remove_dir(&old_path) {
+                        let prev_parent_ref = old_tree.find_cur_parent_ref(child_id, db)?.unwrap();
+                        old_tree.integrate_op(
+                            Operation::MoveDir {
+                                op_id: parent_ref.op_id,
+                                child_id,
+                                timestamp: parent_ref.timestamp,
+                                prev_timestamp: prev_parent_ref.timestamp,
+                                new_parent: None,
+                            },
+                            db,
+                        )?;
+                    } else {
+                        // println!("BREAK E");
+                        break;
+                    }
+                }
+
+                ids_to_write.remove(&child_id);
+                sorted_ids_to_write.next();
+            }
+
+            if sorted_ids_to_write.peek().is_some() {
+                // println!("refreshing old tree - paths: {:?}", fs.paths());
+                self.refresh_old_tree(
+                    &mut old_tree,
+                    fs,
+                    &mut fixup_ops,
+                    &mut ids_to_write,
+                    &mut files_with_temp_name,
+                    db,
+                )?;
+                sorted_ids_to_write = self
+                    .sort_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
+                    .into_iter()
+                    .peekable();
+            }
+        }
+
+        if !files_with_temp_name.is_empty() {
+            // println!(
+            //     "moving {} files with temp names",
+            //     files_with_temp_name.len()
+            // );
+        }
+        // println!("Starting to rename...");
+        for child_id in files_with_temp_name {
+            if let Some(old_path) = old_tree.path_for_id(child_id, db)? {
+                let mut new_path = old_path.clone();
+                new_path.set_file_name(self.name_for_id(child_id, db)?.unwrap().as_os_str());
+
+                if new_path != old_path {
+                    if fs.inode_for_path(&old_path) == old_tree.inode_for_id(child_id, db)?
+                        && fs.move_dir(&old_path, &new_path)
+                    {
+                        old_tree.move_dir(&old_path, &new_path, db)?;
+                    }
+                }
+            }
+        }
+
+        Ok(fixup_ops)
+    }
+
     pub fn read_from_fs<'a, F, I, S>(
         &mut self,
         entries: I,
@@ -496,10 +693,9 @@ impl Tree {
         S: Store,
     {
         // println!("integrate ops >>>>>>>>>>>>");
-        let mut old_tree = self.clone();
+        let old_tree = self.clone();
 
         let mut changed_ids = BTreeMap::new();
-
         for op in ops.clone() {
             // println!("integrate op {:#?}", op);
 
@@ -536,190 +732,7 @@ impl Tree {
                 ids_to_write.insert(op.child_id());
             }
 
-            let mut sorted_ids = self
-                .sort_file_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
-                .into_iter()
-                .peekable();
-
-            let mut files_with_temp_name = BTreeSet::new();
-
-            while sorted_ids.peek().is_some() {
-                while let Some((child_id, depth)) = sorted_ids.peek().cloned() {
-                    // println!("flush change for {:?}", child_id);
-
-                    let old_path = old_tree.path_for_id(child_id, db)?;
-                    if let Some(old_path) = old_path.as_ref() {
-                        if fs.inode_for_path(old_path) != old_tree.inode_for_id(child_id, db)? {
-                            break;
-                        }
-                    }
-                    let parent_ref = self.find_cur_parent_ref(child_id, db)?.unwrap();
-
-                    if depth.is_some() {
-                        let (parent_id, mut name) = parent_ref.parent.as_ref().cloned().unwrap();
-
-                        if let Some(parent_path) = old_tree.path_for_id(parent_id, db)? {
-                            if parent_id != ROOT_ID
-                                && fs.inode_for_path(&parent_path)
-                                    != old_tree.inode_for_id(parent_id, db)?
-                            {
-                                // println!("BREAK A");
-                                // println!("old tree paths {:?}", old_tree.paths(db));
-                                // println!(
-                                //     "{:?} {:?}",
-                                //     fs.inode_for_path(&parent_path),
-                                //     old_tree.inode_for_id(parent_id, db)
-                                // );
-                                break;
-                            }
-                            let mut new_path = parent_path;
-                            new_path.push(name.as_ref());
-
-                            if let Some(old_path) = old_path.as_ref() {
-                                if new_path == *old_path {
-                                    continue;
-                                }
-                            }
-
-                            let assigned_temp_name;
-                            if old_tree.id_for_path(&new_path, db)?.is_some() {
-                                loop {
-                                    let name = Arc::make_mut(&mut name);
-                                    name.push("~");
-                                    new_path.set_file_name(name);
-
-                                    if old_tree.id_for_path(&new_path, db)?.is_none()
-                                        && self.id_for_path(&new_path, db)?.is_none()
-                                    {
-                                        break;
-                                    }
-                                }
-                                assigned_temp_name = true;
-                            } else {
-                                assigned_temp_name = false;
-                            }
-
-                            if let Some(old_path) = old_path {
-                                if assigned_temp_name {
-                                    files_with_temp_name.insert(child_id);
-                                }
-                                if fs.move_dir(&old_path, &new_path) {
-                                    let prev_parent_ref =
-                                        old_tree.find_cur_parent_ref(child_id, db)?.unwrap();
-                                    old_tree.integrate_op(
-                                        Operation::MoveDir {
-                                            op_id: parent_ref.op_id,
-                                            child_id,
-                                            timestamp: parent_ref.timestamp,
-                                            prev_timestamp: prev_parent_ref.timestamp,
-                                            new_parent: Some((parent_id, name)),
-                                        },
-                                        db,
-                                    )?;
-                                } else {
-                                    // println!("BREAK B");
-                                    break;
-                                }
-                            } else {
-                                if fs.insert_dir(&new_path) {
-                                    if assigned_temp_name {
-                                        files_with_temp_name.insert(child_id);
-                                    }
-                                    if let Some(inode) = fs.inode_for_path(&new_path) {
-                                        self.set_inode_for_id(child_id, inode, db)?;
-
-                                        let operation = if let Some(prev_parent_ref) =
-                                            old_tree.find_cur_parent_ref(child_id, db)?
-                                        {
-                                            Operation::MoveDir {
-                                                op_id: parent_ref.op_id,
-                                                child_id,
-                                                timestamp: parent_ref.timestamp,
-                                                prev_timestamp: prev_parent_ref.timestamp,
-                                                new_parent: Some((parent_id, name)),
-                                            }
-                                        } else {
-                                            Operation::InsertDir {
-                                                op_id: child_id,
-                                                timestamp: parent_ref.timestamp,
-                                                parent_id,
-                                                name,
-                                            }
-                                        };
-                                        old_tree.integrate_op(operation, db)?;
-                                        old_tree.set_inode_for_id(child_id, inode, db)?;
-                                    } else {
-                                        // println!("BREAK C");
-                                        break;
-                                    }
-                                } else {
-                                    // println!("BREAK D");
-                                    break;
-                                }
-                            }
-                        }
-                    } else if let Some(old_path) = old_path {
-                        if fs.remove_dir(&old_path) {
-                            let prev_parent_ref =
-                                old_tree.find_cur_parent_ref(child_id, db)?.unwrap();
-                            old_tree.integrate_op(
-                                Operation::MoveDir {
-                                    op_id: parent_ref.op_id,
-                                    child_id,
-                                    timestamp: parent_ref.timestamp,
-                                    prev_timestamp: prev_parent_ref.timestamp,
-                                    new_parent: None,
-                                },
-                                db,
-                            )?;
-                        } else {
-                            // println!("BREAK E");
-                            break;
-                        }
-                    }
-
-                    ids_to_write.remove(&child_id);
-                    sorted_ids.next();
-                }
-
-                if sorted_ids.peek().is_some() {
-                    // println!("refreshing old tree - paths: {:?}", fs.paths());
-                    self.refresh_old_tree(
-                        &mut old_tree,
-                        fs,
-                        &mut fixup_ops,
-                        &mut ids_to_write,
-                        &mut files_with_temp_name,
-                        db,
-                    )?;
-                    sorted_ids = self
-                        .sort_file_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
-                        .into_iter()
-                        .peekable();
-                }
-            }
-
-            if !files_with_temp_name.is_empty() {
-                // println!(
-                //     "moving {} files with temp names",
-                //     files_with_temp_name.len()
-                // );
-            }
-            // println!("Starting to rename...");
-            for child_id in files_with_temp_name {
-                if let Some(old_path) = old_tree.path_for_id(child_id, db)? {
-                    let mut new_path = old_path.clone();
-                    new_path.set_file_name(self.name_for_id(child_id, db)?.unwrap().as_os_str());
-
-                    if new_path != old_path {
-                        if fs.inode_for_path(&old_path) == old_tree.inode_for_id(child_id, db)?
-                            && fs.move_dir(&old_path, &new_path)
-                        {
-                            old_tree.move_dir(&old_path, &new_path, db)?;
-                        }
-                    }
-                }
-            }
+            fixup_ops.extend(self.write_to_fs(ids_to_write, old_tree, fs, db)?);
         }
 
         // println!("integrate ops <<<<<<<<<<<<");
@@ -761,7 +774,7 @@ impl Tree {
         Ok(())
     }
 
-    fn sort_file_ids_by_path_depth<I, S>(
+    fn sort_ids_by_path_depth<I, S>(
         &self,
         file_ids: I,
         db: &S,
