@@ -708,10 +708,8 @@ impl Tree {
             // println!("Starting to rename...");
             for child_id in files_with_temp_name {
                 if let Some(old_path) = old_tree.path_for_id(child_id, db)? {
-                    let new_path = self.path_for_id(child_id, db)?.unwrap();
-                    let new_name = new_path.file_name().unwrap();
                     let mut new_path = old_path.clone();
-                    new_path.set_file_name(new_name);
+                    new_path.set_file_name(self.name_for_id(child_id, db)?.unwrap().as_os_str());
 
                     if new_path != old_path {
                         if fs.inode_for_path(&old_path) == old_tree.inode_for_id(child_id, db)?
@@ -1322,6 +1320,17 @@ impl Tree {
         } else {
             Ok(false)
         }
+    }
+
+    fn name_for_id<S: Store>(
+        &self,
+        child_id: id::Unique,
+        db: &S,
+    ) -> Result<Option<Arc<OsString>>, S::ReadError> {
+        Ok(self
+            .find_cur_parent_ref(child_id, db)?
+            .and_then(|parent_ref| parent_ref.parent)
+            .map(|(_, name)| name))
     }
 
     fn inode_for_id<S: Store>(
