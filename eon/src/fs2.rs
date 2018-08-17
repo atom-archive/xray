@@ -2373,12 +2373,10 @@ mod tests {
             }
 
             // println!("FileSystem: move from {:?} to {:?}", from, to);
-            if let Some(op) = self.tree.move_dir(from, to, self.db).unwrap() {
-                // Blow up if we introduced cycles.
-                self.tree.depth_for_id(op.child_id(), self.db).unwrap();
-                true
-            } else {
+            if to.starts_with(from) || self.tree.move_dir(from, to, self.db).unwrap().is_none() {
                 false
+            } else {
+                true
             }
         }
 
