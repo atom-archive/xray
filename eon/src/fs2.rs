@@ -495,63 +495,31 @@ impl Tree {
         O: IntoIterator<Item = &'a Operation> + Clone,
         S: Store,
     {
-        struct Change {
-            timestamp: LamportTimestamp,
-            moved: bool,
-        }
-
         // println!("integrate ops >>>>>>>>>>>>");
         let mut old_tree = self.clone();
 
-        let mut changes_by_id = BTreeMap::new();
+        let mut changed_ids = BTreeMap::new();
 
         for op in ops.clone() {
             // println!("integrate op {:#?}", op);
 
             match op {
-                Operation::InsertDir {
-                    op_id, timestamp, ..
-                } => {
-                    changes_by_id.insert(
-                        *op_id,
-                        Change {
-                            timestamp: *timestamp,
-                            moved: false,
-                        },
-                    );
-                }
-                Operation::MoveDir {
-                    child_id,
-                    new_parent,
-                    timestamp,
-                    ..
-                } => {
-                    changes_by_id
-                        .entry(*child_id)
-                        .and_modify(|change| {
-                            if *timestamp > change.timestamp {
-                                change.moved = new_parent.is_some();
-                                change.timestamp = *timestamp;
-                            }
-                        }).or_insert(Change {
-                            timestamp: *timestamp,
-                            moved: new_parent.is_some(),
-                        });
-                }
-            }
+                Operation::InsertDir { op_id, .. } => changed_ids.insert(*op_id, false),
+                Operation::MoveDir { child_id, .. } => changed_ids.insert(*child_id, true),
+            };
             self.integrate_op(op.clone(), db)?;
         }
 
         let mut fixup_ops = Vec::new();
-        for (child_id, change) in &changes_by_id {
-            fixup_ops.extend(self.fix_conflicts(*child_id, change.moved, db)?);
+        for (child_id, moved) in &changed_ids {
+            fixup_ops.extend(self.fix_conflicts(*child_id, *moved, db)?);
         }
 
         if let Some(fs) = fs {
             let mut ids_to_write = BTreeSet::new();
-            for (id, change) in changes_by_id {
+            for (id, moved) in changed_ids {
                 ids_to_write.insert(id);
-                if change.moved && old_tree.depth_for_id(id, db)?.is_none() {
+                if moved && old_tree.depth_for_id(id, db)?.is_none() {
                     let mut cursor = self.cursor_at(id, db)?;
                     while let Some(descendant_id) = cursor.file_id(db)? {
                         // println!(
