@@ -718,8 +718,6 @@ impl Tree {
                             && fs.move_dir(&old_path, &new_path)
                         {
                             old_tree.move_dir(&old_path, &new_path, db)?;
-                        } else if let Some(operation) = self.move_dir(new_path, old_path, db)? {
-                            fixup_ops.push(operation);
                         }
                     }
                 }
