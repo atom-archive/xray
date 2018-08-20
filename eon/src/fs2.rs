@@ -242,13 +242,16 @@ impl Tree {
                             // );
                             break;
                         }
+
                         let mut new_path = parent_path;
                         new_path.push(name.as_ref());
-
-                        if let Some(old_path) = old_path.as_ref() {
-                            if new_path == *old_path {
-                                continue;
-                            }
+                        if old_path
+                            .as_ref()
+                            .map_or(false, |old_path| new_path == *old_path)
+                        {
+                            ids_to_write.remove(&child_id);
+                            sorted_ids_to_write.next();
+                            continue;
                         }
 
                         let assigned_temp_name;
