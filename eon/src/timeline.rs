@@ -49,12 +49,6 @@ pub trait FileSystemEntry {
     fn inode(&self) -> Inode;
 }
 
-trait Keyed {
-    type Key: Ord;
-
-    fn key(&self) -> Self::Key;
-}
-
 type Inode = u64;
 type VisibleCount = usize;
 
@@ -159,12 +153,6 @@ pub struct ParentIdAndName {
 pub struct LamportTimestamp {
     value: u64,
     replica_id: id::ReplicaId,
-}
-
-#[derive(Debug)]
-enum TreeEdit<T: Keyed> {
-    Insert(T),
-    Remove(T),
 }
 
 impl Timeline {
@@ -486,17 +474,17 @@ impl Timeline {
         }
 
         let mut operations = Vec::new();
-        let mut metadata = Vec::new();
-        let mut parent_refs = Vec::new();
-        let mut child_refs = Vec::new();
+        let mut metadata_edits = Vec::new();
+        let mut parent_ref_edits = Vec::new();
+        let mut child_ref_edits = Vec::new();
 
         for (child_id, change) in dir_changes {
             if change.moved {
                 let operation = self.local_move(
                     child_id,
                     change.parent,
-                    &mut parent_refs,
-                    &mut child_refs,
+                    &mut parent_ref_edits,
+                    &mut child_ref_edits,
                     db,
                 )?;
                 operations.push(operation);
@@ -507,18 +495,18 @@ impl Timeline {
                     name,
                     child_id,
                     change.inode,
-                    &mut metadata,
-                    &mut parent_refs,
-                    &mut child_refs,
+                    &mut metadata_edits,
+                    &mut parent_ref_edits,
+                    &mut child_ref_edits,
                     db,
                 )?;
                 operations.push(operation);
             }
         }
 
-        self.metadata = edit_tree(&self.metadata, metadata, metadata_db)?;
-        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
-        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
+        self.metadata.edit(metadata_edits, metadata_db)?;
+        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
+        self.child_refs.edit(child_ref_edits, child_ref_db)?;
         Ok(operations)
     }
 
@@ -547,9 +535,9 @@ impl Timeline {
         let child_ref_db = db.child_ref_store();
 
         let mut operations = Vec::new();
-        let mut metadata = Vec::new();
-        let mut parent_refs = Vec::new();
-        let mut child_refs = Vec::new();
+        let mut metadata_edits = Vec::new();
+        let mut parent_ref_edits = Vec::new();
+        let mut child_ref_edits = Vec::new();
 
         let mut cursor = self.child_refs.cursor();
         let mut parent_id = ROOT_ID;
@@ -585,9 +573,9 @@ impl Timeline {
                     name,
                     child_id,
                     inode,
-                    &mut metadata,
-                    &mut parent_refs,
-                    &mut child_refs,
+                    &mut metadata_edits,
+                    &mut parent_ref_edits,
+                    &mut child_ref_edits,
                     db,
                 )?;
                 parent_id = child_id;
@@ -598,9 +586,9 @@ impl Timeline {
             }
         }
 
-        self.metadata = edit_tree(&self.metadata, metadata, metadata_db)?;
-        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
-        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
+        self.metadata.edit(metadata_edits, metadata_db)?;
+        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
+        self.child_refs.edit(child_ref_edits, child_ref_db)?;
         Ok(operations)
     }
 
@@ -613,14 +601,19 @@ impl Timeline {
         let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
 
-        let mut parent_refs = Vec::new();
-        let mut child_refs = Vec::new();
+        let mut parent_ref_edits = Vec::new();
+        let mut child_ref_edits = Vec::new();
 
         if let Some(child_id) = self.id_for_path(&path, db)? {
-            let operation =
-                self.local_move(child_id, None, &mut parent_refs, &mut child_refs, db)?;
-            self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
-            self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
+            let operation = self.local_move(
+                child_id,
+                None,
+                &mut parent_ref_edits,
+                &mut child_ref_edits,
+                db,
+            )?;
+            self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
+            self.child_refs.edit(child_ref_edits, child_ref_db)?;
             Ok(Some(operation))
         } else {
             Ok(None)
@@ -655,20 +648,20 @@ impl Timeline {
         };
 
         if let (Some(from_id), Some(new_parent_id)) = (from_id, new_parent_id) {
-            let mut parent_refs = Vec::new();
-            let mut child_refs = Vec::new();
+            let mut parent_ref_edits = Vec::new();
+            let mut child_ref_edits = Vec::new();
 
             let new_name = Arc::new(OsString::from(to.file_name().unwrap()));
             let operation = self.local_move(
                 from_id,
                 Some((new_parent_id, new_name)),
-                &mut parent_refs,
-                &mut child_refs,
+                &mut parent_ref_edits,
+                &mut child_ref_edits,
                 db,
             )?;
 
-            self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
-            self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
+            self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
+            self.child_refs.edit(child_ref_edits, child_ref_db)?;
 
             Ok(Some(operation))
         } else {
@@ -798,9 +791,9 @@ impl Timeline {
         let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
 
-        let mut metadata = Vec::new();
-        let mut parent_refs = Vec::new();
-        let mut child_refs = Vec::new();
+        let mut metadata_edits = Vec::new();
+        let mut parent_ref_edits = Vec::new();
+        let mut child_ref_edits = Vec::new();
         let mut new_child_ref;
         let received_timestamp;
 
@@ -822,19 +815,19 @@ impl Timeline {
                     deletions: SmallVec::new(),
                 });
 
-                metadata.push(TreeEdit::Insert(Metadata {
+                metadata_edits.push(btree::Edit::Insert(Metadata {
                     file_id: op_id,
                     is_dir: true,
                     inode: None,
                 }));
-                parent_refs.push(TreeEdit::Insert(ParentRef {
+                parent_ref_edits.push(btree::Edit::Insert(ParentRef {
                     child_id: op_id,
                     timestamp,
                     prev_timestamp: timestamp,
                     op_id,
                     parent: Some((parent_id, name)),
                 }));
-                child_refs.push(TreeEdit::Insert(new_child_ref.clone().unwrap()));
+                child_ref_edits.push(btree::Edit::Insert(new_child_ref.clone().unwrap()));
                 received_timestamp = timestamp;
             }
             Operation::MoveDir {
@@ -873,10 +866,10 @@ impl Timeline {
                             child_ref_cursor.seek(&child_ref_key, SeekBias::Left, child_ref_db)?;
                             let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
                             if child_ref.is_visible() {
-                                child_refs.push(TreeEdit::Remove(child_ref.clone()));
+                                child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
                             }
                             child_ref.deletions.push(op_id);
-                            child_refs.push(TreeEdit::Insert(child_ref));
+                            child_ref_edits.push(btree::Edit::Insert(child_ref));
                         }
                     } else {
                         break;
@@ -885,7 +878,7 @@ impl Timeline {
                     is_latest_parent_ref = false;
                 }
 
-                parent_refs.push(TreeEdit::Insert(ParentRef {
+                parent_ref_edits.push(btree::Edit::Insert(ParentRef {
                     child_id,
                     timestamp,
                     prev_timestamp,
@@ -893,15 +886,15 @@ impl Timeline {
                     parent: new_parent,
                 }));
                 if let Some(new_child_ref) = new_child_ref {
-                    child_refs.push(TreeEdit::Insert(new_child_ref.clone()));
+                    child_ref_edits.push(btree::Edit::Insert(new_child_ref.clone()));
                 }
                 received_timestamp = timestamp;
             }
         }
 
-        self.child_refs = edit_tree(&self.child_refs, child_refs, child_ref_db)?;
-        self.metadata = edit_tree(&self.metadata, metadata, metadata_db)?;
-        self.parent_refs = edit_tree(&self.parent_refs, parent_refs, parent_ref_db)?;
+        self.child_refs.edit(child_ref_edits, child_ref_db)?;
+        self.metadata.edit(metadata_edits, metadata_db)?;
+        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
         if db.replica_id() != received_timestamp.replica_id {
             db.recv_timestamp(received_timestamp);
         }
@@ -914,6 +907,8 @@ impl Timeline {
         moved: bool,
         db: &S,
     ) -> Result<Vec<Operation>, S::ReadError> {
+        use btree::KeyedItem;
+
         let mut fixup_ops = Vec::new();
         let mut reverted_moves: BTreeMap<id::Unique, LamportTimestamp> = BTreeMap::new();
 
@@ -1142,26 +1137,26 @@ impl Timeline {
         name: Arc<OsString>,
         child_id: id::Unique,
         inode: Option<Inode>,
-        metadata: &mut Vec<TreeEdit<Metadata>>,
-        parent_refs: &mut Vec<TreeEdit<ParentRef>>,
-        child_refs: &mut Vec<TreeEdit<ChildRef>>,
+        metadata: &mut Vec<btree::Edit<Metadata>>,
+        parent_refs: &mut Vec<btree::Edit<ParentRef>>,
+        child_refs: &mut Vec<btree::Edit<ChildRef>>,
         db: &S,
     ) -> Result<Operation, S::ReadError> {
         let timestamp = db.gen_timestamp();
 
-        metadata.push(TreeEdit::Insert(Metadata {
+        metadata.push(btree::Edit::Insert(Metadata {
             file_id: child_id,
             is_dir: true,
             inode,
         }));
-        parent_refs.push(TreeEdit::Insert(ParentRef {
+        parent_refs.push(btree::Edit::Insert(ParentRef {
             child_id,
             timestamp,
             prev_timestamp: timestamp,
             op_id: child_id,
             parent: Some((parent_id, name.clone())),
         }));
-        child_refs.push(TreeEdit::Insert(ChildRef {
+        child_refs.push(btree::Edit::Insert(ChildRef {
             parent_id,
             name: name.clone(),
             timestamp,
@@ -1181,15 +1176,15 @@ impl Timeline {
         &self,
         child_id: id::Unique,
         new_parent: Option<(id::Unique, Arc<OsString>)>,
-        parent_refs: &mut Vec<TreeEdit<ParentRef>>,
-        child_refs: &mut Vec<TreeEdit<ChildRef>>,
+        parent_refs: &mut Vec<btree::Edit<ParentRef>>,
+        child_refs: &mut Vec<btree::Edit<ChildRef>>,
         db: &S,
     ) -> Result<Operation, S::ReadError> {
         let timestamp = db.gen_timestamp();
         let op_id = db.gen_id();
 
         let prev_parent_ref = self.find_cur_parent_ref(child_id, db)?.unwrap();
-        parent_refs.push(TreeEdit::Insert(ParentRef {
+        parent_refs.push(btree::Edit::Insert(ParentRef {
             child_id,
             timestamp,
             prev_timestamp: prev_parent_ref.timestamp,
@@ -1199,13 +1194,13 @@ impl Timeline {
 
         if let Some(prev_child_ref_key) = prev_parent_ref.to_child_ref_key(true) {
             let mut prev_child_ref = self.find_child_ref(prev_child_ref_key, db)?.unwrap();
-            child_refs.push(TreeEdit::Remove(prev_child_ref.clone()));
+            child_refs.push(btree::Edit::Remove(prev_child_ref.clone()));
             prev_child_ref.deletions.push(op_id);
-            child_refs.push(TreeEdit::Insert(prev_child_ref));
+            child_refs.push(btree::Edit::Insert(prev_child_ref));
         }
 
         if let Some((new_parent_id, new_name)) = new_parent.as_ref() {
-            child_refs.push(TreeEdit::Insert(ChildRef {
+            child_refs.push(btree::Edit::Insert(ChildRef {
                 parent_id: *new_parent_id,
                 name: new_name.clone(),
                 timestamp,
@@ -1336,11 +1331,8 @@ impl Timeline {
             }
 
             metadata.inode = Some(inode);
-            self.metadata = edit_tree(
-                &self.metadata,
-                vec![TreeEdit::Insert(metadata)],
-                metadata_db,
-            )?;
+            self.metadata
+                .edit(vec![btree::Edit::Insert(metadata)], metadata_db)?;
             self.inodes_to_file_ids.insert(inode, child_id);
             Ok(true)
         } else {
@@ -1563,17 +1555,17 @@ impl btree::Item for Metadata {
     }
 }
 
-impl btree::Dimension<id::Unique> for id::Unique {
-    fn from_summary(summary: &id::Unique) -> Self {
-        *summary
-    }
-}
-
-impl Keyed for Metadata {
+impl btree::KeyedItem for Metadata {
     type Key = id::Unique;
 
     fn key(&self) -> Self::Key {
         self.file_id
+    }
+}
+
+impl btree::Dimension<id::Unique> for id::Unique {
+    fn from_summary(summary: &id::Unique) -> Self {
+        *summary
     }
 }
 
@@ -1592,11 +1584,12 @@ impl btree::Item for ParentRef {
     type Summary = ParentRefKey;
 
     fn summarize(&self) -> Self::Summary {
+        use btree::KeyedItem;
         self.key()
     }
 }
 
-impl Keyed for ParentRef {
+impl btree::KeyedItem for ParentRef {
     type Key = ParentRefKey;
 
     fn key(&self) -> Self::Key {
@@ -1669,7 +1662,7 @@ impl btree::Item for ChildRef {
     }
 }
 
-impl Keyed for ChildRef {
+impl btree::KeyedItem for ChildRef {
     type Key = ChildRefKey;
 
     fn key(&self) -> Self::Key {
@@ -1818,61 +1811,6 @@ impl LamportTimestamp {
             replica_id: self.replica_id,
         }
     }
-}
-
-impl<T: Keyed> TreeEdit<T> {
-    fn key(&self) -> T::Key {
-        match self {
-            TreeEdit::Insert(item) | TreeEdit::Remove(item) => item.key(),
-        }
-    }
-}
-
-fn edit_tree<T, S>(
-    old_tree: &btree::Tree<T>,
-    mut ops: Vec<TreeEdit<T>>,
-    db: &S,
-) -> Result<btree::Tree<T>, S::ReadError>
-where
-    T: btree::Item + Keyed,
-    T::Key: btree::Dimension<T::Summary> + Default,
-    S: btree::NodeStore<T>,
-{
-    ops.sort_unstable_by_key(|item| item.key());
-
-    let mut old_cursor = old_tree.cursor();
-    let mut new_tree = btree::Tree::new();
-    let mut buffered_items = Vec::new();
-
-    old_cursor.seek(&T::Key::default(), SeekBias::Left, db)?;
-    for op in ops {
-        let new_key = op.key();
-        let mut old_item = old_cursor.item(db)?;
-
-        if old_item
-            .as_ref()
-            .map_or(false, |old_item| old_item.key() < new_key)
-        {
-            new_tree.extend(buffered_items.drain(..), db)?;
-            let slice = old_cursor.slice(&new_key, SeekBias::Left, db)?;
-            new_tree.push_tree(slice, db)?;
-            old_item = old_cursor.item(db)?;
-        }
-        if old_item.map_or(false, |old_item| old_item.key() == new_key) {
-            old_cursor.next(db)?;
-        }
-        match op {
-            TreeEdit::Insert(item) => {
-                buffered_items.push(item);
-            }
-            TreeEdit::Remove(_) => {}
-        }
-    }
-
-    new_tree.extend(buffered_items, db)?;
-    new_tree.push_tree(old_cursor.suffix::<T::Key, _>(db)?, db)?;
-
-    Ok(new_tree)
 }
 
 #[cfg(test)]

@@ -13,6 +13,12 @@ pub trait Item: Clone + Eq + fmt::Debug {
     fn summarize(&self) -> Self::Summary;
 }
 
+pub trait KeyedItem: Item {
+    type Key: Dimension<Self::Summary>;
+
+    fn key(&self) -> Self::Key;
+}
+
 pub trait Dimension<Summary: Default>:
     for<'a> Add<&'a Self, Output = Self> + for<'a> AddAssign<&'a Self> + Ord + Clone + fmt::Debug
 {
@@ -61,6 +67,12 @@ pub struct Cursor<T: Item> {
 pub enum SeekBias {
     Left,
     Right,
+}
+
+#[derive(Debug)]
+pub enum Edit<T: KeyedItem> {
+    Insert(T),
+    Remove(T),
 }
 
 impl<T: Item> Tree<T> {
@@ -350,6 +362,50 @@ impl<T: Item> Tree<T> {
                 ref child_trees, ..
             } => child_trees.last().unwrap().rightmost_leaf(db),
         }
+    }
+}
+
+impl<T: KeyedItem> Tree<T> {
+    pub fn edit<S>(&mut self, mut edits: Vec<Edit<T>>, db: &S) -> Result<(), S::ReadError>
+    where
+        S: NodeStore<T>,
+    {
+        edits.sort_unstable_by_key(|item| item.key());
+
+        let mut cursor = self.cursor();
+        let mut new_tree = Tree::new();
+        let mut buffered_items = Vec::new();
+
+        cursor.seek(&T::Key::default(), SeekBias::Left, db)?;
+        for edit in edits {
+            let new_key = edit.key();
+            let mut old_item = cursor.item(db)?;
+
+            if old_item
+                .as_ref()
+                .map_or(false, |old_item| old_item.key() < new_key)
+            {
+                new_tree.extend(buffered_items.drain(..), db)?;
+                let slice = cursor.slice(&new_key, SeekBias::Left, db)?;
+                new_tree.push_tree(slice, db)?;
+                old_item = cursor.item(db)?;
+            }
+            if old_item.map_or(false, |old_item| old_item.key() == new_key) {
+                cursor.next(db)?;
+            }
+            match edit {
+                Edit::Insert(item) => {
+                    buffered_items.push(item);
+                }
+                Edit::Remove(_) => {}
+            }
+        }
+
+        new_tree.extend(buffered_items, db)?;
+        new_tree.push_tree(cursor.suffix::<T::Key, _>(db)?, db)?;
+
+        *self = new_tree;
+        Ok(())
     }
 }
 
@@ -821,6 +877,14 @@ impl<T: Item> Cursor<T> {
             Ok(*target == self.end::<D, _>(db)?)
         } else {
             Ok(*target == self.start::<D>())
+        }
+    }
+}
+
+impl<T: KeyedItem> Edit<T> {
+    fn key(&self) -> T::Key {
+        match self {
+            Edit::Insert(item) | Edit::Remove(item) => item.key(),
         }
     }
 }
