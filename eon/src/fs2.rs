@@ -2081,14 +2081,10 @@ mod tests {
     fn test_replication_random() {
         use std::iter::FromIterator;
         use std::mem;
-        const PEERS: usize = 2;
+        const PEERS: usize = 3;
 
-        // for seed in 0..100 {
-        let mut seed = 0;
-        // loop {
-        //     seed += 1;
-        {
-            seed = 26925;
+        for seed in 0..100 {
+            // let seed = 44373;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -2099,7 +2095,7 @@ mod tests {
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
             // Generate and deliver random mutations
-            for _ in 0..10 {
+            for _ in 0..5 {
                 let replica_index = rng.gen_range(0, PEERS);
                 let db = &db[replica_index];
                 let fs = &mut fs[replica_index];
