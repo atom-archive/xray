@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "eon",
+    "memo",
     "xray_core",
     "xray_server",
     "xray_cli",

@@ -1,18 +1,18 @@
-# Eon: Xray's real-time version control system
+# Memo: Xray's real-time version control system
 
-Eon is an experimental real-time conflict-free version control system. It is currently work-in-progress. Eventually, our goal is to enable Eon by default when editing via the Xray editor, but also allow Eon to be integrated with other text editors via a shared-library or a standalone server that communicates over local sockets.
+Memo is an experimental real-time conflict-free version control system. It is currently work-in-progress. Eventually, our goal is to enable Memo by default when editing via the Xray editor, but also allow Memo to be integrated with other text editors via a shared-library or a standalone server that communicates over local sockets.
 
 The sections that follow in this document are totally aspirational and subject to change as we implement more and more features.
 
 ## Overview
 
-When working with Git, you commit snapshots of your repository to a branch, then manually synchronize your copy of that branch with a remote replica by pulling and pushing commits. Eon branches are similar to Git branches, but they are automatically persisted on every edit and are continuously synchronized across all replicas in real-time without requiring manual conflict resolution.
+When working with Git, you commit snapshots of your repository to a branch, then manually synchronize your copy of that branch with a remote replica by pulling and pushing commits. Memo branches are similar to Git branches, but they are automatically persisted on every edit and are continuously synchronized across all replicas in real-time without requiring manual conflict resolution.
 
-Real-time change synchronization means that instead of waiting for changes to be committed and pushed to GitHub, cloud-based services can interact with the state of a repository as the code is being actively being written. For example, a service like Code Climate could perform incremental analysis on every branch of an Eon repository as it changes, inserting annotations into the repository that are be interpreted by client-side tooling. The ability for any replica to perform writes without risk of conflicts means that a cloud-based service could also perform edits such as code formatting.
+Real-time change synchronization means that instead of waiting for changes to be committed and pushed to GitHub, cloud-based services can interact with the state of a repository as the code is being actively being written. For example, a service like Code Climate could perform incremental analysis on every branch of an Memo repository as it changes, inserting annotations into the repository that are be interpreted by client-side tooling. The ability for any replica to perform writes without risk of conflicts means that a cloud-based service could also perform edits such as code formatting.
 
-Eon branches persist every change as it occurs, allowing a specific moments in the editing history to be identified with a version vector. This allows developers to write code for extended sessions without committing, then scrub the history to identify relevant checkpoints in their work after the fact. These checkpoints could also be identified automatically via analysis of the edit history. Fine-grained versioning means that any state of the code can be deployed into a development environment or a staging server without the ceremony of a commit. Just make some edits and click "play" to try them out.
+Memo branches persist every change as it occurs, allowing a specific moments in the editing history to be identified with a version vector. This allows developers to write code for extended sessions without committing, then scrub the history to identify relevant checkpoints in their work after the fact. These checkpoints could also be identified automatically via analysis of the edit history. Fine-grained versioning means that any state of the code can be deployed into a development environment or a staging server without the ceremony of a commit. Just make some edits and click "play" to try them out.
 
-Eon can be used as a standalone version control system, but it is also designed to interoperate smoothly with Git, meaning that an Eon repository can also be a Git repository. Eon branches are aware of the current Git branch, and Eon automatically maps Git commit SHAs to Eon version vectors as commits are created. If Eon detects that the user has checked out a different Git commit, it automatically updates the Eon branch to the appropriate version in the Eon history and replicates the check-out to all the branch's replicas.
+Memo can be used as a standalone version control system, but it is also designed to interoperate smoothly with Git, meaning that an Memo repository can also be a Git repository. Memo branches are aware of the current Git branch, and Memo automatically maps Git commit SHAs to Memo version vectors as commits are created. If Memo detects that the user has checked out a different Git commit, it automatically updates the Memo branch to the appropriate version in the Memo history and replicates the check-out to all the branch's replicas.
 
 ## Conceptual model
 
@@ -69,31 +69,31 @@ Long-term storage is implemented with an off-the-shelf key-value database. Each 
 
 ## Command line interface
 
-When using Eon via the Xray editor, command-line interaction should not be required, but CLI serves as a good reference to the high-level operations supported by ERA. All repository operations are performed through the `eon` command.
+When using Memo via the Xray editor, command-line interaction should not be required, but CLI serves as a good reference to the high-level operations supported by ERA. All repository operations are performed through the `memo` command.
 
-* `eon init` Create an Eon repository in the current directory. Eon will create a database file named `.eon` in the current directory and add an entry for it to the `.gitignore` if the current directory is a Git repository. It will then populate the database based on the current state of the file system and create a default `master` branch in which to store edits.
+* `memo init` Create an Memo repository in the current directory. Memo will create a database file named `.memo` in the current directory and add an entry for it to the `.gitignore` if the current directory is a Git repository. It will then populate the database based on the current state of the file system and create a default `master` branch in which to store edits.
 
-* `eon remote add <name> <url>` Register a remote Eon repository and allow the current repository to check out branches from that repository.
+* `memo remote add <name> <url>` Register a remote Memo repository and allow the current repository to check out branches from that repository.
 
-* `eon sync [--force] [<remote>]` Synchronize the repository with the current state of the file system after disconnected operation. If this is a Git repository and the specified remote is reachable over the network, Eon first attempts to fetch history mapping to the current Git `HEAD`. Once the fetch completes, Eon history is synthesized for any Git commits that aren't present in the database. If the remote is unreachable, synchronization may fail, placing the current branch into *disconnected mode*, described later in the document.
+* `memo sync [--force] [<remote>]` Synchronize the repository with the current state of the file system after disconnected operation. If this is a Git repository and the specified remote is reachable over the network, Memo first attempts to fetch history mapping to the current Git `HEAD`. Once the fetch completes, Memo history is synthesized for any Git commits that aren't present in the database. If the remote is unreachable, synchronization may fail, placing the current branch into *disconnected mode*, described later in the document.
 
-* `eon publish [<remote>] [<local-branch>[:<remote-branch>]]` Send the current state of a local branch to a remote replica, along with all future operations. If no `<local-branch>` is specified, it is assumed to be the current branch. If no `<remote>` is specified, it is assumed to be `origin`.
+* `memo publish [<remote>] [<local-branch>[:<remote-branch>]]` Send the current state of a local branch to a remote replica, along with all future operations. If no `<local-branch>` is specified, it is assumed to be the current branch. If no `<remote>` is specified, it is assumed to be `origin`.
 
-* `eon unpublish [<remote>] [<local-branch>]` Stop sending operations for a local branch to a specific replica. If no `<local-branch>` is specified, it is assumed to be the current branch. If no `<remote>` is specified, it is assumed to be `origin`.
+* `memo unpublish [<remote>] [<local-branch>]` Stop sending operations for a local branch to a specific replica. If no `<local-branch>` is specified, it is assumed to be the current branch. If no `<remote>` is specified, it is assumed to be `origin`.
 
-* `eon checkout [<remote>/]<branch>` Start editing a branch. This fetches the branch's current state and subscribes to all future operations. Any edits will be broadcast to other replicas until `eon unpublish` is run.
+* `memo checkout [<remote>/]<branch>` Start editing a branch. This fetches the branch's current state and subscribes to all future operations. Any edits will be broadcast to other replicas until `memo unpublish` is run.
 
-* `eon checkout -b <branch>` Create a new branch based on the state of the current branch.
+* `memo checkout -b <branch>` Create a new branch based on the state of the current branch.
 
-* `eon reset <version>` Switch the current branch to the specified state in the repository and replicate this change out to other replicas.
+* `memo reset <version>` Switch the current branch to the specified state in the repository and replicate this change out to other replicas.
 
-* `eon merge <branch>` Merge the specified branch into the current branch. This only succeeds if the specified branch shares a common ancestor with the current branch.
+* `memo merge <branch>` Merge the specified branch into the current branch. This only succeeds if the specified branch shares a common ancestor with the current branch.
 
 ## Xray integration
 
-Xray is designed around Eon, with the goal of being Eon's ideal text editor implementation. When Xray opens a folder, it looks for an `.eon` file at the folder's root. If one is detected, Xray automatically synchronizes the repository with `origin`. This synchronization is usually quick and often instant, but in rare circumstances it may take some time. If the user attempts to edit a file before synchronization is complete, they will be offered the option to cancel the synchronization and enter *disconnected mode*, which disables certain advanced features that require the full edit history. They can also check a box to *always* abort synchronization and skip the prompt the next time they attempt to edit prior to a complete synchronization.
+Xray is designed around Memo, with the goal of being Memo's ideal text editor implementation. When Xray opens a folder, it looks for an `.memo` file at the folder's root. If one is detected, Xray automatically synchronizes the repository with `origin`. This synchronization is usually quick and often instant, but in rare circumstances it may take some time. If the user attempts to edit a file before synchronization is complete, they will be offered the option to cancel the synchronization and enter *disconnected mode*, which disables certain advanced features that require the full edit history. They can also check a box to *always* abort synchronization and skip the prompt the next time they attempt to edit prior to a complete synchronization.
 
-Once synchronization is complete (usually in a less than few seconds), the user is free to make edits, and all changes are continuously persisted into the repository. The availability of a full edit history for every buffer enables recovery to the latest state in the event of power failure, infinite, non-chronological undo, stable permalinks to logical positions in the source code, and more. If you edit the same Eon branch as another user, you will see their edits in real time as well as the location of their active cursor.
+Once synchronization is complete (usually in a less than few seconds), the user is free to make edits, and all changes are continuously persisted into the repository. The availability of a full edit history for every buffer enables recovery to the latest state in the event of power failure, infinite, non-chronological undo, stable permalinks to logical positions in the source code, and more. If you edit the same Memo branch as another user, you will see their edits in real time as well as the location of their active cursor.
 
 ## Tasks
 * [x] Update index from a depth-first traversal of an external file system
