@@ -195,6 +195,7 @@ impl BufferView {
             let mut buffer = self.buffer.borrow_mut();
             buffer.edit(&offset_ranges, text);
 
+            let text_char_length = text.chars().count();
             let mut delta = 0_isize;
             buffer
                 .mutate_selections(self.selection_set_id, |buffer, selections| {
@@ -204,10 +205,10 @@ impl BufferView {
                             let start = range.start as isize;
                             let end = range.end as isize;
                             let anchor = buffer
-                                .anchor_before_offset((start + delta) as usize + text.len())
+                                .anchor_before_offset((start + delta) as usize + text_char_length)
                                 .unwrap();
                             let deleted_count = end - start;
-                            delta += text.len() as isize - deleted_count;
+                            delta += text_char_length as isize - deleted_count;
                             Selection {
                                 start: anchor.clone(),
                                 end: anchor,
@@ -1780,6 +1781,23 @@ mod tests {
                 selection((0, 1), (0, 1)),
                 selection((0, 3), (0, 3)),
                 selection((0, 6), (0, 6)),
+            ]
+        );
+
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor
+            .buffer
+            .borrow_mut()
+            .edit(&[0..0], "123");
+
+        editor.edit("ä");
+        editor.edit("a");
+
+        assert_eq!(editor.buffer.borrow().to_string(), "äa123");
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                selection((0, 2), (0, 2)),
             ]
         );
     }
