@@ -1,4 +1,4 @@
-use btree::{self, NodeStore, SeekBias};
+use btree::{self, SeekBias};
 use id;
 use smallvec::SmallVec;
 use std::cmp::{self, Ordering};
@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 pub trait Store {
     type ReadError: fmt::Debug;
-    type MetadataStore: NodeStore<Metadata, ReadError = Self::ReadError>;
-    type ParentRefStore: NodeStore<ParentRef, ReadError = Self::ReadError>;
-    type ChildRefStore: NodeStore<ChildRef, ReadError = Self::ReadError>;
+    type MetadataStore: btree::NodeStore<Metadata, ReadError = Self::ReadError>;
+    type ParentRefStore: btree::NodeStore<ParentRef, ReadError = Self::ReadError>;
+    type ChildRefStore: btree::NodeStore<ChildRef, ReadError = Self::ReadError>;
 
     fn replica_id(&self) -> id::ReplicaId;
 
@@ -61,7 +61,7 @@ type VisibleCount = usize;
 const ROOT_ID: id::Unique = id::Unique::DEFAULT;
 
 #[derive(Clone)]
-pub struct Tree {
+pub struct Timeline {
     metadata: btree::Tree<Metadata>,
     parent_refs: btree::Tree<ParentRef>,
     child_refs: btree::Tree<ChildRef>,
@@ -69,15 +69,15 @@ pub struct Tree {
 }
 
 #[derive(Clone)]
-pub struct TreeCursor {
+pub struct Cursor {
     path: PathBuf,
-    stack: Vec<TreeCursorStackEntry>,
+    stack: Vec<CursorStackEntry>,
     metadata_cursor: btree::Cursor<Metadata>,
     visited_dir_ids: BTreeSet<id::Unique>,
 }
 
 #[derive(Clone)]
-struct TreeCursorStackEntry {
+struct CursorStackEntry {
     cursor: btree::Cursor<ChildRef>,
     jump: bool,
     depth: usize,
@@ -167,9 +167,9 @@ enum TreeEdit<T: Keyed> {
     Remove(T),
 }
 
-impl Tree {
+impl Timeline {
     pub fn new() -> Self {
-        Tree {
+        Timeline {
             metadata: btree::Tree::new(),
             parent_refs: btree::Tree::new(),
             child_refs: btree::Tree::new(),
@@ -181,12 +181,12 @@ impl Tree {
         Ok(self.cursor(db)?.depth() == 0)
     }
 
-    pub fn cursor<S: Store>(&self, db: &S) -> Result<TreeCursor, S::ReadError> {
+    pub fn cursor<S: Store>(&self, db: &S) -> Result<Cursor, S::ReadError> {
         self.cursor_at(ROOT_ID, db)
     }
 
-    pub fn cursor_at<S: Store>(&self, id: id::Unique, db: &S) -> Result<TreeCursor, S::ReadError> {
-        let mut cursor = TreeCursor {
+    pub fn cursor_at<S: Store>(&self, id: id::Unique, db: &S) -> Result<Cursor, S::ReadError> {
+        let mut cursor = Cursor {
             path: PathBuf::new(),
             stack: Vec::new(),
             metadata_cursor: self.metadata.cursor(),
@@ -199,7 +199,7 @@ impl Tree {
     fn write_to_fs<F, S>(
         &mut self,
         mut ids_to_write: BTreeSet<id::Unique>,
-        mut old_tree: Tree,
+        mut old_tree: Timeline,
         fs: &mut F,
         db: &S,
     ) -> Result<Vec<Operation>, S::ReadError>
@@ -345,7 +345,7 @@ impl Tree {
             }
 
             if sorted_ids_to_write.peek().is_some() {
-                // println!("refreshing old tree - paths: {:?}", fs.paths());
+                // println!("refreshing old timeline - paths: {:?}", fs.paths());
                 let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
                 let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
                 for op in &fs_ops {
@@ -1384,7 +1384,7 @@ impl Tree {
     }
 }
 
-impl TreeCursor {
+impl Cursor {
     pub fn depth(&self) -> usize {
         self.stack.last().map_or(0, |entry| entry.depth)
     }
@@ -1483,7 +1483,7 @@ impl TreeCursor {
             if child_ref.parent_id == dir_id {
                 let prev_depth = self.depth();
                 self.path.push(child_ref.name.as_os_str());
-                self.stack.push(TreeCursorStackEntry {
+                self.stack.push(CursorStackEntry {
                     cursor: child_ref_cursor.clone(),
                     jump: depth.is_some(),
                     depth: depth.unwrap_or(prev_depth) + 1,
@@ -1836,7 +1836,7 @@ fn edit_tree<T, S>(
 where
     T: btree::Item + Keyed,
     T::Key: btree::Dimension<T::Summary> + Default,
-    S: NodeStore<T>,
+    S: btree::NodeStore<T>,
 {
     ops.sort_unstable_by_key(|item| item.key());
 
@@ -1887,41 +1887,47 @@ mod tests {
     #[test]
     fn test_local_dir_ops() {
         let db = NullStore::new(1);
-        let mut tree = Tree::new();
-        tree.insert_dirs("a/b2/", &db).unwrap();
-        assert_eq!(tree.paths(&db), ["a/", "a/b2/"]);
+        let mut timeline = Timeline::new();
+        timeline.insert_dirs("a/b2/", &db).unwrap();
+        assert_eq!(timeline.paths(&db), ["a/", "a/b2/"]);
 
-        tree.insert_dirs("a/b1/c", &db).unwrap();
-        assert_eq!(tree.paths(&db), ["a/", "a/b1/", "a/b1/c/", "a/b2/"]);
+        timeline.insert_dirs("a/b1/c", &db).unwrap();
+        assert_eq!(timeline.paths(&db), ["a/", "a/b1/", "a/b1/c/", "a/b2/"]);
 
-        tree.insert_dirs("a/b1/d", &db).unwrap();
+        timeline.insert_dirs("a/b1/d", &db).unwrap();
         assert_eq!(
-            tree.paths(&db),
+            timeline.paths(&db),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
         );
 
-        tree.remove_dir("a/b1/c", &db).unwrap();
-        assert_eq!(tree.paths(&db), ["a/", "a/b1/", "a/b1/d/", "a/b2/"]);
+        timeline.remove_dir("a/b1/c", &db).unwrap();
+        assert_eq!(timeline.paths(&db), ["a/", "a/b1/", "a/b1/d/", "a/b2/"]);
 
-        tree.remove_dir("a/b1", &db).unwrap();
-        assert_eq!(tree.paths(&db), ["a/", "a/b2/"]);
+        timeline.remove_dir("a/b1", &db).unwrap();
+        assert_eq!(timeline.paths(&db), ["a/", "a/b2/"]);
 
-        tree.insert_dirs("a/b1/c", &db).unwrap();
-        tree.insert_dirs("a/b1/d", &db).unwrap();
+        timeline.insert_dirs("a/b1/c", &db).unwrap();
+        timeline.insert_dirs("a/b1/d", &db).unwrap();
         assert_eq!(
-            tree.paths(&db),
+            timeline.paths(&db),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
         );
 
-        let moved_id = tree.id_for_path("a/b1", &db).unwrap().unwrap();
-        tree.move_dir("a/b1", "b", &db).unwrap();
-        assert_eq!(tree.paths(&db), ["a/", "a/b2/", "b/", "b/c/", "b/d/"]);
-        assert_eq!(tree.id_for_path("b", &db).unwrap().unwrap(), moved_id);
+        let moved_id = timeline.id_for_path("a/b1", &db).unwrap().unwrap();
+        timeline.move_dir("a/b1", "b", &db).unwrap();
+        assert_eq!(timeline.paths(&db), ["a/", "a/b2/", "b/", "b/c/", "b/d/"]);
+        assert_eq!(timeline.id_for_path("b", &db).unwrap().unwrap(), moved_id);
 
-        let moved_id = tree.id_for_path("b/d", &db).unwrap().unwrap();
-        tree.move_dir("b/d", "a/b2/d", &db).unwrap();
-        assert_eq!(tree.paths(&db), ["a/", "a/b2/", "a/b2/d/", "b/", "b/c/"]);
-        assert_eq!(tree.id_for_path("a/b2/d", &db).unwrap().unwrap(), moved_id);
+        let moved_id = timeline.id_for_path("b/d", &db).unwrap().unwrap();
+        timeline.move_dir("b/d", "a/b2/d", &db).unwrap();
+        assert_eq!(
+            timeline.paths(&db),
+            ["a/", "a/b2/", "a/b2/d/", "b/", "b/c/"]
+        );
+        assert_eq!(
+            timeline.id_for_path("a/b2/d", &db).unwrap().unwrap(),
+            moved_id
+        );
     }
 
     #[test]
@@ -1937,7 +1943,7 @@ mod tests {
             let mut fs_2 = fs_1.clone();
             let mut prev_fs_1_version = fs_1.version();
             let mut prev_fs_2_version = fs_2.version();
-            let mut index_1 = fs_1.tree();
+            let mut index_1 = fs_1.timeline();
             let mut index_2 = index_1.clone();
             let mut ops_1 = Vec::new();
             let mut ops_2 = Vec::new();
@@ -1995,86 +2001,92 @@ mod tests {
     #[test]
     fn test_name_conflict_fixups() {
         let db_1 = NullStore::new(1);
-        let mut tree_1 = Tree::new();
-        let mut tree_1_ops = Vec::new();
+        let mut timeline_1 = Timeline::new();
+        let mut timeline_1_ops = Vec::new();
 
         let db_2 = NullStore::new(2);
-        let mut tree_2 = Tree::new();
-        let mut tree_2_ops = Vec::new();
+        let mut timeline_2 = Timeline::new();
+        let mut timeline_2_ops = Vec::new();
 
-        tree_1_ops.extend(tree_1.insert_dirs("a", &db_1).unwrap());
-        let id_1 = tree_1.id_for_path("a", &db_1).unwrap().unwrap();
+        timeline_1_ops.extend(timeline_1.insert_dirs("a", &db_1).unwrap());
+        let id_1 = timeline_1.id_for_path("a", &db_1).unwrap().unwrap();
 
-        tree_2_ops.extend(tree_2.insert_dirs("a", &db_2).unwrap());
-        tree_2_ops.extend(tree_2.insert_dirs("a~", &db_2).unwrap());
-        let id_2 = tree_2.id_for_path("a", &db_2).unwrap().unwrap();
-        let id_3 = tree_2.id_for_path("a~", &db_2).unwrap().unwrap();
+        timeline_2_ops.extend(timeline_2.insert_dirs("a", &db_2).unwrap());
+        timeline_2_ops.extend(timeline_2.insert_dirs("a~", &db_2).unwrap());
+        let id_2 = timeline_2.id_for_path("a", &db_2).unwrap().unwrap();
+        let id_3 = timeline_2.id_for_path("a~", &db_2).unwrap().unwrap();
 
-        while !tree_1_ops.is_empty() || !tree_2_ops.is_empty() {
-            let ops_from_tree_2_to_tree_1 = tree_2_ops.drain(..).collect::<Vec<_>>();
-            let ops_from_tree_1_to_tree_2 = tree_1_ops.drain(..).collect::<Vec<_>>();
-            tree_1_ops.extend(
-                tree_1
+        while !timeline_1_ops.is_empty() || !timeline_2_ops.is_empty() {
+            let ops_from_timeline_2_to_timeline_1 = timeline_2_ops.drain(..).collect::<Vec<_>>();
+            let ops_from_timeline_1_to_timeline_2 = timeline_1_ops.drain(..).collect::<Vec<_>>();
+            timeline_1_ops.extend(
+                timeline_1
                     .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
-                        &ops_from_tree_2_to_tree_1,
+                        &ops_from_timeline_2_to_timeline_1,
                         None,
                         &db_1,
                     ).unwrap(),
             );
-            tree_2_ops.extend(
-                tree_2
+            timeline_2_ops.extend(
+                timeline_2
                     .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
-                        &ops_from_tree_1_to_tree_2,
+                        &ops_from_timeline_1_to_timeline_2,
                         None,
                         &db_2,
                     ).unwrap(),
             );
         }
 
-        assert_eq!(tree_1.paths_with_ids(&db_1), tree_2.paths_with_ids(&db_2));
-        assert_eq!(tree_1.paths(&db_1), ["a/", "a~/", "a~~/"]);
-        assert_eq!(tree_1.id_for_path("a", &db_1).unwrap().unwrap(), id_2);
-        assert_eq!(tree_1.id_for_path("a~", &db_1).unwrap().unwrap(), id_3);
-        assert_eq!(tree_1.id_for_path("a~~", &db_1).unwrap().unwrap(), id_1);
+        assert_eq!(
+            timeline_1.paths_with_ids(&db_1),
+            timeline_2.paths_with_ids(&db_2)
+        );
+        assert_eq!(timeline_1.paths(&db_1), ["a/", "a~/", "a~~/"]);
+        assert_eq!(timeline_1.id_for_path("a", &db_1).unwrap().unwrap(), id_2);
+        assert_eq!(timeline_1.id_for_path("a~", &db_1).unwrap().unwrap(), id_3);
+        assert_eq!(timeline_1.id_for_path("a~~", &db_1).unwrap().unwrap(), id_1);
     }
 
     #[test]
     fn test_cycle_fixups() {
         let db_1 = NullStore::new(1);
-        let mut tree_1 = Tree::new();
-        tree_1.insert_dirs("a", &db_1).unwrap();
-        tree_1.insert_dirs("b", &db_1).unwrap();
-        let mut tree_1_ops = Vec::new();
+        let mut timeline_1 = Timeline::new();
+        timeline_1.insert_dirs("a", &db_1).unwrap();
+        timeline_1.insert_dirs("b", &db_1).unwrap();
+        let mut timeline_1_ops = Vec::new();
 
         let db_2 = NullStore::new(2);
-        let mut tree_2 = tree_1.clone();
-        let mut tree_2_ops = Vec::new();
+        let mut timeline_2 = timeline_1.clone();
+        let mut timeline_2_ops = Vec::new();
 
-        tree_1_ops.push(tree_1.move_dir("a", "b/a", &db_1).unwrap().unwrap());
-        tree_2_ops.push(tree_2.move_dir("b", "a/b", &db_1).unwrap().unwrap());
-        while !tree_1_ops.is_empty() || !tree_2_ops.is_empty() {
-            let ops_from_tree_2_to_tree_1 = tree_2_ops.drain(..).collect::<Vec<_>>();
-            let ops_from_tree_1_to_tree_2 = tree_1_ops.drain(..).collect::<Vec<_>>();
-            tree_1_ops.extend(
-                tree_1
+        timeline_1_ops.push(timeline_1.move_dir("a", "b/a", &db_1).unwrap().unwrap());
+        timeline_2_ops.push(timeline_2.move_dir("b", "a/b", &db_1).unwrap().unwrap());
+        while !timeline_1_ops.is_empty() || !timeline_2_ops.is_empty() {
+            let ops_from_timeline_2_to_timeline_1 = timeline_2_ops.drain(..).collect::<Vec<_>>();
+            let ops_from_timeline_1_to_timeline_2 = timeline_1_ops.drain(..).collect::<Vec<_>>();
+            timeline_1_ops.extend(
+                timeline_1
                     .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
-                        &ops_from_tree_2_to_tree_1,
+                        &ops_from_timeline_2_to_timeline_1,
                         None,
                         &db_1,
                     ).unwrap(),
             );
-            tree_2_ops.extend(
-                tree_2
+            timeline_2_ops.extend(
+                timeline_2
                     .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
-                        &ops_from_tree_1_to_tree_2,
+                        &ops_from_timeline_1_to_timeline_2,
                         None,
                         &db_2,
                     ).unwrap(),
             );
         }
 
-        assert_eq!(tree_1.paths_with_ids(&db_1), tree_2.paths_with_ids(&db_2));
-        assert_eq!(tree_1.paths(&db_1), ["b/", "b/a/"]);
+        assert_eq!(
+            timeline_1.paths_with_ids(&db_1),
+            timeline_2.paths_with_ids(&db_2)
+        );
+        assert_eq!(timeline_1.paths(&db_1), ["b/", "b/a/"]);
     }
 
     #[test]
@@ -2091,7 +2103,7 @@ mod tests {
             let db = Vec::from_iter((0..PEERS).map(|i| NullStore::new(i as u64 + 1)));
             let mut fs = Vec::from_iter((0..PEERS).map(|i| FakeFileSystem::new(&db[i], rng)));
             let mut prev_fs_versions = Vec::from_iter((0..PEERS).map(|_| 0));
-            let mut trees = Vec::from_iter((0..PEERS).map(|_| Tree::new()));
+            let mut timelines = Vec::from_iter((0..PEERS).map(|_| Timeline::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
             // Generate and deliver random mutations
@@ -2099,11 +2111,11 @@ mod tests {
                 let replica_index = rng.gen_range(0, PEERS);
                 let db = &db[replica_index];
                 let fs = &mut fs[replica_index];
-                let tree = &mut trees[replica_index];
+                let timeline = &mut timelines[replica_index];
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = tree.integrate_ops(&ops, Some(fs), db).unwrap();
+                    let fixup_ops = timeline.integrate_ops(&ops, Some(fs), db).unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 } else {
                     if prev_fs_versions[replica_index] == fs.version() || rng.gen() {
@@ -2111,7 +2123,7 @@ mod tests {
                     }
 
                     prev_fs_versions[replica_index] = fs.version();
-                    let ops = tree.read_from_fs(fs.entries(), db).unwrap();
+                    let ops = timeline.read_from_fs(fs.entries(), db).unwrap();
                     deliver_ops(replica_index, &mut inboxes, ops);
                 }
             }
@@ -2122,18 +2134,18 @@ mod tests {
                 for replica_index in 0..PEERS {
                     let db = &db[replica_index];
                     let fs = &mut fs[replica_index];
-                    let tree = &mut trees[replica_index];
+                    let timeline = &mut timelines[replica_index];
 
                     if prev_fs_versions[replica_index] < fs.version() {
                         prev_fs_versions[replica_index] = fs.version();
-                        let ops = tree.read_from_fs(fs.entries(), db).unwrap();
+                        let ops = timeline.read_from_fs(fs.entries(), db).unwrap();
                         deliver_ops(replica_index, &mut inboxes, ops);
                         done = false;
                     }
 
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
                     if !ops.is_empty() {
-                        let fixup_ops = tree.integrate_ops(&ops, Some(fs), db).unwrap();
+                        let fixup_ops = timeline.integrate_ops(&ops, Some(fs), db).unwrap();
                         deliver_ops(replica_index, &mut inboxes, fixup_ops);
                         done = false;
                     }
@@ -2144,17 +2156,17 @@ mod tests {
                 }
             }
 
-            // Ensure all trees have the same contents
+            // Ensure all timelines have the same contents
             for i in 0..PEERS - 1 {
                 assert_eq!(
-                    trees[i].paths_with_ids(&db[i]),
-                    trees[i + 1].paths_with_ids(&db[i + 1])
+                    timelines[i].paths_with_ids(&db[i]),
+                    timelines[i + 1].paths_with_ids(&db[i + 1])
                 );
             }
 
-            // Ensure all trees match their underlying file system
+            // Ensure all timelines match their underlying file system
             for i in 0..PEERS {
-                assert_eq!(trees[i].paths(&db[i]), fs[i].paths());
+                assert_eq!(timelines[i].paths(&db[i]), fs[i].paths());
             }
 
             fn deliver_ops(sender: usize, inboxes: &mut Vec<Vec<Operation>>, ops: Vec<Operation>) {
@@ -2171,7 +2183,7 @@ mod tests {
 
     #[derive(Clone)]
     struct FakeFileSystemState<'a, T: Rng + Clone> {
-        tree: Tree,
+        timeline: Timeline,
         next_inode: Inode,
         db: &'a NullStore,
         rng: T,
@@ -2181,7 +2193,7 @@ mod tests {
     struct FakeFileSystemIter<'a, T: Rng + Clone> {
         state: Rc<RefCell<FakeFileSystemState<'a, T>>>,
         version: usize,
-        cursor: Option<TreeCursor>,
+        cursor: Option<Cursor>,
     }
 
     #[derive(Debug)]
@@ -2205,8 +2217,8 @@ mod tests {
             self.0.borrow_mut().mutate(count);
         }
 
-        fn tree(&self) -> Tree {
-            self.0.borrow().tree.clone()
+        fn timeline(&self) -> Timeline {
+            self.0.borrow().timeline.clone()
         }
 
         // fn paths(&self) -> Vec<String> {
@@ -2259,9 +2271,9 @@ mod tests {
 
     impl<'a, T: Rng + Clone> FakeFileSystemState<'a, T> {
         fn new(db: &'a NullStore, rng: T) -> Self {
-            let tree = Tree::new();
+            let timeline = Timeline::new();
             Self {
-                tree,
+                timeline,
                 next_inode: 0,
                 db,
                 rng,
@@ -2271,7 +2283,7 @@ mod tests {
 
         fn mutate(&mut self, count: usize) {
             self.version += 1;
-            self.tree.mutate(
+            self.timeline.mutate(
                 &mut self.rng,
                 count,
                 &mut Some(&mut self.next_inode),
@@ -2280,7 +2292,7 @@ mod tests {
         }
 
         fn paths(&self) -> Vec<String> {
-            self.tree.paths(self.db)
+            self.timeline.paths(self.db)
         }
 
         fn insert_dir(&mut self, path: &Path) -> bool {
@@ -2292,13 +2304,13 @@ mod tests {
             }
 
             // println!("FileSystem: insert {:?}", path);
-            let mut new_tree = self.tree.clone();
-            let operations = new_tree
+            let mut new_timeline = self.timeline.clone();
+            let operations = new_timeline
                 .insert_dirs_internal(path, &mut Some(&mut self.next_inode), self.db)
                 .unwrap();
 
             if operations.len() == 1 {
-                self.tree = new_tree;
+                self.timeline = new_timeline;
                 true
             } else {
                 false
@@ -2314,7 +2326,7 @@ mod tests {
             }
 
             // println!("FileSystem: remove {:?}", path);
-            if self.tree.remove_dir(path, self.db).unwrap().is_some() {
+            if self.timeline.remove_dir(path, self.db).unwrap().is_some() {
                 true
             } else {
                 false
@@ -2330,7 +2342,8 @@ mod tests {
             }
 
             // println!("FileSystem: move from {:?} to {:?}", from, to);
-            if to.starts_with(from) || self.tree.move_dir(from, to, self.db).unwrap().is_none() {
+            if to.starts_with(from) || self.timeline.move_dir(from, to, self.db).unwrap().is_none()
+            {
                 false
             } else {
                 true
@@ -2343,8 +2356,8 @@ mod tests {
                 self.mutate(1);
             }
 
-            self.tree.id_for_path(path, self.db).unwrap().map(|id| {
-                let mut cursor = self.tree.metadata.cursor();
+            self.timeline.id_for_path(path, self.db).unwrap().map(|id| {
+                let mut cursor = self.timeline.metadata.cursor();
                 cursor.seek(&id, SeekBias::Left, self.db).unwrap();
                 cursor.item(self.db).unwrap().unwrap().inode.unwrap()
             })
@@ -2352,9 +2365,9 @@ mod tests {
     }
 
     impl<'a, T: Rng + Clone> FakeFileSystemIter<'a, T> {
-        fn build_tree_cursor(&self) -> TreeCursor {
+        fn build_cursor(&self) -> Cursor {
             let state = self.state.borrow();
-            let mut new_cursor = state.tree.cursor(state.db).unwrap();
+            let mut new_cursor = state.timeline.cursor(state.db).unwrap();
             if let Some(old_cursor) = self.cursor.as_ref() {
                 loop {
                     let advance = if let (Some(new_path), Some(old_path)) =
@@ -2391,7 +2404,7 @@ mod tests {
             let state = self.state.borrow();
 
             if self.cursor.is_none() || self.version < state.version {
-                self.cursor = Some(self.build_tree_cursor());
+                self.cursor = Some(self.build_cursor());
                 self.version = state.version;
             } else {
                 self.cursor.as_mut().unwrap().next(state.db).unwrap();
@@ -2496,7 +2509,7 @@ mod tests {
         }
     }
 
-    impl Tree {
+    impl Timeline {
         fn mutate<S, T: Rng>(
             &mut self,
             rng: &mut T,
