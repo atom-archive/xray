@@ -209,14 +209,14 @@ impl Tree {
     {
         let mut fixup_ops = Vec::new();
         let mut files_with_temp_name = BTreeSet::new();
-        let mut sorted_ids_to_write = self
-            .sort_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
-            .into_iter()
-            .peekable();
 
-        while sorted_ids_to_write.peek().is_some() {
+        loop {
+            let mut sorted_ids_to_write = self
+                .sort_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
+                .into_iter()
+                .peekable();
+
             while let Some((child_id, depth)) = sorted_ids_to_write.peek().cloned() {
-                // println!("flush change for {:?}", child_id);
                 let old_path = old_tree.path_for_id(child_id, db)?;
                 if let Some(old_path) = old_path.as_ref() {
                     if fs.inode_for_path(old_path) != old_tree.inode_for_id(child_id, db)? {
@@ -233,13 +233,6 @@ impl Tree {
                             && fs.inode_for_path(&parent_path)
                                 != old_tree.inode_for_id(parent_id, db)?
                         {
-                            // println!("BREAK A");
-                            // println!("old tree paths {:?}", old_tree.paths(db));
-                            // println!(
-                            //     "{:?} {:?}",
-                            //     fs.inode_for_path(&parent_path),
-                            //     old_tree.inode_for_id(parent_id, db)
-                            // );
                             break;
                         }
 
@@ -273,10 +266,11 @@ impl Tree {
                         }
 
                         if let Some(old_path) = old_path {
-                            if assigned_temp_name {
-                                files_with_temp_name.insert(child_id);
-                            }
                             if fs.move_dir(&old_path, &new_path) {
+                                if assigned_temp_name {
+                                    files_with_temp_name.insert(child_id);
+                                }
+
                                 let prev_parent_ref =
                                     old_tree.find_cur_parent_ref(child_id, db)?.unwrap();
                                 old_tree.integrate_op(
@@ -290,7 +284,6 @@ impl Tree {
                                     db,
                                 )?;
                             } else {
-                                // println!("BREAK B");
                                 break;
                             }
                         } else {
@@ -298,9 +291,8 @@ impl Tree {
                                 if assigned_temp_name {
                                     files_with_temp_name.insert(child_id);
                                 }
-                                if let Some(inode) = fs.inode_for_path(&new_path) {
-                                    self.set_inode_for_id(child_id, inode, db)?;
 
+                                if let Some(inode) = fs.inode_for_path(&new_path) {
                                     let operation = if let Some(prev_parent_ref) =
                                         old_tree.find_cur_parent_ref(child_id, db)?
                                     {
@@ -321,12 +313,11 @@ impl Tree {
                                     };
                                     old_tree.integrate_op(operation, db)?;
                                     old_tree.set_inode_for_id(child_id, inode, db)?;
+                                    self.set_inode_for_id(child_id, inode, db)?;
                                 } else {
-                                    // println!("BREAK C");
                                     break;
                                 }
                             } else {
-                                // println!("BREAK D");
                                 break;
                             }
                         }
@@ -345,7 +336,6 @@ impl Tree {
                             db,
                         )?;
                     } else {
-                        // println!("BREAK E");
                         break;
                     }
                 }
@@ -356,28 +346,30 @@ impl Tree {
 
             if sorted_ids_to_write.peek().is_some() {
                 // println!("refreshing old tree - paths: {:?}", fs.paths());
-                self.refresh_old_tree(
-                    &mut old_tree,
-                    fs,
-                    &mut fixup_ops,
-                    &mut ids_to_write,
-                    &mut files_with_temp_name,
-                    db,
-                )?;
-                sorted_ids_to_write = self
-                    .sort_ids_by_path_depth(ids_to_write.iter().cloned(), db)?
-                    .into_iter()
-                    .peekable();
+                let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
+                let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
+                for op in &fs_ops {
+                    match op {
+                        Operation::InsertDir { op_id, .. } => {
+                            let inode = old_tree.inode_for_id(*op_id, db)?.unwrap();
+                            self.set_inode_for_id(*op_id, inode, db)?;
+                        }
+                        Operation::MoveDir { child_id, .. } => {
+                            files_with_temp_name.remove(child_id);
+                        }
+                    }
+                }
+                for op in &fs_fixup_ops {
+                    ids_to_write.insert(op.child_id());
+                    files_with_temp_name.remove(&op.child_id());
+                }
+                fixup_ops.extend(fs_ops);
+                fixup_ops.extend(fs_fixup_ops);
+            } else {
+                break;
             }
         }
 
-        if !files_with_temp_name.is_empty() {
-            // println!(
-            //     "moving {} files with temp names",
-            //     files_with_temp_name.len()
-            // );
-        }
-        // println!("Starting to rename...");
         for child_id in files_with_temp_name {
             if let Some(old_path) = old_tree.path_for_id(child_id, db)? {
                 let mut new_path = old_path.clone();
@@ -741,40 +733,6 @@ impl Tree {
         // println!("integrate ops <<<<<<<<<<<<");
 
         Ok(fixup_ops)
-    }
-
-    fn refresh_old_tree<F, S>(
-        &mut self,
-        old_tree: &mut Tree,
-        fs: &mut F,
-        fixup_ops: &mut Vec<Operation>,
-        ids_to_write: &mut BTreeSet<id::Unique>,
-        files_with_temp_name: &mut BTreeSet<id::Unique>,
-        db: &S,
-    ) -> Result<(), S::ReadError>
-    where
-        F: FileSystem,
-        S: Store,
-    {
-        let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
-        let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
-        for op in &fs_ops {
-            match op {
-                Operation::InsertDir { op_id, .. } => {
-                    self.set_inode_for_id(*op_id, old_tree.inode_for_id(*op_id, db)?.unwrap(), db)?;
-                }
-                Operation::MoveDir { child_id, .. } => {
-                    files_with_temp_name.remove(child_id);
-                }
-            }
-        }
-        fixup_ops.extend(fs_ops);
-        for op in &fs_fixup_ops {
-            ids_to_write.insert(op.child_id());
-            files_with_temp_name.remove(&op.child_id());
-        }
-        fixup_ops.extend(fs_fixup_ops);
-        Ok(())
     }
 
     fn sort_ids_by_path_depth<I, S>(
