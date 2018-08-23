@@ -1,4 +1,3 @@
-#![cfg_attr(target_arch = "wasm32", feature(proc_macro, wasm_custom_section, wasm_import_module))]
 #![feature(unsize, coerce_unsized)]
 
 extern crate bincode;
