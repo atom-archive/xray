@@ -421,32 +421,33 @@ impl Timeline {
 
             if let Some(file_id) = self.inodes_to_file_ids.get(&entry.inode()).cloned() {
                 if entry.is_dir() {
-                    visited_dir_ids.insert(file_id);
-                    visited_alias_ids.insert(file_id);
-                    if changes.contains_key(&file_id) {
-                        let change = changes.get_mut(&file_id).unwrap();
-                        change.parents = SmallVec::from_iter(cur_parent);
-                    } else {
-                        let parent_refs = self.cur_parent_ref_values(file_id, db)?;
-                        if parent_refs.first().unwrap().parent != cur_parent {
-                            changes.insert(
-                                file_id,
-                                Change {
-                                    inserted: false,
-                                    entry,
-                                    parents: SmallVec::from_iter(cur_parent),
-                                },
-                            );
-                        }
-                    }
                     dir_stack.push(file_id);
+                    visited_dir_ids.insert(file_id);
+
+                    let parent_ref = self
+                        .cur_parent_ref_values(file_id, db)?
+                        .into_iter()
+                        .next()
+                        .unwrap();
+
+                    if parent_ref.parent == cur_parent {
+                        visited_ref_ids.insert(parent_ref.ref_id);
+                    } else {
+                        let change = changes.entry(file_id).or_insert_with(|| Change {
+                            inserted: false,
+                            entry,
+                            parents: SmallVec::new(),
+                        });
+                        change.parents.clear();
+                        change.parents.extend(cur_parent);
+                    }
                 } else {
                     if let Some(parent_ref) = self
                         .cur_parent_ref_values(file_id, db)?
                         .into_iter()
                         .find(|r| r.parent == cur_parent)
                     {
-                        visited_alias_ids.insert(parent_ref.ref_id.alias_id);
+                        visited_ref_ids.insert(parent_ref.ref_id);
                     } else {
                         changes
                             .entry(file_id)
@@ -482,7 +483,7 @@ impl Timeline {
         for dir_id in visited_dir_ids {
             let mut cursor = self.cursor_at(dir_id, db)?;
             while let Some(ref_id) = cursor.ref_id(db)? {
-                if !visited_alias_ids.contains(&ref_id.child_id) {
+                if !visited_ref_ids.contains(&ref_id) {
                     free_alias_ids
                         .entry(ref_id.child_id)
                         .or_insert(SmallVec::new())
@@ -541,6 +542,7 @@ impl Timeline {
             .edit(parent_ref_edits, db.parent_ref_store())?;
         self.child_refs
             .edit(child_ref_edits, db.child_ref_store())?;
+
         Ok(operations)
     }
 
@@ -785,9 +787,8 @@ impl Timeline {
                     db,
                 )?);
                 if let Some(inode) = inode {
-                    self.inodes_to_file_ids.insert(inode, parent_id);
+                    self.inodes_to_file_ids.insert(inode, child_id);
                 }
-
                 parent_id = child_id;
             }
         }
@@ -1370,18 +1371,23 @@ impl Timeline {
         S: Store,
     {
         let mut paths = SmallVec::new();
-        for parent_ref in self.cur_parent_ref_values(file_id, db)? {
-            paths.extend(self.resolve_path(parent_ref.ref_id, db)?);
+
+        if file_id == ROOT_ID {
+            paths.push(PathBuf::new());
+        } else {
+            for parent_ref in self.cur_parent_ref_values(file_id, db)? {
+                paths.extend(self.resolve_path(parent_ref.ref_id, db)?);
+            }
         }
         Ok(paths)
     }
 
-    fn resolve_path<S>(&self, key: ParentRefId, db: &S) -> Result<Option<PathBuf>, S::ReadError>
+    fn resolve_path<S>(&self, ref_id: ParentRefId, db: &S) -> Result<Option<PathBuf>, S::ReadError>
     where
         S: Store,
     {
         let mut path_components = Vec::new();
-        if self.visit_ancestors(key, |name| path_components.push(name), db)? {
+        if self.visit_ancestors(ref_id, |name| path_components.push(name), db)? {
             let mut path = PathBuf::new();
             for component in path_components.into_iter().rev() {
                 path.push(component.as_ref());
@@ -1392,12 +1398,12 @@ impl Timeline {
         }
     }
 
-    fn resolve_depth<S>(&self, key: ParentRefId, db: &S) -> Result<Option<usize>, S::ReadError>
+    fn resolve_depth<S>(&self, ref_id: ParentRefId, db: &S) -> Result<Option<usize>, S::ReadError>
     where
         S: Store,
     {
         let mut depth = 0;
-        if self.visit_ancestors(key, |_| depth += 1, db)? {
+        if self.visit_ancestors(ref_id, |_| depth += 1, db)? {
             Ok(Some(depth))
         } else {
             Ok(None)
@@ -1406,7 +1412,7 @@ impl Timeline {
 
     fn visit_ancestors<F, S>(
         &self,
-        key: ParentRefId,
+        ref_id: ParentRefId,
         mut f: F,
         db: &S,
     ) -> Result<bool, S::ReadError>
@@ -1418,9 +1424,9 @@ impl Timeline {
 
         let mut visited = BTreeSet::new();
         let mut cursor = self.parent_refs.cursor();
-        if key.child_id == ROOT_ID {
+        if ref_id.child_id == ROOT_ID {
             Ok(true)
-        } else if cursor.seek(&key, SeekBias::Left, parent_ref_db)? {
+        } else if cursor.seek(&ref_id, SeekBias::Left, parent_ref_db)? {
             loop {
                 if let Some((parent_id, name)) = cursor.item(parent_ref_db)?.and_then(|r| r.parent)
                 {
@@ -1533,7 +1539,7 @@ impl Timeline {
 
     fn find_child_ref<S>(
         &self,
-        key: ChildRefValueId,
+        ref_id: ChildRefValueId,
         db: &S,
     ) -> Result<Option<ChildRefValue>, S::ReadError>
     where
@@ -1541,7 +1547,7 @@ impl Timeline {
     {
         let child_ref_db = db.child_ref_store();
         let mut cursor = self.child_refs.cursor();
-        if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
+        if cursor.seek(&ref_id, SeekBias::Left, child_ref_db)? {
             cursor.item(child_ref_db)
         } else {
             Ok(None)
@@ -2420,7 +2426,7 @@ mod tests {
                 .insert_dirs_internal(path, &mut Some(&mut self.next_inode), self.db)
                 .unwrap();
 
-            if operations.len() == 1 {
+            if operations.len() == 2 {
                 self.timeline = new_timeline;
                 true
             } else {
