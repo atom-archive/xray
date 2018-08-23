@@ -4,12 +4,13 @@
 
 Xray is an experimental Electron-based text editor informed by what we've learned in the four years since the launch of Atom. In the short term, this project is a testbed for rapidly iterating on several radical ideas without risking the stability of Atom. The longer term future of the code in this repository will become clearer after a few months of progress. For now, our primary goal is to iterate rapidly and learn as much as possible.
 
-## Active development is on the Eon branch
+## Q3 2018 Focus
 
-We're actively developing a subcomponent of Xray called [Eon](https://github.com/atom/xray/tree/eon/eon), which is a real-time, fine-grained version control system. We're keeping that work on a branch since it's still in a pretty messy state, but Xray will eventually pull in Eon as a library and build directly on its data structures. Check out the README on that branch for more details.
+We're currently focused on a sub-project of Xray called [Memo](./memo), which will serve as the foundation of Xray but also be available as a standalone tool. Memo is an operation-based version control system that tracks changes at the level of individual keystrokes and synchronizes branches in real time.
 
 ## Updates
 
+* [August 21, 2018](./docs/updates/2018_08_21.md)
 * [July 31, 2018](./docs/updates/2018_07_31.md)
 * [July 23, 2018](./docs/updates/2018_07_23.md)
 * [July 16, 2018](./docs/updates/2018_07_16.md)
@@ -20,6 +21,12 @@ We're actively developing a subcomponent of Xray called [Eon](https://github.com
 ## Foundational priorities
 
 Our goal is to build a cross-platform text editor that is designed from the beginning around the following foundational priorities:
+
+### Collaboration
+
+*Xray makes it as easy to code together as it is to code alone.*
+
+We design features for collaborative use from the beginning. Editors and other relevant UI elements are designed to be occupied by multiple users. Interactions with the file system and other resources such as subprocesses are abstracted to work over network connections.
 
 ### High performance
 
@@ -34,12 +41,6 @@ We design our features to be responsive from the beginning. We reliably provide 
 | 150ms | Opening an application window. |
 
 We are careful to maximize throughput of batch operations such as project-wide search. Memory consumption is kept within a low constant factor of the size of the project and open buffer set, but we trade memory for speed and extensibility so long as memory requirements are reasonable.
-
-### Collaboration
-
-*Xray makes it as easy to code together as it is to code alone.*
-
-We design features for collaborative use from the beginning. Editors and other relevant UI elements are designed to be occupied by multiple users. Interactions with the file system and other resources such as subprocesses are abstracted to work over network connections.
 
 ### Extensibility
 
@@ -152,56 +153,6 @@ Before coding, we ask ourselves whether the code we're writing can be motivated 
 
 All code related to Xray should live in this repository, but intra-repository dependencies should be expressed in a disciplined way to ensure that a one-line docs change doesn't require us to rebuild the world. Builds should be finger-printed on a per-component basis and we should aim to keep components granular.
 
-### Community SLA
-
-Well-formulated PRs and issues will receive some form of response by the end of the next business day. If this interferes with our ability to learn, we'll revisit.
-
 ## Contributing
 
 Interested in helping out? Welcome! Check out the [CONTRIBUTING](./CONTRIBUTING.md) guide to get started.
-
-## Q1 2018 Roadmap
-
-By May 1, we'd like it to be possible for multiple Xray clients to connect to a headless remote workspace. Clients should be able to open files from the remote project via the file finder and collaboratively edit shared buffers. We also would like to enable collaborators to follow each other around and have a text-based conversation in the workspace. We're going to focus on the bare minimum of editor features needed to reach this goal. If we're collaboratively editing text that isn't syntax highlighted, that's ok for now.
-
-* [x] High-performance text rendering
-* [x] Cursors, selections, and editing
-* [x] Client/server architecture
-* [x] File finder
-* [x] Load and save buffers
-* [x] Remote headless workspace
-  * [x] File finder
-  * [x] Loading a buffer
-  * [x] Editing can be shared between multiple participants
-  * [x] Saving
-  * [x] Discussions
-* [x] Flesh out basic editor experience
-  * [x] Autoscroll
-  * [x] Easy movement and editing operations
-
-## Q2 2018
-
-Once we get the basic collaboration experience down, we'll be looking to expand on it by adding the basic features that developers expect from a text editor. This list is incomplete and will likely evolve as this time approaches.
-
-* [x] Key bindings system
-* [x] Horizontal scrolling
-* [x] Word- and line-based cursor movements
-* [x] Gutter with line numbers
-* [x] Basic mouse interaction
-* [ ] Workspace tabs
-* [ ] Split panes
-* [ ] Undo history
-* [ ] Syntax highlighting
-* [ ] Diagnostics
-* [ ] Autocomplete
-* [ ] Symbolic navigation
-* [ ] Find and replace in a buffer
-* [ ] Local project-wide search
-* [ ] Remote project-wide search
-* [ ] Project browser
-* [ ] Code folding
-* [ ] Soft wrapping
-* [ ] Clarify theming
-* [ ] Following
-* [ ] JS extensions
-* [ ] Further optimize multi-cursor editing
