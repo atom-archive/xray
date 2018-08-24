@@ -198,6 +198,7 @@ impl Timeline {
     where
         F: FileSystem,
         S: Store,
+        Error<S>: From<S::ReadError>,
     {
         let mut fixup_ops = Vec::new();
         let mut refs_with_temp_name = BTreeSet::new();
@@ -409,7 +410,11 @@ impl Timeline {
                     let fs_inode = fs.inode(&old_path);
                     let tree_inode = old_tree.inode_for_id(ref_id.child_id, db)?;
                     if fs_inode == tree_inode && fs.rename(&old_path, &new_path) {
-                        old_tree.rename(&old_path, &new_path, db)?;
+                        match old_tree.rename(&old_path, &new_path, db) {
+                            Ok(_) => {}
+                            Err(Error::ReadError(e)) => return Err(e),
+                            Err(Error::InvalidPath) => unreachable!(),
+                        }
                     }
                 }
             }
@@ -721,16 +726,19 @@ impl Timeline {
     {
         let src = src.into();
         let dst = dst.into();
-
         let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
 
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
 
-        assert!(self.id_for_path(&dst, db)?.is_none());
+        if self.id_for_path(&dst, db)?.is_some() {
+            return Err(Error::InvalidPath);
+        }
+
         let parent_id = if let Some(parent_path) = dst.parent() {
-            self.id_for_path(parent_path, db)?.unwrap()
+            self.id_for_path(parent_path, db)?
+                .ok_or(Error::InvalidPath)?
         } else {
             ROOT_ID
         };
@@ -814,6 +822,7 @@ impl Timeline {
                     &mut child_ref_edits,
                     db,
                 )?);
+
                 if let Some(inode) = inode {
                     self.inodes_to_file_ids.insert(inode, child_id);
                 }
@@ -827,10 +836,11 @@ impl Timeline {
         Ok(operations)
     }
 
-    pub fn remove<I, S>(&mut self, path: I, db: &S) -> Result<Option<Operation>, S::ReadError>
+    pub fn remove<I, S>(&mut self, path: I, db: &S) -> Result<Operation, Error<S>>
     where
         I: Into<PathBuf>,
         S: Store,
+        Error<S>: From<S::ReadError>,
     {
         let path = path.into();
         let parent_ref_db = db.parent_ref_store();
@@ -839,69 +849,59 @@ impl Timeline {
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
 
-        if let Some(ref_id) = self.ref_id_for_path(&path, db)? {
-            let operation = self.update_parent_ref(
-                ref_id,
-                None,
-                &mut parent_ref_edits,
-                &mut child_ref_edits,
-                db,
-            )?;
-            self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
-            self.child_refs.edit(child_ref_edits, child_ref_db)?;
-            Ok(Some(operation))
-        } else {
-            Ok(None)
-        }
+        let ref_id = self.ref_id_for_path(&path, db)?.ok_or(Error::InvalidPath)?;
+        let operation = self.update_parent_ref(
+            ref_id,
+            None,
+            &mut parent_ref_edits,
+            &mut child_ref_edits,
+            db,
+        )?;
+        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
+        self.child_refs.edit(child_ref_edits, child_ref_db)?;
+
+        Ok(operation)
     }
 
-    pub fn rename<F, S, T>(
-        &mut self,
-        from: F,
-        to: T,
-        db: &S,
-    ) -> Result<Option<Operation>, S::ReadError>
+    pub fn rename<F, S, T>(&mut self, from: F, to: T, db: &S) -> Result<Operation, Error<S>>
     where
         F: Into<PathBuf>,
         S: Store,
         T: Into<PathBuf>,
+        Error<S>: From<S::ReadError>,
     {
         let from = from.into();
         let to = to.into();
         let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
 
+        let mut parent_ref_edits = Vec::new();
+        let mut child_ref_edits = Vec::new();
+
         if self.id_for_path(&to, db)?.is_some() {
-            return Ok(None);
+            return Err(Error::InvalidPath);
         }
 
-        let ref_id = self.ref_id_for_path(&from, db)?;
+        let ref_id = self.ref_id_for_path(&from, db)?.ok_or(Error::InvalidPath)?;
         let new_parent_id = if let Some(parent_path) = to.parent() {
             self.id_for_path(parent_path, db)?
+                .ok_or(Error::InvalidPath)?
         } else {
-            Some(ROOT_ID)
+            ROOT_ID
         };
 
-        if let (Some(ref_id), Some(new_parent_id)) = (ref_id, new_parent_id) {
-            let mut parent_ref_edits = Vec::new();
-            let mut child_ref_edits = Vec::new();
+        let new_name = Arc::new(OsString::from(to.file_name().unwrap()));
+        let operation = self.update_parent_ref(
+            ref_id,
+            Some((new_parent_id, new_name)),
+            &mut parent_ref_edits,
+            &mut child_ref_edits,
+            db,
+        )?;
+        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
+        self.child_refs.edit(child_ref_edits, child_ref_db)?;
 
-            let new_name = Arc::new(OsString::from(to.file_name().unwrap()));
-            let operation = self.update_parent_ref(
-                ref_id,
-                Some((new_parent_id, new_name)),
-                &mut parent_ref_edits,
-                &mut child_ref_edits,
-                db,
-            )?;
-
-            self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
-            self.child_refs.edit(child_ref_edits, child_ref_db)?;
-
-            Ok(Some(operation))
-        } else {
-            Ok(None)
-        }
+        Ok(operation)
     }
 
     pub fn integrate_ops<'a, F, O, S>(
@@ -914,6 +914,7 @@ impl Timeline {
         F: FileSystem,
         O: IntoIterator<Item = &'a Operation> + Clone,
         S: Store,
+        Error<S>: From<S::ReadError>,
     {
         // println!("integrate ops >>>>>>>>>>>>");
         let old_tree = self.clone();
@@ -2213,8 +2214,8 @@ mod tests {
         let mut timeline_2 = timeline_1.clone();
         let mut timeline_2_ops = Vec::new();
 
-        timeline_1_ops.push(timeline_1.rename("a", "b/a", &db_1).unwrap().unwrap());
-        timeline_2_ops.push(timeline_2.rename("b", "a/b", &db_1).unwrap().unwrap());
+        timeline_1_ops.push(timeline_1.rename("a", "b/a", &db_1).unwrap());
+        timeline_2_ops.push(timeline_2.rename("b", "a/b", &db_1).unwrap());
         while !timeline_1_ops.is_empty() || !timeline_2_ops.is_empty() {
             let ops_from_timeline_2_to_timeline_1 = timeline_2_ops.drain(..).collect::<Vec<_>>();
             let ops_from_timeline_1_to_timeline_2 = timeline_1_ops.drain(..).collect::<Vec<_>>();
@@ -2766,7 +2767,7 @@ mod tests {
                 } else if k == 1 {
                     let path = self.select_path(rng, db).unwrap();
                     // println!("{:?} Removing {:?}", db.replica_id(), path);
-                    ops.push(self.remove(&path, db).unwrap().unwrap());
+                    ops.push(self.remove(&path, db).unwrap());
                 } else {
                     let (old_path, new_path) = loop {
                         let old_path = self.select_path(rng, db).unwrap();
@@ -2782,7 +2783,7 @@ mod tests {
                     //     old_path,
                     //     new_path
                     // );
-                    ops.push(self.rename(&old_path, &new_path, db).unwrap().unwrap());
+                    ops.push(self.rename(&old_path, &new_path, db).unwrap());
                 }
             }
             ops
