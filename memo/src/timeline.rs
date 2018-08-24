@@ -708,7 +708,7 @@ impl Timeline {
         )?);
 
         if let Some(inode) = inode {
-            self.inodes_to_file_ids.insert(inode, parent_id);
+            self.inodes_to_file_ids.insert(inode, child_id);
         }
 
         self.metadata.edit(metadata_edits, metadata_db)?;
