@@ -595,7 +595,7 @@ impl Timeline {
         if let Some(prev_child_ref_value_id) =
             prev_parent_ref.and_then(|r| r.to_child_ref_value_id(true))
         {
-            let mut prev_child_ref = self.find_child_ref(prev_child_ref_value_id, db)?.unwrap();
+            let mut prev_child_ref = self.child_ref_value(prev_child_ref_value_id, db)?.unwrap();
             child_ref_edits.push(btree::Edit::Remove(prev_child_ref.clone()));
             prev_child_ref.deletions.push(op_id);
             child_ref_edits.push(btree::Edit::Insert(prev_child_ref));
@@ -1543,7 +1543,7 @@ impl Timeline {
         }
     }
 
-    fn find_child_ref<S>(
+    fn child_ref_value<S>(
         &self,
         ref_id: ChildRefValueId,
         db: &S,
