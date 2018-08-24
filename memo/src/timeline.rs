@@ -34,10 +34,12 @@ pub trait FileSystem {
     type Entry: FileSystemEntry;
     type EntriesIterator: Iterator<Item = Self::Entry>;
 
-    fn insert_dir(&mut self, path: &Path) -> bool;
-    fn remove_dir(&mut self, path: &Path) -> bool;
-    fn move_dir(&mut self, from: &Path, to: &Path) -> bool;
-    fn inode_for_path(&self, path: &Path) -> Option<Inode>;
+    fn create_file(&mut self, path: &Path) -> bool;
+    fn create_dir(&mut self, path: &Path) -> bool;
+    fn hard_link(&mut self, src: &Path, dst: &Path) -> bool;
+    fn remove(&mut self, path: &Path, is_dir: bool) -> bool;
+    fn rename(&mut self, from: &Path, to: &Path) -> bool;
+    fn inode(&self, path: &Path) -> Option<Inode>;
     fn entries(&self) -> Self::EntriesIterator;
 
     // TODO: Remove this
@@ -84,6 +86,11 @@ pub enum Operation {
         prev_timestamp: LamportTimestamp,
         new_parent: Option<(id::Unique, Arc<OsString>)>,
     },
+}
+
+pub enum Error<S: Store> {
+    InvalidPath,
+    ReadError(S::ReadError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -204,19 +211,19 @@ impl Timeline {
             while let Some((ref_id, depth)) = sorted_refs_to_write.peek().cloned() {
                 let old_path = old_tree.resolve_path(ref_id, db)?;
                 if let Some(old_path) = old_path.as_ref() {
-                    if fs.inode_for_path(old_path) != old_tree.inode_for_id(ref_id.child_id, db)? {
+                    if fs.inode(old_path) != old_tree.inode_for_id(ref_id.child_id, db)? {
                         break;
                     }
                 }
 
                 let parent_ref = self.cur_parent_ref_value(ref_id, db)?.unwrap();
+                let metadata = self.metadata(ref_id.child_id, db)?.unwrap();
                 if depth.is_some() {
                     let (parent_id, mut name) = parent_ref.parent.clone().unwrap();
 
                     if let Some(parent_path) = old_tree.resolve_paths(parent_id, db)?.first_mut() {
                         if parent_id != ROOT_ID
-                            && fs.inode_for_path(&parent_path)
-                                != old_tree.inode_for_id(parent_id, db)?
+                            && fs.inode(&parent_path) != old_tree.inode_for_id(parent_id, db)?
                         {
                             break;
                         }
@@ -251,7 +258,7 @@ impl Timeline {
                         }
 
                         if let Some(old_path) = old_path {
-                            if fs.move_dir(&old_path, &new_path) {
+                            if fs.rename(&old_path, &new_path) {
                                 if assigned_temp_name {
                                     refs_with_temp_name.insert(ref_id);
                                 }
@@ -272,12 +279,31 @@ impl Timeline {
                                 break;
                             }
                         } else {
-                            if fs.insert_dir(&new_path) {
+                            let mut success = false;
+                            if metadata.is_dir {
+                                success = fs.create_dir(&new_path);
+                            } else {
+                                let existing_paths = old_tree.resolve_paths(ref_id.child_id, db)?;
+                                if existing_paths.is_empty() {
+                                    success = fs.create_file(&new_path);
+                                } else {
+                                    for existing_path in existing_paths {
+                                        if fs.inode(&existing_path) == metadata.inode
+                                            && fs.hard_link(&existing_path, new_path)
+                                        {
+                                            success = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if success {
                                 if assigned_temp_name {
                                     refs_with_temp_name.insert(ref_id);
                                 }
 
-                                if let Some(inode) = fs.inode_for_path(&new_path) {
+                                if let Some(inode) = fs.inode(&new_path) {
                                     if let Some(prev_parent_ref) =
                                         old_tree.cur_parent_ref_value(ref_id, db)?
                                     {
@@ -322,7 +348,7 @@ impl Timeline {
                         }
                     }
                 } else if let Some(old_path) = old_path {
-                    if fs.remove_dir(&old_path) {
+                    if fs.remove(&old_path, metadata.is_dir) {
                         let prev_parent_ref = old_tree.cur_parent_ref_value(ref_id, db)?.unwrap();
                         old_tree.integrate_op(
                             Operation::UpdateParent {
@@ -380,9 +406,9 @@ impl Timeline {
                 new_path.set_file_name(self.resolve_name(ref_id, db)?.unwrap().as_os_str());
 
                 if new_path != old_path {
-                    let fs_inode = fs.inode_for_path(&old_path);
+                    let fs_inode = fs.inode(&old_path);
                     let tree_inode = old_tree.inode_for_id(ref_id.child_id, db)?;
-                    if fs_inode == tree_inode && fs.move_dir(&old_path, &new_path) {
+                    if fs_inode == tree_inode && fs.rename(&old_path, &new_path) {
                         old_tree.rename(&old_path, &new_path, db)?;
                     }
                 }
@@ -621,26 +647,33 @@ impl Timeline {
         })
     }
 
-    pub fn insert_dirs<I, S>(&mut self, path: I, db: &S) -> Result<Vec<Operation>, S::ReadError>
+    pub fn create_dir_all<I, S>(&mut self, path: I, db: &S) -> Result<Vec<Operation>, Error<S>>
     where
         I: Into<PathBuf>,
         S: Store,
+        Error<S>: From<S::ReadError>,
     {
-        self.insert_dirs_internal(path, &mut None, db)
+        self.create_dir_all_internal(path, &mut None, db)
     }
 
     // TODO: Return an error if there is a name conflict
-    pub fn insert_file_internal<I, S>(
+    pub fn create_file_internal<I, S>(
         &mut self,
         path: I,
         inode: Option<Inode>,
         db: &S,
-    ) -> Result<SmallVec<[Operation; 2]>, S::ReadError>
+    ) -> Result<SmallVec<[Operation; 2]>, Error<S>>
     where
         I: Into<PathBuf>,
         S: Store,
+        Error<S>: From<S::ReadError>,
     {
         let path = path.into();
+        let mut operations = SmallVec::new();
+        if self.id_for_path(&path, db)?.is_some() {
+            return Err(Error::InvalidPath);
+        }
+
         let metadata_db = db.metadata_store();
         let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
@@ -649,27 +682,26 @@ impl Timeline {
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
 
-        assert!(self.id_for_path(&path, db)?.is_none());
         let parent_id = if let Some(parent_path) = path.parent() {
-            self.id_for_path(parent_path, db)?.unwrap()
+            self.id_for_path(parent_path, db)?
+                .ok_or(Error::InvalidPath)?
         } else {
             ROOT_ID
         };
-        let name = Arc::new(path.file_name().unwrap().into());
-        let operations = self.local_insert(
-            parent_id,
-            name,
+        let child_id = db.gen_id();
+
+        operations.push(self.insert_metadata(child_id, false, inode, &mut metadata_edits));
+        operations.push(self.update_parent_ref(
             ParentRefId {
-                child_id: db.gen_id(),
+                child_id,
                 alias_id: db.gen_id(),
             },
-            inode,
-            false,
-            &mut metadata_edits,
+            Some((parent_id, Arc::new(path.file_name().unwrap().into()))),
             &mut parent_ref_edits,
             &mut child_ref_edits,
             db,
-        )?;
+        )?);
+
         if let Some(inode) = inode {
             self.inodes_to_file_ids.insert(inode, parent_id);
         }
@@ -680,19 +712,15 @@ impl Timeline {
         Ok(operations)
     }
 
-    pub fn insert_hard_link_internal<I1, I2, S>(
-        &mut self,
-        file_path: I1,
-        link_path: I2,
-        db: &S,
-    ) -> Result<SmallVec<[Operation; 2]>, S::ReadError>
+    pub fn hard_link<I1, I2, S>(&mut self, src: I1, dst: I2, db: &S) -> Result<Operation, Error<S>>
     where
         I1: Into<PathBuf>,
         I2: Into<PathBuf>,
         S: Store,
+        Error<S>: From<S::ReadError>,
     {
-        let file_path = file_path.into();
-        let link_path = link_path.into();
+        let src = src.into();
+        let dst = dst.into();
 
         let parent_ref_db = db.parent_ref_store();
         let child_ref_db = db.child_ref_store();
@@ -700,24 +728,19 @@ impl Timeline {
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
 
-        assert!(self.id_for_path(&link_path, db)?.is_none());
-        let parent_id = if let Some(parent_path) = link_path.parent() {
+        assert!(self.id_for_path(&dst, db)?.is_none());
+        let parent_id = if let Some(parent_path) = dst.parent() {
             self.id_for_path(parent_path, db)?.unwrap()
         } else {
             ROOT_ID
         };
-        let child_id = self.id_for_path(file_path, db).unwrap().unwrap();
-        let name = Arc::new(link_path.file_name().unwrap().into());
-        let operations = self.local_insert(
-            parent_id,
-            name,
+        let child_id = self.id_for_path(src, db).unwrap().unwrap();
+        let operation = self.update_parent_ref(
             ParentRefId {
                 child_id,
                 alias_id: db.gen_id(),
             },
-            self.inode_for_id(child_id, db).unwrap(),
-            false,
-            &mut vec![],
+            Some((parent_id, Arc::new(dst.file_name().unwrap().into()))),
             &mut parent_ref_edits,
             &mut child_ref_edits,
             db,
@@ -725,19 +748,20 @@ impl Timeline {
 
         self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
         self.child_refs.edit(child_ref_edits, child_ref_db)?;
-        Ok(operations)
+        Ok(operation)
     }
 
     // TODO: Return an error if there is a name conflict.
-    fn insert_dirs_internal<I, S>(
+    fn create_dir_all_internal<I, S>(
         &mut self,
         path: I,
         next_inode: &mut Option<&mut Inode>,
         db: &S,
-    ) -> Result<Vec<Operation>, S::ReadError>
+    ) -> Result<Vec<Operation>, Error<S>>
     where
         I: Into<PathBuf>,
         S: Store,
+        Error<S>: From<S::ReadError>,
     {
         let path = path.into();
         let metadata_db = db.metadata_store();
@@ -778,16 +802,14 @@ impl Timeline {
                     **next_inode += 1;
                     inode
                 });
-                operations.extend(self.local_insert(
-                    parent_id,
-                    name,
+
+                operations.push(self.insert_metadata(child_id, true, inode, &mut metadata_edits));
+                operations.push(self.update_parent_ref(
                     ParentRefId {
                         child_id,
                         alias_id: db.gen_id(),
                     },
-                    inode,
-                    true,
-                    &mut metadata_edits,
+                    Some((parent_id, name.clone())),
                     &mut parent_ref_edits,
                     &mut child_ref_edits,
                     db,
@@ -1351,30 +1373,6 @@ impl Timeline {
         Ok(Some(ref_id))
     }
 
-    fn local_insert<S: Store>(
-        &self,
-        parent_id: id::Unique,
-        name: Arc<OsString>,
-        ref_id: ParentRefId,
-        inode: Option<Inode>,
-        is_dir: bool,
-        metadata_edits: &mut Vec<btree::Edit<Metadata>>,
-        parent_ref_edits: &mut Vec<btree::Edit<ParentRefValue>>,
-        child_ref_edits: &mut Vec<btree::Edit<ChildRefValue>>,
-        db: &S,
-    ) -> Result<SmallVec<[Operation; 2]>, S::ReadError> {
-        let mut operations = SmallVec::new();
-        operations.push(self.insert_metadata(ref_id.child_id, is_dir, inode, metadata_edits));
-        operations.push(self.update_parent_ref(
-            ref_id,
-            Some((parent_id, name.clone())),
-            parent_ref_edits,
-            child_ref_edits,
-            db,
-        )?);
-        Ok(operations)
-    }
-
     pub fn resolve_paths<S>(
         &self,
         file_id: id::Unique,
@@ -1724,6 +1722,15 @@ impl Cursor {
     }
 }
 
+impl<S: Store> fmt::Debug for Error<S> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::InvalidPath => write!(f, "Error::InvalidPath"),
+            Error::ReadError(e) => write!(f, "Error::ReadError({:?})", e),
+        }
+    }
+}
+
 impl btree::Item for Metadata {
     type Summary = id::Unique;
 
@@ -2030,13 +2037,13 @@ mod tests {
     fn test_local_dir_ops() {
         let db = NullStore::new(1);
         let mut timeline = Timeline::new();
-        timeline.insert_dirs("a/b2/", &db).unwrap();
+        timeline.create_dir_all("a/b2/", &db).unwrap();
         assert_eq!(timeline.paths(&db), ["a/", "a/b2/"]);
 
-        timeline.insert_dirs("a/b1/c", &db).unwrap();
+        timeline.create_dir_all("a/b1/c", &db).unwrap();
         assert_eq!(timeline.paths(&db), ["a/", "a/b1/", "a/b1/c/", "a/b2/"]);
 
-        timeline.insert_dirs("a/b1/d", &db).unwrap();
+        timeline.create_dir_all("a/b1/d", &db).unwrap();
         assert_eq!(
             timeline.paths(&db),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
@@ -2048,8 +2055,8 @@ mod tests {
         timeline.remove("a/b1", &db).unwrap();
         assert_eq!(timeline.paths(&db), ["a/", "a/b2/"]);
 
-        timeline.insert_dirs("a/b1/c", &db).unwrap();
-        timeline.insert_dirs("a/b1/d", &db).unwrap();
+        timeline.create_dir_all("a/b1/c", &db).unwrap();
+        timeline.create_dir_all("a/b1/d", &db).unwrap();
         assert_eq!(
             timeline.paths(&db),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
@@ -2074,7 +2081,8 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        for seed in 0..100 {
+        for seed in 0..1000000 {
+            // let seed = 26;
             println!("SEED: {:?}", seed);
 
             let mut rng = StdRng::from_seed(&[seed]);
@@ -2094,16 +2102,19 @@ mod tests {
 
             loop {
                 if fs_1.version() > prev_fs_1_version && rng.gen() {
+                    // println!("scanning from fs 1");
                     prev_fs_1_version = fs_1.version();
                     ops_1.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
                 }
 
                 if fs_2.version() > prev_fs_2_version && rng.gen() {
+                    // println!("scanning from fs 2");
                     prev_fs_2_version = fs_2.version();
                     ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
                 }
 
                 if !ops_2.is_empty() && rng.gen() {
+                    // println!("integrating into index 1");
                     ops_1.extend(
                         index_1
                             .integrate_ops(
@@ -2115,6 +2126,7 @@ mod tests {
                 }
 
                 if !ops_1.is_empty() && rng.gen() {
+                    // println!("integrating into index 2");
                     ops_2.extend(
                         index_2
                             .integrate_ops(
@@ -2150,11 +2162,11 @@ mod tests {
         let mut timeline_2 = Timeline::new();
         let mut timeline_2_ops = Vec::new();
 
-        timeline_1_ops.extend(timeline_1.insert_dirs("a", &db_1).unwrap());
+        timeline_1_ops.extend(timeline_1.create_dir_all("a", &db_1).unwrap());
         let id_1 = timeline_1.id_for_path("a", &db_1).unwrap().unwrap();
 
-        timeline_2_ops.extend(timeline_2.insert_dirs("a", &db_2).unwrap());
-        timeline_2_ops.extend(timeline_2.insert_dirs("a~", &db_2).unwrap());
+        timeline_2_ops.extend(timeline_2.create_dir_all("a", &db_2).unwrap());
+        timeline_2_ops.extend(timeline_2.create_dir_all("a~", &db_2).unwrap());
         let id_2 = timeline_2.id_for_path("a", &db_2).unwrap().unwrap();
         let id_3 = timeline_2.id_for_path("a~", &db_2).unwrap().unwrap();
 
@@ -2193,8 +2205,8 @@ mod tests {
     fn test_cycle_fixups() {
         let db_1 = NullStore::new(1);
         let mut timeline_1 = Timeline::new();
-        timeline_1.insert_dirs("a", &db_1).unwrap();
-        timeline_1.insert_dirs("b", &db_1).unwrap();
+        timeline_1.create_dir_all("a", &db_1).unwrap();
+        timeline_1.create_dir_all("b", &db_1).unwrap();
         let mut timeline_1_ops = Vec::new();
 
         let db_2 = NullStore::new(2);
@@ -2387,20 +2399,28 @@ mod tests {
             self.0.borrow().paths()
         }
 
-        fn insert_dir(&mut self, path: &Path) -> bool {
-            self.0.borrow_mut().insert_dir(path)
+        fn create_file(&mut self, path: &Path) -> bool {
+            self.0.borrow_mut().create_file(path)
         }
 
-        fn remove_dir(&mut self, path: &Path) -> bool {
-            self.0.borrow_mut().remove_dir(path)
+        fn create_dir(&mut self, path: &Path) -> bool {
+            self.0.borrow_mut().create_dir(path)
         }
 
-        fn move_dir(&mut self, from: &Path, to: &Path) -> bool {
-            self.0.borrow_mut().move_dir(from, to)
+        fn hard_link(&mut self, src: &Path, dst: &Path) -> bool {
+            self.0.borrow_mut().hard_link(src, dst)
         }
 
-        fn inode_for_path(&self, path: &Path) -> Option<Inode> {
-            self.0.borrow_mut().inode_for_path(path)
+        fn remove(&mut self, path: &Path, is_dir: bool) -> bool {
+            self.0.borrow_mut().remove(path, is_dir)
+        }
+
+        fn rename(&mut self, from: &Path, to: &Path) -> bool {
+            self.0.borrow_mut().rename(from, to)
+        }
+
+        fn inode(&self, path: &Path) -> Option<Inode> {
+            self.0.borrow_mut().inode(path)
         }
 
         fn entries(&self) -> Self::EntriesIterator {
@@ -2434,21 +2454,36 @@ mod tests {
             self.timeline.paths(self.db)
         }
 
-        fn insert_dir(&mut self, path: &Path) -> bool {
+        fn create_file(&mut self, path: &Path) -> bool {
             if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before insert_dir");
+                // println!("mutate before create_file");
                 self.mutate(1);
             } else {
                 self.version += 1;
             }
 
-            // println!("FileSystem: insert {:?}", path);
-            let mut new_timeline = self.timeline.clone();
-            let operations = new_timeline
-                .insert_dirs_internal(path, &mut Some(&mut self.next_inode), self.db)
-                .unwrap();
+            // println!("FileSystem: create file {:?}", path);
+            let inode = self.next_inode;
+            self.next_inode += 1;
+            self.timeline
+                .create_file_internal(path, Some(inode), self.db)
+                .is_ok()
+        }
 
-            if operations.len() == 2 {
+        fn create_dir(&mut self, path: &Path) -> bool {
+            if self.rng.gen_weighted_bool(10) {
+                // println!("mutate before create_dir");
+                self.mutate(1);
+            } else {
+                self.version += 1;
+            }
+
+            // println!("FileSystem: create dir {:?}", path);
+            let mut new_timeline = self.timeline.clone();
+            if new_timeline
+                .create_dir_all_internal(path, &mut Some(&mut self.next_inode), self.db)
+                .is_ok()
+            {
                 self.timeline = new_timeline;
                 true
             } else {
@@ -2456,41 +2491,48 @@ mod tests {
             }
         }
 
-        fn remove_dir(&mut self, path: &Path) -> bool {
+        fn hard_link(&mut self, src: &Path, dst: &Path) -> bool {
             if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before remove_dir");
+                // println!("mutate before hard_link");
+                self.mutate(1);
+            } else {
+                self.version += 1;
+            }
+
+            // println!("FileSystem: hard link {:?} to {:?}", src, dst);
+            self.timeline.hard_link(src, dst, self.db).is_ok()
+        }
+
+        fn remove(&mut self, path: &Path, is_dir: bool) -> bool {
+            if self.rng.gen_weighted_bool(10) {
+                // println!("mutate before remove");
                 self.mutate(1);
             } else {
                 self.version += 1;
             }
 
             // println!("FileSystem: remove {:?}", path);
-            if self.timeline.remove(path, self.db).unwrap().is_some() {
-                true
-            } else {
-                false
-            }
+            let child_id = self.timeline.id_for_path(path, self.db).unwrap().unwrap();
+            let metadata = self.timeline.metadata(child_id, self.db).unwrap().unwrap();
+            assert_eq!(is_dir, metadata.is_dir);
+            self.timeline.remove(path, self.db).is_ok()
         }
 
-        fn move_dir(&mut self, from: &Path, to: &Path) -> bool {
+        fn rename(&mut self, from: &Path, to: &Path) -> bool {
             if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before move_dir");
+                // println!("mutate before rename");
                 self.mutate(1);
             } else {
                 self.version += 1;
             }
 
             // println!("FileSystem: move from {:?} to {:?}", from, to);
-            if to.starts_with(from) || self.timeline.rename(from, to, self.db).unwrap().is_none() {
-                false
-            } else {
-                true
-            }
+            !to.starts_with(from) && self.timeline.rename(from, to, self.db).is_ok()
         }
 
-        fn inode_for_path(&mut self, path: &Path) -> Option<Inode> {
+        fn inode(&mut self, path: &Path) -> Option<Inode> {
             if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before inode_for_path");
+                // println!("mutate before inode");
                 self.mutate(1);
             }
 
@@ -2632,6 +2674,12 @@ mod tests {
         }
     }
 
+    impl From<()> for Error<NullStore> {
+        fn from(_: ()) -> Self {
+            Error::ReadError(())
+        }
+    }
+
     impl btree::NodeStore<Metadata> for NullStore {
         type ReadError = ();
 
@@ -2672,6 +2720,7 @@ mod tests {
         ) -> Vec<Operation>
         where
             S: Store,
+            Error<S>: From<S::ReadError>,
         {
             let mut ops = Vec::new();
             for _ in 0..count {
@@ -2682,14 +2731,14 @@ mod tests {
                     // println!("{:?} Inserting {:?}", db.replica_id(), path);
                     if let Some(parent_path) = path.parent() {
                         ops.extend(
-                            self.insert_dirs_internal(parent_path, &mut Some(next_inode), db)
+                            self.create_dir_all_internal(parent_path, &mut Some(next_inode), db)
                                 .unwrap(),
                         );
                     }
 
                     if rng.gen() {
                         ops.extend(
-                            self.insert_dirs_internal(&path, &mut Some(next_inode), db)
+                            self.create_dir_all_internal(&path, &mut Some(next_inode), db)
                                 .unwrap(),
                         );
                     } else {
@@ -2704,17 +2753,14 @@ mod tests {
                         }
 
                         if rng.gen() && !file_paths.is_empty() {
-                            ops.extend(
-                                self.insert_hard_link_internal(
-                                    rng.choose(&file_paths).unwrap(),
-                                    &path,
-                                    db,
-                                ).unwrap(),
+                            ops.push(
+                                self.hard_link(rng.choose(&file_paths).unwrap(), &path, db)
+                                    .unwrap(),
                             );
                         } else {
                             let inode = *next_inode;
                             *next_inode += 1;
-                            ops.extend(self.insert_file_internal(&path, Some(inode), db).unwrap());
+                            ops.extend(self.create_file_internal(&path, Some(inode), db).unwrap());
                         }
                     }
                 } else if k == 1 {
