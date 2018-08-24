@@ -410,9 +410,8 @@ impl Timeline {
 
         let mut dir_stack = vec![ROOT_ID];
         let mut visited_dir_ids = BTreeSet::from_iter(Some(ROOT_ID));
-        let mut visited_ref_ids = BTreeSet::new();
+        let mut occupied_ref_ids = BTreeSet::new();
         let mut changes: BTreeMap<id::Unique, Change<F>> = BTreeMap::new();
-        let mut free_alias_ids = BTreeMap::<id::Unique, SmallVec<[id::Unique; 1]>>::new();
 
         for entry in entries {
             assert!(entry.depth() > 0);
@@ -426,13 +425,12 @@ impl Timeline {
 
                     if let Some(parent_ref) = self.cur_parent_ref_values(file_id, db)?.pop() {
                         visited_dir_ids.insert(file_id);
-                        visited_ref_ids.insert(parent_ref.ref_id);
 
                         if parent_ref.parent == cur_parent {
-                            free_alias_ids.remove(&file_id);
+                            occupied_ref_ids.insert(parent_ref.ref_id);
                             changes.remove(&file_id);
                         } else {
-                            free_alias_ids.insert(file_id, smallvec![parent_ref.ref_id.alias_id]);
+                            occupied_ref_ids.remove(&parent_ref.ref_id);
                             changes.insert(
                                 file_id,
                                 Change {
@@ -458,7 +456,7 @@ impl Timeline {
                         .into_iter()
                         .find(|r| r.parent == cur_parent)
                     {
-                        visited_ref_ids.insert(parent_ref.ref_id);
+                        occupied_ref_ids.insert(parent_ref.ref_id);
                     } else {
                         changes
                             .entry(file_id)
@@ -487,22 +485,6 @@ impl Timeline {
             }
         }
 
-        // Figure out what child refs were deleted, constructing a map of parent refs that can be
-        // recycled if the file referenced by the deleted child ref was moved or hard-linked
-        // elsewhere.
-        for dir_id in visited_dir_ids {
-            let mut cursor = self.cursor_at(dir_id, db)?;
-            while let Some(ref_id) = cursor.ref_id(db)? {
-                if !visited_ref_ids.contains(&ref_id) {
-                    free_alias_ids
-                        .entry(ref_id.child_id)
-                        .or_insert(SmallVec::new())
-                        .push(ref_id.alias_id);
-                }
-                cursor.next_sibling_or_cousin(db)?;
-            }
-        }
-
         let mut operations = Vec::new();
         let mut metadata_edits = Vec::new();
         let mut parent_ref_edits = Vec::new();
@@ -521,10 +503,19 @@ impl Timeline {
             }
 
             for parent in change.parents {
-                let alias_id = free_alias_ids
-                    .get_mut(&child_id)
-                    .and_then(|ids| ids.pop())
-                    .unwrap_or(db.gen_id());
+                let available_ref_id = self
+                    .cur_parent_ref_values(child_id, db)?
+                    .into_iter()
+                    .map(|parent_ref| parent_ref.ref_id)
+                    .filter(|ref_id| !occupied_ref_ids.contains(&ref_id))
+                    .next();
+                let alias_id = if let Some(ref_id) = available_ref_id {
+                    occupied_ref_ids.insert(ref_id);
+                    ref_id.alias_id
+                } else {
+                    db.gen_id()
+                };
+
                 operations.push(self.update_parent_ref(
                     ParentRefId { child_id, alias_id },
                     Some(parent),
@@ -535,15 +526,20 @@ impl Timeline {
             }
         }
 
-        for (child_id, alias_ids) in free_alias_ids {
-            for alias_id in alias_ids {
-                operations.push(self.update_parent_ref(
-                    ParentRefId { child_id, alias_id },
-                    None,
-                    &mut parent_ref_edits,
-                    &mut child_ref_edits,
-                    db,
-                )?);
+        // Delete all file refs that are not reachable anymore from the visited directories.
+        for dir_id in visited_dir_ids {
+            let mut cursor = self.cursor_at(dir_id, db)?;
+            while let Some(ref_id) = cursor.ref_id(db)? {
+                if !occupied_ref_ids.contains(&ref_id) {
+                    operations.push(self.update_parent_ref(
+                        ref_id,
+                        None,
+                        &mut parent_ref_edits,
+                        &mut child_ref_edits,
+                        db,
+                    )?);
+                }
+                cursor.next_sibling_or_cousin(db)?;
             }
         }
 
