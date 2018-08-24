@@ -422,23 +422,35 @@ impl Timeline {
 
             if let Some(file_id) = self.inodes_to_file_ids.get(&entry.inode()).cloned() {
                 if entry.is_dir() {
-                    let parent_ref = self.cur_parent_ref_values(file_id, db)?.pop().unwrap();
                     dir_stack.push(file_id);
-                    visited_dir_ids.insert(file_id);
-                    visited_ref_ids.insert(parent_ref.ref_id);
 
-                    if parent_ref.parent == cur_parent {
-                        changes.remove(&file_id);
-                        free_alias_ids.remove(&file_id);
+                    if let Some(parent_ref) = self.cur_parent_ref_values(file_id, db)?.pop() {
+                        visited_dir_ids.insert(file_id);
+                        visited_ref_ids.insert(parent_ref.ref_id);
+
+                        if parent_ref.parent == cur_parent {
+                            free_alias_ids.remove(&file_id);
+                            changes.remove(&file_id);
+                        } else {
+                            free_alias_ids.insert(file_id, smallvec![parent_ref.ref_id.alias_id]);
+                            changes.insert(
+                                file_id,
+                                Change {
+                                    inserted: false,
+                                    entry,
+                                    parents: SmallVec::from_iter(cur_parent),
+                                },
+                            );
+                        }
                     } else {
-                        let change = changes.entry(file_id).or_insert_with(|| Change {
-                            inserted: false,
-                            entry,
-                            parents: SmallVec::new(),
-                        });
-                        change.parents.clear();
-                        change.parents.extend(cur_parent);
-                        free_alias_ids.insert(file_id, smallvec![parent_ref.ref_id.alias_id]);
+                        changes.insert(
+                            file_id,
+                            Change {
+                                inserted: true,
+                                entry,
+                                parents: SmallVec::from_iter(cur_parent),
+                            },
+                        );
                     }
                 } else {
                     if let Some(parent_ref) = self
