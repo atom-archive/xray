@@ -371,7 +371,7 @@ impl Timeline {
             }
 
             if sorted_refs_to_write.peek().is_some() {
-                println!("refreshing old timeline - paths: {:?}", fs.paths());
+                // println!("refreshing old timeline - paths: {:?}", fs.paths());
                 let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
                 let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
                 for op in &fs_ops {
@@ -743,21 +743,25 @@ impl Timeline {
         } else {
             ROOT_ID
         };
-        let child_id = self.id_for_path(src, db).unwrap().unwrap();
-        let operation = self.update_parent_ref(
-            ParentRefId {
-                child_id,
-                alias_id: db.gen_id(),
-            },
-            Some((parent_id, Arc::new(dst.file_name().unwrap().into()))),
-            &mut parent_ref_edits,
-            &mut child_ref_edits,
-            db,
-        )?;
 
-        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
-        self.child_refs.edit(child_ref_edits, child_ref_db)?;
-        Ok(operation)
+        if let Some(child_id) = self.id_for_path(src, db)? {
+            let operation = self.update_parent_ref(
+                ParentRefId {
+                    child_id,
+                    alias_id: db.gen_id(),
+                },
+                Some((parent_id, Arc::new(dst.file_name().unwrap().into()))),
+                &mut parent_ref_edits,
+                &mut child_ref_edits,
+                db,
+            )?;
+
+            self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
+            self.child_refs.edit(child_ref_edits, child_ref_db)?;
+            Ok(operation)
+        } else {
+            Err(Error::InvalidPath)
+        }
     }
 
     // TODO: Return an error if there is a name conflict.
@@ -917,7 +921,7 @@ impl Timeline {
         S: Store,
         Error<S>: From<S::ReadError>,
     {
-        println!("integrate ops >>>>>>>>>>>>");
+        // println!("integrate ops >>>>>>>>>>>>");
         let old_tree = self.clone();
 
         let mut changed_refs = BTreeMap::new();
@@ -967,7 +971,7 @@ impl Timeline {
             fixup_ops.extend(self.write_to_fs(refs_to_write, old_tree, fs, db)?);
         }
 
-        println!("integrate ops <<<<<<<<<<<<");
+        // println!("integrate ops <<<<<<<<<<<<");
 
         Ok(fixup_ops)
     }
@@ -1040,7 +1044,7 @@ impl Timeline {
         let mut child_ref_edits = Vec::new();
         let mut new_child_ref;
 
-        println!("{:?} – integrate op {:?}", db.replica_id(), op);
+        // println!("{:?} – integrate op {:?}", db.replica_id(), op);
 
         match op {
             Operation::InsertMetadata { op_id, is_dir } => {
@@ -1147,7 +1151,6 @@ impl Timeline {
             loop {
                 let mut parent_ref = cursor.item(parent_ref_db)?.unwrap();
                 if visited.contains(&parent_ref.ref_id.child_id) {
-                    // println!("cycle detected");
                     // Cycle detected. Revert the most recent move contributing to the cycle.
                     cursor.seek(
                         &latest_move.as_ref().unwrap().key(),
@@ -2077,14 +2080,14 @@ mod tests {
     #[test]
     fn test_fs_sync_random() {
         for seed in 0..1 {
-            let seed = 7992;
+            let seed = 210774;
             println!("SEED: {:?}", seed);
 
             let mut rng = StdRng::from_seed(&[seed]);
             let db = NullStore::new(1);
 
             let mut fs_1 = FakeFileSystem::new(&db, rng.clone());
-            fs_1.mutate(1);
+            fs_1.mutate(5);
 
             let mut fs_2 = fs_1.clone();
             let mut prev_fs_1_version = fs_1.version();
@@ -2094,25 +2097,25 @@ mod tests {
             let mut ops_1 = Vec::new();
             let mut ops_2 = Vec::new();
 
-            println!("mutate fs 1");
+            // println!("mutate fs 1");
 
-            fs_1.mutate(1);
+            fs_1.mutate(5);
 
             loop {
                 if fs_1.version() > prev_fs_1_version && rng.gen() {
-                    println!("scanning from fs 1");
+                    // println!("scanning from fs 1");
                     prev_fs_1_version = fs_1.version();
                     ops_1.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
                 }
 
                 if fs_2.version() > prev_fs_2_version && rng.gen() {
-                    println!("scanning from fs 2");
+                    // println!("scanning from fs 2");
                     prev_fs_2_version = fs_2.version();
                     ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
                 }
 
                 if !ops_2.is_empty() && rng.gen() {
-                    println!("integrating into index 1");
+                    // println!("integrating into index 1");
                     ops_1.extend(
                         index_1
                             .integrate_ops(
@@ -2124,7 +2127,7 @@ mod tests {
                 }
 
                 if !ops_1.is_empty() && rng.gen() {
-                    println!("integrating into index 2");
+                    // println!("integrating into index 2");
                     ops_2.extend(
                         index_2
                             .integrate_ops(
@@ -2249,7 +2252,7 @@ mod tests {
 
         for seed in 0..100 {
             // let seed = 44373;
-            println!("SEED: {:?}", seed);
+            // println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
             let db = Vec::from_iter((0..PEERS).map(|i| NullStore::new(i as u64 + 1)));
@@ -2453,14 +2456,14 @@ mod tests {
         }
 
         fn create_file(&mut self, path: &Path) -> bool {
-            // if self.rng.gen_weighted_bool(10) {
-            //     println!("mutate before create_file");
-            //     self.mutate(1);
-            // } else {
-            self.version += 1;
-            // }
+            if self.rng.gen_weighted_bool(10) {
+                // println!("mutate before create_file");
+                self.mutate(1);
+            } else {
+                self.version += 1;
+            }
 
-            println!("FileSystem: create file {:?}", path);
+            // println!("FileSystem: create file {:?}", path);
             let inode = self.next_inode;
             self.next_inode += 1;
             self.timeline
@@ -2470,13 +2473,13 @@ mod tests {
 
         fn create_dir(&mut self, path: &Path) -> bool {
             if self.rng.gen_weighted_bool(10) {
-                println!("mutate before create_dir");
+                // println!("mutate before create_dir");
                 self.mutate(1);
             } else {
                 self.version += 1;
             }
 
-            println!("FileSystem: create dir {:?}", path);
+            // println!("FileSystem: create dir {:?}", path);
             let inode = self.next_inode;
             self.next_inode += 1;
             self.timeline
@@ -2485,50 +2488,53 @@ mod tests {
         }
 
         fn hard_link(&mut self, src: &Path, dst: &Path) -> bool {
-            // if self.rng.gen_weighted_bool(10) {
-            //     println!("mutate before hard_link");
-            //     self.mutate(1);
-            // } else {
-            self.version += 1;
-            // }
+            if self.rng.gen_weighted_bool(10) {
+                // println!("mutate before hard_link");
+                self.mutate(1);
+            } else {
+                self.version += 1;
+            }
 
-            println!("FileSystem: hard link {:?} to {:?}", src, dst);
+            // println!("FileSystem: hard link {:?} to {:?}", src, dst);
             self.timeline.hard_link(src, dst, self.db).is_ok()
         }
 
         fn remove(&mut self, path: &Path, is_dir: bool) -> bool {
-            // if self.rng.gen_weighted_bool(10) {
-            //     println!("mutate before remove");
-            //     self.mutate(1);
-            // } else {
-            self.version += 1;
-            // }
+            if self.rng.gen_weighted_bool(10) {
+                // println!("mutate before remove");
+                self.mutate(1);
+            } else {
+                self.version += 1;
+            }
 
-            println!("FileSystem: remove {:?}", path);
-            let child_id = self.timeline.id_for_path(path, self.db).unwrap().unwrap();
-            let metadata = self.timeline.metadata(child_id, self.db).unwrap().unwrap();
-            assert_eq!(is_dir, metadata.is_dir);
-            self.timeline.remove(path, self.db).is_ok()
+            // println!("FileSystem: remove {:?}", path);
+            if let Some(child_id) = self.timeline.id_for_path(path, self.db).unwrap() {
+                let metadata = self.timeline.metadata(child_id, self.db).unwrap().unwrap();
+                assert_eq!(is_dir, metadata.is_dir);
+                self.timeline.remove(path, self.db).is_ok()
+            } else {
+                false
+            }
         }
 
         fn rename(&mut self, from: &Path, to: &Path) -> bool {
-            // if self.rng.gen_weighted_bool(10) {
-            //     println!("mutate before rename");
-            //     self.mutate(1);
-            // } else {
-            self.version += 1;
-            // }
+            if self.rng.gen_weighted_bool(10) {
+                // println!("mutate before rename");
+                self.mutate(1);
+            } else {
+                self.version += 1;
+            }
 
-            println!("FileSystem: move from {:?} to {:?}", from, to);
+            // println!("FileSystem: move from {:?} to {:?}", from, to);
             !to.starts_with(from) && self.timeline.rename(from, to, self.db).is_ok()
         }
 
         fn inode(&mut self, path: &Path) -> Option<Inode> {
-            // if self.rng.gen_weighted_bool(10) {
-            //     println!("mutate before inode");
-            //     self.mutate(1);
-            // }
-            //
+            if self.rng.gen_weighted_bool(10) {
+                // println!("mutate before inode");
+                self.mutate(1);
+            }
+
             self.timeline.id_for_path(path, self.db).unwrap().map(|id| {
                 let mut cursor = self.timeline.metadata.cursor();
                 cursor.seek(&id, SeekBias::Left, self.db).unwrap();
@@ -2566,13 +2572,13 @@ mod tests {
         type Item = FakeFileSystemEntry;
 
         fn next(&mut self) -> Option<Self::Item> {
-            // {
-            //     let mut state = self.state.borrow_mut();
-            //     if state.rng.gen_weighted_bool(20) {
-            //         println!("mutate while scanning entries");
-            //         state.mutate(1);
-            //     }
-            // }
+            {
+                let mut state = self.state.borrow_mut();
+                if state.rng.gen_weighted_bool(20) {
+                    // println!("mutate while scanning entries");
+                    state.mutate(1);
+                }
+            }
 
             let state = self.state.borrow();
 
@@ -2723,7 +2729,7 @@ mod tests {
                     let path = self.gen_path(rng, subtree_depth, db);
 
                     if rng.gen() {
-                        println!("Random mutation: Inserting dirs {:?}", path);
+                        // println!("Random mutation: Inserting dirs {:?}", path);
                         ops.extend(
                             self.create_dir_all_internal(&path, &mut Some(next_inode), db)
                                 .unwrap(),
@@ -2731,8 +2737,11 @@ mod tests {
                     } else {
                         if let Some(parent_path) = path.parent() {
                             ops.extend(
-                                self.create_dir_all_internal(parent_path, &mut Some(next_inode), db)
-                                    .unwrap(),
+                                self.create_dir_all_internal(
+                                    parent_path,
+                                    &mut Some(next_inode),
+                                    db,
+                                ).unwrap(),
                             );
                         }
 
@@ -2748,36 +2757,35 @@ mod tests {
 
                         if rng.gen() && !existing_file_paths.is_empty() {
                             let src = rng.choose(&existing_file_paths).unwrap();
-                            println!("Random mutation: Inserting hard link {:?} <-- {:?}", src, path);
-                            ops.push(
-                                self.hard_link(src, &path, db)
-                                    .unwrap(),
-                            );
+                            // println!(
+                            //     "Random mutation: Inserting hard link {:?} <-- {:?}",
+                            //     src, path
+                            // );
+                            ops.push(self.hard_link(src, &path, db).unwrap());
                         } else {
-                            println!("Random mutation: Create file {:?}", path);
+                            // println!("Random mutation: Create file {:?}", path);
                             let inode = *next_inode;
                             *next_inode += 1;
-                            ops.extend(self.create_file_internal(&path, false, Some(inode), db).unwrap());
+                            ops.extend(
+                                self.create_file_internal(&path, false, Some(inode), db)
+                                    .unwrap(),
+                            );
                         }
                     }
                 } else if k == 1 {
-                    let path = self.select_path(rng, db).unwrap();
-                    println!("Random mutation: Removing {:?}", path);
+                    let path = self.select_path(rng, false, db).unwrap();
+                    // println!("Random mutation: Removing {:?}", path);
                     ops.push(self.remove(&path, db).unwrap());
                 } else {
                     let (old_path, new_path) = loop {
-                        let old_path = self.select_path(rng, db).unwrap();
+                        let old_path = self.select_path(rng, false, db).unwrap();
                         let new_path = self.gen_path(rng, 1, db);
                         if !new_path.starts_with(&old_path) {
                             break (old_path, new_path);
                         }
                     };
 
-                    println!(
-                        "Random mutation: Moving {:?} to {:?}",
-                        old_path,
-                        new_path
-                    );
+                    // println!("Random mutation: Moving {:?} to {:?}", old_path, new_path);
                     ops.push(self.rename(&old_path, &new_path, db).unwrap());
                 }
             }
@@ -2786,16 +2794,16 @@ mod tests {
 
         fn gen_path<S: Store, T: Rng>(&self, rng: &mut T, depth: usize, db: &S) -> PathBuf {
             loop {
-                let mut new_tree = PathBuf::new();
+                let mut new_path = PathBuf::new();
                 for _ in 0..depth {
-                    new_tree.push(gen_name(rng));
+                    new_path.push(gen_name(rng));
                 }
 
                 let path = if self.is_empty(db).unwrap() || rng.gen_weighted_bool(8) {
-                    new_tree
+                    new_path
                 } else {
-                    let mut prefix = self.select_path(rng, db).unwrap();
-                    prefix.push(new_tree);
+                    let mut prefix = self.select_path(rng, true, db).unwrap();
+                    prefix.push(new_path);
                     prefix
                 };
 
@@ -2805,7 +2813,12 @@ mod tests {
             }
         }
 
-        fn select_path<S: Store, T: Rng>(&self, rng: &mut T, db: &S) -> Option<PathBuf> {
+        fn select_path<S: Store, T: Rng>(
+            &self,
+            rng: &mut T,
+            select_dir: bool,
+            db: &S,
+        ) -> Option<PathBuf> {
             if self.is_empty(db).unwrap() {
                 None
             } else {
@@ -2822,7 +2835,11 @@ mod tests {
                     let mut child_refs = Vec::new();
                     while let Some(child_ref) = cursor.item(child_ref_db).unwrap() {
                         if child_ref.parent_id == parent_id {
-                            if child_ref.is_visible() {
+                            let child_id = child_ref.parent_ref_id.child_id;
+                            if child_ref.is_visible()
+                                && (!select_dir
+                                    || self.metadata(child_id, db).unwrap().unwrap().is_dir)
+                            {
                                 child_refs.push(child_ref);
                             }
                             let next_visible_index =
