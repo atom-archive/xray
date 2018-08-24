@@ -412,6 +412,7 @@ impl Timeline {
         let mut visited_dir_ids = BTreeSet::from_iter(Some(ROOT_ID));
         let mut visited_ref_ids = BTreeSet::new();
         let mut changes: BTreeMap<id::Unique, Change<F>> = BTreeMap::new();
+        let mut free_alias_ids = BTreeMap::<id::Unique, SmallVec<[id::Unique; 1]>>::new();
 
         for entry in entries {
             assert!(entry.depth() > 0);
@@ -421,17 +422,14 @@ impl Timeline {
 
             if let Some(file_id) = self.inodes_to_file_ids.get(&entry.inode()).cloned() {
                 if entry.is_dir() {
+                    let parent_ref = self.cur_parent_ref_values(file_id, db)?.pop().unwrap();
                     dir_stack.push(file_id);
                     visited_dir_ids.insert(file_id);
-
-                    let parent_ref = self
-                        .cur_parent_ref_values(file_id, db)?
-                        .into_iter()
-                        .next()
-                        .unwrap();
+                    visited_ref_ids.insert(parent_ref.ref_id);
 
                     if parent_ref.parent == cur_parent {
-                        visited_ref_ids.insert(parent_ref.ref_id);
+                        changes.remove(&file_id);
+                        free_alias_ids.remove(&file_id);
                     } else {
                         let change = changes.entry(file_id).or_insert_with(|| Change {
                             inserted: false,
@@ -440,6 +438,7 @@ impl Timeline {
                         });
                         change.parents.clear();
                         change.parents.extend(cur_parent);
+                        free_alias_ids.insert(file_id, smallvec![parent_ref.ref_id.alias_id]);
                     }
                 } else {
                     if let Some(parent_ref) = self
@@ -479,7 +478,6 @@ impl Timeline {
         // Figure out what child refs were deleted, constructing a map of parent refs that can be
         // recycled if the file referenced by the deleted child ref was moved or hard-linked
         // elsewhere.
-        let mut free_alias_ids = BTreeMap::<id::Unique, SmallVec<[id::Unique; 1]>>::new();
         for dir_id in visited_dir_ids {
             let mut cursor = self.cursor_at(dir_id, db)?;
             while let Some(ref_id) = cursor.ref_id(db)? {
