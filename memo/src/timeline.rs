@@ -665,6 +665,7 @@ impl Timeline {
     pub fn create_file_internal<I, S>(
         &mut self,
         path: I,
+        is_dir: bool,
         inode: Option<Inode>,
         db: &S,
     ) -> Result<SmallVec<[Operation; 2]>, Error<S>>
@@ -695,7 +696,7 @@ impl Timeline {
         };
         let child_id = db.gen_id();
 
-        operations.push(self.insert_metadata(child_id, false, inode, &mut metadata_edits));
+        operations.push(self.insert_metadata(child_id, is_dir, inode, &mut metadata_edits));
         operations.push(self.update_parent_ref(
             ParentRefId {
                 child_id,
@@ -2473,16 +2474,11 @@ mod tests {
             }
 
             // println!("FileSystem: create dir {:?}", path);
-            let mut new_timeline = self.timeline.clone();
-            if new_timeline
-                .create_dir_all_internal(path, &mut Some(&mut self.next_inode), self.db)
+            let inode = self.next_inode;
+            self.next_inode += 1;
+            self.timeline
+                .create_file_internal(path, true, Some(inode), self.db)
                 .is_ok()
-            {
-                self.timeline = new_timeline;
-                true
-            } else {
-                false
-            }
         }
 
         fn hard_link(&mut self, src: &Path, dst: &Path) -> bool {
@@ -2723,12 +2719,6 @@ mod tests {
                     let subtree_depth = rng.gen_range(1, 5);
                     let path = self.gen_path(rng, subtree_depth, db);
                     // println!("{:?} Inserting {:?}", db.replica_id(), path);
-                    if let Some(parent_path) = path.parent() {
-                        ops.extend(
-                            self.create_dir_all_internal(parent_path, &mut Some(next_inode), db)
-                                .unwrap(),
-                        );
-                    }
 
                     if rng.gen() {
                         ops.extend(
@@ -2736,19 +2726,27 @@ mod tests {
                                 .unwrap(),
                         );
                     } else {
+                        if let Some(parent_path) = path.parent() {
+                            ops.extend(
+                                self.create_dir_all_internal(parent_path, &mut Some(next_inode), db)
+                                    .unwrap(),
+                            );
+                        }
+
                         // TODO: Maybe use a more efficient way to select a random file.
-                        let mut file_paths = Vec::new();
+                        let mut existing_file_paths = Vec::new();
                         let mut cursor = self.cursor(db).unwrap();
                         while cursor.path().is_some() {
                             if !cursor.is_dir(db).unwrap().unwrap() {
-                                file_paths.push(cursor.path().unwrap().to_path_buf());
+                                existing_file_paths.push(cursor.path().unwrap().to_path_buf());
                             }
                             cursor.next(db).unwrap();
                         }
 
-                        if rng.gen() && !file_paths.is_empty() {
+                        if rng.gen() && !existing_file_paths.is_empty() {
+                            let src = rng.choose(&existing_file_paths).unwrap();
                             ops.push(
-                                self.hard_link(rng.choose(&file_paths).unwrap(), &path, db)
+                                self.hard_link(src, &path, db)
                                     .unwrap(),
                             );
                         } else {
