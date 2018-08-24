@@ -371,7 +371,7 @@ impl Timeline {
             }
 
             if sorted_refs_to_write.peek().is_some() {
-                // println!("refreshing old timeline - paths: {:?}", fs.paths());
+                println!("refreshing old timeline - paths: {:?}", fs.paths());
                 let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
                 let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
                 for op in &fs_ops {
@@ -917,7 +917,7 @@ impl Timeline {
         S: Store,
         Error<S>: From<S::ReadError>,
     {
-        // println!("integrate ops >>>>>>>>>>>>");
+        println!("integrate ops >>>>>>>>>>>>");
         let old_tree = self.clone();
 
         let mut changed_refs = BTreeMap::new();
@@ -967,7 +967,7 @@ impl Timeline {
             fixup_ops.extend(self.write_to_fs(refs_to_write, old_tree, fs, db)?);
         }
 
-        // println!("integrate ops <<<<<<<<<<<<");
+        println!("integrate ops <<<<<<<<<<<<");
 
         Ok(fixup_ops)
     }
@@ -1040,7 +1040,7 @@ impl Timeline {
         let mut child_ref_edits = Vec::new();
         let mut new_child_ref;
 
-        // println!("{:?} – integrate op {:?}", db.replica_id(), op);
+        println!("{:?} – integrate op {:?}", db.replica_id(), op);
 
         match op {
             Operation::InsertMetadata { op_id, is_dir } => {
@@ -2076,8 +2076,8 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        for seed in 0..1000000 {
-            // let seed = 26;
+        for seed in 0..1 {
+            let seed = 7992;
             println!("SEED: {:?}", seed);
 
             let mut rng = StdRng::from_seed(&[seed]);
@@ -2085,6 +2085,7 @@ mod tests {
 
             let mut fs_1 = FakeFileSystem::new(&db, rng.clone());
             fs_1.mutate(1);
+
             let mut fs_2 = fs_1.clone();
             let mut prev_fs_1_version = fs_1.version();
             let mut prev_fs_2_version = fs_2.version();
@@ -2093,23 +2094,25 @@ mod tests {
             let mut ops_1 = Vec::new();
             let mut ops_2 = Vec::new();
 
+            println!("mutate fs 1");
+
             fs_1.mutate(1);
 
             loop {
                 if fs_1.version() > prev_fs_1_version && rng.gen() {
-                    // println!("scanning from fs 1");
+                    println!("scanning from fs 1");
                     prev_fs_1_version = fs_1.version();
                     ops_1.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
                 }
 
                 if fs_2.version() > prev_fs_2_version && rng.gen() {
-                    // println!("scanning from fs 2");
+                    println!("scanning from fs 2");
                     prev_fs_2_version = fs_2.version();
                     ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
                 }
 
                 if !ops_2.is_empty() && rng.gen() {
-                    // println!("integrating into index 1");
+                    println!("integrating into index 1");
                     ops_1.extend(
                         index_1
                             .integrate_ops(
@@ -2121,7 +2124,7 @@ mod tests {
                 }
 
                 if !ops_1.is_empty() && rng.gen() {
-                    // println!("integrating into index 2");
+                    println!("integrating into index 2");
                     ops_2.extend(
                         index_2
                             .integrate_ops(
@@ -2451,29 +2454,29 @@ mod tests {
 
         fn create_file(&mut self, path: &Path) -> bool {
             // if self.rng.gen_weighted_bool(10) {
-            //     // println!("mutate before create_file");
+            //     println!("mutate before create_file");
             //     self.mutate(1);
             // } else {
-            //     self.version += 1;
+            self.version += 1;
             // }
 
-            // println!("FileSystem: create file {:?}", path);
+            println!("FileSystem: create file {:?}", path);
             let inode = self.next_inode;
             self.next_inode += 1;
             self.timeline
-                .create_file_internal(path, Some(inode), self.db)
+                .create_file_internal(path, false, Some(inode), self.db)
                 .is_ok()
         }
 
         fn create_dir(&mut self, path: &Path) -> bool {
             if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before create_dir");
+                println!("mutate before create_dir");
                 self.mutate(1);
             } else {
                 self.version += 1;
             }
 
-            // println!("FileSystem: create dir {:?}", path);
+            println!("FileSystem: create dir {:?}", path);
             let inode = self.next_inode;
             self.next_inode += 1;
             self.timeline
@@ -2489,7 +2492,7 @@ mod tests {
             self.version += 1;
             // }
 
-            // println!("FileSystem: hard link {:?} to {:?}", src, dst);
+            println!("FileSystem: hard link {:?} to {:?}", src, dst);
             self.timeline.hard_link(src, dst, self.db).is_ok()
         }
 
@@ -2501,7 +2504,7 @@ mod tests {
             self.version += 1;
             // }
 
-            // println!("FileSystem: remove {:?}", path);
+            println!("FileSystem: remove {:?}", path);
             let child_id = self.timeline.id_for_path(path, self.db).unwrap().unwrap();
             let metadata = self.timeline.metadata(child_id, self.db).unwrap().unwrap();
             assert_eq!(is_dir, metadata.is_dir);
@@ -2516,7 +2519,7 @@ mod tests {
             self.version += 1;
             // }
 
-            // println!("FileSystem: move from {:?} to {:?}", from, to);
+            println!("FileSystem: move from {:?} to {:?}", from, to);
             !to.starts_with(from) && self.timeline.rename(from, to, self.db).is_ok()
         }
 
@@ -2718,9 +2721,9 @@ mod tests {
                 if self.is_empty(db).unwrap() || k == 0 {
                     let subtree_depth = rng.gen_range(1, 5);
                     let path = self.gen_path(rng, subtree_depth, db);
-                    // println!("{:?} Inserting {:?}", db.replica_id(), path);
 
                     if rng.gen() {
+                        println!("Random mutation: Inserting dirs {:?}", path);
                         ops.extend(
                             self.create_dir_all_internal(&path, &mut Some(next_inode), db)
                                 .unwrap(),
@@ -2745,19 +2748,21 @@ mod tests {
 
                         if rng.gen() && !existing_file_paths.is_empty() {
                             let src = rng.choose(&existing_file_paths).unwrap();
+                            println!("Random mutation: Inserting hard link {:?} <-- {:?}", src, path);
                             ops.push(
                                 self.hard_link(src, &path, db)
                                     .unwrap(),
                             );
                         } else {
+                            println!("Random mutation: Create file {:?}", path);
                             let inode = *next_inode;
                             *next_inode += 1;
-                            ops.extend(self.create_file_internal(&path, Some(inode), db).unwrap());
+                            ops.extend(self.create_file_internal(&path, false, Some(inode), db).unwrap());
                         }
                     }
                 } else if k == 1 {
                     let path = self.select_path(rng, db).unwrap();
-                    // println!("{:?} Removing {:?}", db.replica_id(), path);
+                    println!("Random mutation: Removing {:?}", path);
                     ops.push(self.remove(&path, db).unwrap());
                 } else {
                     let (old_path, new_path) = loop {
@@ -2768,12 +2773,11 @@ mod tests {
                         }
                     };
 
-                    // println!(
-                    //     "{:?} Moving {:?} to {:?}",
-                    //     db.replica_id(),
-                    //     old_path,
-                    //     new_path
-                    // );
+                    println!(
+                        "Random mutation: Moving {:?} to {:?}",
+                        old_path,
+                        new_path
+                    );
                     ops.push(self.rename(&old_path, &new_path, db).unwrap());
                 }
             }
