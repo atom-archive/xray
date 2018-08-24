@@ -901,8 +901,15 @@ impl Timeline {
             // println!("integrate op {:#?}", op);
 
             match op {
-                Operation::UpdateParent { ref_id, .. } => {
-                    changed_refs.insert(*ref_id, true); // FIXME: "Moved" should not always be true.
+                Operation::UpdateParent {
+                    ref_id,
+                    timestamp,
+                    prev_timestamp,
+                    ..
+                } => {
+                    let moved_dir = timestamp != prev_timestamp
+                        && self.metadata(ref_id.child_id, db)?.unwrap().is_dir;
+                    changed_refs.insert(*ref_id, moved_dir);
                 }
                 _ => {}
             }
@@ -910,15 +917,15 @@ impl Timeline {
         }
 
         let mut fixup_ops = Vec::new();
-        for (ref_id, moved) in &changed_refs {
-            fixup_ops.extend(self.fix_conflicts(*ref_id, *moved, db)?);
+        for (ref_id, moved_dir) in &changed_refs {
+            fixup_ops.extend(self.fix_conflicts(*ref_id, *moved_dir, db)?);
         }
 
         if let Some(fs) = fs {
             let mut refs_to_write = BTreeSet::new();
-            for (ref_id, moved) in changed_refs {
+            for (ref_id, moved_dir) in changed_refs {
                 refs_to_write.insert(ref_id);
-                if moved && old_tree.resolve_depth(ref_id, db)?.is_none() {
+                if moved_dir && old_tree.resolve_depth(ref_id, db)?.is_none() {
                     let mut cursor = self.cursor_at(ref_id.child_id, db)?;
                     while let Some(descendant_ref_id) = cursor.ref_id(db)? {
                         // println!(
@@ -1104,7 +1111,7 @@ impl Timeline {
     fn fix_conflicts<S: Store>(
         &mut self,
         ref_id: ParentRefId,
-        moved: bool,
+        moved_dir: bool,
         db: &S,
     ) -> Result<Vec<Operation>, S::ReadError> {
         use btree::KeyedItem;
@@ -1112,8 +1119,8 @@ impl Timeline {
         let mut fixup_ops = Vec::new();
         let mut reverted_moves: BTreeMap<ParentRefId, LamportTimestamp> = BTreeMap::new();
 
-        // If the child was moved, check for cycles
-        if moved {
+        // If the child was moved and is a directory, check for cycles.
+        if moved_dir {
             let parent_ref_db = db.parent_ref_store();
             let mut visited = BTreeSet::new();
             let mut latest_move: Option<ParentRefValue> = None;
@@ -1476,13 +1483,9 @@ impl Timeline {
         child_id: id::Unique,
         db: &S,
     ) -> Result<Option<Inode>, S::ReadError> {
-        let metadata_db = db.metadata_store();
-        let mut cursor = self.metadata.cursor();
-        if cursor.seek(&child_id, SeekBias::Left, metadata_db)? {
-            Ok(cursor.item(metadata_db)?.unwrap().inode)
-        } else {
-            Ok(None)
-        }
+        Ok(self
+            .metadata(child_id, db)?
+            .and_then(|metadata| metadata.inode))
     }
 
     fn set_inode_for_id<S: Store>(
@@ -1506,6 +1509,19 @@ impl Timeline {
             Ok(true)
         } else {
             Ok(false)
+        }
+    }
+
+    fn metadata<S>(&self, child_id: id::Unique, db: &S) -> Result<Option<Metadata>, S::ReadError>
+    where
+        S: Store,
+    {
+        let metadata_db = db.metadata_store();
+        let mut cursor = self.metadata.cursor();
+        if cursor.seek(&child_id, SeekBias::Left, metadata_db)? {
+            Ok(cursor.item(metadata_db)?)
+        } else {
+            Ok(None)
         }
     }
 
