@@ -211,7 +211,7 @@ impl Timeline {
 
                 let parent_ref = self.cur_parent_ref_value(ref_id, db)?.unwrap();
                 if depth.is_some() {
-                    let (parent_id, mut name) = parent_ref.parent.as_ref().cloned().unwrap();
+                    let (parent_id, mut name) = parent_ref.parent.clone().unwrap();
 
                     if let Some(parent_path) = old_tree.resolve_paths(parent_id, db)?.first_mut() {
                         if parent_id != ROOT_ID
@@ -294,7 +294,7 @@ impl Timeline {
                                     } else {
                                         old_tree.integrate_op(
                                             Operation::InsertMetadata {
-                                                op_id: parent_ref.op_id,
+                                                op_id: ref_id.child_id,
                                                 is_dir: true,
                                             },
                                             db,
@@ -410,7 +410,7 @@ impl Timeline {
 
         let mut dir_stack = vec![ROOT_ID];
         let mut visited_dir_ids = BTreeSet::from_iter(Some(ROOT_ID));
-        let mut visited_alias_ids = BTreeSet::new();
+        let mut visited_ref_ids = BTreeSet::new();
         let mut changes: BTreeMap<id::Unique, Change<F>> = BTreeMap::new();
 
         for entry in entries {
@@ -896,7 +896,7 @@ impl Timeline {
 
             match op {
                 Operation::UpdateParent { ref_id, .. } => {
-                    changed_refs.insert(*ref_id, true);
+                    changed_refs.insert(*ref_id, true); // FIXME: "Moved" should not always be true.
                 }
                 _ => {}
             }
