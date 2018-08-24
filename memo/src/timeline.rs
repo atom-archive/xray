@@ -921,8 +921,6 @@ impl Timeline {
 
         let mut changed_refs = BTreeMap::new();
         for op in ops.clone() {
-            // println!("integrate op {:#?}", op);
-
             match op {
                 Operation::UpdateParent {
                     ref_id,
@@ -951,11 +949,6 @@ impl Timeline {
                 if moved_dir && old_tree.resolve_depth(ref_id, db)?.is_none() {
                     let mut cursor = self.cursor_at(ref_id.child_id, db)?;
                     while let Some(descendant_ref_id) = cursor.ref_id(db)? {
-                        // println!(
-                        //     "resurrecting descendant {:?} {:?}",
-                        //     descendant_id,
-                        //     cursor.path()
-                        // );
                         refs_to_write.insert(descendant_ref_id);
                         cursor.next(db)?;
                     }
@@ -2090,7 +2083,7 @@ mod tests {
             let db = NullStore::new(1);
 
             let mut fs_1 = FakeFileSystem::new(&db, rng.clone());
-            fs_1.mutate(5);
+            fs_1.mutate(1);
             let mut fs_2 = fs_1.clone();
             let mut prev_fs_1_version = fs_1.version();
             let mut prev_fs_2_version = fs_2.version();
@@ -2099,7 +2092,7 @@ mod tests {
             let mut ops_1 = Vec::new();
             let mut ops_2 = Vec::new();
 
-            fs_1.mutate(5);
+            fs_1.mutate(1);
 
             loop {
                 if fs_1.version() > prev_fs_1_version && rng.gen() {
@@ -2456,12 +2449,12 @@ mod tests {
         }
 
         fn create_file(&mut self, path: &Path) -> bool {
-            if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before create_file");
-                self.mutate(1);
-            } else {
-                self.version += 1;
-            }
+            // if self.rng.gen_weighted_bool(10) {
+            //     // println!("mutate before create_file");
+            //     self.mutate(1);
+            // } else {
+            //     self.version += 1;
+            // }
 
             // println!("FileSystem: create file {:?}", path);
             let inode = self.next_inode;
@@ -2493,24 +2486,24 @@ mod tests {
         }
 
         fn hard_link(&mut self, src: &Path, dst: &Path) -> bool {
-            if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before hard_link");
-                self.mutate(1);
-            } else {
-                self.version += 1;
-            }
+            // if self.rng.gen_weighted_bool(10) {
+            //     println!("mutate before hard_link");
+            //     self.mutate(1);
+            // } else {
+            self.version += 1;
+            // }
 
             // println!("FileSystem: hard link {:?} to {:?}", src, dst);
             self.timeline.hard_link(src, dst, self.db).is_ok()
         }
 
         fn remove(&mut self, path: &Path, is_dir: bool) -> bool {
-            if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before remove");
-                self.mutate(1);
-            } else {
-                self.version += 1;
-            }
+            // if self.rng.gen_weighted_bool(10) {
+            //     println!("mutate before remove");
+            //     self.mutate(1);
+            // } else {
+            self.version += 1;
+            // }
 
             // println!("FileSystem: remove {:?}", path);
             let child_id = self.timeline.id_for_path(path, self.db).unwrap().unwrap();
@@ -2520,23 +2513,23 @@ mod tests {
         }
 
         fn rename(&mut self, from: &Path, to: &Path) -> bool {
-            if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before rename");
-                self.mutate(1);
-            } else {
-                self.version += 1;
-            }
+            // if self.rng.gen_weighted_bool(10) {
+            //     println!("mutate before rename");
+            //     self.mutate(1);
+            // } else {
+            self.version += 1;
+            // }
 
             // println!("FileSystem: move from {:?} to {:?}", from, to);
             !to.starts_with(from) && self.timeline.rename(from, to, self.db).is_ok()
         }
 
         fn inode(&mut self, path: &Path) -> Option<Inode> {
-            if self.rng.gen_weighted_bool(10) {
-                // println!("mutate before inode");
-                self.mutate(1);
-            }
-
+            // if self.rng.gen_weighted_bool(10) {
+            //     println!("mutate before inode");
+            //     self.mutate(1);
+            // }
+            //
             self.timeline.id_for_path(path, self.db).unwrap().map(|id| {
                 let mut cursor = self.timeline.metadata.cursor();
                 cursor.seek(&id, SeekBias::Left, self.db).unwrap();
@@ -2574,13 +2567,13 @@ mod tests {
         type Item = FakeFileSystemEntry;
 
         fn next(&mut self) -> Option<Self::Item> {
-            {
-                let mut state = self.state.borrow_mut();
-                if state.rng.gen_weighted_bool(20) {
-                    // println!("mutate while scanning entries");
-                    state.mutate(1);
-                }
-            }
+            // {
+            //     let mut state = self.state.borrow_mut();
+            //     if state.rng.gen_weighted_bool(20) {
+            //         println!("mutate while scanning entries");
+            //         state.mutate(1);
+            //     }
+            // }
 
             let state = self.state.borrow();
 
