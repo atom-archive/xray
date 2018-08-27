@@ -2079,8 +2079,8 @@ mod tests {
 
     #[test]
     fn test_fs_sync_random() {
-        for seed in 0..1 {
-            let seed = 210774;
+        for seed in 0..100 {
+            // let seed = 210774;
             println!("SEED: {:?}", seed);
 
             let mut rng = StdRng::from_seed(&[seed]);
