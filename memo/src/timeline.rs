@@ -2510,8 +2510,7 @@ mod tests {
             // println!("FileSystem: remove {:?}", path);
             if let Some(child_id) = self.timeline.id_for_path(path, self.db).unwrap() {
                 let metadata = self.timeline.metadata(child_id, self.db).unwrap().unwrap();
-                assert_eq!(is_dir, metadata.is_dir);
-                self.timeline.remove(path, self.db).is_ok()
+                is_dir == metadata.is_dir && self.timeline.remove(path, self.db).is_ok()
             } else {
                 false
             }
