@@ -660,7 +660,6 @@ impl Timeline {
         self.create_dir_all_internal(path, &mut None, db)
     }
 
-    // TODO: Return an error if there is a name conflict
     pub fn create_file_internal<I, S>(
         &mut self,
         path: I,
@@ -763,7 +762,6 @@ impl Timeline {
         }
     }
 
-    // TODO: Return an error if there is a name conflict.
     fn create_dir_all_internal<I, S>(
         &mut self,
         path: I,
