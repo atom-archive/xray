@@ -10,12 +10,12 @@ We're currently focused on a sub-project of Xray called [Memo](./memo), which wi
 
 ## Updates
 
+* [August 28, 2018](./docs/updates/2018_08_28.md)
 * [August 21, 2018](./docs/updates/2018_08_21.md)
 * [July 31, 2018](./docs/updates/2018_07_31.md)
 * [July 23, 2018](./docs/updates/2018_07_23.md)
 * [July 16, 2018](./docs/updates/2018_07_16.md)
 * [July 10, 2018](./docs/updates/2018_07_10.md)
-* [May 28, 2018](./docs/updates/2018_05_28.md)
 * [Archives](./docs/updates/)
 
 ## Foundational priorities
