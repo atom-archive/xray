@@ -2,9 +2,7 @@ use btree::{self, SeekBias};
 use id;
 use smallvec::SmallVec;
 use std::cmp::{self, Ordering};
-// TODO: Replace BTree-based collections with Hash-based collections.
-// We're using the B-tree versions to enforce deterministic ordering behavior during development.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::iter::FromIterator;
@@ -63,7 +61,7 @@ pub struct Timeline {
     metadata: btree::Tree<Metadata>,
     parent_refs: btree::Tree<ParentRefValue>,
     child_refs: btree::Tree<ChildRefValue>,
-    inodes_to_file_ids: BTreeMap<Inode, id::Unique>,
+    inodes_to_file_ids: HashMap<Inode, id::Unique>,
 }
 
 #[derive(Clone)]
@@ -109,7 +107,7 @@ pub struct ParentRefValue {
     parent: Option<(id::Unique, Arc<OsString>)>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ParentRefId {
     child_id: id::Unique,
     alias_id: id::Unique,
@@ -166,7 +164,7 @@ impl Timeline {
             metadata: btree::Tree::new(),
             parent_refs: btree::Tree::new(),
             child_refs: btree::Tree::new(),
-            inodes_to_file_ids: BTreeMap::new(),
+            inodes_to_file_ids: HashMap::new(),
         }
     }
 
@@ -190,7 +188,7 @@ impl Timeline {
 
     fn write_to_fs<F, S>(
         &mut self,
-        mut refs_to_write: BTreeSet<ParentRefId>,
+        mut refs_to_write: HashSet<ParentRefId>,
         mut old_tree: Timeline,
         fs: &mut F,
         db: &S,
@@ -201,7 +199,7 @@ impl Timeline {
         Error<S>: From<S::ReadError>,
     {
         let mut fixup_ops = Vec::new();
-        let mut refs_with_temp_name = BTreeSet::new();
+        let mut refs_with_temp_name = HashSet::new();
 
         loop {
             let mut sorted_refs_to_write = self
@@ -440,10 +438,11 @@ impl Timeline {
         }
 
         let mut dir_stack = vec![ROOT_ID];
-        let mut visited_dir_ids = BTreeSet::from_iter(Some(ROOT_ID));
-        let mut occupied_ref_ids = BTreeSet::new();
-        let mut changes: BTreeMap<id::Unique, Change<F>> = BTreeMap::new();
+        let mut visited_dir_ids = HashSet::new();
+        let mut occupied_ref_ids = HashSet::new();
+        let mut changes = HashMap::new();
 
+        visited_dir_ids.insert(ROOT_ID);
         for entry in entries {
             assert!(entry.depth() > 0);
             dir_stack.truncate(entry.depth());
@@ -924,7 +923,7 @@ impl Timeline {
         // println!("integrate ops >>>>>>>>>>>>");
         let old_tree = self.clone();
 
-        let mut changed_refs = BTreeMap::new();
+        let mut changed_refs = HashMap::new();
         for op in ops.clone() {
             match op {
                 Operation::UpdateParent {
@@ -948,7 +947,7 @@ impl Timeline {
         }
 
         if let Some(fs) = fs {
-            let mut refs_to_write = BTreeSet::new();
+            let mut refs_to_write = HashSet::new();
             for (ref_id, moved_dir) in changed_refs {
                 refs_to_write.insert(ref_id);
                 if moved_dir && old_tree.resolve_depth(ref_id, db)?.is_none() {
@@ -985,7 +984,7 @@ impl Timeline {
         I: Iterator<Item = ParentRefId>,
         S: Store,
     {
-        let mut ref_ids_to_depths = BTreeMap::new();
+        let mut ref_ids_to_depths = HashMap::new();
         for ref_id in ref_ids {
             ref_ids_to_depths.insert(ref_id, self.resolve_depth(ref_id, db)?);
         }
@@ -1138,12 +1137,12 @@ impl Timeline {
         use btree::KeyedItem;
 
         let mut fixup_ops = Vec::new();
-        let mut reverted_moves: BTreeMap<ParentRefId, LamportTimestamp> = BTreeMap::new();
+        let mut reverted_moves: HashMap<ParentRefId, LamportTimestamp> = HashMap::new();
 
         // If the child was moved and is a directory, check for cycles.
         if moved_dir {
             let parent_ref_db = db.parent_ref_store();
-            let mut visited = BTreeSet::new();
+            let mut visited = HashSet::new();
             let mut latest_move: Option<ParentRefValue> = None;
             let mut cursor = self.parent_refs.cursor();
             cursor.seek(&ref_id, SeekBias::Left, parent_ref_db)?;
@@ -1431,7 +1430,7 @@ impl Timeline {
     {
         let parent_ref_db = db.parent_ref_store();
 
-        let mut visited = BTreeSet::new();
+        let mut visited = HashSet::new();
         let mut cursor = self.parent_refs.cursor();
         if ref_id.child_id == ROOT_ID {
             Ok(true)
@@ -2250,9 +2249,9 @@ mod tests {
         use std::mem;
         const PEERS: usize = 3;
 
-        for seed in 0..100 {
+        for seed in 0..1000000 {
             // let seed = 44373;
-            // println!("SEED: {:?}", seed);
+            println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
             let db = Vec::from_iter((0..PEERS).map(|i| NullStore::new(i as u64 + 1)));
