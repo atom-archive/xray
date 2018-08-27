@@ -406,7 +406,7 @@ impl Timeline {
                 let mut new_path = old_path.clone();
                 new_path.set_file_name(self.resolve_name(ref_id, db)?.unwrap().as_os_str());
 
-                if new_path != old_path {
+                if new_path != old_path && old_tree.id_for_path(&new_path, db)?.is_none() {
                     let fs_inode = fs.inode(&old_path);
                     let tree_inode = old_tree.inode_for_id(ref_id.child_id, db)?;
                     if fs_inode == tree_inode && fs.rename(&old_path, &new_path) {
