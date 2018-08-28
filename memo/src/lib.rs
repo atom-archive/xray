@@ -5,4 +5,6 @@ extern crate uuid;
 
 mod btree;
 pub mod timeline;
-mod id;
+mod time;
+
+pub type ReplicaId = u64;

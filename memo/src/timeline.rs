@@ -1,20 +1,20 @@
 use btree::{self, SeekBias};
-use id;
+use time;
 use smallvec::SmallVec;
-use std::cmp::{self, Ordering};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::iter::FromIterator;
 use std::ops::{Add, AddAssign};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use ReplicaId;
 
 pub trait ReplicaContext {
-    fn replica_id(&self) -> id::ReplicaId;
-
-    fn gen_id(&self) -> id::Unique;
-    fn gen_timestamp(&self) -> LamportTimestamp;
-    fn recv_timestamp(&self, timestamp: LamportTimestamp);
+    fn replica_id(&self) -> ReplicaId;
+    fn local_time(&self) -> time::Local;
+    fn lamport_time(&self) -> time::Lamport;
+    fn observe_lamport_timestamp(&self, timestamp: time::Lamport);
 }
 
 // TODO: Return results from these methods to deal with IoErrors
@@ -44,14 +44,14 @@ pub trait FileSystemEntry {
 type Inode = u64;
 type VisibleCount = usize;
 
-const ROOT_ID: id::Unique = id::Unique::DEFAULT;
+const ROOT_ID: time::Local = time::Local::DEFAULT;
 
 #[derive(Clone)]
 pub struct Timeline {
     metadata: btree::Tree<Metadata>,
     parent_refs: btree::Tree<ParentRefValue>,
     child_refs: btree::Tree<ChildRefValue>,
-    inodes_to_file_ids: HashMap<Inode, id::Unique>,
+    inodes_to_file_ids: HashMap<Inode, time::Local>,
 }
 
 #[derive(Clone)]
@@ -64,15 +64,15 @@ pub struct Cursor {
 #[derive(Clone, Debug)]
 pub enum Operation {
     InsertMetadata {
-        op_id: id::Unique,
+        op_id: time::Local,
         is_dir: bool,
     },
     UpdateParent {
-        op_id: id::Unique,
+        op_id: time::Local,
         ref_id: ParentRefId,
-        timestamp: LamportTimestamp,
-        prev_timestamp: LamportTimestamp,
-        new_parent: Option<(id::Unique, Arc<OsString>)>,
+        timestamp: time::Lamport,
+        prev_timestamp: time::Lamport,
+        new_parent: Option<(time::Local, Arc<OsString>)>,
     },
 }
 
@@ -83,7 +83,7 @@ pub enum Error {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Metadata {
-    file_id: id::Unique,
+    file_id: time::Local,
     is_dir: bool,
     inode: Option<Inode>,
 }
@@ -91,61 +91,55 @@ pub struct Metadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParentRefValue {
     ref_id: ParentRefId,
-    timestamp: LamportTimestamp,
-    prev_timestamp: LamportTimestamp,
-    op_id: id::Unique,
-    parent: Option<(id::Unique, Arc<OsString>)>,
+    timestamp: time::Lamport,
+    prev_timestamp: time::Lamport,
+    op_id: time::Local,
+    parent: Option<(time::Local, Arc<OsString>)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ParentRefId {
-    child_id: id::Unique,
-    alias_id: id::Unique,
+    child_id: time::Local,
+    alias_id: time::Local,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ParentRefValueId {
     ref_id: ParentRefId,
-    timestamp: LamportTimestamp,
+    timestamp: time::Lamport,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildRefValue {
-    parent_id: id::Unique,
+    parent_id: time::Local,
     name: Arc<OsString>,
-    timestamp: LamportTimestamp,
-    op_id: id::Unique,
+    timestamp: time::Lamport,
+    op_id: time::Local,
     parent_ref_id: ParentRefId,
-    deletions: SmallVec<[id::Unique; 1]>,
+    deletions: SmallVec<[time::Local; 1]>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChildRefValueSummary {
-    parent_id: id::Unique,
+    parent_id: time::Local,
     name: Arc<OsString>,
     visible: bool,
-    timestamp: LamportTimestamp,
+    timestamp: time::Lamport,
     visible_count: VisibleCount,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChildRefValueId {
-    parent_id: id::Unique,
+    parent_id: time::Local,
     name: Arc<OsString>,
     visible: bool,
-    timestamp: LamportTimestamp,
+    timestamp: time::Lamport,
 }
 
 #[derive(Clone, Debug, Default, Ord, Eq, PartialEq, PartialOrd)]
 pub struct ChildRefId {
-    parent_id: id::Unique,
+    parent_id: time::Local,
     name: Arc<OsString>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct LamportTimestamp {
-    value: u64,
-    replica_id: id::ReplicaId,
 }
 
 impl Timeline {
@@ -166,7 +160,7 @@ impl Timeline {
         self.cursor_at(ROOT_ID)
     }
 
-    pub fn cursor_at(&self, id: id::Unique) -> Cursor {
+    pub fn cursor_at(&self, id: time::Local) -> Cursor {
         let mut cursor = Cursor {
             path: PathBuf::new(),
             stack: Vec::new(),
@@ -415,7 +409,7 @@ impl Timeline {
         struct Change<F: FileSystemEntry> {
             inserted: bool,
             entry: F,
-            parents: SmallVec<[(id::Unique, Arc<OsString>); 1]>,
+            parents: SmallVec<[(time::Local, Arc<OsString>); 1]>,
         }
 
         let mut dir_stack = vec![ROOT_ID];
@@ -480,7 +474,7 @@ impl Timeline {
                     }
                 }
             } else {
-                let file_id = ctx.gen_id();
+                let file_id = ctx.local_time();
                 self.inodes_to_file_ids.insert(entry.inode(), file_id);
                 if entry.is_dir() {
                     dir_stack.push(file_id);
@@ -524,7 +518,7 @@ impl Timeline {
                     occupied_ref_ids.insert(ref_id);
                     ref_id.alias_id
                 } else {
-                    ctx.gen_id()
+                    ctx.local_time()
                 };
 
                 operations.push(self.update_parent_ref(
@@ -563,7 +557,7 @@ impl Timeline {
 
     fn insert_metadata(
         &self,
-        file_id: id::Unique,
+        file_id: time::Local,
         is_dir: bool,
         inode: Option<Inode>,
         metadata_edits: &mut Vec<btree::Edit<Metadata>>,
@@ -582,13 +576,13 @@ impl Timeline {
     fn update_parent_ref<R: ReplicaContext>(
         &self,
         ref_id: ParentRefId,
-        new_parent: Option<(id::Unique, Arc<OsString>)>,
+        new_parent: Option<(time::Local, Arc<OsString>)>,
         parent_ref_edits: &mut Vec<btree::Edit<ParentRefValue>>,
         child_ref_edits: &mut Vec<btree::Edit<ChildRefValue>>,
         ctx: &R,
     ) -> Operation {
-        let timestamp = ctx.gen_timestamp();
-        let op_id = ctx.gen_id();
+        let timestamp = ctx.lamport_time();
+        let op_id = ctx.local_time();
 
         let prev_parent_ref = self.cur_parent_ref_value(ref_id);
         let prev_timestamp = prev_parent_ref.as_ref().map_or(timestamp, |r| r.timestamp);
@@ -664,13 +658,13 @@ impl Timeline {
         } else {
             ROOT_ID
         };
-        let child_id = ctx.gen_id();
+        let child_id = ctx.local_time();
 
         operations.push(self.insert_metadata(child_id, is_dir, inode, &mut metadata_edits));
         operations.push(self.update_parent_ref(
             ParentRefId {
                 child_id,
-                alias_id: ctx.gen_id(),
+                alias_id: ctx.local_time(),
             },
             Some((parent_id, Arc::new(path.file_name().unwrap().into()))),
             &mut parent_ref_edits,
@@ -714,7 +708,7 @@ impl Timeline {
             let operation = self.update_parent_ref(
                 ParentRefId {
                     child_id,
-                    alias_id: ctx.gen_id(),
+                    alias_id: ctx.local_time(),
                 },
                 Some((parent_id, Arc::new(dst.file_name().unwrap().into()))),
                 &mut parent_ref_edits,
@@ -770,7 +764,7 @@ impl Timeline {
                 }
             }
             if !entry_exists {
-                let child_id = ctx.gen_id();
+                let child_id = ctx.local_time();
                 let inode = next_inode.as_mut().map(|next_inode| {
                     let inode = **next_inode;
                     **next_inode += 1;
@@ -781,7 +775,7 @@ impl Timeline {
                 operations.push(self.update_parent_ref(
                     ParentRefId {
                         child_id,
-                        alias_id: ctx.gen_id(),
+                        alias_id: ctx.local_time(),
                     },
                     Some((parent_id, name.clone())),
                     &mut parent_ref_edits,
@@ -972,7 +966,7 @@ impl Timeline {
     }
 
     #[cfg(test)]
-    fn paths_with_ids(&self) -> Vec<(id::Unique, String)> {
+    fn paths_with_ids(&self) -> Vec<(time::Local, String)> {
         self.paths()
             .into_iter()
             .map(|path| (self.id_for_path(&path).unwrap(), path))
@@ -1058,7 +1052,7 @@ impl Timeline {
                 }
 
                 if ctx.replica_id() != timestamp.replica_id {
-                    ctx.recv_timestamp(timestamp);
+                    ctx.observe_lamport_timestamp(timestamp);
                 }
             }
         }
@@ -1077,7 +1071,7 @@ impl Timeline {
         use btree::KeyedItem;
 
         let mut fixup_ops = Vec::new();
-        let mut reverted_moves: HashMap<ParentRefId, LamportTimestamp> = HashMap::new();
+        let mut reverted_moves: HashMap<ParentRefId, time::Lamport> = HashMap::new();
 
         // If the child was moved and is a directory, check for cycles.
         if moved_dir {
@@ -1161,9 +1155,9 @@ impl Timeline {
                 );
                 let new_parent = cursor.item().unwrap().parent;
                 fixup_ops.push(Operation::UpdateParent {
-                    op_id: ctx.gen_id(),
+                    op_id: ctx.local_time(),
                     ref_id: *ref_id,
-                    timestamp: ctx.gen_timestamp(),
+                    timestamp: ctx.lamport_time(),
                     prev_timestamp,
                     new_parent,
                 });
@@ -1234,9 +1228,9 @@ impl Timeline {
                     }
 
                     let fixup_op = Operation::UpdateParent {
-                        op_id: ctx.gen_id(),
+                        op_id: ctx.local_time(),
                         ref_id: child_ref.parent_ref_id,
-                        timestamp: ctx.gen_timestamp(),
+                        timestamp: ctx.lamport_time(),
                         prev_timestamp: child_ref.timestamp,
                         new_parent: Some((parent_id, unique_name.clone())),
                     };
@@ -1254,7 +1248,7 @@ impl Timeline {
         fixup_ops
     }
 
-    fn id_for_path<P>(&self, path: P) -> Option<id::Unique>
+    fn id_for_path<P>(&self, path: P) -> Option<time::Local>
     where
         P: Into<PathBuf>,
     {
@@ -1293,7 +1287,7 @@ impl Timeline {
         Some(ref_id)
     }
 
-    pub fn resolve_paths(&self, file_id: id::Unique) -> SmallVec<[PathBuf; 1]> {
+    pub fn resolve_paths(&self, file_id: time::Local) -> SmallVec<[PathBuf; 1]> {
         let mut paths = SmallVec::new();
 
         if file_id == ROOT_ID {
@@ -1369,11 +1363,11 @@ impl Timeline {
             .map(|(_, name)| name)
     }
 
-    fn inode_for_id(&self, child_id: id::Unique) -> Option<Inode> {
+    fn inode_for_id(&self, child_id: time::Local) -> Option<Inode> {
         self.metadata(child_id).and_then(|metadata| metadata.inode)
     }
 
-    fn set_inode_for_id(&mut self, child_id: id::Unique, inode: Inode) -> bool {
+    fn set_inode_for_id(&mut self, child_id: time::Local, inode: Inode) -> bool {
         let mut cursor = self.metadata.cursor();
         if cursor.seek(&child_id, SeekBias::Left) {
             let mut metadata = cursor.item().unwrap();
@@ -1390,7 +1384,7 @@ impl Timeline {
         }
     }
 
-    fn metadata(&self, child_id: id::Unique) -> Option<Metadata> {
+    fn metadata(&self, child_id: time::Local) -> Option<Metadata> {
         let mut cursor = self.metadata.cursor();
         if cursor.seek(&child_id, SeekBias::Left) {
             cursor.item()
@@ -1399,7 +1393,7 @@ impl Timeline {
         }
     }
 
-    fn cur_parent_ref_values(&self, child_id: id::Unique) -> Vec<ParentRefValue> {
+    fn cur_parent_ref_values(&self, child_id: time::Local) -> Vec<ParentRefValue> {
         let mut cursor = self.parent_refs.cursor();
         cursor.seek(&child_id, SeekBias::Left);
         let mut parent_ref_values = Vec::new();
@@ -1458,7 +1452,7 @@ impl Cursor {
         self.metadata().map(|metadata| metadata.is_dir)
     }
 
-    pub fn file_id(&self) -> Option<id::Unique> {
+    pub fn file_id(&self) -> Option<time::Local> {
         self.metadata().map(|metadata| metadata.file_id)
     }
 
@@ -1503,7 +1497,7 @@ impl Cursor {
     fn descend_into(
         &mut self,
         mut child_ref_cursor: btree::Cursor<ChildRefValue>,
-        dir_id: id::Unique,
+        dir_id: time::Local,
     ) -> bool {
         child_ref_cursor.seek(&dir_id, SeekBias::Left);
         if let Some(child_ref) = child_ref_cursor.item() {
@@ -1552,7 +1546,7 @@ impl Cursor {
 }
 
 impl btree::Item for Metadata {
-    type Summary = id::Unique;
+    type Summary = time::Local;
 
     fn summarize(&self) -> Self::Summary {
         self.file_id
@@ -1560,15 +1554,15 @@ impl btree::Item for Metadata {
 }
 
 impl btree::KeyedItem for Metadata {
-    type Key = id::Unique;
+    type Key = time::Local;
 
     fn key(&self) -> Self::Key {
         self.file_id
     }
 }
 
-impl btree::Dimension<id::Unique> for id::Unique {
-    fn from_summary(summary: &id::Unique) -> Self {
+impl btree::Dimension<time::Local> for time::Local {
+    fn from_summary(summary: &time::Local) -> Self {
         *summary
     }
 }
@@ -1606,7 +1600,7 @@ impl btree::KeyedItem for ParentRefValue {
     }
 }
 
-impl btree::Dimension<ParentRefValueId> for id::Unique {
+impl btree::Dimension<ParentRefValueId> for time::Local {
     fn from_summary(summary: &ParentRefValueId) -> Self {
         summary.ref_id.child_id
     }
@@ -1802,7 +1796,7 @@ impl<'a> Add<&'a Self> for ChildRefId {
     }
 }
 
-impl btree::Dimension<ChildRefValueSummary> for id::Unique {
+impl btree::Dimension<ChildRefValueSummary> for time::Local {
     fn from_summary(summary: &ChildRefValueSummary) -> Self {
         summary.parent_id
     }
@@ -1811,36 +1805,6 @@ impl btree::Dimension<ChildRefValueSummary> for id::Unique {
 impl btree::Dimension<ChildRefValueSummary> for VisibleCount {
     fn from_summary(summary: &ChildRefValueSummary) -> Self {
         summary.visible_count
-    }
-}
-
-impl LamportTimestamp {
-    pub fn new(replica_id: id::ReplicaId) -> Self {
-        Self {
-            value: 0,
-            replica_id,
-        }
-    }
-
-    pub fn max_value() -> Self {
-        Self {
-            value: u64::max_value(),
-            replica_id: id::ReplicaId::max_value(),
-        }
-    }
-
-    pub fn inc(self) -> Self {
-        Self {
-            value: self.value + 1,
-            replica_id: self.replica_id,
-        }
-    }
-
-    pub fn update(self, other: Self) -> Self {
-        Self {
-            value: cmp::max(self.value, other.value) + 1,
-            replica_id: self.replica_id,
-        }
     }
 }
 
@@ -2152,8 +2116,8 @@ mod tests {
     }
 
     struct TestContext {
-        next_id: Cell<id::Unique>,
-        lamport_clock: Cell<LamportTimestamp>,
+        next_id: Cell<time::Local>,
+        lamport_clock: Cell<time::Lamport>,
     }
 
     impl<'a, T: Rng + Clone> FakeFileSystem<'a, T> {
@@ -2417,31 +2381,31 @@ mod tests {
     }
 
     impl TestContext {
-        fn new(replica_id: id::ReplicaId) -> Self {
+        fn new(replica_id: ReplicaId) -> Self {
             Self {
-                next_id: Cell::new(id::Unique::new(replica_id)),
-                lamport_clock: Cell::new(LamportTimestamp::new(replica_id)),
+                next_id: Cell::new(time::Local::new(replica_id)),
+                lamport_clock: Cell::new(time::Lamport::new(replica_id)),
             }
         }
     }
 
     impl ReplicaContext for TestContext {
-        fn replica_id(&self) -> id::ReplicaId {
+        fn replica_id(&self) -> ReplicaId {
             self.lamport_clock.get().replica_id
         }
 
-        fn gen_id(&self) -> id::Unique {
+        fn local_time(&self) -> time::Local {
             let next_id = self.next_id.get();
             self.next_id.replace(next_id.next());
             next_id
         }
 
-        fn gen_timestamp(&self) -> LamportTimestamp {
+        fn lamport_time(&self) -> time::Lamport {
             self.lamport_clock.replace(self.lamport_clock.get().inc());
             self.lamport_clock.get()
         }
 
-        fn recv_timestamp(&self, timestamp: LamportTimestamp) {
+        fn observe_lamport_timestamp(&self, timestamp: time::Lamport) {
             self.lamport_clock
                 .set(self.lamport_clock.get().update(timestamp));
         }
