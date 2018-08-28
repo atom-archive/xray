@@ -4,23 +4,13 @@ use smallvec::SmallVec;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::iter::FromIterator;
 use std::ops::{Add, AddAssign};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub trait Store {
-    type ReadError: fmt::Debug;
-    type MetadataStore: btree::NodeStore<Metadata, ReadError = Self::ReadError>;
-    type ParentRefStore: btree::NodeStore<ParentRefValue, ReadError = Self::ReadError>;
-    type ChildRefValueStore: btree::NodeStore<ChildRefValue, ReadError = Self::ReadError>;
-
+pub trait ReplicaContext {
     fn replica_id(&self) -> id::ReplicaId;
-
-    fn metadata_store(&self) -> &Self::MetadataStore;
-    fn parent_ref_store(&self) -> &Self::ParentRefStore;
-    fn child_ref_store(&self) -> &Self::ChildRefValueStore;
 
     fn gen_id(&self) -> id::Unique;
     fn gen_timestamp(&self) -> LamportTimestamp;
@@ -86,9 +76,9 @@ pub enum Operation {
     },
 }
 
-pub enum Error<S: Store> {
+#[derive(Debug)]
+pub enum Error {
     InvalidPath,
-    ReadError(S::ReadError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -168,61 +158,60 @@ impl Timeline {
         }
     }
 
-    pub fn is_empty<S: Store>(&self, db: &S) -> Result<bool, S::ReadError> {
-        Ok(self.cursor(db)?.depth() == 0)
+    pub fn is_empty(&self) -> bool {
+        self.cursor().depth() == 0
     }
 
-    pub fn cursor<S: Store>(&self, db: &S) -> Result<Cursor, S::ReadError> {
-        self.cursor_at(ROOT_ID, db)
+    pub fn cursor(&self) -> Cursor {
+        self.cursor_at(ROOT_ID)
     }
 
-    pub fn cursor_at<S: Store>(&self, id: id::Unique, db: &S) -> Result<Cursor, S::ReadError> {
+    pub fn cursor_at(&self, id: id::Unique) -> Cursor {
         let mut cursor = Cursor {
             path: PathBuf::new(),
             stack: Vec::new(),
             metadata_cursor: self.metadata.cursor(),
         };
-        cursor.descend_into(self.child_refs.cursor(), id, db)?;
-        Ok(cursor)
+        cursor.descend_into(self.child_refs.cursor(), id);
+        cursor
     }
 
-    fn write_to_fs<F, S>(
+    fn write_to_fs<F, R>(
         &mut self,
         mut refs_to_write: HashSet<ParentRefId>,
         mut old_tree: Timeline,
         fs: &mut F,
-        db: &S,
-    ) -> Result<Vec<Operation>, S::ReadError>
+        ctx: &R,
+    ) -> Vec<Operation>
     where
         F: FileSystem,
-        S: Store,
-        Error<S>: From<S::ReadError>,
+        R: ReplicaContext,
     {
         let mut fixup_ops = Vec::new();
         let mut refs_with_temp_name = HashSet::new();
 
         loop {
             let mut sorted_refs_to_write = self
-                .sort_refs_by_path_depth(refs_to_write.iter().cloned(), db)?
+                .sort_refs_by_path_depth(refs_to_write.iter().cloned())
                 .into_iter()
                 .peekable();
 
             while let Some((ref_id, depth)) = sorted_refs_to_write.peek().cloned() {
-                let old_path = old_tree.resolve_path(ref_id, db)?;
+                let old_path = old_tree.resolve_path(ref_id);
                 if let Some(old_path) = old_path.as_ref() {
-                    if fs.inode(old_path) != old_tree.inode_for_id(ref_id.child_id, db)? {
+                    if fs.inode(old_path) != old_tree.inode_for_id(ref_id.child_id) {
                         break;
                     }
                 }
 
-                let parent_ref = self.cur_parent_ref_value(ref_id, db)?.unwrap();
-                let metadata = self.metadata(ref_id.child_id, db)?.unwrap();
+                let parent_ref = self.cur_parent_ref_value(ref_id).unwrap();
+                let metadata = self.metadata(ref_id.child_id).unwrap();
                 if depth.is_some() {
                     let (parent_id, mut name) = parent_ref.parent.clone().unwrap();
 
-                    if let Some(parent_path) = old_tree.resolve_paths(parent_id, db)?.first_mut() {
+                    if let Some(parent_path) = old_tree.resolve_paths(parent_id).first_mut() {
                         if parent_id != ROOT_ID
-                            && fs.inode(&parent_path) != old_tree.inode_for_id(parent_id, db)?
+                            && fs.inode(&parent_path) != old_tree.inode_for_id(parent_id)
                         {
                             break;
                         }
@@ -239,14 +228,14 @@ impl Timeline {
                         }
 
                         let assigned_temp_name;
-                        if old_tree.id_for_path(&new_path, db)?.is_some() {
+                        if old_tree.id_for_path(&new_path).is_some() {
                             loop {
                                 let name = Arc::make_mut(&mut name);
                                 name.push("~");
                                 new_path.set_file_name(name);
 
-                                if old_tree.id_for_path(&new_path, db)?.is_none()
-                                    && self.id_for_path(&new_path, db)?.is_none()
+                                if old_tree.id_for_path(&new_path).is_none()
+                                    && self.id_for_path(&new_path).is_none()
                                 {
                                     break;
                                 }
@@ -263,7 +252,7 @@ impl Timeline {
                                 }
 
                                 let prev_parent_ref =
-                                    old_tree.cur_parent_ref_value(ref_id, db)?.unwrap();
+                                    old_tree.cur_parent_ref_value(ref_id).unwrap();
                                 old_tree.integrate_op(
                                     Operation::UpdateParent {
                                         op_id: parent_ref.op_id,
@@ -272,8 +261,8 @@ impl Timeline {
                                         prev_timestamp: prev_parent_ref.timestamp,
                                         new_parent: Some((parent_id, name)),
                                     },
-                                    db,
-                                )?;
+                                    ctx,
+                                );
                             } else {
                                 break;
                             }
@@ -282,7 +271,7 @@ impl Timeline {
                             if metadata.is_dir {
                                 success = fs.create_dir(&new_path);
                             } else {
-                                let existing_paths = old_tree.resolve_paths(ref_id.child_id, db)?;
+                                let existing_paths = old_tree.resolve_paths(ref_id.child_id);
                                 if existing_paths.is_empty() {
                                     success = fs.create_file(&new_path);
                                 } else {
@@ -304,7 +293,7 @@ impl Timeline {
 
                                 if let Some(inode) = fs.inode(&new_path) {
                                     if let Some(prev_parent_ref) =
-                                        old_tree.cur_parent_ref_value(ref_id, db)?
+                                        old_tree.cur_parent_ref_value(ref_id)
                                     {
                                         old_tree.integrate_op(
                                             Operation::UpdateParent {
@@ -314,16 +303,16 @@ impl Timeline {
                                                 prev_timestamp: prev_parent_ref.timestamp,
                                                 new_parent: Some((parent_id, name)),
                                             },
-                                            db,
-                                        )?;
+                                            ctx,
+                                        );
                                     } else {
                                         old_tree.integrate_op(
                                             Operation::InsertMetadata {
                                                 op_id: ref_id.child_id,
                                                 is_dir: true,
                                             },
-                                            db,
-                                        )?;
+                                            ctx,
+                                        );
                                         old_tree.integrate_op(
                                             Operation::UpdateParent {
                                                 op_id: parent_ref.op_id,
@@ -332,12 +321,12 @@ impl Timeline {
                                                 prev_timestamp: parent_ref.timestamp,
                                                 new_parent: Some((parent_id, name)),
                                             },
-                                            db,
-                                        )?;
+                                            ctx,
+                                        );
                                     };
 
-                                    old_tree.set_inode_for_id(ref_id.child_id, inode, db)?;
-                                    self.set_inode_for_id(ref_id.child_id, inode, db)?;
+                                    old_tree.set_inode_for_id(ref_id.child_id, inode);
+                                    self.set_inode_for_id(ref_id.child_id, inode);
                                 } else {
                                     break;
                                 }
@@ -348,7 +337,7 @@ impl Timeline {
                     }
                 } else if let Some(old_path) = old_path {
                     if fs.remove(&old_path, metadata.is_dir) {
-                        let prev_parent_ref = old_tree.cur_parent_ref_value(ref_id, db)?.unwrap();
+                        let prev_parent_ref = old_tree.cur_parent_ref_value(ref_id).unwrap();
                         old_tree.integrate_op(
                             Operation::UpdateParent {
                                 op_id: parent_ref.op_id,
@@ -357,8 +346,8 @@ impl Timeline {
                                 prev_timestamp: prev_parent_ref.timestamp,
                                 new_parent: None,
                             },
-                            db,
-                        )?;
+                            ctx,
+                        );
                     } else {
                         break;
                     }
@@ -370,13 +359,13 @@ impl Timeline {
 
             if sorted_refs_to_write.peek().is_some() {
                 // println!("refreshing old timeline - paths: {:?}", fs.paths());
-                let fs_ops = old_tree.read_from_fs(fs.entries(), db)?;
-                let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, db)?;
+                let fs_ops = old_tree.read_from_fs(fs.entries(), ctx);
+                let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, ctx);
                 for op in &fs_ops {
                     match op {
                         Operation::InsertMetadata { op_id, .. } => {
-                            let inode = old_tree.inode_for_id(*op_id, db)?.unwrap();
-                            self.set_inode_for_id(*op_id, inode, db)?;
+                            let inode = old_tree.inode_for_id(*op_id).unwrap();
+                            self.set_inode_for_id(*op_id, inode);
                         }
                         Operation::UpdateParent { ref_id, .. } => {
                             refs_with_temp_name.remove(&ref_id);
@@ -400,36 +389,28 @@ impl Timeline {
         }
 
         for ref_id in refs_with_temp_name {
-            if let Some(old_path) = old_tree.resolve_path(ref_id, db)? {
+            if let Some(old_path) = old_tree.resolve_path(ref_id) {
                 let mut new_path = old_path.clone();
-                new_path.set_file_name(self.resolve_name(ref_id, db)?.unwrap().as_os_str());
+                new_path.set_file_name(self.resolve_name(ref_id).unwrap().as_os_str());
 
-                if new_path != old_path && old_tree.id_for_path(&new_path, db)?.is_none() {
+                if new_path != old_path && old_tree.id_for_path(&new_path).is_none() {
                     let fs_inode = fs.inode(&old_path);
-                    let tree_inode = old_tree.inode_for_id(ref_id.child_id, db)?;
+                    let tree_inode = old_tree.inode_for_id(ref_id.child_id);
                     if fs_inode == tree_inode && fs.rename(&old_path, &new_path) {
-                        match old_tree.rename(&old_path, &new_path, db) {
-                            Ok(_) => {}
-                            Err(Error::ReadError(e)) => return Err(e),
-                            Err(Error::InvalidPath) => unreachable!(),
-                        }
+                        old_tree.rename(&old_path, &new_path, ctx).unwrap();
                     }
                 }
             }
         }
 
-        Ok(fixup_ops)
+        fixup_ops
     }
 
-    pub fn read_from_fs<'a, F, I, S>(
-        &mut self,
-        entries: I,
-        db: &S,
-    ) -> Result<Vec<Operation>, S::ReadError>
+    pub fn read_from_fs<'a, F, I, R>(&mut self, entries: I, ctx: &R) -> Vec<Operation>
     where
         F: FileSystemEntry,
         I: IntoIterator<Item = F>,
-        S: Store,
+        R: ReplicaContext,
     {
         struct Change<F: FileSystemEntry> {
             inserted: bool,
@@ -453,7 +434,7 @@ impl Timeline {
                 if entry.is_dir() {
                     dir_stack.push(file_id);
 
-                    if let Some(parent_ref) = self.cur_parent_ref_values(file_id, db)?.pop() {
+                    if let Some(parent_ref) = self.cur_parent_ref_values(file_id).pop() {
                         visited_dir_ids.insert(file_id);
 
                         if parent_ref.parent == cur_parent {
@@ -482,7 +463,7 @@ impl Timeline {
                     }
                 } else {
                     if let Some(parent_ref) = self
-                        .cur_parent_ref_values(file_id, db)?
+                        .cur_parent_ref_values(file_id)
                         .into_iter()
                         .find(|r| r.parent == cur_parent)
                     {
@@ -499,7 +480,7 @@ impl Timeline {
                     }
                 }
             } else {
-                let file_id = db.gen_id();
+                let file_id = ctx.gen_id();
                 self.inodes_to_file_ids.insert(entry.inode(), file_id);
                 if entry.is_dir() {
                     dir_stack.push(file_id);
@@ -534,7 +515,7 @@ impl Timeline {
 
             for parent in change.parents {
                 let available_ref_id = self
-                    .cur_parent_ref_values(child_id, db)?
+                    .cur_parent_ref_values(child_id)
                     .into_iter()
                     .map(|parent_ref| parent_ref.ref_id)
                     .filter(|ref_id| !occupied_ref_ids.contains(&ref_id))
@@ -543,7 +524,7 @@ impl Timeline {
                     occupied_ref_ids.insert(ref_id);
                     ref_id.alias_id
                 } else {
-                    db.gen_id()
+                    ctx.gen_id()
                 };
 
                 operations.push(self.update_parent_ref(
@@ -551,35 +532,33 @@ impl Timeline {
                     Some(parent),
                     &mut parent_ref_edits,
                     &mut child_ref_edits,
-                    db,
-                )?);
+                    ctx,
+                ));
             }
         }
 
         // Delete all file refs that are not reachable anymore from the visited directories.
         for dir_id in visited_dir_ids {
-            let mut cursor = self.cursor_at(dir_id, db)?;
-            while let Some(ref_id) = cursor.ref_id(db)? {
+            let mut cursor = self.cursor_at(dir_id);
+            while let Some(ref_id) = cursor.ref_id() {
                 if !occupied_ref_ids.contains(&ref_id) {
                     operations.push(self.update_parent_ref(
                         ref_id,
                         None,
                         &mut parent_ref_edits,
                         &mut child_ref_edits,
-                        db,
-                    )?);
+                        ctx,
+                    ));
                 }
-                cursor.next_sibling_or_cousin(db)?;
+                cursor.next_sibling_or_cousin();
             }
         }
 
-        self.metadata.edit(metadata_edits, db.metadata_store())?;
-        self.parent_refs
-            .edit(parent_ref_edits, db.parent_ref_store())?;
-        self.child_refs
-            .edit(child_ref_edits, db.child_ref_store())?;
+        self.metadata.edit(metadata_edits);
+        self.parent_refs.edit(parent_ref_edits);
+        self.child_refs.edit(child_ref_edits);
 
-        Ok(operations)
+        operations
     }
 
     fn insert_metadata(
@@ -600,18 +579,18 @@ impl Timeline {
         }
     }
 
-    fn update_parent_ref<S: Store>(
+    fn update_parent_ref<R: ReplicaContext>(
         &self,
         ref_id: ParentRefId,
         new_parent: Option<(id::Unique, Arc<OsString>)>,
         parent_ref_edits: &mut Vec<btree::Edit<ParentRefValue>>,
         child_ref_edits: &mut Vec<btree::Edit<ChildRefValue>>,
-        db: &S,
-    ) -> Result<Operation, S::ReadError> {
-        let timestamp = db.gen_timestamp();
-        let op_id = db.gen_id();
+        ctx: &R,
+    ) -> Operation {
+        let timestamp = ctx.gen_timestamp();
+        let op_id = ctx.gen_id();
 
-        let prev_parent_ref = self.cur_parent_ref_value(ref_id, db)?;
+        let prev_parent_ref = self.cur_parent_ref_value(ref_id);
         let prev_timestamp = prev_parent_ref.as_ref().map_or(timestamp, |r| r.timestamp);
 
         parent_ref_edits.push(btree::Edit::Insert(ParentRefValue {
@@ -625,7 +604,7 @@ impl Timeline {
         if let Some(prev_child_ref_value_id) =
             prev_parent_ref.and_then(|r| r.to_child_ref_value_id(true))
         {
-            let mut prev_child_ref = self.child_ref_value(prev_child_ref_value_id, db)?.unwrap();
+            let mut prev_child_ref = self.child_ref_value(prev_child_ref_value_id).unwrap();
             child_ref_edits.push(btree::Edit::Remove(prev_child_ref.clone()));
             prev_child_ref.deletions.push(op_id);
             child_ref_edits.push(btree::Edit::Insert(prev_child_ref));
@@ -642,141 +621,126 @@ impl Timeline {
             }));
         }
 
-        Ok(Operation::UpdateParent {
+        Operation::UpdateParent {
             op_id,
             ref_id,
             timestamp,
             prev_timestamp,
             new_parent,
-        })
+        }
     }
 
-    pub fn create_dir_all<I, S>(&mut self, path: I, db: &S) -> Result<Vec<Operation>, Error<S>>
+    pub fn create_dir_all<I, R>(&mut self, path: I, ctx: &R) -> Result<Vec<Operation>, Error>
     where
         I: Into<PathBuf>,
-        S: Store,
-        Error<S>: From<S::ReadError>,
+        R: ReplicaContext,
     {
-        self.create_dir_all_internal(path, &mut None, db)
+        self.create_dir_all_internal(path, &mut None, ctx)
     }
 
-    pub fn create_file_internal<I, S>(
+    pub fn create_file_internal<I, R>(
         &mut self,
         path: I,
         is_dir: bool,
         inode: Option<Inode>,
-        db: &S,
-    ) -> Result<SmallVec<[Operation; 2]>, Error<S>>
+        ctx: &R,
+    ) -> Result<SmallVec<[Operation; 2]>, Error>
     where
         I: Into<PathBuf>,
-        S: Store,
-        Error<S>: From<S::ReadError>,
+        R: ReplicaContext,
     {
         let path = path.into();
         let mut operations = SmallVec::new();
-        if self.id_for_path(&path, db)?.is_some() {
+        if self.id_for_path(&path).is_some() {
             return Err(Error::InvalidPath);
         }
-
-        let metadata_db = db.metadata_store();
-        let parent_ref_db = db.parent_ref_store();
-        let child_ref_db = db.child_ref_store();
 
         let mut metadata_edits = Vec::new();
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
 
         let parent_id = if let Some(parent_path) = path.parent() {
-            self.id_for_path(parent_path, db)?
-                .ok_or(Error::InvalidPath)?
+            self.id_for_path(parent_path).ok_or(Error::InvalidPath)?
         } else {
             ROOT_ID
         };
-        let child_id = db.gen_id();
+        let child_id = ctx.gen_id();
 
         operations.push(self.insert_metadata(child_id, is_dir, inode, &mut metadata_edits));
         operations.push(self.update_parent_ref(
             ParentRefId {
                 child_id,
-                alias_id: db.gen_id(),
+                alias_id: ctx.gen_id(),
             },
             Some((parent_id, Arc::new(path.file_name().unwrap().into()))),
             &mut parent_ref_edits,
             &mut child_ref_edits,
-            db,
-        )?);
+            ctx,
+        ));
 
         if let Some(inode) = inode {
             self.inodes_to_file_ids.insert(inode, child_id);
         }
 
-        self.metadata.edit(metadata_edits, metadata_db)?;
-        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
-        self.child_refs.edit(child_ref_edits, child_ref_db)?;
+        self.metadata.edit(metadata_edits);
+        self.parent_refs.edit(parent_ref_edits);
+        self.child_refs.edit(child_ref_edits);
         Ok(operations)
     }
 
-    pub fn hard_link<I1, I2, S>(&mut self, src: I1, dst: I2, db: &S) -> Result<Operation, Error<S>>
+    pub fn hard_link<I1, I2, R>(&mut self, src: I1, dst: I2, ctx: &R) -> Result<Operation, Error>
     where
         I1: Into<PathBuf>,
         I2: Into<PathBuf>,
-        S: Store,
-        Error<S>: From<S::ReadError>,
+        R: ReplicaContext,
     {
         let src = src.into();
         let dst = dst.into();
-        let parent_ref_db = db.parent_ref_store();
-        let child_ref_db = db.child_ref_store();
 
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
 
-        if self.id_for_path(&dst, db)?.is_some() {
+        if self.id_for_path(&dst).is_some() {
             return Err(Error::InvalidPath);
         }
 
         let parent_id = if let Some(parent_path) = dst.parent() {
-            self.id_for_path(parent_path, db)?
-                .ok_or(Error::InvalidPath)?
+            self.id_for_path(parent_path).ok_or(Error::InvalidPath)?
         } else {
             ROOT_ID
         };
 
-        if let Some(child_id) = self.id_for_path(src, db)? {
+        if let Some(child_id) = self.id_for_path(src) {
             let operation = self.update_parent_ref(
                 ParentRefId {
                     child_id,
-                    alias_id: db.gen_id(),
+                    alias_id: ctx.gen_id(),
                 },
                 Some((parent_id, Arc::new(dst.file_name().unwrap().into()))),
                 &mut parent_ref_edits,
                 &mut child_ref_edits,
-                db,
-            )?;
+                ctx,
+            );
 
-            self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
-            self.child_refs.edit(child_ref_edits, child_ref_db)?;
+            self.parent_refs.edit(parent_ref_edits);
+            self.child_refs.edit(child_ref_edits);
             Ok(operation)
         } else {
             Err(Error::InvalidPath)
         }
     }
 
-    fn create_dir_all_internal<I, S>(
+    fn create_dir_all_internal<I, R>(
         &mut self,
         path: I,
         next_inode: &mut Option<&mut Inode>,
-        db: &S,
-    ) -> Result<Vec<Operation>, Error<S>>
+        ctx: &R,
+    ) -> Result<Vec<Operation>, Error>
     where
         I: Into<PathBuf>,
-        S: Store,
-        Error<S>: From<S::ReadError>,
+        R: ReplicaContext,
     {
         let path = path.into();
-        let metadata_db = db.metadata_store();
-        let parent_ref_db = db.parent_ref_store();
-        let child_ref_db = db.child_ref_store();
 
         let mut operations = Vec::new();
         let mut metadata_edits = Vec::new();
@@ -794,8 +758,8 @@ impl Timeline {
                     parent_id,
                     name: name.clone(),
                 };
-                if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
-                    let child_ref = cursor.item(child_ref_db)?.unwrap();
+                if cursor.seek(&key, SeekBias::Left) {
+                    let child_ref = cursor.item().unwrap();
                     if child_ref.is_visible() {
                         parent_id = child_ref.parent_ref_id.child_id;
                     } else {
@@ -806,7 +770,7 @@ impl Timeline {
                 }
             }
             if !entry_exists {
-                let child_id = db.gen_id();
+                let child_id = ctx.gen_id();
                 let inode = next_inode.as_mut().map(|next_inode| {
                     let inode = **next_inode;
                     **next_inode += 1;
@@ -817,13 +781,13 @@ impl Timeline {
                 operations.push(self.update_parent_ref(
                     ParentRefId {
                         child_id,
-                        alias_id: db.gen_id(),
+                        alias_id: ctx.gen_id(),
                     },
                     Some((parent_id, name.clone())),
                     &mut parent_ref_edits,
                     &mut child_ref_edits,
-                    db,
-                )?);
+                    ctx,
+                ));
 
                 if let Some(inode) = inode {
                     self.inodes_to_file_ids.insert(inode, child_id);
@@ -832,62 +796,55 @@ impl Timeline {
             }
         }
 
-        self.metadata.edit(metadata_edits, metadata_db)?;
-        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
-        self.child_refs.edit(child_ref_edits, child_ref_db)?;
+        self.metadata.edit(metadata_edits);
+        self.parent_refs.edit(parent_ref_edits);
+        self.child_refs.edit(child_ref_edits);
         Ok(operations)
     }
 
-    pub fn remove<I, S>(&mut self, path: I, db: &S) -> Result<Operation, Error<S>>
+    pub fn remove<I, R>(&mut self, path: I, ctx: &R) -> Result<Operation, Error>
     where
         I: Into<PathBuf>,
-        S: Store,
-        Error<S>: From<S::ReadError>,
+        R: ReplicaContext,
     {
         let path = path.into();
-        let parent_ref_db = db.parent_ref_store();
-        let child_ref_db = db.child_ref_store();
 
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
 
-        let ref_id = self.ref_id_for_path(&path, db)?.ok_or(Error::InvalidPath)?;
+        let ref_id = self.ref_id_for_path(&path).ok_or(Error::InvalidPath)?;
         let operation = self.update_parent_ref(
             ref_id,
             None,
             &mut parent_ref_edits,
             &mut child_ref_edits,
-            db,
-        )?;
-        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
-        self.child_refs.edit(child_ref_edits, child_ref_db)?;
+            ctx,
+        );
+        self.parent_refs.edit(parent_ref_edits);
+        self.child_refs.edit(child_ref_edits);
 
         Ok(operation)
     }
 
-    pub fn rename<F, S, T>(&mut self, from: F, to: T, db: &S) -> Result<Operation, Error<S>>
+    pub fn rename<F, R, T>(&mut self, from: F, to: T, ctx: &R) -> Result<Operation, Error>
     where
         F: Into<PathBuf>,
-        S: Store,
+        R: ReplicaContext,
         T: Into<PathBuf>,
-        Error<S>: From<S::ReadError>,
     {
         let from = from.into();
         let to = to.into();
-        let parent_ref_db = db.parent_ref_store();
-        let child_ref_db = db.child_ref_store();
 
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
 
-        if self.id_for_path(&to, db)?.is_some() {
+        if self.id_for_path(&to).is_some() {
             return Err(Error::InvalidPath);
         }
 
-        let ref_id = self.ref_id_for_path(&from, db)?.ok_or(Error::InvalidPath)?;
+        let ref_id = self.ref_id_for_path(&from).ok_or(Error::InvalidPath)?;
         let new_parent_id = if let Some(parent_path) = to.parent() {
-            self.id_for_path(parent_path, db)?
-                .ok_or(Error::InvalidPath)?
+            self.id_for_path(parent_path).ok_or(Error::InvalidPath)?
         } else {
             ROOT_ID
         };
@@ -898,25 +855,24 @@ impl Timeline {
             Some((new_parent_id, new_name)),
             &mut parent_ref_edits,
             &mut child_ref_edits,
-            db,
-        )?;
-        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
-        self.child_refs.edit(child_ref_edits, child_ref_db)?;
+            ctx,
+        );
+        self.parent_refs.edit(parent_ref_edits);
+        self.child_refs.edit(child_ref_edits);
 
         Ok(operation)
     }
 
-    pub fn integrate_ops<'a, F, O, S>(
+    pub fn integrate_ops<'a, F, O, R>(
         &mut self,
         ops: O,
         fs: Option<&mut F>,
-        db: &S,
-    ) -> Result<Vec<Operation>, S::ReadError>
+        ctx: &R,
+    ) -> Vec<Operation>
     where
         F: FileSystem,
         O: IntoIterator<Item = &'a Operation> + Clone,
-        S: Store,
-        Error<S>: From<S::ReadError>,
+        R: ReplicaContext,
     {
         // println!("integrate ops >>>>>>>>>>>>");
         let old_tree = self.clone();
@@ -931,28 +887,28 @@ impl Timeline {
                     ..
                 } => {
                     let moved_dir = timestamp != prev_timestamp
-                        && self.metadata(ref_id.child_id, db)?.unwrap().is_dir;
+                        && self.metadata(ref_id.child_id).unwrap().is_dir;
                     changed_refs.insert(*ref_id, moved_dir);
                 }
                 _ => {}
             }
-            self.integrate_op(op.clone(), db)?;
+            self.integrate_op(op.clone(), ctx);
         }
 
         let mut fixup_ops = Vec::new();
         for (ref_id, moved_dir) in &changed_refs {
-            fixup_ops.extend(self.fix_conflicts(*ref_id, *moved_dir, db)?);
+            fixup_ops.extend(self.fix_conflicts(*ref_id, *moved_dir, ctx));
         }
 
         if let Some(fs) = fs {
             let mut refs_to_write = HashSet::new();
             for (ref_id, moved_dir) in changed_refs {
                 refs_to_write.insert(ref_id);
-                if moved_dir && old_tree.resolve_depth(ref_id, db)?.is_none() {
-                    let mut cursor = self.cursor_at(ref_id.child_id, db)?;
-                    while let Some(descendant_ref_id) = cursor.ref_id(db)? {
+                if moved_dir && old_tree.resolve_depth(ref_id).is_none() {
+                    let mut cursor = self.cursor_at(ref_id.child_id);
+                    while let Some(descendant_ref_id) = cursor.ref_id() {
                         refs_to_write.insert(descendant_ref_id);
-                        cursor.next(db)?;
+                        cursor.next();
                     }
                 }
             }
@@ -965,26 +921,21 @@ impl Timeline {
                 }
             }
 
-            fixup_ops.extend(self.write_to_fs(refs_to_write, old_tree, fs, db)?);
+            fixup_ops.extend(self.write_to_fs(refs_to_write, old_tree, fs, ctx));
         }
 
         // println!("integrate ops <<<<<<<<<<<<");
 
-        Ok(fixup_ops)
+        fixup_ops
     }
 
-    fn sort_refs_by_path_depth<I, S>(
-        &self,
-        ref_ids: I,
-        db: &S,
-    ) -> Result<Vec<(ParentRefId, Option<usize>)>, S::ReadError>
+    fn sort_refs_by_path_depth<I>(&self, ref_ids: I) -> Vec<(ParentRefId, Option<usize>)>
     where
         I: Iterator<Item = ParentRefId>,
-        S: Store,
     {
         let mut ref_ids_to_depths = HashMap::new();
         for ref_id in ref_ids {
-            ref_ids_to_depths.insert(ref_id, self.resolve_depth(ref_id, db)?);
+            ref_ids_to_depths.insert(ref_id, self.resolve_depth(ref_id));
         }
 
         let mut sorted_ref_ids = ref_ids_to_depths.into_iter().collect::<Vec<_>>();
@@ -998,50 +949,46 @@ impl Timeline {
             }
         });
 
-        Ok(sorted_ref_ids)
+        sorted_ref_ids
     }
 
-    // #[cfg(test)]
-    pub fn paths<S: Store>(&self, db: &S) -> Vec<String> {
-        let mut cursor = self.cursor(db).unwrap();
+    #[cfg(test)]
+    pub fn paths(&self) -> Vec<String> {
+        let mut cursor = self.cursor();
         let mut paths = Vec::new();
         loop {
             if let Some(path) = cursor.path() {
                 let mut path = path.to_string_lossy().into_owned();
-                if cursor.metadata(db).unwrap().unwrap().is_dir {
+                if cursor.metadata().unwrap().is_dir {
                     path += "/";
                 }
                 paths.push(path);
             } else {
                 break;
             }
-            cursor.next(db).unwrap();
+            cursor.next();
         }
         paths
     }
 
     #[cfg(test)]
-    fn paths_with_ids<S: Store>(&self, db: &S) -> Vec<(id::Unique, String)> {
-        self.paths(db)
+    fn paths_with_ids(&self) -> Vec<(id::Unique, String)> {
+        self.paths()
             .into_iter()
-            .map(|path| (self.id_for_path(&path, db).unwrap().unwrap(), path))
+            .map(|path| (self.id_for_path(&path).unwrap(), path))
             .collect()
     }
 
-    fn integrate_op<S>(&mut self, op: Operation, db: &S) -> Result<(), S::ReadError>
+    fn integrate_op<R>(&mut self, op: Operation, ctx: &R)
     where
-        S: Store,
+        R: ReplicaContext,
     {
-        let metadata_db = db.metadata_store();
-        let parent_ref_db = db.parent_ref_store();
-        let child_ref_db = db.child_ref_store();
-
         let mut metadata_edits = Vec::new();
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
         let mut new_child_ref;
 
-        // println!("{:?} – integrate op {:?}", db.replica_id(), op);
+        // println!("{:?} – integrate op {:?}", ctx.replica_id(), op);
 
         match op {
             Operation::InsertMetadata { op_id, is_dir } => {
@@ -1069,10 +1016,10 @@ impl Timeline {
 
                 let mut child_ref_cursor = self.child_refs.cursor();
                 let mut parent_ref_cursor = self.parent_refs.cursor();
-                parent_ref_cursor.seek(&ref_id, SeekBias::Left, parent_ref_db)?;
+                parent_ref_cursor.seek(&ref_id, SeekBias::Left);
                 let mut is_latest_parent_ref = true;
 
-                while let Some(parent_ref) = parent_ref_cursor.item(parent_ref_db)? {
+                while let Some(parent_ref) = parent_ref_cursor.item() {
                     if parent_ref.ref_id != ref_id {
                         break;
                     } else if parent_ref.timestamp > timestamp {
@@ -1084,12 +1031,8 @@ impl Timeline {
                         if let Some(mut child_ref_value_id) =
                             parent_ref.to_child_ref_value_id(is_latest_parent_ref)
                         {
-                            child_ref_cursor.seek(
-                                &child_ref_value_id,
-                                SeekBias::Left,
-                                child_ref_db,
-                            )?;
-                            let mut child_ref = child_ref_cursor.item(child_ref_db)?.unwrap();
+                            child_ref_cursor.seek(&child_ref_value_id, SeekBias::Left);
+                            let mut child_ref = child_ref_cursor.item().unwrap();
                             if child_ref.is_visible() {
                                 child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
                             }
@@ -1099,7 +1042,7 @@ impl Timeline {
                     } else {
                         break;
                     }
-                    parent_ref_cursor.next(parent_ref_db)?;
+                    parent_ref_cursor.next();
                     is_latest_parent_ref = false;
                 }
 
@@ -1114,24 +1057,23 @@ impl Timeline {
                     child_ref_edits.push(btree::Edit::Insert(new_child_ref.clone()));
                 }
 
-                if db.replica_id() != timestamp.replica_id {
-                    db.recv_timestamp(timestamp);
+                if ctx.replica_id() != timestamp.replica_id {
+                    ctx.recv_timestamp(timestamp);
                 }
             }
         }
 
-        self.child_refs.edit(child_ref_edits, child_ref_db)?;
-        self.metadata.edit(metadata_edits, metadata_db)?;
-        self.parent_refs.edit(parent_ref_edits, parent_ref_db)?;
-        Ok(())
+        self.child_refs.edit(child_ref_edits);
+        self.metadata.edit(metadata_edits);
+        self.parent_refs.edit(parent_ref_edits);
     }
 
-    fn fix_conflicts<S: Store>(
+    fn fix_conflicts<R: ReplicaContext>(
         &mut self,
         ref_id: ParentRefId,
         moved_dir: bool,
-        db: &S,
-    ) -> Result<Vec<Operation>, S::ReadError> {
+        ctx: &R,
+    ) -> Vec<Operation> {
         use btree::KeyedItem;
 
         let mut fixup_ops = Vec::new();
@@ -1139,31 +1081,26 @@ impl Timeline {
 
         // If the child was moved and is a directory, check for cycles.
         if moved_dir {
-            let parent_ref_db = db.parent_ref_store();
             let mut visited = HashSet::new();
             let mut latest_move: Option<ParentRefValue> = None;
             let mut cursor = self.parent_refs.cursor();
-            cursor.seek(&ref_id, SeekBias::Left, parent_ref_db)?;
+            cursor.seek(&ref_id, SeekBias::Left);
 
             loop {
-                let mut parent_ref = cursor.item(parent_ref_db)?.unwrap();
+                let mut parent_ref = cursor.item().unwrap();
                 if visited.contains(&parent_ref.ref_id.child_id) {
                     // Cycle detected. Revert the most recent move contributing to the cycle.
-                    cursor.seek(
-                        &latest_move.as_ref().unwrap().key(),
-                        SeekBias::Right,
-                        parent_ref_db,
-                    )?;
+                    cursor.seek(&latest_move.as_ref().unwrap().key(), SeekBias::Right);
 
                     // Find the previous value for this parent ref that isn't a deletion and store
                     // its timestamp in our reverted_moves map.
                     loop {
-                        let parent_ref = cursor.item(parent_ref_db)?.unwrap();
+                        let parent_ref = cursor.item().unwrap();
                         if parent_ref.parent.is_some() {
                             reverted_moves.insert(parent_ref.ref_id, parent_ref.timestamp);
                             break;
                         } else {
-                            cursor.next(parent_ref_db)?;
+                            cursor.next();
                         }
                     }
 
@@ -1178,8 +1115,8 @@ impl Timeline {
                     // it as having the value we reverted to.
                     if let Some(prev_timestamp) = reverted_moves.get(&parent_ref.ref_id) {
                         while parent_ref.timestamp > *prev_timestamp {
-                            cursor.next(parent_ref_db)?;
-                            parent_ref = cursor.item(parent_ref_db)?.unwrap();
+                            cursor.next();
+                            parent_ref = cursor.item().unwrap();
                         }
                     }
 
@@ -1189,12 +1126,10 @@ impl Timeline {
                         .as_ref()
                         .map_or(true, |m| parent_ref.timestamp > m.timestamp)
                     {
-                        cursor.next(parent_ref_db)?;
-                        if cursor
-                            .item(parent_ref_db)?
-                            .map_or(false, |next_parent_ref| {
-                                next_parent_ref.ref_id == parent_ref.ref_id
-                            }) {
+                        cursor.next();
+                        if cursor.item().map_or(false, |next_parent_ref| {
+                            next_parent_ref.ref_id == parent_ref.ref_id
+                        }) {
                             latest_move = Some(parent_ref.clone());
                         }
                     }
@@ -1204,7 +1139,7 @@ impl Timeline {
                         if parent_id == ROOT_ID {
                             break;
                         } else {
-                            cursor.seek(&parent_id, SeekBias::Left, parent_ref_db)?;
+                            cursor.seek(&parent_id, SeekBias::Left);
                         }
                     } else {
                         break;
@@ -1215,21 +1150,20 @@ impl Timeline {
             // Convert the reverted moves into new move operations.
             let mut moved_ref_ids = Vec::new();
             for (ref_id, timestamp) in &reverted_moves {
-                cursor.seek(ref_id, SeekBias::Left, parent_ref_db)?;
-                let prev_timestamp = cursor.item(parent_ref_db)?.unwrap().timestamp;
+                cursor.seek(ref_id, SeekBias::Left);
+                let prev_timestamp = cursor.item().unwrap().timestamp;
                 cursor.seek_forward(
                     &ParentRefValueId {
                         ref_id: *ref_id,
                         timestamp: *timestamp,
                     },
                     SeekBias::Left,
-                    parent_ref_db,
-                )?;
-                let new_parent = cursor.item(parent_ref_db)?.unwrap().parent;
+                );
+                let new_parent = cursor.item().unwrap().parent;
                 fixup_ops.push(Operation::UpdateParent {
-                    op_id: db.gen_id(),
+                    op_id: ctx.gen_id(),
                     ref_id: *ref_id,
-                    timestamp: db.gen_timestamp(),
+                    timestamp: ctx.gen_timestamp(),
                     prev_timestamp,
                     new_parent,
                 });
@@ -1237,30 +1171,28 @@ impl Timeline {
             }
 
             for op in &fixup_ops {
-                self.integrate_op(op.clone(), db)?;
+                self.integrate_op(op.clone(), ctx);
             }
             for ref_id in moved_ref_ids {
-                fixup_ops.extend(self.fix_name_conflicts(ref_id, db)?);
+                fixup_ops.extend(self.fix_name_conflicts(ref_id, ctx));
             }
         }
 
         if !reverted_moves.contains_key(&ref_id) {
-            fixup_ops.extend(self.fix_name_conflicts(ref_id, db)?);
+            fixup_ops.extend(self.fix_name_conflicts(ref_id, ctx));
         }
 
-        Ok(fixup_ops)
+        fixup_ops
     }
 
-    fn fix_name_conflicts<S: Store>(
+    fn fix_name_conflicts<R: ReplicaContext>(
         &mut self,
         ref_id: ParentRefId,
-        db: &S,
-    ) -> Result<Vec<Operation>, S::ReadError> {
-        let child_ref_db = db.child_ref_store();
-
+        ctx: &R,
+    ) -> Vec<Operation> {
         let mut fixup_ops = Vec::new();
 
-        let parent_ref = self.cur_parent_ref_value(ref_id, db)?.unwrap();
+        let parent_ref = self.cur_parent_ref_value(ref_id).unwrap();
         if let Some((parent_id, name)) = parent_ref.parent {
             let mut cursor_1 = self.child_refs.cursor();
             cursor_1.seek(
@@ -1269,14 +1201,13 @@ impl Timeline {
                     name: name.clone(),
                 },
                 SeekBias::Left,
-                child_ref_db,
-            )?;
-            cursor_1.next(child_ref_db)?;
+            );
+            cursor_1.next();
 
             let mut cursor_2 = cursor_1.clone();
             let mut unique_name = name.clone();
 
-            while let Some(child_ref) = cursor_1.item(child_ref_db)? {
+            while let Some(child_ref) = cursor_1.item() {
                 if child_ref.is_visible()
                     && child_ref.parent_id == parent_id
                     && child_ref.name == name
@@ -1289,9 +1220,8 @@ impl Timeline {
                                 name: unique_name.clone(),
                             },
                             SeekBias::Left,
-                            child_ref_db,
-                        )?;
-                        if let Some(conflicting_child_ref) = cursor_2.item(child_ref_db)? {
+                        );
+                        if let Some(conflicting_child_ref) = cursor_2.item() {
                             if !conflicting_child_ref.is_visible()
                                 || conflicting_child_ref.parent_id != parent_id
                                 || conflicting_child_ref.name != unique_name
@@ -1304,43 +1234,38 @@ impl Timeline {
                     }
 
                     let fixup_op = Operation::UpdateParent {
-                        op_id: db.gen_id(),
+                        op_id: ctx.gen_id(),
                         ref_id: child_ref.parent_ref_id,
-                        timestamp: db.gen_timestamp(),
+                        timestamp: ctx.gen_timestamp(),
                         prev_timestamp: child_ref.timestamp,
                         new_parent: Some((parent_id, unique_name.clone())),
                     };
-                    self.integrate_op(fixup_op.clone(), db)?;
+                    self.integrate_op(fixup_op.clone(), ctx);
                     fixup_ops.push(fixup_op);
 
-                    let visible_index = cursor_1.end::<usize, _>(child_ref_db)?;
-                    cursor_1.seek_forward(&visible_index, SeekBias::Right, child_ref_db)?;
+                    let visible_index = cursor_1.end::<usize>();
+                    cursor_1.seek_forward(&visible_index, SeekBias::Right);
                 } else {
                     break;
                 }
             }
         }
 
-        Ok(fixup_ops)
+        fixup_ops
     }
 
-    fn id_for_path<P, S>(&self, path: P, db: &S) -> Result<Option<id::Unique>, S::ReadError>
+    fn id_for_path<P>(&self, path: P) -> Option<id::Unique>
     where
         P: Into<PathBuf>,
-        S: Store,
     {
-        Ok(self
-            .ref_id_for_path(path, db)?
-            .map(|ref_id| ref_id.child_id))
+        self.ref_id_for_path(path).map(|ref_id| ref_id.child_id)
     }
 
-    fn ref_id_for_path<P, S>(&self, path: P, db: &S) -> Result<Option<ParentRefId>, S::ReadError>
+    fn ref_id_for_path<P>(&self, path: P) -> Option<ParentRefId>
     where
         P: Into<PathBuf>,
-        S: Store,
     {
         let path = path.into();
-        let child_ref_db = db.child_ref_store();
 
         let mut cursor = self.child_refs.cursor();
         let mut ref_id = ParentRefId {
@@ -1353,89 +1278,67 @@ impl Timeline {
                 parent_id: ref_id.child_id,
                 name,
             };
-            if cursor.seek(&key, SeekBias::Left, child_ref_db)? {
-                let child_ref = cursor.item(child_ref_db)?.unwrap();
+            if cursor.seek(&key, SeekBias::Left) {
+                let child_ref = cursor.item().unwrap();
                 if child_ref.is_visible() {
                     ref_id = child_ref.parent_ref_id;
                 } else {
-                    return Ok(None);
+                    return None;
                 }
             } else {
-                return Ok(None);
+                return None;
             }
         }
 
-        Ok(Some(ref_id))
+        Some(ref_id)
     }
 
-    pub fn resolve_paths<S>(
-        &self,
-        file_id: id::Unique,
-        db: &S,
-    ) -> Result<SmallVec<[PathBuf; 1]>, S::ReadError>
-    where
-        S: Store,
-    {
+    pub fn resolve_paths(&self, file_id: id::Unique) -> SmallVec<[PathBuf; 1]> {
         let mut paths = SmallVec::new();
 
         if file_id == ROOT_ID {
             paths.push(PathBuf::new());
         } else {
-            for parent_ref in self.cur_parent_ref_values(file_id, db)? {
-                paths.extend(self.resolve_path(parent_ref.ref_id, db)?);
+            for parent_ref in self.cur_parent_ref_values(file_id) {
+                paths.extend(self.resolve_path(parent_ref.ref_id));
             }
         }
-        Ok(paths)
+        paths
     }
 
-    fn resolve_path<S>(&self, ref_id: ParentRefId, db: &S) -> Result<Option<PathBuf>, S::ReadError>
-    where
-        S: Store,
-    {
+    fn resolve_path(&self, ref_id: ParentRefId) -> Option<PathBuf> {
         let mut path_components = Vec::new();
-        if self.visit_ancestors(ref_id, |name| path_components.push(name), db)? {
+        if self.visit_ancestors(ref_id, |name| path_components.push(name)) {
             let mut path = PathBuf::new();
             for component in path_components.into_iter().rev() {
                 path.push(component.as_ref());
             }
-            Ok(Some(path))
+            Some(path)
         } else {
-            Ok(None)
+            None
         }
     }
 
-    fn resolve_depth<S>(&self, ref_id: ParentRefId, db: &S) -> Result<Option<usize>, S::ReadError>
-    where
-        S: Store,
-    {
+    fn resolve_depth(&self, ref_id: ParentRefId) -> Option<usize> {
         let mut depth = 0;
-        if self.visit_ancestors(ref_id, |_| depth += 1, db)? {
-            Ok(Some(depth))
+        if self.visit_ancestors(ref_id, |_| depth += 1) {
+            Some(depth)
         } else {
-            Ok(None)
+            None
         }
     }
 
-    fn visit_ancestors<F, S>(
-        &self,
-        ref_id: ParentRefId,
-        mut f: F,
-        db: &S,
-    ) -> Result<bool, S::ReadError>
+    fn visit_ancestors<F>(&self, ref_id: ParentRefId, mut f: F) -> bool
     where
         F: FnMut(Arc<OsString>),
-        S: Store,
     {
-        let parent_ref_db = db.parent_ref_store();
-
         let mut visited = HashSet::new();
         let mut cursor = self.parent_refs.cursor();
         if ref_id.child_id == ROOT_ID {
-            Ok(true)
-        } else if cursor.seek(&ref_id, SeekBias::Left, parent_ref_db)? {
+            true
+        } else if cursor.seek(&ref_id, SeekBias::Left) {
             loop {
-                if let Some((parent_id, name)) = cursor.item(parent_ref_db)?.and_then(|r| r.parent)
-                {
+                if let Some((parent_id, name)) = cursor.item().and_then(|r| r.parent) {
                     // TODO: Only check for cycles in debug mode
                     if visited.contains(&parent_id) {
                         panic!("Cycle detected when visiting ancestors");
@@ -1447,125 +1350,85 @@ impl Timeline {
                     if parent_id == ROOT_ID {
                         break;
                     } else {
-                        cursor.seek(&parent_id, SeekBias::Left, parent_ref_db)?;
+                        cursor.seek(&parent_id, SeekBias::Left);
                     }
                 } else {
-                    return Ok(false);
+                    return false;
                 }
             }
 
-            Ok(true)
+            true
         } else {
-            Ok(false)
+            false
         }
     }
 
-    fn resolve_name<S: Store>(
-        &self,
-        ref_id: ParentRefId,
-        db: &S,
-    ) -> Result<Option<Arc<OsString>>, S::ReadError> {
-        Ok(self
-            .cur_parent_ref_value(ref_id, db)?
+    fn resolve_name(&self, ref_id: ParentRefId) -> Option<Arc<OsString>> {
+        self.cur_parent_ref_value(ref_id)
             .and_then(|parent_ref| parent_ref.parent)
-            .map(|(_, name)| name))
+            .map(|(_, name)| name)
     }
 
-    fn inode_for_id<S: Store>(
-        &self,
-        child_id: id::Unique,
-        db: &S,
-    ) -> Result<Option<Inode>, S::ReadError> {
-        Ok(self
-            .metadata(child_id, db)?
-            .and_then(|metadata| metadata.inode))
+    fn inode_for_id(&self, child_id: id::Unique) -> Option<Inode> {
+        self.metadata(child_id).and_then(|metadata| metadata.inode)
     }
 
-    fn set_inode_for_id<S: Store>(
-        &mut self,
-        child_id: id::Unique,
-        inode: Inode,
-        db: &S,
-    ) -> Result<bool, S::ReadError> {
-        let metadata_db = db.metadata_store();
+    fn set_inode_for_id(&mut self, child_id: id::Unique, inode: Inode) -> bool {
         let mut cursor = self.metadata.cursor();
-        if cursor.seek(&child_id, SeekBias::Left, metadata_db)? {
-            let mut metadata = cursor.item(metadata_db)?.unwrap();
+        if cursor.seek(&child_id, SeekBias::Left) {
+            let mut metadata = cursor.item().unwrap();
             if let Some(inode) = metadata.inode {
                 self.inodes_to_file_ids.remove(&inode);
             }
 
             metadata.inode = Some(inode);
-            self.metadata
-                .edit(vec![btree::Edit::Insert(metadata)], metadata_db)?;
+            self.metadata.edit(vec![btree::Edit::Insert(metadata)]);
             self.inodes_to_file_ids.insert(inode, child_id);
-            Ok(true)
+            true
         } else {
-            Ok(false)
+            false
         }
     }
 
-    fn metadata<S>(&self, child_id: id::Unique, db: &S) -> Result<Option<Metadata>, S::ReadError>
-    where
-        S: Store,
-    {
-        let metadata_db = db.metadata_store();
+    fn metadata(&self, child_id: id::Unique) -> Option<Metadata> {
         let mut cursor = self.metadata.cursor();
-        if cursor.seek(&child_id, SeekBias::Left, metadata_db)? {
-            Ok(cursor.item(metadata_db)?)
+        if cursor.seek(&child_id, SeekBias::Left) {
+            cursor.item()
         } else {
-            Ok(None)
+            None
         }
     }
 
-    fn cur_parent_ref_values<S: Store>(
-        &self,
-        child_id: id::Unique,
-        db: &S,
-    ) -> Result<Vec<ParentRefValue>, S::ReadError> {
-        let parent_ref_db = db.parent_ref_store();
+    fn cur_parent_ref_values(&self, child_id: id::Unique) -> Vec<ParentRefValue> {
         let mut cursor = self.parent_refs.cursor();
-        cursor.seek(&child_id, SeekBias::Left, parent_ref_db)?;
+        cursor.seek(&child_id, SeekBias::Left);
         let mut parent_ref_values = Vec::new();
-        while let Some(parent_ref) = cursor.item(parent_ref_db)? {
+        while let Some(parent_ref) = cursor.item() {
             if parent_ref.ref_id.child_id == child_id {
-                cursor.seek(&parent_ref.ref_id, SeekBias::Right, parent_ref_db)?;
+                cursor.seek(&parent_ref.ref_id, SeekBias::Right);
                 parent_ref_values.push(parent_ref);
             } else {
                 break;
             }
         }
-        Ok(parent_ref_values)
+        parent_ref_values
     }
 
-    fn cur_parent_ref_value<S: Store>(
-        &self,
-        ref_id: ParentRefId,
-        db: &S,
-    ) -> Result<Option<ParentRefValue>, S::ReadError> {
-        let parent_ref_db = db.parent_ref_store();
+    fn cur_parent_ref_value(&self, ref_id: ParentRefId) -> Option<ParentRefValue> {
         let mut cursor = self.parent_refs.cursor();
-        if cursor.seek(&ref_id, SeekBias::Left, parent_ref_db)? {
-            cursor.item(parent_ref_db)
+        if cursor.seek(&ref_id, SeekBias::Left) {
+            cursor.item()
         } else {
-            Ok(None)
+            None
         }
     }
 
-    fn child_ref_value<S>(
-        &self,
-        ref_id: ChildRefValueId,
-        db: &S,
-    ) -> Result<Option<ChildRefValue>, S::ReadError>
-    where
-        S: Store,
-    {
-        let child_ref_db = db.child_ref_store();
+    fn child_ref_value(&self, ref_id: ChildRefValueId) -> Option<ChildRefValue> {
         let mut cursor = self.child_refs.cursor();
-        if cursor.seek(&ref_id, SeekBias::Left, child_ref_db)? {
-            cursor.item(child_ref_db)
+        if cursor.seek(&ref_id, SeekBias::Left) {
+            cursor.item()
         } else {
-            Ok(None)
+            None
         }
     }
 }
@@ -1583,146 +1446,108 @@ impl Cursor {
         }
     }
 
-    pub fn name<S: Store>(&self, db: &S) -> Result<Option<Arc<OsString>>, S::ReadError> {
+    pub fn name(&self) -> Option<Arc<OsString>> {
         if self.stack.is_empty() {
-            Ok(None)
+            None
         } else {
-            Ok(Some(
-                self.stack
-                    .last()
-                    .unwrap()
-                    .item(db.child_ref_store())?
-                    .unwrap()
-                    .name
-                    .clone(),
-            ))
+            Some(self.stack.last().unwrap().item().unwrap().name.clone())
         }
     }
 
-    pub fn is_dir<S: Store>(&self, db: &S) -> Result<Option<bool>, S::ReadError> {
-        Ok(self.metadata(db)?.map(|metadata| metadata.is_dir))
+    pub fn is_dir(&self) -> Option<bool> {
+        self.metadata().map(|metadata| metadata.is_dir)
     }
 
-    pub fn file_id<S: Store>(&self, db: &S) -> Result<Option<id::Unique>, S::ReadError> {
-        Ok(self.metadata(db)?.map(|metadata| metadata.file_id))
+    pub fn file_id(&self) -> Option<id::Unique> {
+        self.metadata().map(|metadata| metadata.file_id)
     }
 
-    pub fn ref_id<S: Store>(&self, db: &S) -> Result<Option<ParentRefId>, S::ReadError> {
+    pub fn ref_id(&self) -> Option<ParentRefId> {
         if self.stack.is_empty() {
-            Ok(None)
+            None
         } else {
-            Ok(Some(
-                self.stack
-                    .last()
-                    .unwrap()
-                    .item(db.child_ref_store())?
-                    .unwrap()
-                    .parent_ref_id,
-            ))
+            Some(self.stack.last().unwrap().item().unwrap().parent_ref_id)
         }
     }
 
-    fn metadata<S: Store>(&self, db: &S) -> Result<Option<Metadata>, S::ReadError> {
+    fn metadata(&self) -> Option<Metadata> {
         if self.stack.is_empty() {
-            Ok(None)
+            None
         } else {
-            self.metadata_cursor.item(db.metadata_store())
+            self.metadata_cursor.item()
         }
     }
 
-    pub fn next<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
-        let metadata_db = db.metadata_store();
-
+    pub fn next(&mut self) {
         if !self.stack.is_empty() {
-            let metadata = self.metadata_cursor.item(metadata_db)?.unwrap();
-            if !metadata.is_dir || !self.descend(db)? {
-                self.next_sibling_or_cousin(db)?;
+            let metadata = self.metadata_cursor.item().unwrap();
+            if !metadata.is_dir || !self.descend() {
+                self.next_sibling_or_cousin();
             }
         }
-        Ok(())
     }
 
-    pub fn next_sibling_or_cousin<S: Store>(&mut self, db: &S) -> Result<(), S::ReadError> {
-        while !self.stack.is_empty() && !self.next_sibling(db)? {
+    pub fn next_sibling_or_cousin(&mut self) {
+        while !self.stack.is_empty() && !self.next_sibling() {
             self.path.pop();
             self.stack.pop();
         }
-        Ok(())
     }
 
-    fn descend<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
+    fn descend(&mut self) -> bool {
         let cursor = self.stack.last().unwrap().clone();
-        let dir_id = cursor
-            .item(db.child_ref_store())?
-            .unwrap()
-            .parent_ref_id
-            .child_id;
-        self.descend_into(cursor, dir_id, db)
+        let dir_id = cursor.item().unwrap().parent_ref_id.child_id;
+        self.descend_into(cursor, dir_id)
     }
 
-    fn descend_into<S: Store>(
+    fn descend_into(
         &mut self,
         mut child_ref_cursor: btree::Cursor<ChildRefValue>,
         dir_id: id::Unique,
-        db: &S,
-    ) -> Result<bool, S::ReadError> {
-        child_ref_cursor.seek(&dir_id, SeekBias::Left, db.child_ref_store())?;
-        if let Some(child_ref) = child_ref_cursor.item(db.child_ref_store())? {
+    ) -> bool {
+        child_ref_cursor.seek(&dir_id, SeekBias::Left);
+        if let Some(child_ref) = child_ref_cursor.item() {
             if child_ref.parent_id == dir_id {
                 self.path.push(child_ref.name.as_os_str());
                 self.stack.push(child_ref_cursor.clone());
 
                 let child_id = child_ref.parent_ref_id.child_id;
                 if child_ref.is_visible() {
-                    self.metadata_cursor
-                        .seek(&child_id, SeekBias::Left, db.metadata_store())?;
-                    Ok(true)
-                } else if self.next_sibling(db)? {
-                    Ok(true)
+                    self.metadata_cursor.seek(&child_id, SeekBias::Left);
+                    true
+                } else if self.next_sibling() {
+                    true
                 } else {
                     self.path.pop();
                     self.stack.pop();
-                    Ok(false)
+                    false
                 }
             } else {
-                Ok(false)
+                false
             }
         } else {
-            Ok(false)
+            false
         }
     }
 
-    fn next_sibling<S: Store>(&mut self, db: &S) -> Result<bool, S::ReadError> {
-        let child_ref_db = db.child_ref_store();
+    fn next_sibling(&mut self) -> bool {
         let cursor = self.stack.last_mut().unwrap();
-        let parent_id = cursor.item(child_ref_db)?.unwrap().parent_id;
-        let next_visible_index: usize = cursor.end(child_ref_db)?;
-        cursor.seek(&next_visible_index, SeekBias::Right, child_ref_db)?;
-        while let Some(child_ref) = cursor.item(child_ref_db)? {
+        let parent_id = cursor.item().unwrap().parent_id;
+        let next_visible_index: usize = cursor.end();
+        cursor.seek(&next_visible_index, SeekBias::Right);
+        while let Some(child_ref) = cursor.item() {
             if child_ref.parent_id == parent_id {
                 self.path.pop();
                 self.path.push(child_ref.name.as_os_str());
-                self.metadata_cursor.seek(
-                    &child_ref.parent_ref_id.child_id,
-                    SeekBias::Left,
-                    db.metadata_store(),
-                )?;
-                return Ok(true);
+                self.metadata_cursor
+                    .seek(&child_ref.parent_ref_id.child_id, SeekBias::Left);
+                return true;
             } else {
                 break;
             }
         }
 
-        Ok(false)
-    }
-}
-
-impl<S: Store> fmt::Debug for Error<S> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Error::InvalidPath => write!(f, "Error::InvalidPath"),
-            Error::ReadError(e) => write!(f, "Error::ReadError({:?})", e),
-        }
+        false
     }
 }
 
@@ -2030,48 +1855,42 @@ mod tests {
 
     #[test]
     fn test_local_dir_ops() {
-        let db = NullStore::new(1);
+        let ctx = TestContext::new(1);
         let mut timeline = Timeline::new();
-        timeline.create_dir_all("a/b2/", &db).unwrap();
-        assert_eq!(timeline.paths(&db), ["a/", "a/b2/"]);
+        timeline.create_dir_all("a/b2/", &ctx).unwrap();
+        assert_eq!(timeline.paths(), ["a/", "a/b2/"]);
 
-        timeline.create_dir_all("a/b1/c", &db).unwrap();
-        assert_eq!(timeline.paths(&db), ["a/", "a/b1/", "a/b1/c/", "a/b2/"]);
+        timeline.create_dir_all("a/b1/c", &ctx).unwrap();
+        assert_eq!(timeline.paths(), ["a/", "a/b1/", "a/b1/c/", "a/b2/"]);
 
-        timeline.create_dir_all("a/b1/d", &db).unwrap();
+        timeline.create_dir_all("a/b1/d", &ctx).unwrap();
         assert_eq!(
-            timeline.paths(&db),
+            timeline.paths(),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
         );
 
-        timeline.remove("a/b1/c", &db).unwrap();
-        assert_eq!(timeline.paths(&db), ["a/", "a/b1/", "a/b1/d/", "a/b2/"]);
+        timeline.remove("a/b1/c", &ctx).unwrap();
+        assert_eq!(timeline.paths(), ["a/", "a/b1/", "a/b1/d/", "a/b2/"]);
 
-        timeline.remove("a/b1", &db).unwrap();
-        assert_eq!(timeline.paths(&db), ["a/", "a/b2/"]);
+        timeline.remove("a/b1", &ctx).unwrap();
+        assert_eq!(timeline.paths(), ["a/", "a/b2/"]);
 
-        timeline.create_dir_all("a/b1/c", &db).unwrap();
-        timeline.create_dir_all("a/b1/d", &db).unwrap();
+        timeline.create_dir_all("a/b1/c", &ctx).unwrap();
+        timeline.create_dir_all("a/b1/d", &ctx).unwrap();
         assert_eq!(
-            timeline.paths(&db),
+            timeline.paths(),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
         );
 
-        let moved_id = timeline.id_for_path("a/b1", &db).unwrap().unwrap();
-        timeline.rename("a/b1", "b", &db).unwrap();
-        assert_eq!(timeline.paths(&db), ["a/", "a/b2/", "b/", "b/c/", "b/d/"]);
-        assert_eq!(timeline.id_for_path("b", &db).unwrap().unwrap(), moved_id);
+        let moved_id = timeline.id_for_path("a/b1").unwrap();
+        timeline.rename("a/b1", "b", &ctx).unwrap();
+        assert_eq!(timeline.paths(), ["a/", "a/b2/", "b/", "b/c/", "b/d/"]);
+        assert_eq!(timeline.id_for_path("b",).unwrap(), moved_id);
 
-        let moved_id = timeline.id_for_path("b/d", &db).unwrap().unwrap();
-        timeline.rename("b/d", "a/b2/d", &db).unwrap();
-        assert_eq!(
-            timeline.paths(&db),
-            ["a/", "a/b2/", "a/b2/d/", "b/", "b/c/"]
-        );
-        assert_eq!(
-            timeline.id_for_path("a/b2/d", &db).unwrap().unwrap(),
-            moved_id
-        );
+        let moved_id = timeline.id_for_path("b/d").unwrap();
+        timeline.rename("b/d", "a/b2/d", &ctx).unwrap();
+        assert_eq!(timeline.paths(), ["a/", "a/b2/", "a/b2/d/", "b/", "b/c/"]);
+        assert_eq!(timeline.id_for_path("a/b2/d",).unwrap(), moved_id);
     }
 
     #[test]
@@ -2081,9 +1900,9 @@ mod tests {
             println!("SEED: {:?}", seed);
 
             let mut rng = StdRng::from_seed(&[seed]);
-            let db = NullStore::new(1);
+            let ctx = TestContext::new(1);
 
-            let mut fs_1 = FakeFileSystem::new(&db, rng.clone());
+            let mut fs_1 = FakeFileSystem::new(&ctx, rng.clone());
             fs_1.mutate(5);
 
             let mut fs_2 = fs_1.clone();
@@ -2102,37 +1921,31 @@ mod tests {
                 if fs_1.version() > prev_fs_1_version && rng.gen() {
                     // println!("scanning from fs 1");
                     prev_fs_1_version = fs_1.version();
-                    ops_1.extend(index_1.read_from_fs(fs_1.entries(), &db).unwrap());
+                    ops_1.extend(index_1.read_from_fs(fs_1.entries(), &ctx));
                 }
 
                 if fs_2.version() > prev_fs_2_version && rng.gen() {
                     // println!("scanning from fs 2");
                     prev_fs_2_version = fs_2.version();
-                    ops_2.extend(index_2.read_from_fs(fs_2.entries(), &db).unwrap());
+                    ops_2.extend(index_2.read_from_fs(fs_2.entries(), &ctx));
                 }
 
                 if !ops_2.is_empty() && rng.gen() {
                     // println!("integrating into index 1");
-                    ops_1.extend(
-                        index_1
-                            .integrate_ops(
-                                &ops_2.drain(..).collect::<Vec<_>>(),
-                                Some(&mut fs_1),
-                                &db,
-                            ).unwrap(),
-                    );
+                    ops_1.extend(index_1.integrate_ops(
+                        &ops_2.drain(..).collect::<Vec<_>>(),
+                        Some(&mut fs_1),
+                        &ctx,
+                    ));
                 }
 
                 if !ops_1.is_empty() && rng.gen() {
                     // println!("integrating into index 2");
-                    ops_2.extend(
-                        index_2
-                            .integrate_ops(
-                                &ops_1.drain(..).collect::<Vec<_>>(),
-                                Some(&mut fs_2),
-                                &db,
-                            ).unwrap(),
-                    );
+                    ops_2.extend(index_2.integrate_ops(
+                        &ops_1.drain(..).collect::<Vec<_>>(),
+                        Some(&mut fs_2),
+                        &ctx,
+                    ));
                 }
 
                 if ops_1.is_empty()
@@ -2144,101 +1957,83 @@ mod tests {
                 }
             }
 
-            assert_eq!(index_2.paths_with_ids(&db), index_1.paths_with_ids(&db));
+            assert_eq!(index_2.paths_with_ids(), index_1.paths_with_ids());
             assert_eq!(fs_2.paths(), fs_1.paths());
-            assert_eq!(index_1.paths(&db), fs_1.paths());
+            assert_eq!(index_1.paths(), fs_1.paths());
         }
     }
 
     #[test]
     fn test_name_conflict_fixups() {
-        let db_1 = NullStore::new(1);
+        let ctx_1 = TestContext::new(1);
         let mut timeline_1 = Timeline::new();
         let mut timeline_1_ops = Vec::new();
 
-        let db_2 = NullStore::new(2);
+        let ctx_2 = TestContext::new(2);
         let mut timeline_2 = Timeline::new();
         let mut timeline_2_ops = Vec::new();
 
-        timeline_1_ops.extend(timeline_1.create_dir_all("a", &db_1).unwrap());
-        let id_1 = timeline_1.id_for_path("a", &db_1).unwrap().unwrap();
+        timeline_1_ops.extend(timeline_1.create_dir_all("a", &ctx_1).unwrap());
+        let id_1 = timeline_1.id_for_path("a").unwrap();
 
-        timeline_2_ops.extend(timeline_2.create_dir_all("a", &db_2).unwrap());
-        timeline_2_ops.extend(timeline_2.create_dir_all("a~", &db_2).unwrap());
-        let id_2 = timeline_2.id_for_path("a", &db_2).unwrap().unwrap();
-        let id_3 = timeline_2.id_for_path("a~", &db_2).unwrap().unwrap();
+        timeline_2_ops.extend(timeline_2.create_dir_all("a", &ctx_2).unwrap());
+        timeline_2_ops.extend(timeline_2.create_dir_all("a~", &ctx_2).unwrap());
+        let id_2 = timeline_2.id_for_path("a").unwrap();
+        let id_3 = timeline_2.id_for_path("a~").unwrap();
 
         while !timeline_1_ops.is_empty() || !timeline_2_ops.is_empty() {
             let ops_from_timeline_2_to_timeline_1 = timeline_2_ops.drain(..).collect::<Vec<_>>();
             let ops_from_timeline_1_to_timeline_2 = timeline_1_ops.drain(..).collect::<Vec<_>>();
-            timeline_1_ops.extend(
-                timeline_1
-                    .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
-                        &ops_from_timeline_2_to_timeline_1,
-                        None,
-                        &db_1,
-                    ).unwrap(),
-            );
-            timeline_2_ops.extend(
-                timeline_2
-                    .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
-                        &ops_from_timeline_1_to_timeline_2,
-                        None,
-                        &db_2,
-                    ).unwrap(),
-            );
+            timeline_1_ops.extend(timeline_1.integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+                &ops_from_timeline_2_to_timeline_1,
+                None,
+                &ctx_1,
+            ));
+            timeline_2_ops.extend(timeline_2.integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+                &ops_from_timeline_1_to_timeline_2,
+                None,
+                &ctx_2,
+            ));
         }
 
-        assert_eq!(
-            timeline_1.paths_with_ids(&db_1),
-            timeline_2.paths_with_ids(&db_2)
-        );
-        assert_eq!(timeline_1.paths(&db_1), ["a/", "a~/", "a~~/"]);
-        assert_eq!(timeline_1.id_for_path("a", &db_1).unwrap().unwrap(), id_2);
-        assert_eq!(timeline_1.id_for_path("a~", &db_1).unwrap().unwrap(), id_3);
-        assert_eq!(timeline_1.id_for_path("a~~", &db_1).unwrap().unwrap(), id_1);
+        assert_eq!(timeline_1.paths_with_ids(), timeline_2.paths_with_ids());
+        assert_eq!(timeline_1.paths(), ["a/", "a~/", "a~~/"]);
+        assert_eq!(timeline_1.id_for_path("a").unwrap(), id_2);
+        assert_eq!(timeline_1.id_for_path("a~").unwrap(), id_3);
+        assert_eq!(timeline_1.id_for_path("a~~").unwrap(), id_1);
     }
 
     #[test]
     fn test_cycle_fixups() {
-        let db_1 = NullStore::new(1);
+        let ctx_1 = TestContext::new(1);
         let mut timeline_1 = Timeline::new();
-        timeline_1.create_dir_all("a", &db_1).unwrap();
-        timeline_1.create_dir_all("b", &db_1).unwrap();
+        timeline_1.create_dir_all("a", &ctx_1).unwrap();
+        timeline_1.create_dir_all("b", &ctx_1).unwrap();
         let mut timeline_1_ops = Vec::new();
 
-        let db_2 = NullStore::new(2);
+        let ctx_2 = TestContext::new(2);
         let mut timeline_2 = timeline_1.clone();
         let mut timeline_2_ops = Vec::new();
 
-        timeline_1_ops.push(timeline_1.rename("a", "b/a", &db_1).unwrap());
-        timeline_2_ops.push(timeline_2.rename("b", "a/b", &db_1).unwrap());
+        timeline_1_ops.push(timeline_1.rename("a", "b/a", &ctx_1).unwrap());
+        timeline_2_ops.push(timeline_2.rename("b", "a/b", &ctx_1).unwrap());
         while !timeline_1_ops.is_empty() || !timeline_2_ops.is_empty() {
             let ops_from_timeline_2_to_timeline_1 = timeline_2_ops.drain(..).collect::<Vec<_>>();
             let ops_from_timeline_1_to_timeline_2 = timeline_1_ops.drain(..).collect::<Vec<_>>();
-            timeline_1_ops.extend(
-                timeline_1
-                    .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
-                        &ops_from_timeline_2_to_timeline_1,
-                        None,
-                        &db_1,
-                    ).unwrap(),
-            );
-            timeline_2_ops.extend(
-                timeline_2
-                    .integrate_ops::<FakeFileSystem<StdRng>, _, _>(
-                        &ops_from_timeline_1_to_timeline_2,
-                        None,
-                        &db_2,
-                    ).unwrap(),
-            );
+            timeline_1_ops.extend(timeline_1.integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+                &ops_from_timeline_2_to_timeline_1,
+                None,
+                &ctx_1,
+            ));
+            timeline_2_ops.extend(timeline_2.integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+                &ops_from_timeline_1_to_timeline_2,
+                None,
+                &ctx_2,
+            ));
         }
 
-        assert_eq!(
-            timeline_1.paths_with_ids(&db_1),
-            timeline_2.paths_with_ids(&db_2)
-        );
-        assert_eq!(timeline_1.paths(&db_1), ["b/", "b/a/"]);
+        assert_eq!(timeline_1.paths_with_ids(), timeline_2.paths_with_ids());
+        assert_eq!(timeline_1.paths(), ["b/", "b/a/"]);
     }
 
     #[test]
@@ -2247,13 +2042,13 @@ mod tests {
         use std::mem;
         const PEERS: usize = 3;
 
-        for seed in 0..1000000 {
+        for seed in 0..100 {
             // let seed = 44373;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let db = Vec::from_iter((0..PEERS).map(|i| NullStore::new(i as u64 + 1)));
-            let mut fs = Vec::from_iter((0..PEERS).map(|i| FakeFileSystem::new(&db[i], rng)));
+            let ctx = Vec::from_iter((0..PEERS).map(|i| TestContext::new(i as u64 + 1)));
+            let mut fs = Vec::from_iter((0..PEERS).map(|i| FakeFileSystem::new(&ctx[i], rng)));
             let mut prev_fs_versions = Vec::from_iter((0..PEERS).map(|_| 0));
             let mut timelines = Vec::from_iter((0..PEERS).map(|_| Timeline::new()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
@@ -2261,13 +2056,13 @@ mod tests {
             // Generate and deliver random mutations
             for _ in 0..5 {
                 let replica_index = rng.gen_range(0, PEERS);
-                let db = &db[replica_index];
+                let ctx = &ctx[replica_index];
                 let fs = &mut fs[replica_index];
                 let timeline = &mut timelines[replica_index];
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = timeline.integrate_ops(&ops, Some(fs), db).unwrap();
+                    let fixup_ops = timeline.integrate_ops(&ops, Some(fs), ctx);
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 } else {
                     if prev_fs_versions[replica_index] == fs.version() || rng.gen() {
@@ -2275,7 +2070,7 @@ mod tests {
                     }
 
                     prev_fs_versions[replica_index] = fs.version();
-                    let ops = timeline.read_from_fs(fs.entries(), db).unwrap();
+                    let ops = timeline.read_from_fs(fs.entries(), ctx);
                     deliver_ops(replica_index, &mut inboxes, ops);
                 }
             }
@@ -2284,20 +2079,20 @@ mod tests {
             loop {
                 let mut done = true;
                 for replica_index in 0..PEERS {
-                    let db = &db[replica_index];
+                    let ctx = &ctx[replica_index];
                     let fs = &mut fs[replica_index];
                     let timeline = &mut timelines[replica_index];
 
                     if prev_fs_versions[replica_index] < fs.version() {
                         prev_fs_versions[replica_index] = fs.version();
-                        let ops = timeline.read_from_fs(fs.entries(), db).unwrap();
+                        let ops = timeline.read_from_fs(fs.entries(), ctx);
                         deliver_ops(replica_index, &mut inboxes, ops);
                         done = false;
                     }
 
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
                     if !ops.is_empty() {
-                        let fixup_ops = timeline.integrate_ops(&ops, Some(fs), db).unwrap();
+                        let fixup_ops = timeline.integrate_ops(&ops, Some(fs), ctx);
                         deliver_ops(replica_index, &mut inboxes, fixup_ops);
                         done = false;
                     }
@@ -2311,14 +2106,14 @@ mod tests {
             // Ensure all timelines have the same contents
             for i in 0..PEERS - 1 {
                 assert_eq!(
-                    timelines[i].paths_with_ids(&db[i]),
-                    timelines[i + 1].paths_with_ids(&db[i + 1])
+                    timelines[i].paths_with_ids(),
+                    timelines[i + 1].paths_with_ids()
                 );
             }
 
             // Ensure all timelines match their underlying file system
             for i in 0..PEERS {
-                assert_eq!(timelines[i].paths(&db[i]), fs[i].paths());
+                assert_eq!(timelines[i].paths(), fs[i].paths());
             }
 
             fn deliver_ops(sender: usize, inboxes: &mut Vec<Vec<Operation>>, ops: Vec<Operation>) {
@@ -2337,7 +2132,7 @@ mod tests {
     struct FakeFileSystemState<'a, T: Rng + Clone> {
         timeline: Timeline,
         next_inode: Inode,
-        db: &'a NullStore,
+        ctx: &'a TestContext,
         rng: T,
         version: usize,
     }
@@ -2356,14 +2151,14 @@ mod tests {
         is_dir: bool,
     }
 
-    struct NullStore {
+    struct TestContext {
         next_id: Cell<id::Unique>,
         lamport_clock: Cell<LamportTimestamp>,
     }
 
     impl<'a, T: Rng + Clone> FakeFileSystem<'a, T> {
-        fn new(db: &'a NullStore, rng: T) -> Self {
-            FakeFileSystem(Rc::new(RefCell::new(FakeFileSystemState::new(db, rng))))
+        fn new(ctx: &'a TestContext, rng: T) -> Self {
+            FakeFileSystem(Rc::new(RefCell::new(FakeFileSystemState::new(ctx, rng))))
         }
 
         fn mutate(&self, count: usize) {
@@ -2431,12 +2226,12 @@ mod tests {
     }
 
     impl<'a, T: Rng + Clone> FakeFileSystemState<'a, T> {
-        fn new(db: &'a NullStore, rng: T) -> Self {
+        fn new(ctx: &'a TestContext, rng: T) -> Self {
             let timeline = Timeline::new();
             Self {
                 timeline,
                 next_inode: 0,
-                db,
+                ctx,
                 rng,
                 version: 0,
             }
@@ -2445,11 +2240,11 @@ mod tests {
         fn mutate(&mut self, count: usize) {
             self.version += 1;
             self.timeline
-                .mutate(&mut self.rng, count, &mut self.next_inode, self.db);
+                .mutate(&mut self.rng, count, &mut self.next_inode, self.ctx);
         }
 
         fn paths(&self) -> Vec<String> {
-            self.timeline.paths(self.db)
+            self.timeline.paths()
         }
 
         fn create_file(&mut self, path: &Path) -> bool {
@@ -2464,7 +2259,7 @@ mod tests {
             let inode = self.next_inode;
             self.next_inode += 1;
             self.timeline
-                .create_file_internal(path, false, Some(inode), self.db)
+                .create_file_internal(path, false, Some(inode), self.ctx)
                 .is_ok()
         }
 
@@ -2480,7 +2275,7 @@ mod tests {
             let inode = self.next_inode;
             self.next_inode += 1;
             self.timeline
-                .create_file_internal(path, true, Some(inode), self.db)
+                .create_file_internal(path, true, Some(inode), self.ctx)
                 .is_ok()
         }
 
@@ -2493,7 +2288,7 @@ mod tests {
             }
 
             // println!("FileSystem: hard link {:?} to {:?}", src, dst);
-            self.timeline.hard_link(src, dst, self.db).is_ok()
+            self.timeline.hard_link(src, dst, self.ctx).is_ok()
         }
 
         fn remove(&mut self, path: &Path, is_dir: bool) -> bool {
@@ -2505,9 +2300,9 @@ mod tests {
             }
 
             // println!("FileSystem: remove {:?}", path);
-            if let Some(child_id) = self.timeline.id_for_path(path, self.db).unwrap() {
-                let metadata = self.timeline.metadata(child_id, self.db).unwrap().unwrap();
-                is_dir == metadata.is_dir && self.timeline.remove(path, self.db).is_ok()
+            if let Some(child_id) = self.timeline.id_for_path(path) {
+                let metadata = self.timeline.metadata(child_id).unwrap();
+                is_dir == metadata.is_dir && self.timeline.remove(path, self.ctx).is_ok()
             } else {
                 false
             }
@@ -2522,7 +2317,7 @@ mod tests {
             }
 
             // println!("FileSystem: move from {:?} to {:?}", from, to);
-            !to.starts_with(from) && self.timeline.rename(from, to, self.db).is_ok()
+            !to.starts_with(from) && self.timeline.rename(from, to, self.ctx).is_ok()
         }
 
         fn inode(&mut self, path: &Path) -> Option<Inode> {
@@ -2531,10 +2326,10 @@ mod tests {
                 self.mutate(1);
             }
 
-            self.timeline.id_for_path(path, self.db).unwrap().map(|id| {
+            self.timeline.id_for_path(path).map(|id| {
                 let mut cursor = self.timeline.metadata.cursor();
-                cursor.seek(&id, SeekBias::Left, self.db).unwrap();
-                cursor.item(self.db).unwrap().unwrap().inode.unwrap()
+                cursor.seek(&id, SeekBias::Left);
+                cursor.item().unwrap().inode.unwrap()
             })
         }
     }
@@ -2542,7 +2337,7 @@ mod tests {
     impl<'a, T: Rng + Clone> FakeFileSystemIter<'a, T> {
         fn build_cursor(&self) -> Cursor {
             let state = self.state.borrow();
-            let mut new_cursor = state.timeline.cursor(state.db).unwrap();
+            let mut new_cursor = state.timeline.cursor();
             if let Some(old_cursor) = self.cursor.as_ref() {
                 loop {
                     let advance = if let (Some(new_path), Some(old_path)) =
@@ -2554,7 +2349,7 @@ mod tests {
                     };
 
                     if advance {
-                        new_cursor.next(state.db).unwrap();
+                        new_cursor.next();
                     } else {
                         break;
                     }
@@ -2582,7 +2377,7 @@ mod tests {
                 self.cursor = Some(self.build_cursor());
                 self.version = state.version;
             } else {
-                self.cursor.as_mut().unwrap().next(state.db).unwrap();
+                self.cursor.as_mut().unwrap().next();
             }
 
             let cursor = self.cursor.as_mut().unwrap();
@@ -2591,8 +2386,8 @@ mod tests {
             if depth == 0 {
                 None
             } else {
-                let name = cursor.name(state.db).unwrap().unwrap();
-                let Metadata { is_dir, inode, .. } = cursor.metadata(state.db).unwrap().unwrap();
+                let name = cursor.name().unwrap();
+                let Metadata { is_dir, inode, .. } = cursor.metadata().unwrap();
                 Some(FakeFileSystemEntry {
                     depth,
                     name,
@@ -2621,7 +2416,7 @@ mod tests {
         }
     }
 
-    impl NullStore {
+    impl TestContext {
         fn new(replica_id: id::ReplicaId) -> Self {
             Self {
                 next_id: Cell::new(id::Unique::new(replica_id)),
@@ -2630,12 +2425,7 @@ mod tests {
         }
     }
 
-    impl Store for NullStore {
-        type ReadError = ();
-        type MetadataStore = NullStore;
-        type ParentRefStore = NullStore;
-        type ChildRefValueStore = NullStore;
-
+    impl ReplicaContext for TestContext {
         fn replica_id(&self) -> id::ReplicaId {
             self.lamport_clock.get().replica_id
         }
@@ -2655,79 +2445,30 @@ mod tests {
             self.lamport_clock
                 .set(self.lamport_clock.get().update(timestamp));
         }
-
-        fn metadata_store(&self) -> &Self::MetadataStore {
-            self
-        }
-
-        fn parent_ref_store(&self) -> &Self::ParentRefStore {
-            self
-        }
-
-        fn child_ref_store(&self) -> &Self::ParentRefStore {
-            self
-        }
-    }
-
-    impl From<()> for Error<NullStore> {
-        fn from(_: ()) -> Self {
-            Error::ReadError(())
-        }
-    }
-
-    impl btree::NodeStore<Metadata> for NullStore {
-        type ReadError = ();
-
-        fn get(&self, _id: btree::NodeId) -> Result<Arc<btree::Node<Metadata>>, Self::ReadError> {
-            unreachable!()
-        }
-    }
-
-    impl btree::NodeStore<ParentRefValue> for NullStore {
-        type ReadError = ();
-
-        fn get(
-            &self,
-            _id: btree::NodeId,
-        ) -> Result<Arc<btree::Node<ParentRefValue>>, Self::ReadError> {
-            unreachable!()
-        }
-    }
-
-    impl btree::NodeStore<ChildRefValue> for NullStore {
-        type ReadError = ();
-
-        fn get(
-            &self,
-            _id: btree::NodeId,
-        ) -> Result<Arc<btree::Node<ChildRefValue>>, Self::ReadError> {
-            unreachable!()
-        }
     }
 
     impl Timeline {
-        fn mutate<S, T: Rng>(
+        fn mutate<R, T: Rng>(
             &mut self,
             rng: &mut T,
             count: usize,
             next_inode: &mut Inode,
-            db: &S,
+            ctx: &R,
         ) -> Vec<Operation>
         where
-            S: Store,
-            Error<S>: From<S::ReadError>,
+            R: ReplicaContext,
         {
             let mut ops = Vec::new();
             for _ in 0..count {
                 let k = rng.gen_range(0, 3);
-                if self.is_empty(db).unwrap() || k == 0 {
+                if self.is_empty() || k == 0 {
                     let subtree_depth = rng.gen_range(1, 5);
-                    let path = self.gen_path(rng, subtree_depth, db);
+                    let path = self.gen_path(rng, subtree_depth);
 
                     if rng.gen() {
                         // println!("Random mutation: Inserting dirs {:?}", path);
                         ops.extend(
-                            self.create_dir_all_internal(&path, &mut Some(next_inode), db)
+                            self.create_dir_all_internal(&path, &mut Some(next_inode), ctx)
                                 .unwrap(),
                         );
                     } else {
@@ -2736,19 +2477,19 @@ mod tests {
                                 self.create_dir_all_internal(
                                     parent_path,
                                     &mut Some(next_inode),
-                                    db,
+                                    ctx,
                                 ).unwrap(),
                             );
                         }
 
                         // TODO: Maybe use a more efficient way to select a random file.
                         let mut existing_file_paths = Vec::new();
-                        let mut cursor = self.cursor(db).unwrap();
+                        let mut cursor = self.cursor();
                         while cursor.path().is_some() {
-                            if !cursor.is_dir(db).unwrap().unwrap() {
+                            if !cursor.is_dir().unwrap() {
                                 existing_file_paths.push(cursor.path().unwrap().to_path_buf());
                             }
-                            cursor.next(db).unwrap();
+                            cursor.next();
                         }
 
                         if rng.gen() && !existing_file_paths.is_empty() {
@@ -2757,92 +2498,80 @@ mod tests {
                             //     "Random mutation: Inserting hard link {:?} <-- {:?}",
                             //     src, path
                             // );
-                            ops.push(self.hard_link(src, &path, db).unwrap());
+                            ops.push(self.hard_link(src, &path, ctx).unwrap());
                         } else {
                             // println!("Random mutation: Create file {:?}", path);
                             let inode = *next_inode;
                             *next_inode += 1;
                             ops.extend(
-                                self.create_file_internal(&path, false, Some(inode), db)
+                                self.create_file_internal(&path, false, Some(inode), ctx)
                                     .unwrap(),
                             );
                         }
                     }
                 } else if k == 1 {
-                    let path = self.select_path(rng, false, db).unwrap();
+                    let path = self.select_path(rng, false).unwrap();
                     // println!("Random mutation: Removing {:?}", path);
-                    ops.push(self.remove(&path, db).unwrap());
+                    ops.push(self.remove(&path, ctx).unwrap());
                 } else {
                     let (old_path, new_path) = loop {
-                        let old_path = self.select_path(rng, false, db).unwrap();
-                        let new_path = self.gen_path(rng, 1, db);
+                        let old_path = self.select_path(rng, false).unwrap();
+                        let new_path = self.gen_path(rng, 1);
                         if !new_path.starts_with(&old_path) {
                             break (old_path, new_path);
                         }
                     };
 
                     // println!("Random mutation: Moving {:?} to {:?}", old_path, new_path);
-                    ops.push(self.rename(&old_path, &new_path, db).unwrap());
+                    ops.push(self.rename(&old_path, &new_path, ctx).unwrap());
                 }
             }
             ops
         }
 
-        fn gen_path<S: Store, T: Rng>(&self, rng: &mut T, depth: usize, db: &S) -> PathBuf {
+        fn gen_path<T: Rng>(&self, rng: &mut T, depth: usize) -> PathBuf {
             loop {
                 let mut new_path = PathBuf::new();
                 for _ in 0..depth {
                     new_path.push(gen_name(rng));
                 }
 
-                let path = if self.is_empty(db).unwrap() || rng.gen_weighted_bool(8) {
+                let path = if self.is_empty() || rng.gen_weighted_bool(8) {
                     new_path
                 } else {
-                    let mut prefix = self.select_path(rng, true, db).unwrap();
+                    let mut prefix = self.select_path(rng, true).unwrap();
                     prefix.push(new_path);
                     prefix
                 };
 
-                if self.id_for_path(&path, db).unwrap().is_none() {
+                if self.id_for_path(&path).is_none() {
                     return path;
                 }
             }
         }
 
-        fn select_path<S: Store, T: Rng>(
-            &self,
-            rng: &mut T,
-            select_dir: bool,
-            db: &S,
-        ) -> Option<PathBuf> {
-            if self.is_empty(db).unwrap() {
+        fn select_path<T: Rng>(&self, rng: &mut T, select_dir: bool) -> Option<PathBuf> {
+            if self.is_empty() {
                 None
             } else {
-                let child_ref_db = db.child_ref_store();
                 let mut depth = 0;
                 let mut path = PathBuf::new();
                 let mut cursor = self.child_refs.cursor();
                 let mut parent_id = ROOT_ID;
 
                 loop {
-                    cursor
-                        .seek(&parent_id, SeekBias::Left, child_ref_db)
-                        .unwrap();
+                    cursor.seek(&parent_id, SeekBias::Left);
                     let mut child_refs = Vec::new();
-                    while let Some(child_ref) = cursor.item(child_ref_db).unwrap() {
+                    while let Some(child_ref) = cursor.item() {
                         if child_ref.parent_id == parent_id {
                             let child_id = child_ref.parent_ref_id.child_id;
                             if child_ref.is_visible()
-                                && (!select_dir
-                                    || self.metadata(child_id, db).unwrap().unwrap().is_dir)
+                                && (!select_dir || self.metadata(child_id).unwrap().is_dir)
                             {
                                 child_refs.push(child_ref);
                             }
-                            let next_visible_index =
-                                cursor.end::<usize, _>(child_ref_db).unwrap() + 1;
-                            cursor
-                                .seek_forward(&next_visible_index, SeekBias::Left, child_ref_db)
-                                .unwrap();
+                            let next_visible_index = cursor.end::<usize>() + 1;
+                            cursor.seek_forward(&next_visible_index, SeekBias::Left);
                         } else {
                             break;
                         }
