@@ -4,8 +4,9 @@ version = "0.1.0"
 authors = ["Antonio Scandurra <as-cii@github.com>", "Nathan Sobo <nathan@github.com>"]
 
 [dependencies]
+futures = "0.1"
 smallvec = "0.6.1"
-parking_lot = "0.5"
+parking_lot = "0.6"
 uuid = { version = "0.6", features = ["v4"] }
 
 [dev-dependencies]

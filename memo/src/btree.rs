@@ -1,3 +1,7 @@
+use futures::future::{self, ExecuteError, Executor};
+use futures::sync::oneshot;
+use futures::Future;
+use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::fmt;
@@ -29,6 +33,13 @@ pub trait Dimension<Summary: Default>:
     }
 }
 
+pub trait Store<T: Item>: Clone {
+    type WriteError;
+
+    fn read(&self, id: NodeId) -> Node<T>;
+    fn write(&self, node: &Node<T>) -> Result<NodeId, Self::WriteError>;
+}
+
 #[derive(Debug)]
 pub enum Tree<T: Item> {
     Resident(Arc<Node<T>>),
@@ -38,12 +49,14 @@ pub enum Tree<T: Item> {
 #[derive(Debug)]
 pub enum Node<T: Item> {
     Internal {
+        store_id: Mutex<Option<NodeId>>,
         height: u8,
         summary: T::Summary,
         child_summaries: SmallVec<[T::Summary; 2 * TREE_BASE]>,
         child_trees: SmallVec<[Tree<T>; 2 * TREE_BASE]>,
     },
     Leaf {
+        store_id: Mutex<Option<NodeId>>,
         summary: T::Summary,
         items: SmallVec<[T; 2 * TREE_BASE]>,
     },
@@ -69,12 +82,83 @@ pub enum Edit<T: KeyedItem> {
     Remove(T),
 }
 
+pub struct SaveResult<
+    W,
+    B: Future<Item = (), Error = ()>,
+    F: Future<Item = (), Error = SaveError<W>>,
+> {
+    background: B,
+    foreground: F,
+}
+
+pub enum SaveError<W> {
+    WriteError(W),
+    Canceled,
+}
+
 impl<T: Item> Tree<T> {
     pub fn new() -> Self {
         Tree::Resident(Arc::new(Node::Leaf {
+            store_id: Mutex::new(None),
             summary: T::Summary::default(),
             items: SmallVec::new(),
         }))
+    }
+
+    pub fn save<S>(
+        &self,
+        store: S,
+    ) -> SaveResult<
+        S::WriteError,
+        impl Future<Item = (), Error = ()>,
+        impl Future<Item = (), Error = SaveError<S::WriteError>>,
+    >
+    where
+        S: 'static + Store<T>,
+    {
+        let snapshot = self.clone();
+        let (tx, rx) = oneshot::channel();
+        SaveResult {
+            background: future::lazy(move || {
+                let _ = tx.send(snapshot.save_internal(store));
+                Ok(())
+            }),
+            foreground: rx
+                .map_err(|_| SaveError::Canceled)
+                .and_then(|result| result.map_err(|err| SaveError::WriteError(err))),
+        }
+    }
+
+    pub fn save_internal<S>(&self, store: S) -> Result<(), S::WriteError>
+    where
+        S: Store<T>,
+    {
+        match self {
+            Tree::Resident(node) => match node.as_ref() {
+                Node::Internal {
+                    store_id,
+                    child_trees,
+                    ..
+                } => {
+                    let mut store_id = store_id.lock();
+                    if store_id.is_none() {
+                        for tree in child_trees {
+                            tree.save_internal(store.clone())?;
+                        }
+                        *store_id = Some(store.write(node)?)
+                    }
+                }
+                Node::Leaf { store_id, .. } => {
+                    let mut store_id = store_id.lock();
+                    if store_id.is_none() {
+                        *store_id = Some(store.write(node)?)
+                    }
+                }
+            },
+            _ => {}
+        }
+
+        Ok(())
     }
 
     pub fn items(&self) -> Vec<T> {
@@ -136,6 +220,7 @@ impl<T: Item> Tree<T> {
 
             if leaf.is_none() {
                 leaf = Some(Node::Leaf::<T> {
+                    store_id: Mutex::new(None),
                     summary: T::Summary::default(),
                     items: SmallVec::new(),
                 });
@@ -154,6 +239,7 @@ impl<T: Item> Tree<T> {
     pub fn push(&mut self, item: T) {
         self.push_tree(Tree::from_child_trees(vec![Tree::Resident(Arc::new(
             Node::Leaf {
+                store_id: Mutex::new(None),
                 summary: item.summarize(),
                 items: SmallVec::from_vec(vec![item]),
             },
@@ -180,6 +266,7 @@ impl<T: Item> Tree<T> {
                 summary,
                 child_summaries,
                 child_trees,
+                ..
             } => {
                 let other_node = other.node();
                 *summary += other_node.summary();
@@ -229,6 +316,7 @@ impl<T: Item> Tree<T> {
                     *child_trees = left_trees;
 
                     Some(Tree::Resident(Arc::new(Node::Internal {
+                        store_id: Mutex::new(None),
                         height: *height,
                         summary: sum(right_summaries.iter()),
                         child_summaries: right_summaries,
@@ -257,6 +345,7 @@ impl<T: Item> Tree<T> {
                     *items = left_items;
                     *summary = sum_owned(items.iter().map(|item| item.summarize()));
                     Some(Tree::Resident(Arc::new(Node::Leaf {
+                        store_id: Mutex::new(None),
                         summary: sum_owned(right_items.iter().map(|item| item.summarize())),
                         items: right_items,
                     })))
@@ -277,6 +366,7 @@ impl<T: Item> Tree<T> {
         }
         let summary = sum(child_summaries.iter());
         Tree::Resident(Arc::new(Node::Internal {
+            store_id: Mutex::new(None),
             height,
             summary,
             child_summaries,
@@ -433,6 +523,15 @@ impl<T: Item> Node<T> {
     }
 }
 
+impl<T: Item> Node<T> {
+    fn store_id(&self) -> &Mutex<Option<NodeId>> {
+        match self {
+            Node::Internal { store_id, .. } => store_id,
+            Node::Leaf { store_id, .. } => store_id,
+        }
+    }
+}
+
 impl<T: Item> Clone for Node<T> {
     fn clone(&self) -> Self {
         match self {
@@ -441,13 +540,16 @@ impl<T: Item> Clone for Node<T> {
                 summary,
                 child_summaries,
                 child_trees,
+                ..
             } => Node::Internal {
+                store_id: Mutex::new(None),
                 height: *height,
                 summary: summary.clone(),
                 child_summaries: child_summaries.clone(),
                 child_trees: child_trees.clone(),
             },
-            Node::Leaf { summary, items } => Node::Leaf {
+            Node::Leaf { summary, items, .. } => Node::Leaf {
+                store_id: Mutex::new(None),
                 summary: summary.clone(),
                 items: items.clone(),
             },
@@ -691,6 +793,7 @@ impl<T: Item> Cursor<T> {
                                     pos = D::from_summary(&self.summary).clone();
                                     if let Some(slice) = slice.as_mut() {
                                         slice.push_tree(Tree::Resident(Arc::new(Node::Leaf {
+                                            store_id: Mutex::new(None),
                                             summary: slice_items_summary,
                                             items: slice_items,
                                         })));
@@ -702,6 +805,7 @@ impl<T: Item> Cursor<T> {
                             if let Some(slice) = slice.as_mut() {
                                 if slice_items.len() > 0 {
                                     slice.push_tree(Tree::Resident(Arc::new(Node::Leaf {
+                                        store_id: Mutex::new(None),
                                         summary: slice_items_summary,
                                         items: slice_items,
                                     })));
@@ -777,6 +881,7 @@ impl<T: Item> Cursor<T> {
                         if let Some(slice) = slice.as_mut() {
                             if slice_items.len() > 0 {
                                 slice.push_tree(Tree::Resident(Arc::new(Node::Leaf {
+                                    store_id: Mutex::new(None),
                                     summary: slice_items_summary,
                                     items: slice_items,
                                 })));
