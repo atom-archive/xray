@@ -9,6 +9,7 @@ mod btree;
 pub mod buffer;
 mod notify_cell;
 mod time;
+mod replica_context;
 pub mod timeline;
 
 pub type ReplicaId = u64;

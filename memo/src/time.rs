@@ -29,9 +29,8 @@ impl Local {
         Self { replica_id, seq: 0 }
     }
 
-    pub fn next(mut self) -> Self {
+    pub fn tick(&mut self) {
         self.seq += 1;
-        self
     }
 }
 
@@ -92,17 +91,13 @@ impl Lamport {
         }
     }
 
-    pub fn inc(self) -> Self {
-        Self {
-            value: self.value + 1,
-            replica_id: self.replica_id,
-        }
+    pub fn tick(&mut self) {
+        self.value += 1;
     }
 
-    pub fn update(self, other: Self) -> Self {
-        Self {
-            value: cmp::max(self.value, other.value) + 1,
-            replica_id: self.replica_id,
+    pub fn observe(&mut self, timestamp: Self) {
+        if timestamp.replica_id != self.replica_id {
+            self.value = cmp::max(self.value, timestamp.value) + 1;
         }
     }
 }

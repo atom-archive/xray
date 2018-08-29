@@ -1,9 +1,9 @@
 use btree::{self, SeekBias};
 use notify_cell::{NotifyCell, NotifyCellObserver};
+use replica_context::ReplicaContext;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::iter;
 use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
@@ -11,12 +11,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use time;
 use UserId;
-
-pub trait ReplicaContext: fmt::Debug {
-    fn local_time(&self) -> time::Local;
-    fn lamport_time(&self) -> time::Lamport;
-    fn observe_lamport_timestamp(&self, timestamp: time::Lamport);
-}
 
 type SelectionSetVersion = usize;
 pub type BufferId = usize;
@@ -38,7 +32,7 @@ pub struct Buffer {
     pub version: time::Global,
     updates: NotifyCell<()>,
     selections: HashMap<time::Local, SelectionSet>,
-    ctx: Rc<ReplicaContext>,
+    ctx: Rc<RefCell<ReplicaContext>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
@@ -98,14 +92,6 @@ pub struct Insertion {
     offset_in_parent: usize,
     text: Arc<Text>,
     timestamp: time::Lamport,
-}
-
-pub struct Deletion {
-    start_id: time::Local,
-    start_offset: usize,
-    end_id: time::Local,
-    end_offset: usize,
-    version_in_range: time::Global,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -179,7 +165,7 @@ pub struct Operation {
 }
 
 impl Buffer {
-    pub fn new(id: BufferId, ctx: Rc<ReplicaContext>) -> Self {
+    pub fn new(id: BufferId, ctx: Rc<RefCell<ReplicaContext>>) -> Self {
         // Push start sentinel.
         let sentinel_id = time::Local::new(0);
         let fragments = btree::Tree::from_item(Fragment::new(
@@ -319,7 +305,7 @@ impl Buffer {
             selections,
             user_id,
         };
-        let id = self.ctx.local_time();
+        let id = self.ctx.borrow_mut().local_time();
         self.selections.insert(id, set);
         self.updates.set(());
         id
@@ -562,7 +548,7 @@ impl Buffer {
 
         new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
-        self.ctx.observe_lamport_timestamp(timestamp);
+        self.ctx.borrow_mut().observe_lamport_timestamp(timestamp);
         Ok(())
     }
 
@@ -610,8 +596,8 @@ impl Buffer {
         let mut end_offset = None;
         let mut version_in_range = time::Global::new();
 
-        let mut op_id = self.ctx.local_time();
-        let mut op_timestamp = self.ctx.lamport_time();
+        let mut op_id = self.ctx.borrow_mut().local_time();
+        let mut op_timestamp = self.ctx.borrow_mut().lamport_time();
 
         while cur_range.is_some() && cursor.item().is_some() {
             let mut fragment = cursor.item().unwrap();
@@ -717,8 +703,8 @@ impl Buffer {
                     version_in_range = time::Global::new();
                     cur_range = old_ranges.next();
                     if cur_range.is_some() {
-                        op_id = self.ctx.local_time();
-                        op_timestamp = self.ctx.lamport_time();
+                        op_id = self.ctx.borrow_mut().local_time();
+                        op_timestamp = self.ctx.borrow_mut().lamport_time();
                     }
                 } else {
                     break;
@@ -771,8 +757,8 @@ impl Buffer {
 
                             cur_range = old_ranges.next();
                             if cur_range.is_some() {
-                                op_id = self.ctx.local_time();
-                                op_timestamp = self.ctx.lamport_time();
+                                op_id = self.ctx.borrow_mut().local_time();
+                                op_timestamp = self.ctx.borrow_mut().lamport_time();
                             }
                             break;
                         }
@@ -1837,12 +1823,10 @@ mod tests {
 
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
-    use std::cell::Cell;
-    use ReplicaId;
 
     #[test]
     fn test_edit() {
-        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
+        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "abc");
         assert_eq!(buffer.to_string(), "abc");
         buffer.edit(&[3..3], "def");
@@ -1863,7 +1847,7 @@ mod tests {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
+            let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
             let mut reference_string = String::new();
 
             for _i in 0..10 {
@@ -1897,7 +1881,7 @@ mod tests {
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
+        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "abcd\nefg\nhij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs\n");
@@ -1914,7 +1898,7 @@ mod tests {
 
     #[test]
     fn test_longest_row() {
-        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
+        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
         assert_eq!(buffer.longest_row(), 0);
         buffer.edit(&[0..0], "abcd\nefg\nhij");
         assert_eq!(buffer.longest_row(), 0);
@@ -1930,7 +1914,7 @@ mod tests {
 
     #[test]
     fn iter_starting_at_point() {
-        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
+        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "abcd\nefgh\nij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs");
@@ -1973,7 +1957,7 @@ mod tests {
         assert_eq!(cursor.read_to_start(), "srQP\nonm\nlkji\nhgfe\ndcba");
 
         // Regression test:
-        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
+        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
         buffer.edit(&[60..60], "\n");
 
@@ -2103,7 +2087,7 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
+        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
@@ -2245,7 +2229,7 @@ mod tests {
 
     #[test]
     fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
+        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
@@ -2276,7 +2260,7 @@ mod tests {
             let mut buffers = Vec::new();
             let mut queues = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new(0, Rc::new(TestContext::new(i + 1)));
+                let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(i + 1))));
                 buffers.push(buffer);
                 queues.push(Vec::new());
             }
@@ -2323,39 +2307,6 @@ mod tests {
             for buffer in &buffers[1..] {
                 assert_eq!(buffer.to_string(), buffers[0].to_string());
             }
-        }
-    }
-
-    #[derive(Debug)]
-    struct TestContext {
-        local_clock: Cell<time::Local>,
-        lamport_clock: Cell<time::Lamport>,
-    }
-
-    impl TestContext {
-        fn new(replica_id: ReplicaId) -> Self {
-            Self {
-                local_clock: Cell::new(time::Local::new(replica_id)),
-                lamport_clock: Cell::new(time::Lamport::new(replica_id)),
-            }
-        }
-    }
-
-    impl ReplicaContext for TestContext {
-        fn local_time(&self) -> time::Local {
-            let next_id = self.local_clock.get();
-            self.local_clock.replace(next_id.next());
-            next_id
-        }
-
-        fn lamport_time(&self) -> time::Lamport {
-            self.lamport_clock.replace(self.lamport_clock.get().inc());
-            self.lamport_clock.get()
-        }
-
-        fn observe_lamport_timestamp(&self, timestamp: time::Lamport) {
-            self.lamport_clock
-                .set(self.lamport_clock.get().update(timestamp));
         }
     }
 

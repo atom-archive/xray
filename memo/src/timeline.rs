@@ -1,21 +1,16 @@
 use btree::{self, SeekBias};
-use time;
+use replica_context::ReplicaContext;
 use smallvec::SmallVec;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::iter::FromIterator;
 use std::ops::{Add, AddAssign};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
-use ReplicaId;
-
-pub trait ReplicaContext {
-    fn replica_id(&self) -> ReplicaId;
-    fn local_time(&self) -> time::Local;
-    fn lamport_time(&self) -> time::Lamport;
-    fn observe_lamport_timestamp(&self, timestamp: time::Lamport);
-}
+use time;
 
 // TODO: Return results from these methods to deal with IoErrors
 pub trait FileSystem {
@@ -52,6 +47,7 @@ pub struct Timeline {
     parent_refs: btree::Tree<ParentRefValue>,
     child_refs: btree::Tree<ChildRefValue>,
     inodes_to_file_ids: HashMap<Inode, time::Local>,
+    ctx: Rc<RefCell<ReplicaContext>>,
 }
 
 #[derive(Clone)]
@@ -143,12 +139,13 @@ pub struct ChildRefId {
 }
 
 impl Timeline {
-    pub fn new() -> Self {
+    pub fn new(ctx: Rc<RefCell<ReplicaContext>>) -> Self {
         Timeline {
             metadata: btree::Tree::new(),
             parent_refs: btree::Tree::new(),
             child_refs: btree::Tree::new(),
             inodes_to_file_ids: HashMap::new(),
+            ctx,
         }
     }
 
@@ -170,16 +167,14 @@ impl Timeline {
         cursor
     }
 
-    fn write_to_fs<F, R>(
+    fn write_to_fs<F>(
         &mut self,
         mut refs_to_write: HashSet<ParentRefId>,
         mut old_tree: Timeline,
         fs: &mut F,
-        ctx: &R,
     ) -> Vec<Operation>
     where
         F: FileSystem,
-        R: ReplicaContext,
     {
         let mut fixup_ops = Vec::new();
         let mut refs_with_temp_name = HashSet::new();
@@ -247,16 +242,13 @@ impl Timeline {
 
                                 let prev_parent_ref =
                                     old_tree.cur_parent_ref_value(ref_id).unwrap();
-                                old_tree.integrate_op(
-                                    Operation::UpdateParent {
-                                        op_id: parent_ref.op_id,
-                                        ref_id,
-                                        timestamp: parent_ref.timestamp,
-                                        prev_timestamp: prev_parent_ref.timestamp,
-                                        new_parent: Some((parent_id, name)),
-                                    },
-                                    ctx,
-                                );
+                                old_tree.integrate_op(Operation::UpdateParent {
+                                    op_id: parent_ref.op_id,
+                                    ref_id,
+                                    timestamp: parent_ref.timestamp,
+                                    prev_timestamp: prev_parent_ref.timestamp,
+                                    new_parent: Some((parent_id, name)),
+                                });
                             } else {
                                 break;
                             }
@@ -289,34 +281,25 @@ impl Timeline {
                                     if let Some(prev_parent_ref) =
                                         old_tree.cur_parent_ref_value(ref_id)
                                     {
-                                        old_tree.integrate_op(
-                                            Operation::UpdateParent {
-                                                op_id: parent_ref.op_id,
-                                                ref_id,
-                                                timestamp: parent_ref.timestamp,
-                                                prev_timestamp: prev_parent_ref.timestamp,
-                                                new_parent: Some((parent_id, name)),
-                                            },
-                                            ctx,
-                                        );
+                                        old_tree.integrate_op(Operation::UpdateParent {
+                                            op_id: parent_ref.op_id,
+                                            ref_id,
+                                            timestamp: parent_ref.timestamp,
+                                            prev_timestamp: prev_parent_ref.timestamp,
+                                            new_parent: Some((parent_id, name)),
+                                        });
                                     } else {
-                                        old_tree.integrate_op(
-                                            Operation::InsertMetadata {
-                                                op_id: ref_id.child_id,
-                                                is_dir: true,
-                                            },
-                                            ctx,
-                                        );
-                                        old_tree.integrate_op(
-                                            Operation::UpdateParent {
-                                                op_id: parent_ref.op_id,
-                                                ref_id,
-                                                timestamp: parent_ref.timestamp,
-                                                prev_timestamp: parent_ref.timestamp,
-                                                new_parent: Some((parent_id, name)),
-                                            },
-                                            ctx,
-                                        );
+                                        old_tree.integrate_op(Operation::InsertMetadata {
+                                            op_id: ref_id.child_id,
+                                            is_dir: true,
+                                        });
+                                        old_tree.integrate_op(Operation::UpdateParent {
+                                            op_id: parent_ref.op_id,
+                                            ref_id,
+                                            timestamp: parent_ref.timestamp,
+                                            prev_timestamp: parent_ref.timestamp,
+                                            new_parent: Some((parent_id, name)),
+                                        });
                                     };
 
                                     old_tree.set_inode_for_id(ref_id.child_id, inode);
@@ -332,16 +315,13 @@ impl Timeline {
                 } else if let Some(old_path) = old_path {
                     if fs.remove(&old_path, metadata.is_dir) {
                         let prev_parent_ref = old_tree.cur_parent_ref_value(ref_id).unwrap();
-                        old_tree.integrate_op(
-                            Operation::UpdateParent {
-                                op_id: parent_ref.op_id,
-                                ref_id,
-                                timestamp: parent_ref.timestamp,
-                                prev_timestamp: prev_parent_ref.timestamp,
-                                new_parent: None,
-                            },
-                            ctx,
-                        );
+                        old_tree.integrate_op(Operation::UpdateParent {
+                            op_id: parent_ref.op_id,
+                            ref_id,
+                            timestamp: parent_ref.timestamp,
+                            prev_timestamp: prev_parent_ref.timestamp,
+                            new_parent: None,
+                        });
                     } else {
                         break;
                     }
@@ -353,8 +333,8 @@ impl Timeline {
 
             if sorted_refs_to_write.peek().is_some() {
                 // println!("refreshing old timeline - paths: {:?}", fs.paths());
-                let fs_ops = old_tree.read_from_fs(fs.entries(), ctx);
-                let fs_fixup_ops = self.integrate_ops::<F, _, _>(&fs_ops, None, ctx);
+                let fs_ops = old_tree.read_from_fs(fs.entries());
+                let fs_fixup_ops = self.integrate_ops::<F, _>(&fs_ops, None);
                 for op in &fs_ops {
                     match op {
                         Operation::InsertMetadata { op_id, .. } => {
@@ -391,7 +371,7 @@ impl Timeline {
                     let fs_inode = fs.inode(&old_path);
                     let tree_inode = old_tree.inode_for_id(ref_id.child_id);
                     if fs_inode == tree_inode && fs.rename(&old_path, &new_path) {
-                        old_tree.rename(&old_path, &new_path, ctx).unwrap();
+                        old_tree.rename(&old_path, &new_path).unwrap();
                     }
                 }
             }
@@ -400,11 +380,10 @@ impl Timeline {
         fixup_ops
     }
 
-    pub fn read_from_fs<'a, F, I, R>(&mut self, entries: I, ctx: &R) -> Vec<Operation>
+    pub fn read_from_fs<'a, F, I>(&mut self, entries: I) -> Vec<Operation>
     where
         F: FileSystemEntry,
         I: IntoIterator<Item = F>,
-        R: ReplicaContext,
     {
         struct Change<F: FileSystemEntry> {
             inserted: bool,
@@ -474,7 +453,7 @@ impl Timeline {
                     }
                 }
             } else {
-                let file_id = ctx.local_time();
+                let file_id = self.ctx.borrow_mut().local_time();
                 self.inodes_to_file_ids.insert(entry.inode(), file_id);
                 if entry.is_dir() {
                     dir_stack.push(file_id);
@@ -518,7 +497,7 @@ impl Timeline {
                     occupied_ref_ids.insert(ref_id);
                     ref_id.alias_id
                 } else {
-                    ctx.local_time()
+                    self.ctx.borrow_mut().local_time()
                 };
 
                 operations.push(self.update_parent_ref(
@@ -526,7 +505,6 @@ impl Timeline {
                     Some(parent),
                     &mut parent_ref_edits,
                     &mut child_ref_edits,
-                    ctx,
                 ));
             }
         }
@@ -541,7 +519,6 @@ impl Timeline {
                         None,
                         &mut parent_ref_edits,
                         &mut child_ref_edits,
-                        ctx,
                     ));
                 }
                 cursor.next_sibling_or_cousin();
@@ -573,16 +550,15 @@ impl Timeline {
         }
     }
 
-    fn update_parent_ref<R: ReplicaContext>(
+    fn update_parent_ref(
         &self,
         ref_id: ParentRefId,
         new_parent: Option<(time::Local, Arc<OsString>)>,
         parent_ref_edits: &mut Vec<btree::Edit<ParentRefValue>>,
         child_ref_edits: &mut Vec<btree::Edit<ChildRefValue>>,
-        ctx: &R,
     ) -> Operation {
-        let timestamp = ctx.lamport_time();
-        let op_id = ctx.local_time();
+        let timestamp = self.ctx.borrow_mut().lamport_time();
+        let op_id = self.ctx.borrow_mut().local_time();
 
         let prev_parent_ref = self.cur_parent_ref_value(ref_id);
         let prev_timestamp = prev_parent_ref.as_ref().map_or(timestamp, |r| r.timestamp);
@@ -624,24 +600,21 @@ impl Timeline {
         }
     }
 
-    pub fn create_dir_all<I, R>(&mut self, path: I, ctx: &R) -> Result<Vec<Operation>, Error>
+    pub fn create_dir_all<I>(&mut self, path: I) -> Result<Vec<Operation>, Error>
     where
         I: Into<PathBuf>,
-        R: ReplicaContext,
     {
-        self.create_dir_all_internal(path, &mut None, ctx)
+        self.create_dir_all_internal(path, &mut None)
     }
 
-    pub fn create_file_internal<I, R>(
+    pub fn create_file_internal<I>(
         &mut self,
         path: I,
         is_dir: bool,
         inode: Option<Inode>,
-        ctx: &R,
     ) -> Result<SmallVec<[Operation; 2]>, Error>
     where
         I: Into<PathBuf>,
-        R: ReplicaContext,
     {
         let path = path.into();
         let mut operations = SmallVec::new();
@@ -658,18 +631,15 @@ impl Timeline {
         } else {
             ROOT_ID
         };
-        let child_id = ctx.local_time();
+        let child_id = self.ctx.borrow_mut().local_time();
+        let alias_id = self.ctx.borrow_mut().local_time();
 
         operations.push(self.insert_metadata(child_id, is_dir, inode, &mut metadata_edits));
         operations.push(self.update_parent_ref(
-            ParentRefId {
-                child_id,
-                alias_id: ctx.local_time(),
-            },
+            ParentRefId { child_id, alias_id },
             Some((parent_id, Arc::new(path.file_name().unwrap().into()))),
             &mut parent_ref_edits,
             &mut child_ref_edits,
-            ctx,
         ));
 
         if let Some(inode) = inode {
@@ -682,11 +652,10 @@ impl Timeline {
         Ok(operations)
     }
 
-    pub fn hard_link<I1, I2, R>(&mut self, src: I1, dst: I2, ctx: &R) -> Result<Operation, Error>
+    pub fn hard_link<I1, I2>(&mut self, src: I1, dst: I2) -> Result<Operation, Error>
     where
         I1: Into<PathBuf>,
         I2: Into<PathBuf>,
-        R: ReplicaContext,
     {
         let src = src.into();
         let dst = dst.into();
@@ -705,15 +674,12 @@ impl Timeline {
         };
 
         if let Some(child_id) = self.id_for_path(src) {
+            let alias_id = self.ctx.borrow_mut().local_time();
             let operation = self.update_parent_ref(
-                ParentRefId {
-                    child_id,
-                    alias_id: ctx.local_time(),
-                },
+                ParentRefId { child_id, alias_id },
                 Some((parent_id, Arc::new(dst.file_name().unwrap().into()))),
                 &mut parent_ref_edits,
                 &mut child_ref_edits,
-                ctx,
             );
 
             self.parent_refs.edit(parent_ref_edits);
@@ -724,15 +690,13 @@ impl Timeline {
         }
     }
 
-    fn create_dir_all_internal<I, R>(
+    fn create_dir_all_internal<I>(
         &mut self,
         path: I,
         next_inode: &mut Option<&mut Inode>,
-        ctx: &R,
     ) -> Result<Vec<Operation>, Error>
     where
         I: Into<PathBuf>,
-        R: ReplicaContext,
     {
         let path = path.into();
 
@@ -764,7 +728,8 @@ impl Timeline {
                 }
             }
             if !entry_exists {
-                let child_id = ctx.local_time();
+                let child_id = self.ctx.borrow_mut().local_time();
+                let alias_id = self.ctx.borrow_mut().local_time();
                 let inode = next_inode.as_mut().map(|next_inode| {
                     let inode = **next_inode;
                     **next_inode += 1;
@@ -773,14 +738,10 @@ impl Timeline {
 
                 operations.push(self.insert_metadata(child_id, true, inode, &mut metadata_edits));
                 operations.push(self.update_parent_ref(
-                    ParentRefId {
-                        child_id,
-                        alias_id: ctx.local_time(),
-                    },
+                    ParentRefId { child_id, alias_id },
                     Some((parent_id, name.clone())),
                     &mut parent_ref_edits,
                     &mut child_ref_edits,
-                    ctx,
                 ));
 
                 if let Some(inode) = inode {
@@ -796,10 +757,9 @@ impl Timeline {
         Ok(operations)
     }
 
-    pub fn remove<I, R>(&mut self, path: I, ctx: &R) -> Result<Operation, Error>
+    pub fn remove<I>(&mut self, path: I) -> Result<Operation, Error>
     where
         I: Into<PathBuf>,
-        R: ReplicaContext,
     {
         let path = path.into();
 
@@ -807,23 +767,17 @@ impl Timeline {
         let mut child_ref_edits = Vec::new();
 
         let ref_id = self.ref_id_for_path(&path).ok_or(Error::InvalidPath)?;
-        let operation = self.update_parent_ref(
-            ref_id,
-            None,
-            &mut parent_ref_edits,
-            &mut child_ref_edits,
-            ctx,
-        );
+        let operation =
+            self.update_parent_ref(ref_id, None, &mut parent_ref_edits, &mut child_ref_edits);
         self.parent_refs.edit(parent_ref_edits);
         self.child_refs.edit(child_ref_edits);
 
         Ok(operation)
     }
 
-    pub fn rename<F, R, T>(&mut self, from: F, to: T, ctx: &R) -> Result<Operation, Error>
+    pub fn rename<F, T>(&mut self, from: F, to: T) -> Result<Operation, Error>
     where
         F: Into<PathBuf>,
-        R: ReplicaContext,
         T: Into<PathBuf>,
     {
         let from = from.into();
@@ -849,7 +803,6 @@ impl Timeline {
             Some((new_parent_id, new_name)),
             &mut parent_ref_edits,
             &mut child_ref_edits,
-            ctx,
         );
         self.parent_refs.edit(parent_ref_edits);
         self.child_refs.edit(child_ref_edits);
@@ -857,16 +810,10 @@ impl Timeline {
         Ok(operation)
     }
 
-    pub fn integrate_ops<'a, F, O, R>(
-        &mut self,
-        ops: O,
-        fs: Option<&mut F>,
-        ctx: &R,
-    ) -> Vec<Operation>
+    pub fn integrate_ops<'a, F, O>(&mut self, ops: O, fs: Option<&mut F>) -> Vec<Operation>
     where
         F: FileSystem,
         O: IntoIterator<Item = &'a Operation> + Clone,
-        R: ReplicaContext,
     {
         // println!("integrate ops >>>>>>>>>>>>");
         let old_tree = self.clone();
@@ -886,12 +833,12 @@ impl Timeline {
                 }
                 _ => {}
             }
-            self.integrate_op(op.clone(), ctx);
+            self.integrate_op(op.clone());
         }
 
         let mut fixup_ops = Vec::new();
         for (ref_id, moved_dir) in &changed_refs {
-            fixup_ops.extend(self.fix_conflicts(*ref_id, *moved_dir, ctx));
+            fixup_ops.extend(self.fix_conflicts(*ref_id, *moved_dir));
         }
 
         if let Some(fs) = fs {
@@ -915,7 +862,7 @@ impl Timeline {
                 }
             }
 
-            fixup_ops.extend(self.write_to_fs(refs_to_write, old_tree, fs, ctx));
+            fixup_ops.extend(self.write_to_fs(refs_to_write, old_tree, fs));
         }
 
         // println!("integrate ops <<<<<<<<<<<<");
@@ -973,16 +920,13 @@ impl Timeline {
             .collect()
     }
 
-    fn integrate_op<R>(&mut self, op: Operation, ctx: &R)
-    where
-        R: ReplicaContext,
-    {
+    fn integrate_op(&mut self, op: Operation) {
         let mut metadata_edits = Vec::new();
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
         let mut new_child_ref;
 
-        // println!("{:?} – integrate op {:?}", ctx.replica_id(), op);
+        // println!("{:?} – integrate op {:?}".borrow().replica_id(), op);
 
         match op {
             Operation::InsertMetadata { op_id, is_dir } => {
@@ -1051,9 +995,7 @@ impl Timeline {
                     child_ref_edits.push(btree::Edit::Insert(new_child_ref.clone()));
                 }
 
-                if ctx.replica_id() != timestamp.replica_id {
-                    ctx.observe_lamport_timestamp(timestamp);
-                }
+                self.ctx.borrow_mut().observe_lamport_timestamp(timestamp);
             }
         }
 
@@ -1062,12 +1004,7 @@ impl Timeline {
         self.parent_refs.edit(parent_ref_edits);
     }
 
-    fn fix_conflicts<R: ReplicaContext>(
-        &mut self,
-        ref_id: ParentRefId,
-        moved_dir: bool,
-        ctx: &R,
-    ) -> Vec<Operation> {
+    fn fix_conflicts(&mut self, ref_id: ParentRefId, moved_dir: bool) -> Vec<Operation> {
         use btree::KeyedItem;
 
         let mut fixup_ops = Vec::new();
@@ -1154,10 +1091,12 @@ impl Timeline {
                     SeekBias::Left,
                 );
                 let new_parent = cursor.item().unwrap().parent;
+                let op_id = self.ctx.borrow_mut().local_time();
+                let timestamp = self.ctx.borrow_mut().lamport_time();
                 fixup_ops.push(Operation::UpdateParent {
-                    op_id: ctx.local_time(),
+                    op_id,
                     ref_id: *ref_id,
-                    timestamp: ctx.lamport_time(),
+                    timestamp,
                     prev_timestamp,
                     new_parent,
                 });
@@ -1165,25 +1104,21 @@ impl Timeline {
             }
 
             for op in &fixup_ops {
-                self.integrate_op(op.clone(), ctx);
+                self.integrate_op(op.clone());
             }
             for ref_id in moved_ref_ids {
-                fixup_ops.extend(self.fix_name_conflicts(ref_id, ctx));
+                fixup_ops.extend(self.fix_name_conflicts(ref_id));
             }
         }
 
         if !reverted_moves.contains_key(&ref_id) {
-            fixup_ops.extend(self.fix_name_conflicts(ref_id, ctx));
+            fixup_ops.extend(self.fix_name_conflicts(ref_id));
         }
 
         fixup_ops
     }
 
-    fn fix_name_conflicts<R: ReplicaContext>(
-        &mut self,
-        ref_id: ParentRefId,
-        ctx: &R,
-    ) -> Vec<Operation> {
+    fn fix_name_conflicts(&mut self, ref_id: ParentRefId) -> Vec<Operation> {
         let mut fixup_ops = Vec::new();
 
         let parent_ref = self.cur_parent_ref_value(ref_id).unwrap();
@@ -1227,14 +1162,16 @@ impl Timeline {
                         }
                     }
 
+                    let op_id = self.ctx.borrow_mut().local_time();
+                    let timestamp = self.ctx.borrow_mut().lamport_time();
                     let fixup_op = Operation::UpdateParent {
-                        op_id: ctx.local_time(),
+                        op_id,
                         ref_id: child_ref.parent_ref_id,
-                        timestamp: ctx.lamport_time(),
+                        timestamp,
                         prev_timestamp: child_ref.timestamp,
                         new_parent: Some((parent_id, unique_name.clone())),
                     };
-                    self.integrate_op(fixup_op.clone(), ctx);
+                    self.integrate_op(fixup_op.clone());
                     fixup_ops.push(fixup_op);
 
                     let visible_index = cursor_1.end::<usize>();
@@ -1814,45 +1751,42 @@ mod tests {
 
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
-    use std::cell::{Cell, RefCell};
-    use std::rc::Rc;
 
     #[test]
     fn test_local_dir_ops() {
-        let ctx = TestContext::new(1);
-        let mut timeline = Timeline::new();
-        timeline.create_dir_all("a/b2/", &ctx).unwrap();
+        let mut timeline = Timeline::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
+        timeline.create_dir_all("a/b2/").unwrap();
         assert_eq!(timeline.paths(), ["a/", "a/b2/"]);
 
-        timeline.create_dir_all("a/b1/c", &ctx).unwrap();
+        timeline.create_dir_all("a/b1/c").unwrap();
         assert_eq!(timeline.paths(), ["a/", "a/b1/", "a/b1/c/", "a/b2/"]);
 
-        timeline.create_dir_all("a/b1/d", &ctx).unwrap();
+        timeline.create_dir_all("a/b1/d").unwrap();
         assert_eq!(
             timeline.paths(),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
         );
 
-        timeline.remove("a/b1/c", &ctx).unwrap();
+        timeline.remove("a/b1/c").unwrap();
         assert_eq!(timeline.paths(), ["a/", "a/b1/", "a/b1/d/", "a/b2/"]);
 
-        timeline.remove("a/b1", &ctx).unwrap();
+        timeline.remove("a/b1").unwrap();
         assert_eq!(timeline.paths(), ["a/", "a/b2/"]);
 
-        timeline.create_dir_all("a/b1/c", &ctx).unwrap();
-        timeline.create_dir_all("a/b1/d", &ctx).unwrap();
+        timeline.create_dir_all("a/b1/c").unwrap();
+        timeline.create_dir_all("a/b1/d").unwrap();
         assert_eq!(
             timeline.paths(),
             ["a/", "a/b1/", "a/b1/c/", "a/b1/d/", "a/b2/"]
         );
 
         let moved_id = timeline.id_for_path("a/b1").unwrap();
-        timeline.rename("a/b1", "b", &ctx).unwrap();
+        timeline.rename("a/b1", "b").unwrap();
         assert_eq!(timeline.paths(), ["a/", "a/b2/", "b/", "b/c/", "b/d/"]);
         assert_eq!(timeline.id_for_path("b",).unwrap(), moved_id);
 
         let moved_id = timeline.id_for_path("b/d").unwrap();
-        timeline.rename("b/d", "a/b2/d", &ctx).unwrap();
+        timeline.rename("b/d", "a/b2/d").unwrap();
         assert_eq!(timeline.paths(), ["a/", "a/b2/", "a/b2/d/", "b/", "b/c/"]);
         assert_eq!(timeline.id_for_path("a/b2/d",).unwrap(), moved_id);
     }
@@ -1864,9 +1798,8 @@ mod tests {
             println!("SEED: {:?}", seed);
 
             let mut rng = StdRng::from_seed(&[seed]);
-            let ctx = TestContext::new(1);
 
-            let mut fs_1 = FakeFileSystem::new(&ctx, rng.clone());
+            let mut fs_1 = FakeFileSystem::new(rng.clone());
             fs_1.mutate(5);
 
             let mut fs_2 = fs_1.clone();
@@ -1885,31 +1818,29 @@ mod tests {
                 if fs_1.version() > prev_fs_1_version && rng.gen() {
                     // println!("scanning from fs 1");
                     prev_fs_1_version = fs_1.version();
-                    ops_1.extend(index_1.read_from_fs(fs_1.entries(), &ctx));
+                    ops_1.extend(index_1.read_from_fs(fs_1.entries()));
                 }
 
                 if fs_2.version() > prev_fs_2_version && rng.gen() {
                     // println!("scanning from fs 2");
                     prev_fs_2_version = fs_2.version();
-                    ops_2.extend(index_2.read_from_fs(fs_2.entries(), &ctx));
+                    ops_2.extend(index_2.read_from_fs(fs_2.entries()));
                 }
 
                 if !ops_2.is_empty() && rng.gen() {
                     // println!("integrating into index 1");
-                    ops_1.extend(index_1.integrate_ops(
-                        &ops_2.drain(..).collect::<Vec<_>>(),
-                        Some(&mut fs_1),
-                        &ctx,
-                    ));
+                    ops_1.extend(
+                        index_1
+                            .integrate_ops(&ops_2.drain(..).collect::<Vec<_>>(), Some(&mut fs_1)),
+                    );
                 }
 
                 if !ops_1.is_empty() && rng.gen() {
                     // println!("integrating into index 2");
-                    ops_2.extend(index_2.integrate_ops(
-                        &ops_1.drain(..).collect::<Vec<_>>(),
-                        Some(&mut fs_2),
-                        &ctx,
-                    ));
+                    ops_2.extend(
+                        index_2
+                            .integrate_ops(&ops_1.drain(..).collect::<Vec<_>>(), Some(&mut fs_2)),
+                    );
                 }
 
                 if ops_1.is_empty()
@@ -1929,34 +1860,30 @@ mod tests {
 
     #[test]
     fn test_name_conflict_fixups() {
-        let ctx_1 = TestContext::new(1);
-        let mut timeline_1 = Timeline::new();
+        let mut timeline_1 = Timeline::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
         let mut timeline_1_ops = Vec::new();
 
-        let ctx_2 = TestContext::new(2);
-        let mut timeline_2 = Timeline::new();
+        let mut timeline_2 = Timeline::new(Rc::new(RefCell::new(ReplicaContext::new(2))));
         let mut timeline_2_ops = Vec::new();
 
-        timeline_1_ops.extend(timeline_1.create_dir_all("a", &ctx_1).unwrap());
+        timeline_1_ops.extend(timeline_1.create_dir_all("a").unwrap());
         let id_1 = timeline_1.id_for_path("a").unwrap();
 
-        timeline_2_ops.extend(timeline_2.create_dir_all("a", &ctx_2).unwrap());
-        timeline_2_ops.extend(timeline_2.create_dir_all("a~", &ctx_2).unwrap());
+        timeline_2_ops.extend(timeline_2.create_dir_all("a").unwrap());
+        timeline_2_ops.extend(timeline_2.create_dir_all("a~").unwrap());
         let id_2 = timeline_2.id_for_path("a").unwrap();
         let id_3 = timeline_2.id_for_path("a~").unwrap();
 
         while !timeline_1_ops.is_empty() || !timeline_2_ops.is_empty() {
             let ops_from_timeline_2_to_timeline_1 = timeline_2_ops.drain(..).collect::<Vec<_>>();
             let ops_from_timeline_1_to_timeline_2 = timeline_1_ops.drain(..).collect::<Vec<_>>();
-            timeline_1_ops.extend(timeline_1.integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+            timeline_1_ops.extend(timeline_1.integrate_ops::<FakeFileSystem<StdRng>, _>(
                 &ops_from_timeline_2_to_timeline_1,
                 None,
-                &ctx_1,
             ));
-            timeline_2_ops.extend(timeline_2.integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+            timeline_2_ops.extend(timeline_2.integrate_ops::<FakeFileSystem<StdRng>, _>(
                 &ops_from_timeline_1_to_timeline_2,
                 None,
-                &ctx_2,
             ));
         }
 
@@ -1969,30 +1896,26 @@ mod tests {
 
     #[test]
     fn test_cycle_fixups() {
-        let ctx_1 = TestContext::new(1);
-        let mut timeline_1 = Timeline::new();
-        timeline_1.create_dir_all("a", &ctx_1).unwrap();
-        timeline_1.create_dir_all("b", &ctx_1).unwrap();
+        let mut timeline_1 = Timeline::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
+        timeline_1.create_dir_all("a").unwrap();
+        timeline_1.create_dir_all("b").unwrap();
         let mut timeline_1_ops = Vec::new();
 
-        let ctx_2 = TestContext::new(2);
         let mut timeline_2 = timeline_1.clone();
         let mut timeline_2_ops = Vec::new();
 
-        timeline_1_ops.push(timeline_1.rename("a", "b/a", &ctx_1).unwrap());
-        timeline_2_ops.push(timeline_2.rename("b", "a/b", &ctx_1).unwrap());
+        timeline_1_ops.push(timeline_1.rename("a", "b/a").unwrap());
+        timeline_2_ops.push(timeline_2.rename("b", "a/b").unwrap());
         while !timeline_1_ops.is_empty() || !timeline_2_ops.is_empty() {
             let ops_from_timeline_2_to_timeline_1 = timeline_2_ops.drain(..).collect::<Vec<_>>();
             let ops_from_timeline_1_to_timeline_2 = timeline_1_ops.drain(..).collect::<Vec<_>>();
-            timeline_1_ops.extend(timeline_1.integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+            timeline_1_ops.extend(timeline_1.integrate_ops::<FakeFileSystem<StdRng>, _>(
                 &ops_from_timeline_2_to_timeline_1,
                 None,
-                &ctx_1,
             ));
-            timeline_2_ops.extend(timeline_2.integrate_ops::<FakeFileSystem<StdRng>, _, _>(
+            timeline_2_ops.extend(timeline_2.integrate_ops::<FakeFileSystem<StdRng>, _>(
                 &ops_from_timeline_1_to_timeline_2,
                 None,
-                &ctx_2,
             ));
         }
 
@@ -2011,22 +1934,23 @@ mod tests {
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let ctx = Vec::from_iter((0..PEERS).map(|i| TestContext::new(i as u64 + 1)));
-            let mut fs = Vec::from_iter((0..PEERS).map(|i| FakeFileSystem::new(&ctx[i], rng)));
+            let mut fs = Vec::from_iter((0..PEERS).map(|_| FakeFileSystem::new(rng)));
             let mut prev_fs_versions = Vec::from_iter((0..PEERS).map(|_| 0));
-            let mut timelines = Vec::from_iter((0..PEERS).map(|_| Timeline::new()));
+            let mut timelines =
+                Vec::from_iter((0..PEERS).map(|i| {
+                    Timeline::new(Rc::new(RefCell::new(ReplicaContext::new(i as u64 + 1))))
+                }));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
             // Generate and deliver random mutations
             for _ in 0..5 {
                 let replica_index = rng.gen_range(0, PEERS);
-                let ctx = &ctx[replica_index];
                 let fs = &mut fs[replica_index];
                 let timeline = &mut timelines[replica_index];
 
                 if !inboxes[replica_index].is_empty() && rng.gen() {
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = timeline.integrate_ops(&ops, Some(fs), ctx);
+                    let fixup_ops = timeline.integrate_ops(&ops, Some(fs));
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 } else {
                     if prev_fs_versions[replica_index] == fs.version() || rng.gen() {
@@ -2034,7 +1958,7 @@ mod tests {
                     }
 
                     prev_fs_versions[replica_index] = fs.version();
-                    let ops = timeline.read_from_fs(fs.entries(), ctx);
+                    let ops = timeline.read_from_fs(fs.entries());
                     deliver_ops(replica_index, &mut inboxes, ops);
                 }
             }
@@ -2043,20 +1967,19 @@ mod tests {
             loop {
                 let mut done = true;
                 for replica_index in 0..PEERS {
-                    let ctx = &ctx[replica_index];
                     let fs = &mut fs[replica_index];
                     let timeline = &mut timelines[replica_index];
 
                     if prev_fs_versions[replica_index] < fs.version() {
                         prev_fs_versions[replica_index] = fs.version();
-                        let ops = timeline.read_from_fs(fs.entries(), ctx);
+                        let ops = timeline.read_from_fs(fs.entries());
                         deliver_ops(replica_index, &mut inboxes, ops);
                         done = false;
                     }
 
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
                     if !ops.is_empty() {
-                        let fixup_ops = timeline.integrate_ops(&ops, Some(fs), ctx);
+                        let fixup_ops = timeline.integrate_ops(&ops, Some(fs));
                         deliver_ops(replica_index, &mut inboxes, fixup_ops);
                         done = false;
                     }
@@ -2090,19 +2013,18 @@ mod tests {
         }
     }
 
-    struct FakeFileSystem<'a, T: Rng + Clone>(Rc<RefCell<FakeFileSystemState<'a, T>>>);
+    struct FakeFileSystem<T: Rng + Clone>(Rc<RefCell<FakeFileSystemState<T>>>);
 
     #[derive(Clone)]
-    struct FakeFileSystemState<'a, T: Rng + Clone> {
+    struct FakeFileSystemState<T: Rng + Clone> {
         timeline: Timeline,
         next_inode: Inode,
-        ctx: &'a TestContext,
         rng: T,
         version: usize,
     }
 
-    struct FakeFileSystemIter<'a, T: Rng + Clone> {
-        state: Rc<RefCell<FakeFileSystemState<'a, T>>>,
+    struct FakeFileSystemIter<T: Rng + Clone> {
+        state: Rc<RefCell<FakeFileSystemState<T>>>,
         version: usize,
         cursor: Option<Cursor>,
     }
@@ -2115,14 +2037,9 @@ mod tests {
         is_dir: bool,
     }
 
-    struct TestContext {
-        next_id: Cell<time::Local>,
-        lamport_clock: Cell<time::Lamport>,
-    }
-
-    impl<'a, T: Rng + Clone> FakeFileSystem<'a, T> {
-        fn new(ctx: &'a TestContext, rng: T) -> Self {
-            FakeFileSystem(Rc::new(RefCell::new(FakeFileSystemState::new(ctx, rng))))
+    impl<T: Rng + Clone> FakeFileSystem<T> {
+        fn new(rng: T) -> Self {
+            FakeFileSystem(Rc::new(RefCell::new(FakeFileSystemState::new(rng))))
         }
 
         fn mutate(&self, count: usize) {
@@ -2142,15 +2059,15 @@ mod tests {
         }
     }
 
-    impl<'a, T: Rng + Clone> Clone for FakeFileSystem<'a, T> {
+    impl<T: Rng + Clone> Clone for FakeFileSystem<T> {
         fn clone(&self) -> Self {
             FakeFileSystem(Rc::new(RefCell::new(self.0.borrow().clone())))
         }
     }
 
-    impl<'a, T: Rng + Clone> FileSystem for FakeFileSystem<'a, T> {
+    impl<T: Rng + Clone> FileSystem for FakeFileSystem<T> {
         type Entry = FakeFileSystemEntry;
-        type EntriesIterator = FakeFileSystemIter<'a, T>;
+        type EntriesIterator = FakeFileSystemIter<T>;
 
         fn paths(&self) -> Vec<String> {
             self.0.borrow().paths()
@@ -2189,13 +2106,11 @@ mod tests {
         }
     }
 
-    impl<'a, T: Rng + Clone> FakeFileSystemState<'a, T> {
-        fn new(ctx: &'a TestContext, rng: T) -> Self {
-            let timeline = Timeline::new();
+    impl<T: Rng + Clone> FakeFileSystemState<T> {
+        fn new(rng: T) -> Self {
             Self {
-                timeline,
+                timeline: Timeline::new(Rc::new(RefCell::new(ReplicaContext::new(999)))),
                 next_inode: 0,
-                ctx,
                 rng,
                 version: 0,
             }
@@ -2204,7 +2119,7 @@ mod tests {
         fn mutate(&mut self, count: usize) {
             self.version += 1;
             self.timeline
-                .mutate(&mut self.rng, count, &mut self.next_inode, self.ctx);
+                .mutate(&mut self.rng, count, &mut self.next_inode);
         }
 
         fn paths(&self) -> Vec<String> {
@@ -2223,7 +2138,7 @@ mod tests {
             let inode = self.next_inode;
             self.next_inode += 1;
             self.timeline
-                .create_file_internal(path, false, Some(inode), self.ctx)
+                .create_file_internal(path, false, Some(inode))
                 .is_ok()
         }
 
@@ -2239,7 +2154,7 @@ mod tests {
             let inode = self.next_inode;
             self.next_inode += 1;
             self.timeline
-                .create_file_internal(path, true, Some(inode), self.ctx)
+                .create_file_internal(path, true, Some(inode))
                 .is_ok()
         }
 
@@ -2252,7 +2167,7 @@ mod tests {
             }
 
             // println!("FileSystem: hard link {:?} to {:?}", src, dst);
-            self.timeline.hard_link(src, dst, self.ctx).is_ok()
+            self.timeline.hard_link(src, dst).is_ok()
         }
 
         fn remove(&mut self, path: &Path, is_dir: bool) -> bool {
@@ -2266,7 +2181,7 @@ mod tests {
             // println!("FileSystem: remove {:?}", path);
             if let Some(child_id) = self.timeline.id_for_path(path) {
                 let metadata = self.timeline.metadata(child_id).unwrap();
-                is_dir == metadata.is_dir && self.timeline.remove(path, self.ctx).is_ok()
+                is_dir == metadata.is_dir && self.timeline.remove(path).is_ok()
             } else {
                 false
             }
@@ -2281,7 +2196,7 @@ mod tests {
             }
 
             // println!("FileSystem: move from {:?} to {:?}", from, to);
-            !to.starts_with(from) && self.timeline.rename(from, to, self.ctx).is_ok()
+            !to.starts_with(from) && self.timeline.rename(from, to).is_ok()
         }
 
         fn inode(&mut self, path: &Path) -> Option<Inode> {
@@ -2298,7 +2213,7 @@ mod tests {
         }
     }
 
-    impl<'a, T: Rng + Clone> FakeFileSystemIter<'a, T> {
+    impl<T: Rng + Clone> FakeFileSystemIter<T> {
         fn build_cursor(&self) -> Cursor {
             let state = self.state.borrow();
             let mut new_cursor = state.timeline.cursor();
@@ -2323,7 +2238,7 @@ mod tests {
         }
     }
 
-    impl<'a, T: Rng + Clone> Iterator for FakeFileSystemIter<'a, T> {
+    impl<T: Rng + Clone> Iterator for FakeFileSystemIter<T> {
         type Item = FakeFileSystemEntry;
 
         fn next(&mut self) -> Option<Self::Item> {
@@ -2380,48 +2295,13 @@ mod tests {
         }
     }
 
-    impl TestContext {
-        fn new(replica_id: ReplicaId) -> Self {
-            Self {
-                next_id: Cell::new(time::Local::new(replica_id)),
-                lamport_clock: Cell::new(time::Lamport::new(replica_id)),
-            }
-        }
-    }
-
-    impl ReplicaContext for TestContext {
-        fn replica_id(&self) -> ReplicaId {
-            self.lamport_clock.get().replica_id
-        }
-
-        fn local_time(&self) -> time::Local {
-            let next_id = self.next_id.get();
-            self.next_id.replace(next_id.next());
-            next_id
-        }
-
-        fn lamport_time(&self) -> time::Lamport {
-            self.lamport_clock.replace(self.lamport_clock.get().inc());
-            self.lamport_clock.get()
-        }
-
-        fn observe_lamport_timestamp(&self, timestamp: time::Lamport) {
-            self.lamport_clock
-                .set(self.lamport_clock.get().update(timestamp));
-        }
-    }
-
     impl Timeline {
-        fn mutate<R, T: Rng>(
+        fn mutate<T: Rng>(
             &mut self,
             rng: &mut T,
             count: usize,
             next_inode: &mut Inode,
-            ctx: &R,
-        ) -> Vec<Operation>
-        where
-            R: ReplicaContext,
-        {
+        ) -> Vec<Operation> {
             let mut ops = Vec::new();
             for _ in 0..count {
                 let k = rng.gen_range(0, 3);
@@ -2432,17 +2312,14 @@ mod tests {
                     if rng.gen() {
                         // println!("Random mutation: Inserting dirs {:?}", path);
                         ops.extend(
-                            self.create_dir_all_internal(&path, &mut Some(next_inode), ctx)
+                            self.create_dir_all_internal(&path, &mut Some(next_inode))
                                 .unwrap(),
                         );
                     } else {
                         if let Some(parent_path) = path.parent() {
                             ops.extend(
-                                self.create_dir_all_internal(
-                                    parent_path,
-                                    &mut Some(next_inode),
-                                    ctx,
-                                ).unwrap(),
+                                self.create_dir_all_internal(parent_path, &mut Some(next_inode))
+                                    .unwrap(),
                             );
                         }
 
@@ -2462,13 +2339,13 @@ mod tests {
                             //     "Random mutation: Inserting hard link {:?} <-- {:?}",
                             //     src, path
                             // );
-                            ops.push(self.hard_link(src, &path, ctx).unwrap());
+                            ops.push(self.hard_link(src, &path).unwrap());
                         } else {
                             // println!("Random mutation: Create file {:?}", path);
                             let inode = *next_inode;
                             *next_inode += 1;
                             ops.extend(
-                                self.create_file_internal(&path, false, Some(inode), ctx)
+                                self.create_file_internal(&path, false, Some(inode))
                                     .unwrap(),
                             );
                         }
@@ -2476,7 +2353,7 @@ mod tests {
                 } else if k == 1 {
                     let path = self.select_path(rng, false).unwrap();
                     // println!("Random mutation: Removing {:?}", path);
-                    ops.push(self.remove(&path, ctx).unwrap());
+                    ops.push(self.remove(&path).unwrap());
                 } else {
                     let (old_path, new_path) = loop {
                         let old_path = self.select_path(rng, false).unwrap();
@@ -2487,7 +2364,7 @@ mod tests {
                     };
 
                     // println!("Random mutation: Moving {:?} to {:?}", old_path, new_path);
-                    ops.push(self.rename(&old_path, &new_path, ctx).unwrap());
+                    ops.push(self.rename(&old_path, &new_path).unwrap());
                 }
             }
             ops
