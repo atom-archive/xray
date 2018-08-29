@@ -68,6 +68,7 @@ pub struct Cursor<T: Item> {
     stack: SmallVec<[(Tree<T>, usize, T::Summary); 16]>,
     summary: T::Summary,
     did_seek: bool,
+    is_at_end: bool,
 }
 
 #[derive(Eq, PartialEq)]
@@ -577,11 +578,13 @@ impl<T: Item> Cursor<T> {
             stack: SmallVec::new(),
             summary: T::Summary::default(),
             did_seek: false,
+            is_at_end: false,
         }
     }
 
     fn reset(&mut self) {
         self.did_seek = false;
+        self.is_at_end = false;
         self.stack.truncate(0);
         self.summary = T::Summary::default();
     }
@@ -632,8 +635,10 @@ impl<T: Item> Cursor<T> {
                     _ => unreachable!(),
                 }
             }
-        } else {
+        } else if self.is_at_end {
             self.tree.last()
+        } else {
+            None
         }
     }
 
@@ -654,39 +659,40 @@ impl<T: Item> Cursor<T> {
     pub fn prev(&mut self) {
         assert!(self.did_seek, "Must seek before calling this method");
 
-        while self.stack.len() > 0 {
-            let subtree = {
-                let (subtree, index, summary) = self.stack.last_mut().unwrap();
-                if *index == 0 {
-                    None
+        if self.is_at_end {
+            let tree = self.tree.clone();
+            self.summary = T::Summary::default();
+            self.is_at_end = false;
+            self.descend_to_end(tree);
+        } else {
+            while self.stack.len() > 0 {
+                let (subtree, mut index, summary) = self.stack.last().unwrap().clone();
+
+                self.summary = summary.clone();
+                if index == 0 {
+                    self.stack.pop();
                 } else {
-                    *index -= 1;
-                    self.summary = summary.clone();
+                    index -= 1;
                     match subtree.node().as_ref() {
                         Node::Internal {
                             child_trees,
                             child_summaries,
                             ..
                         } => {
-                            for summary in &child_summaries[0..*index] {
+                            for summary in &child_summaries[0..index] {
                                 self.summary += summary;
                             }
-                            Some(child_trees[*index].clone())
+                            self.descend_to_end(child_trees[index].clone());
                         }
                         Node::Leaf { items, .. } => {
-                            for item in &items[0..*index] {
+                            for item in &items[0..index] {
                                 self.summary += &item.summarize();
                             }
-                            None
                         }
                     }
+                    *self.stack.last_mut().unwrap() = (subtree, index, summary);
+                    break;
                 }
-            };
-            if let Some(subtree) = subtree {
-                self.descend_to_end(subtree);
-                break;
-            } else {
-                self.stack.pop();
             }
         }
     }
@@ -723,6 +729,8 @@ impl<T: Item> Cursor<T> {
                 self.stack.pop();
             }
         }
+
+        self.is_at_end = self.stack.is_empty();
     }
 
     fn descend_to_start(&mut self, mut subtree: Tree<T>) {
@@ -981,6 +989,7 @@ impl<T: Item> Cursor<T> {
             }
         }
 
+        self.is_at_end = self.stack.is_empty();
         if bias == SeekBias::Left {
             *target == self.end::<D>()
         } else {
@@ -1094,25 +1103,200 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_cursor() {
+        // Empty tree
+        let tree = Tree::<u8>::new();
+        let mut cursor = tree.cursor();
+        assert_eq!(cursor.slice(&Sum(0), SeekBias::Right).items(), vec![]);
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
+        // Single-element tree
+        let mut tree = Tree::<u8>::new();
+        tree.extend(vec![1]);
+        let mut cursor = tree.cursor();
+        assert_eq!(cursor.slice(&Sum(0), SeekBias::Right).items(), vec![]);
+        assert_eq!(cursor.item(), Some(1));
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
+        cursor.next();
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(1));
+        assert_eq!(cursor.start::<Count>(), Count(1));
+        assert_eq!(cursor.start::<Sum>(), Sum(1));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(1));
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
+        cursor.reset();
+        assert_eq!(cursor.slice(&Sum(1), SeekBias::Right).items(), [1]);
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(1));
+        assert_eq!(cursor.start::<Count>(), Count(1));
+        assert_eq!(cursor.start::<Sum>(), Sum(1));
+
+        cursor.seek(&Sum(0), SeekBias::Right);
+        assert_eq!(
+            cursor
+                .slice(&tree.extent::<Count>(), SeekBias::Right)
+                .items(),
+            [1]
+        );
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(1));
+        assert_eq!(cursor.start::<Count>(), Count(1));
+        assert_eq!(cursor.start::<Sum>(), Sum(1));
+
+        // Multiple-element tree
+        let mut tree = Tree::new();
+        tree.extend(vec![1, 2, 3, 4, 5, 6]);
+        let mut cursor = tree.cursor();
+
+        assert_eq!(cursor.slice(&Sum(4), SeekBias::Right).items(), [1, 2]);
+        assert_eq!(cursor.item(), Some(3));
+        assert_eq!(cursor.prev_item(), Some(2));
+        assert_eq!(cursor.start::<Count>(), Count(2));
+        assert_eq!(cursor.start::<Sum>(), Sum(3));
+
+        cursor.next();
+        assert_eq!(cursor.item(), Some(4));
+        assert_eq!(cursor.prev_item(), Some(3));
+        assert_eq!(cursor.start::<Count>(), Count(3));
+        assert_eq!(cursor.start::<Sum>(), Sum(6));
+
+        cursor.next();
+        assert_eq!(cursor.item(), Some(5));
+        assert_eq!(cursor.prev_item(), Some(4));
+        assert_eq!(cursor.start::<Count>(), Count(4));
+        assert_eq!(cursor.start::<Sum>(), Sum(10));
+
+        cursor.next();
+        assert_eq!(cursor.item(), Some(6));
+        assert_eq!(cursor.prev_item(), Some(5));
+        assert_eq!(cursor.start::<Count>(), Count(5));
+        assert_eq!(cursor.start::<Sum>(), Sum(15));
+
+        cursor.next();
+        cursor.next();
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(6));
+        assert_eq!(cursor.start::<Count>(), Count(6));
+        assert_eq!(cursor.start::<Sum>(), Sum(21));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(6));
+        assert_eq!(cursor.prev_item(), Some(5));
+        assert_eq!(cursor.start::<Count>(), Count(5));
+        assert_eq!(cursor.start::<Sum>(), Sum(15));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(5));
+        assert_eq!(cursor.prev_item(), Some(4));
+        assert_eq!(cursor.start::<Count>(), Count(4));
+        assert_eq!(cursor.start::<Sum>(), Sum(10));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(4));
+        assert_eq!(cursor.prev_item(), Some(3));
+        assert_eq!(cursor.start::<Count>(), Count(3));
+        assert_eq!(cursor.start::<Sum>(), Sum(6));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(3));
+        assert_eq!(cursor.prev_item(), Some(2));
+        assert_eq!(cursor.start::<Count>(), Count(2));
+        assert_eq!(cursor.start::<Sum>(), Sum(3));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(2));
+        assert_eq!(cursor.prev_item(), Some(1));
+        assert_eq!(cursor.start::<Count>(), Count(1));
+        assert_eq!(cursor.start::<Sum>(), Sum(1));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), Some(1));
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
+        cursor.prev();
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
+        cursor.reset();
+        assert_eq!(
+            cursor
+                .slice(&tree.extent::<Count>(), SeekBias::Right)
+                .items(),
+            tree.items()
+        );
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(6));
+        assert_eq!(cursor.start::<Count>(), Count(6));
+        assert_eq!(cursor.start::<Sum>(), Sum(21));
+
+        cursor.seek(&Count(3), SeekBias::Right);
+        assert_eq!(
+            cursor
+                .slice(&tree.extent::<Count>(), SeekBias::Right)
+                .items(),
+            [4, 5, 6]
+        );
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), Some(6));
+        assert_eq!(cursor.start::<Count>(), Count(6));
+        assert_eq!(cursor.start::<Sum>(), Sum(21));
+
+        // Seeking can bias left or right
+        cursor.seek(&Sum(1), SeekBias::Left);
+        assert_eq!(cursor.item(), Some(1));
+        cursor.seek(&Sum(1), SeekBias::Right);
+        assert_eq!(cursor.item(), Some(2));
+
+        // Slicing without resetting starts from where the cursor is parked at.
+        cursor.seek(&Sum(1), SeekBias::Right);
+        assert_eq!(cursor.slice(&Sum(6), SeekBias::Right).items(), vec![2, 3]);
+        assert_eq!(cursor.slice(&Sum(21), SeekBias::Left).items(), vec![4, 5]);
+        assert_eq!(cursor.slice(&Sum(21), SeekBias::Right).items(), vec![6]);
+    }
+
     #[derive(Clone, Default, Debug)]
     pub struct IntegersSummary {
         count: Count,
+        sum: Sum,
     }
 
     #[derive(Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
     struct Count(usize);
 
+    #[derive(Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
+    struct Sum(usize);
+
     impl Item for u8 {
         type Summary = IntegersSummary;
 
         fn summarize(&self) -> Self::Summary {
-            IntegersSummary { count: Count(1) }
+            IntegersSummary {
+                count: Count(1),
+                sum: Sum(*self as usize),
+            }
         }
     }
 
     impl<'a> AddAssign<&'a Self> for IntegersSummary {
         fn add_assign(&mut self, other: &Self) {
             self.count += &other.count;
+            self.sum += &other.sum;
         }
     }
 
@@ -1129,6 +1313,27 @@ mod tests {
     }
 
     impl<'a> Add<&'a Self> for Count {
+        type Output = Self;
+
+        fn add(mut self, other: &Self) -> Self {
+            self.0 += other.0;
+            self
+        }
+    }
+
+    impl Dimension<IntegersSummary> for Sum {
+        fn from_summary(summary: &IntegersSummary) -> Self {
+            summary.sum.clone()
+        }
+    }
+
+    impl<'a> AddAssign<&'a Self> for Sum {
+        fn add_assign(&mut self, other: &Self) {
+            self.0 += other.0;
+        }
+    }
+
+    impl<'a> Add<&'a Self> for Sum {
         type Output = Self;
 
         fn add(mut self, other: &Self) -> Self {

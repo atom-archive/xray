@@ -2389,6 +2389,9 @@ mod tests {
 
     impl Cursor {
         fn read_to_start(mut self) -> String {
+            // Exclude the character we're currently parked at.
+            self.prev();
+
             let mut chars = Vec::new();
             while let Some(c) = self.code_unit() {
                 chars.push(c);
