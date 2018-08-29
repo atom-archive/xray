@@ -10,7 +10,6 @@ use std::ops::{Add, AddAssign, Range, Sub};
 use std::rc::Rc;
 use std::sync::Arc;
 use time;
-use ReplicaId;
 use UserId;
 
 pub trait ReplicaContext: fmt::Debug {
@@ -531,9 +530,7 @@ impl Buffer {
                     new_fragments.push(fragment);
                 }
             } else {
-                if new_text.is_some()
-                    && should_insert_before(&fragment.insertion, timestamp, id.replica_id)
-                {
+                if new_text.is_some() && timestamp > fragment.insertion.timestamp {
                     new_fragments.push(self.build_fragment_to_insert(
                         id,
                         cursor.prev_item().as_ref().unwrap(),
@@ -1275,7 +1272,7 @@ impl Cursor {
             .and_then(|fragment| fragment.get_code_unit(self.fragment_offset))
     }
 
-    fn next(&mut self) {
+    pub fn next(&mut self) {
         self.fragment_offset += 1;
         while let Some(fragment) = self.fragment_cursor.item() {
             if fragment.get_code_unit(self.fragment_offset).is_some() {
@@ -1287,7 +1284,7 @@ impl Cursor {
         }
     }
 
-    fn prev(&mut self) {
+    pub fn prev(&mut self) {
         if self.fragment_offset > 0 {
             self.fragment_offset -= 1;
         } else {
@@ -1834,18 +1831,6 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
     }
 }
 
-fn should_insert_before(
-    insertion: &Insertion,
-    other_timestamp: time::Lamport,
-    other_replica_id: ReplicaId,
-) -> bool {
-    match insertion.timestamp.cmp(&other_timestamp) {
-        Ordering::Less => true,
-        Ordering::Equal => insertion.id.replica_id < other_replica_id,
-        Ordering::Greater => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     extern crate rand;
@@ -1853,6 +1838,7 @@ mod tests {
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
     use std::cell::Cell;
+    use ReplicaId;
 
     #[test]
     fn test_edit() {
@@ -2407,30 +2393,6 @@ mod tests {
                 self.next();
             }
             String::from_utf16_lossy(&chars)
-        }
-    }
-
-    fn selections(buffer: &Rc<RefCell<Buffer>>) -> Vec<(time::Local, Selection)> {
-        let buffer = buffer.borrow();
-
-        let mut selections = Vec::new();
-        for (set_id, selection_set) in &buffer.selections {
-            for selection in selection_set.selections.iter() {
-                selections.push((*set_id, selection.clone()));
-            }
-        }
-        selections.sort_by_key(|(set_id, _)| *set_id);
-
-        selections
-    }
-
-    fn empty_selection(buffer: &Buffer, offset: usize) -> Selection {
-        let anchor = buffer.anchor_before_offset(offset).unwrap();
-        Selection {
-            start: anchor.clone(),
-            end: anchor,
-            reversed: false,
-            goal_column: None,
         }
     }
 }
