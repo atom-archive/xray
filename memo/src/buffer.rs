@@ -2290,7 +2290,7 @@ mod tests {
             let mut buffers = Vec::new();
             let mut queues = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new(0, Rc::new(TestContext::new(i)));
+                let mut buffer = Buffer::new(0, Rc::new(TestContext::new(i + 1)));
                 buffers.push(buffer);
                 queues.push(Vec::new());
             }
