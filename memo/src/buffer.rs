@@ -1,30 +1,26 @@
 use btree::{self, SeekBias};
-use futures::{unsync, Future, Stream};
 use notify_cell::{NotifyCell, NotifyCellObserver};
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::hash::BuildHasherDefault;
 use std::iter;
-use std::marker;
 use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
 use std::rc::Rc;
 use std::sync::Arc;
+use time;
+use ReplicaId;
 use UserId;
 
-pub type ReplicaId = usize;
-type LocalTimestamp = usize;
-type LamportTimestamp = usize;
-pub type SelectionSetId = usize;
+pub trait ReplicaContext: fmt::Debug {
+    fn local_time(&self) -> time::Local;
+    fn lamport_time(&self) -> time::Lamport;
+    fn observe_lamport_timestamp(&self, timestamp: time::Lamport);
+}
+
 type SelectionSetVersion = usize;
 pub type BufferId = usize;
-
-#[derive(Clone, Debug)]
-pub struct Version(
-    Arc<HashMap<ReplicaId, LocalTimestamp>>,
-);
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum Error {
@@ -32,30 +28,18 @@ pub enum Error {
     InvalidAnchor,
     InvalidOperation,
     SelectionSetNotFound,
-    IoError(String),
 }
 
 pub struct Buffer {
     id: BufferId,
-    pub replica_id: ReplicaId,
-    next_replica_id: Option<ReplicaId>,
-    local_clock: LocalTimestamp,
-    lamport_clock: LamportTimestamp,
     fragments: btree::Tree<Fragment>,
-    insertion_splits: HashMap<EditId, btree::Tree<InsertionSplit>>,
-    anchor_cache: RefCell<HashMap<Anchor, (usize, Point), BuildHasherDefault<SeaHasher>>>,
-    offset_cache: RefCell<HashMap<Point, usize, BuildHasherDefault<SeaHasher>>>,
-    pub version: Version,
-    client: Option<client::Service<rpc::Service>>,
-    operation_txs: Vec<unsync::mpsc::UnboundedSender<Arc<Operation>>>,
+    insertion_splits: HashMap<time::Local, btree::Tree<InsertionSplit>>,
+    anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
+    offset_cache: RefCell<HashMap<Point, usize>>,
+    pub version: time::Global,
     updates: NotifyCell<()>,
-    next_local_selection_set_id: SelectionSetId,
-    selections: HashMap<(ReplicaId, SelectionSetId), SelectionSet, BuildHasherDefault<SeaHasher>>,
-    file: Option<Box<fs::File>>,
-}
-
-pub struct BufferSnapshot {
-    fragments: btree::Tree<Fragment>,
+    selections: HashMap<time::Local, SelectionSet>,
+    ctx: Rc<ReplicaContext>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
@@ -64,27 +48,27 @@ pub struct Point {
     pub column: u32,
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, Hash, )]
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub struct Anchor(AnchorInner);
 
-#[derive(Clone, Eq, PartialEq, Debug, Hash, )]
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
 enum AnchorInner {
     Start,
     End,
     Middle {
-        insertion_id: EditId,
+        insertion_id: time::Local,
         offset: usize,
         bias: AnchorBias,
     },
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, Hash, )]
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
 enum AnchorBias {
     Left,
     Right,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, )]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Selection {
     pub start: Anchor,
     pub end: Anchor,
@@ -103,41 +87,35 @@ pub struct SelectionSetState {
     selections: Vec<Selection>,
 }
 
-pub struct Iter<'a> {
-    fragment_cursor: btree::Cursor<'a, Fragment>,
+pub struct Cursor {
+    fragment_cursor: btree::Cursor<Fragment>,
     fragment_offset: usize,
 }
 
-pub struct BackwardIter<'a> {
-    fragment_cursor: btree::Cursor<'a, Fragment>,
-    fragment_offset: usize,
-}
-
-#[derive(Clone, Eq, PartialEq, Debug, )]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Insertion {
-    id: EditId,
-    parent_id: EditId,
+    id: time::Local,
+    parent_id: time::Local,
     offset_in_parent: usize,
-    replica_id: ReplicaId,
     text: Arc<Text>,
-    timestamp: LamportTimestamp,
+    timestamp: time::Lamport,
 }
 
 pub struct Deletion {
-    start_id: EditId,
+    start_id: time::Local,
     start_offset: usize,
-    end_id: EditId,
+    end_id: time::Local,
     end_offset: usize,
-    version_in_range: Version,
+    version_in_range: time::Global,
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, )]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Text {
     code_units: Vec<u16>,
     nodes: Vec<LineNode>,
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, )]
+#[derive(Clone, Eq, PartialEq, Debug)]
 struct LineNode {
     len: u32,
     longest_row: u32,
@@ -156,16 +134,8 @@ struct LineNodeProbe<'a> {
     right_child: Option<&'a LineNode>,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, )]
-pub struct EditId {
-    replica_id: ReplicaId,
-    timestamp: LocalTimestamp,
-}
-
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug, )]
-struct FragmentId(
-    Arc<Vec<u16>>,
-);
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
+struct FragmentId(Arc<Vec<u16>>);
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct Fragment {
@@ -173,7 +143,7 @@ struct Fragment {
     insertion: Insertion,
     start_offset: usize,
     end_offset: usize,
-    deletions: HashSet<EditId>,
+    deletions: HashSet<time::Local>,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -186,7 +156,7 @@ pub struct FragmentSummary {
     longest_row_len: u32,
 }
 
-#[derive(Eq, PartialEq, Clone, Debug, )]
+#[derive(Eq, PartialEq, Clone, Debug)]
 struct InsertionSplit {
     extent: usize,
     fragment_id: FragmentId,
@@ -197,66 +167,30 @@ struct InsertionSplitSummary {
     extent: usize,
 }
 
-#[derive(Debug, )]
-pub enum Operation {
-    Edit {
-        id: EditId,
-        start_id: EditId,
-        start_offset: usize,
-        end_id: EditId,
-        end_offset: usize,
-        version_in_range: Version,
-        timestamp: LamportTimestamp,
-        new_text: Option<Arc<Text>>,
-    },
-}
-
-impl Version {
-    fn new() -> Self {
-        Version(Arc::new(HashMap::new()))
-    }
-
-    fn set(&mut self, replica_id: ReplicaId, timestamp: LocalTimestamp) {
-        let map = Arc::make_mut(&mut self.0);
-        *map.entry(replica_id).or_insert(0) = timestamp;
-    }
-
-    fn include(&mut self, insertion: &Insertion) {
-        let map = Arc::make_mut(&mut self.0);
-        let value = map.entry(insertion.id.replica_id).or_insert(0);
-        *value = cmp::max(*value, insertion.id.timestamp);
-    }
-
-    fn includes(&self, insertion: &Insertion) -> bool {
-        if let Some(timestamp) = self.0.get(&insertion.id.replica_id) {
-            *timestamp >= insertion.id.timestamp
-        } else {
-            false
-        }
-    }
+#[derive(Debug)]
+pub struct Operation {
+    id: time::Local,
+    start_id: time::Local,
+    start_offset: usize,
+    end_id: time::Local,
+    end_offset: usize,
+    version_in_range: time::Global,
+    timestamp: time::Lamport,
+    new_text: Option<Arc<Text>>,
 }
 
 impl Buffer {
-    pub fn new(id: BufferId) -> Self {
-        let mut fragments = btree::Tree::new();
-
+    pub fn new(id: BufferId, ctx: Rc<ReplicaContext>) -> Self {
         // Push start sentinel.
-        let sentinel_id = EditId {
-            replica_id: 0,
-            timestamp: 0,
-        };
-        fragments.push(Fragment::new(
+        let sentinel_id = time::Local::new(0);
+        let fragments = btree::Tree::from_item(Fragment::new(
             FragmentId::min_value(),
             Insertion {
                 id: sentinel_id,
-                parent_id: EditId {
-                    replica_id: 0,
-                    timestamp: 0,
-                },
+                parent_id: time::Local::new(0),
                 offset_in_parent: 0,
-                replica_id: 0,
                 text: Arc::new(Text::new(vec![])),
-                timestamp: 0,
+                timestamp: time::Lamport::new(0),
             },
         ));
         let mut insertion_splits = HashMap::new();
@@ -270,21 +204,14 @@ impl Buffer {
 
         Self {
             id,
-            replica_id: 1,
-            next_replica_id: Some(2),
-            local_clock: 0,
-            lamport_clock: 0,
             fragments,
             insertion_splits,
             anchor_cache: RefCell::new(HashMap::default()),
             offset_cache: RefCell::new(HashMap::default()),
-            version: Version::new(),
-            client: None,
-            operation_txs: Vec::new(),
+            version: time::Global::new(),
             updates: NotifyCell::new(()),
             selections: HashMap::default(),
-            next_local_selection_set_id: 0,
-            file: None,
+            ctx,
         }
     }
 
@@ -292,14 +219,8 @@ impl Buffer {
         self.id
     }
 
-    pub fn next_replica_id(&mut self) -> Result<ReplicaId, ()> {
-        let replica_id = self.next_replica_id.ok_or(())?;
-        self.next_replica_id = Some(replica_id + 1);
-        Ok(replica_id)
-    }
-
     pub fn len(&self) -> usize {
-        self.fragments.len().0
+        self.fragments.extent::<usize>()
     }
 
     pub fn len_for_row(&self, row: u32) -> Result<u32, Error> {
@@ -318,45 +239,48 @@ impl Buffer {
     }
 
     pub fn max_point(&self) -> Point {
-        self.fragments.len::<Point>()
+        self.fragments.extent()
     }
 
     pub fn line(&self, row: u32) -> Result<Vec<u16>, Error> {
-        let mut iterator = self.iter_starting_at_point(Point::new(row, 0)).peekable();
-        if iterator.peek().is_none() {
+        let mut cursor = self.cursor_at_point(Point::new(row, 0));
+        if cursor.code_unit().is_none() {
             Err(Error::OffsetOutOfRange)
         } else {
-            Ok(iterator.take_while(|c| *c != u16::from(b'\n')).collect())
-        }
-    }
-
-    pub fn snapshot(&self) -> BufferSnapshot {
-        BufferSnapshot {
-            fragments: self.fragments.clone(),
+            let mut line = Vec::new();
+            while let Some(c) = cursor.code_unit() {
+                if c == b'\n' as u16 {
+                    break;
+                } else {
+                    line.push(c);
+                    cursor.next();
+                }
+            }
+            Ok(line)
         }
     }
 
     pub fn to_u16_chars(&self) -> Vec<u16> {
-        let mut result = Vec::with_capacity(self.len());
-        result.extend(self.iter());
-        result
+        let mut chars = Vec::with_capacity(self.len());
+        let mut cursor = self.cursor();
+        while let Some(c) = cursor.code_unit() {
+            chars.push(c);
+            cursor.next();
+        }
+        chars
     }
 
     #[cfg(test)]
     pub fn to_string(&self) -> String {
-        String::from_utf16_lossy(self.iter().collect::<Vec<u16>>().as_slice())
+        String::from_utf16_lossy(&self.to_u16_chars())
     }
 
-    pub fn iter(&self) -> Iter {
-        Iter::new(self)
+    pub fn cursor(&self) -> Cursor {
+        Cursor::new(self)
     }
 
-    pub fn iter_starting_at_point(&self, point: Point) -> Iter {
-        Iter::starting_at_point(self, point)
-    }
-
-    pub fn backward_iter_starting_at_point(&self, point: Point) -> BackwardIter {
-        BackwardIter::starting_at_point(self, point)
+    pub fn cursor_at_point(&self, point: Point) -> Cursor {
+        Cursor::at_point(self, point)
     }
 
     pub fn edit<'a, I, T>(&mut self, old_ranges: I, new_text: T) -> Vec<Arc<Operation>>
@@ -379,7 +303,9 @@ impl Buffer {
                 .filter(|old_range| new_text.is_some() || old_range.end > old_range.start),
             new_text.clone(),
         );
-        self.version.set(self.replica_id, self.local_clock);
+        if let Some(op) = ops.last() {
+            self.version.include(&op.id);
+        }
         self.updates.set(());
         ops
     }
@@ -388,35 +314,36 @@ impl Buffer {
         &mut self,
         user_id: UserId,
         selections: Vec<Selection>,
-    ) -> SelectionSetId {
-        let id = self.next_local_selection_set_id;
-
+    ) -> time::Local {
         let set = SelectionSet {
             version: 0,
             selections,
             user_id,
         };
-
-        self.next_local_selection_set_id += 1;
-        self.selections.insert((self.replica_id, id), set);
+        let id = self.ctx.local_time();
+        self.selections.insert(id, set);
         self.updates.set(());
         id
     }
 
-    pub fn remove_selection_set(&mut self, id: SelectionSetId) -> Result<(), ()> {
-        self.selections.remove(&(self.replica_id, id)).ok_or(())?;
+    pub fn remove_selection_set(&mut self, id: time::Local) -> Result<(), Error> {
+        self.selections
+            .remove(&id)
+            .ok_or(Error::SelectionSetNotFound)?;
         self.updates.set(());
         Ok(())
     }
 
-    pub fn selections(&self, set_id: SelectionSetId) -> Result<&[Selection], ()> {
-        self.selections
-            .get(&(self.replica_id, set_id))
-            .ok_or(())
-            .map(|set| set.selections.as_slice())
+    pub fn selections(&self, set_id: time::Local) -> Result<&[Selection], Error> {
+        Ok(self
+            .selections
+            .get(&set_id)
+            .ok_or(Error::SelectionSetNotFound)?
+            .selections
+            .as_slice())
     }
 
-    pub fn insert_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), Error>
+    pub fn insert_selections<F>(&mut self, set_id: time::Local, f: F) -> Result<(), Error>
     where
         F: FnOnce(&Buffer, &[Selection]) -> Vec<Selection>,
     {
@@ -435,8 +362,7 @@ impl Buffer {
                                 .cmp_anchors(
                                     &old_selections.peek().unwrap().start,
                                     &new_selections.peek().unwrap().start,
-                                )
-                                .unwrap()
+                                ).unwrap()
                             {
                                 Ordering::Less => {
                                     selections.push(old_selections.next().unwrap());
@@ -463,18 +389,18 @@ impl Buffer {
         })
     }
 
-    pub fn mutate_selections<F>(&mut self, set_id: SelectionSetId, f: F) -> Result<(), Error>
+    pub fn mutate_selections<F>(&mut self, set_id: time::Local, f: F) -> Result<(), Error>
     where
         F: FnOnce(&Buffer, &mut Vec<Selection>),
     {
-        let id = (self.replica_id, set_id);
-        let mut set = self.selections
-            .remove(&id)
+        let mut set = self
+            .selections
+            .remove(&set_id)
             .ok_or(Error::SelectionSetNotFound)?;
         f(self, &mut set.selections);
         self.merge_selections(&mut set.selections);
         set.version += 1;
-        self.selections.insert(id, set);
+        self.selections.insert(set_id, set);
         self.updates.set(());
         Ok(())
     }
@@ -485,11 +411,15 @@ impl Buffer {
             let mut old_selections = selections.drain(..);
             if let Some(mut prev_selection) = old_selections.next() {
                 for selection in old_selections {
-                    if self.cmp_anchors(&prev_selection.end, &selection.start)
-                        .unwrap() >= Ordering::Equal
+                    if self
+                        .cmp_anchors(&prev_selection.end, &selection.start)
+                        .unwrap()
+                        >= Ordering::Equal
                     {
-                        if self.cmp_anchors(&selection.end, &prev_selection.end)
-                            .unwrap() > Ordering::Equal
+                        if self
+                            .cmp_anchors(&selection.end, &prev_selection.end)
+                            .unwrap()
+                            > Ordering::Equal
                         {
                             prev_selection.end = selection.end;
                         }
@@ -503,45 +433,21 @@ impl Buffer {
         *selections = new_selections;
     }
 
-    pub fn remote_selections(&self) -> impl Iterator<Item = (UserId, &[Selection])> {
-        let local_replica_id = self.replica_id;
-        self.selections
-            .iter()
-            .filter_map(move |((replica_id, _), set)| {
-                if *replica_id != local_replica_id {
-                    Some((set.user_id, set.selections.as_slice()))
-                } else {
-                    None
-                }
-            })
-    }
-
     pub fn updates(&self) -> NotifyCellObserver<()> {
         self.updates.observe()
     }
 
     fn integrate_op(&mut self, op: Arc<Operation>) -> Result<(), Error> {
-        match op.as_ref() {
-            &Operation::Edit {
-                ref id,
-                ref start_id,
-                ref start_offset,
-                ref end_id,
-                ref end_offset,
-                ref new_text,
-                ref version_in_range,
-                ref timestamp,
-            } => self.integrate_edit(
-                *id,
-                *start_id,
-                *start_offset,
-                *end_id,
-                *end_offset,
-                new_text.as_ref().cloned(),
-                version_in_range,
-                *timestamp,
-            )?,
-        }
+        self.integrate_edit(
+            op.id,
+            op.start_id,
+            op.start_offset,
+            op.end_id,
+            op.end_offset,
+            op.new_text.as_ref().cloned(),
+            &op.version_in_range,
+            op.timestamp,
+        )?;
         self.anchor_cache.borrow_mut().clear();
         self.offset_cache.borrow_mut().clear();
         self.updates.set(());
@@ -550,14 +456,14 @@ impl Buffer {
 
     fn integrate_edit(
         &mut self,
-        id: EditId,
-        start_id: EditId,
+        id: time::Local,
+        start_id: time::Local,
         start_offset: usize,
-        end_id: EditId,
+        end_id: time::Local,
         end_offset: usize,
         new_text: Option<Arc<Text>>,
-        version_in_range: &Version,
-        timestamp: LamportTimestamp,
+        version_in_range: &time::Global,
+        timestamp: time::Lamport,
     ) -> Result<(), Error> {
         let mut new_text = new_text.as_ref().cloned();
         let start_fragment_id = self.resolve_fragment_id(start_id, start_offset)?;
@@ -568,7 +474,7 @@ impl Buffer {
         let mut new_fragments = cursor.slice(&start_fragment_id, SeekBias::Left);
 
         if start_offset == cursor.item().unwrap().end_offset {
-            new_fragments.push(cursor.item().unwrap().clone());
+            new_fragments.push(cursor.item().unwrap());
             cursor.next();
         }
 
@@ -589,19 +495,26 @@ impl Buffer {
                     fragment.end_offset
                 };
                 let (before_range, within_range, after_range) = self.split_fragment(
-                    cursor.prev_item().unwrap(),
-                    fragment,
+                    cursor.prev_item().as_ref().unwrap(),
+                    &fragment,
                     split_start..split_end,
                 );
-                let insertion = new_text.take().map(|new_text| {
-                    self.build_fragment_to_insert(
-                        id,
-                        before_range.as_ref().or(cursor.prev_item()).unwrap(),
-                        within_range.as_ref().or(after_range.as_ref()),
-                        new_text,
-                        timestamp,
+                let insertion = if let Some(new_text) = new_text.take() {
+                    Some(
+                        self.build_fragment_to_insert(
+                            id,
+                            before_range
+                                .as_ref()
+                                .or(cursor.prev_item().as_ref())
+                                .unwrap(),
+                            within_range.as_ref().or(after_range.as_ref()),
+                            new_text,
+                            timestamp,
+                        ),
                     )
-                });
+                } else {
+                    None
+                };
                 if let Some(fragment) = before_range {
                     new_fragments.push(fragment);
                 }
@@ -609,7 +522,7 @@ impl Buffer {
                     new_fragments.push(fragment);
                 }
                 if let Some(mut fragment) = within_range {
-                    if version_in_range.includes(&fragment.insertion) {
+                    if version_in_range.includes(&fragment.insertion.id) {
                         fragment.deletions.insert(id);
                     }
                     new_fragments.push(fragment);
@@ -623,15 +536,15 @@ impl Buffer {
                 {
                     new_fragments.push(self.build_fragment_to_insert(
                         id,
-                        cursor.prev_item().unwrap(),
-                        Some(fragment),
+                        cursor.prev_item().as_ref().unwrap(),
+                        Some(&fragment),
                         new_text.take().unwrap(),
                         timestamp,
                     ));
                 }
 
                 let mut fragment = fragment.clone();
-                if version_in_range.includes(&fragment.insertion) {
+                if version_in_range.includes(&fragment.insertion.id) {
                     fragment.deletions.insert(id);
                 }
                 new_fragments.push(fragment);
@@ -643,51 +556,26 @@ impl Buffer {
         if let Some(new_text) = new_text {
             new_fragments.push(self.build_fragment_to_insert(
                 id,
-                cursor.prev_item().unwrap(),
+                cursor.prev_item().as_ref().unwrap(),
                 None,
                 new_text,
                 timestamp,
             ));
         }
 
-        new_fragments
-            .push_tree(cursor.slice(&old_fragments.len(), SeekBias::Right));
+        new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
-        self.lamport_clock = cmp::max(self.lamport_clock, timestamp) + 1;
+        self.ctx.observe_lamport_timestamp(timestamp);
         Ok(())
     }
 
-    fn update_remote_selection_set(
-        &mut self,
-        replica_id: ReplicaId,
-        set_id: SelectionSetId,
-        state: SelectionSetState,
-    ) {
-        let set = self.selections
-            .entry((replica_id, set_id))
-            .or_insert(SelectionSet {
-                user_id: state.user_id,
-                selections: Vec::new(),
-                version: 0,
-            });
-        set.version += 1;
-        set.selections = state.selections;
-        self.updates.set(());
-    }
-
-    fn remove_remote_selection_set(&mut self, replica_id: ReplicaId, set_id: SelectionSetId) {
-        self.selections.remove(&(replica_id, set_id));
-        self.updates.set(());
-    }
-
-    fn remove_remote_selection_sets(&mut self, id: ReplicaId) {
-        self.selections
-            .retain(|(replica_id, _), _| *replica_id != id);
-        self.updates.set(());
-    }
-
-    fn resolve_fragment_id(&self, edit_id: EditId, offset: usize) -> Result<FragmentId, Error> {
-        let split_tree = self.insertion_splits
+    fn resolve_fragment_id(
+        &self,
+        edit_id: time::Local,
+        offset: usize,
+    ) -> Result<FragmentId, Error> {
+        let split_tree = self
+            .insertion_splits
             .get(&edit_id)
             .ok_or(Error::InvalidOperation)?;
         let mut cursor = split_tree.cursor();
@@ -697,12 +585,6 @@ impl Buffer {
             .ok_or(Error::InvalidOperation)?
             .fragment_id
             .clone())
-    }
-
-    fn outgoing_ops(&mut self) -> unsync::mpsc::UnboundedReceiver<Arc<Operation>> {
-        let (tx, rx) = unsync::mpsc::unbounded();
-        self.operation_txs.push(tx);
-        rx
     }
 
     fn splice_fragments<'a, I>(
@@ -718,36 +600,33 @@ impl Buffer {
             return Vec::new();
         }
 
-        let replica_id = self.replica_id;
         let mut ops = Vec::with_capacity(old_ranges.size_hint().0);
 
         let old_fragments = self.fragments.clone();
         let mut cursor = old_fragments.cursor();
         let mut new_fragments = btree::Tree::new();
-        new_fragments.push_tree(cursor.slice(
-            &cur_range.as_ref().unwrap().start,
-            SeekBias::Right,
-        ));
+        new_fragments.push_tree(cursor.slice(&cur_range.as_ref().unwrap().start, SeekBias::Right));
 
-        self.local_clock += 1;
-        self.lamport_clock += 1;
         let mut start_id = None;
         let mut start_offset = None;
         let mut end_id = None;
         let mut end_offset = None;
-        let mut version_in_range = Version::new();
+        let mut version_in_range = time::Global::new();
+
+        let mut op_id = self.ctx.local_time();
+        let mut op_timestamp = self.ctx.lamport_time();
 
         while cur_range.is_some() && cursor.item().is_some() {
-            let mut fragment = cursor.item().unwrap().clone();
-            let mut fragment_start = cursor.start();
+            let mut fragment = cursor.item().unwrap();
+            let mut fragment_start = cursor.start::<usize>();
             let mut fragment_end = fragment_start + fragment.len();
 
-            let old_split_tree = self.insertion_splits
+            let old_split_tree = self
+                .insertion_splits
                 .remove(&fragment.insertion.id)
                 .unwrap();
             let mut splits_cursor = old_split_tree.cursor();
-            let mut new_split_tree =
-                splits_cursor.slice(&fragment.start_offset, SeekBias::Right);
+            let mut new_split_tree = splits_cursor.slice(&fragment.start_offset, SeekBias::Right);
 
             // Find all splices that start or end within the current fragment. Then, split the
             // fragment and reassemble it in both trees accounting for the deleted and the newly
@@ -777,22 +656,16 @@ impl Buffer {
                 }
 
                 if range.start == fragment_start {
-                    let local_timestamp = self.local_clock;
-                    let lamport_timestamp = self.lamport_clock;
-
                     start_id = Some(new_fragments.last().unwrap().insertion.id);
                     start_offset = Some(new_fragments.last().unwrap().end_offset);
 
                     if let Some(new_text) = new_text.clone() {
                         let new_fragment = self.build_fragment_to_insert(
-                            EditId {
-                                replica_id,
-                                timestamp: local_timestamp,
-                            },
-                            new_fragments.last().unwrap(),
+                            op_id,
+                            &new_fragments.last().unwrap(),
                             Some(&fragment),
                             new_text,
-                            lamport_timestamp,
+                            op_timestamp,
                         );
                         new_fragments.push(new_fragment);
                     }
@@ -805,10 +678,7 @@ impl Buffer {
                         prefix.id =
                             FragmentId::between(&new_fragments.last().unwrap().id, &fragment.id);
                         if fragment.is_visible() {
-                            prefix.deletions.insert(EditId {
-                                replica_id,
-                                timestamp: self.local_clock,
-                            });
+                            prefix.deletions.insert(op_id);
                         }
                         fragment.start_offset = prefix.end_offset;
                         new_fragments.push(prefix.clone());
@@ -819,15 +689,12 @@ impl Buffer {
                         fragment_start = range.end;
                         end_id = Some(fragment.insertion.id);
                         end_offset = Some(fragment.start_offset);
-                        version_in_range.include(&fragment.insertion);
+                        version_in_range.include(&fragment.insertion.id);
                     }
                 } else {
-                    version_in_range.include(&fragment.insertion);
+                    version_in_range.include(&fragment.insertion.id);
                     if fragment.is_visible() {
-                        fragment.deletions.insert(EditId {
-                            replica_id,
-                            timestamp: self.local_clock,
-                        });
+                        fragment.deletions.insert(op_id);
                     }
                 }
 
@@ -835,17 +702,14 @@ impl Buffer {
                 // check if it also intersects the current fragment. Otherwise we break out of the
                 // loop and find the first fragment that the splice does not contain fully.
                 if range.end <= fragment_end {
-                    ops.push(Arc::new(Operation::Edit {
-                        id: EditId {
-                            replica_id,
-                            timestamp: self.local_clock,
-                        },
+                    ops.push(Arc::new(Operation {
+                        id: op_id,
                         start_id: start_id.unwrap(),
                         start_offset: start_offset.unwrap(),
                         end_id: end_id.unwrap(),
                         end_offset: end_offset.unwrap(),
                         new_text: new_text.clone(),
-                        timestamp: self.lamport_clock,
+                        timestamp: op_timestamp,
                         version_in_range,
                     }));
 
@@ -853,11 +717,11 @@ impl Buffer {
                     start_offset = None;
                     end_id = None;
                     end_offset = None;
-                    version_in_range = Version::new();
+                    version_in_range = time::Global::new();
                     cur_range = old_ranges.next();
                     if cur_range.is_some() {
-                        self.local_clock += 1;
-                        self.lamport_clock += 1;
+                        op_id = self.ctx.local_time();
+                        op_timestamp = self.ctx.lamport_time();
                     }
                 } else {
                     break;
@@ -868,9 +732,8 @@ impl Buffer {
                 fragment_id: fragment.id.clone(),
             });
             splits_cursor.next();
-            new_split_tree.push_tree(
-                splits_cursor.slice(&old_split_tree.len(), SeekBias::Right),
-            );
+            new_split_tree
+                .push_tree(splits_cursor.slice(&old_split_tree.extent::<usize>(), SeekBias::Right));
             self.insertion_splits
                 .insert(fragment.insertion.id, new_split_tree);
             new_fragments.push(fragment);
@@ -878,34 +741,28 @@ impl Buffer {
             // Scan forward until we find a fragment that is not fully contained by the current splice.
             cursor.next();
             if let Some(range) = cur_range.clone() {
-                while let Some(mut fragment) = cursor.item().cloned() {
-                    fragment_start = cursor.start();
+                while let Some(mut fragment) = cursor.item() {
+                    fragment_start = cursor.start::<usize>();
                     fragment_end = fragment_start + fragment.len();
                     if range.start < fragment_start && range.end >= fragment_end {
                         if fragment.is_visible() {
-                            fragment.deletions.insert(EditId {
-                                replica_id,
-                                timestamp: self.local_clock,
-                            });
+                            fragment.deletions.insert(op_id);
                         }
-                        version_in_range.include(&fragment.insertion);
+                        version_in_range.include(&fragment.insertion.id);
                         new_fragments.push(fragment.clone());
                         cursor.next();
 
                         if range.end == fragment_end {
                             end_id = Some(fragment.insertion.id);
                             end_offset = Some(fragment.end_offset);
-                            ops.push(Arc::new(Operation::Edit {
-                                id: EditId {
-                                    replica_id,
-                                    timestamp: self.local_clock,
-                                },
+                            ops.push(Arc::new(Operation {
+                                id: op_id,
                                 start_id: start_id.unwrap(),
                                 start_offset: start_offset.unwrap(),
                                 end_id: end_id.unwrap(),
                                 end_offset: end_offset.unwrap(),
                                 new_text: new_text.clone(),
-                                timestamp: self.lamport_clock,
+                                timestamp: op_timestamp,
                                 version_in_range,
                             }));
 
@@ -913,12 +770,12 @@ impl Buffer {
                             start_offset = None;
                             end_id = None;
                             end_offset = None;
-                            version_in_range = Version::new();
+                            version_in_range = time::Global::new();
 
                             cur_range = old_ranges.next();
                             if cur_range.is_some() {
-                                self.local_clock += 1;
-                                self.lamport_clock += 1;
+                                op_id = self.ctx.local_time();
+                                op_timestamp = self.ctx.lamport_time();
                             }
                             break;
                         }
@@ -931,10 +788,9 @@ impl Buffer {
                 // that the cursor is parked at, we should seek to the next splice's start range
                 // and push all the fragments in between into the new tree.
                 if cur_range.map_or(false, |range| range.start > fragment_end) {
-                    new_fragments.push_tree(cursor.slice(
-                        &cur_range.as_ref().unwrap().start,
-                        SeekBias::Right,
-                    ));
+                    new_fragments.push_tree(
+                        cursor.slice(&cur_range.as_ref().unwrap().start, SeekBias::Right),
+                    );
                 }
             }
         }
@@ -943,36 +799,30 @@ impl Buffer {
         // multiple because ranges must be disjoint.
         if cur_range.is_some() {
             debug_assert_eq!(old_ranges.next(), None);
-            let local_timestamp = self.local_clock;
-            let lamport_timestamp = self.lamport_clock;
-            let id = EditId {
-                replica_id,
-                timestamp: local_timestamp,
-            };
-            ops.push(Arc::new(Operation::Edit {
-                id,
-                start_id: new_fragments.last().unwrap().insertion.id,
-                start_offset: new_fragments.last().unwrap().end_offset,
-                end_id: new_fragments.last().unwrap().insertion.id,
-                end_offset: new_fragments.last().unwrap().end_offset,
+            let last_fragment = new_fragments.last().unwrap();
+            ops.push(Arc::new(Operation {
+                id: op_id,
+                start_id: last_fragment.insertion.id,
+                start_offset: last_fragment.end_offset,
+                end_id: last_fragment.insertion.id,
+                end_offset: last_fragment.end_offset,
                 new_text: new_text.clone(),
-                timestamp: lamport_timestamp,
-                version_in_range: Version::new(),
+                timestamp: op_timestamp,
+                version_in_range: time::Global::new(),
             }));
 
             if let Some(new_text) = new_text {
-                let new_fragment = self.build_fragment_to_insert(
-                    id,
-                    new_fragments.last().unwrap(),
+                new_fragments.push(self.build_fragment_to_insert(
+                    op_id,
+                    &last_fragment,
                     None,
                     new_text,
-                    lamport_timestamp,
-                );
-                new_fragments.push(new_fragment);
+                    op_timestamp,
+                ));
             }
         } else {
             new_fragments
-                .push_tree(cursor.slice(&old_fragments.len(), SeekBias::Right));
+                .push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         }
 
         self.fragments = new_fragments;
@@ -1025,37 +875,37 @@ impl Buffer {
                 None
             };
 
-            let old_split_tree = self.insertion_splits
+            let old_split_tree = self
+                .insertion_splits
                 .remove(&fragment.insertion.id)
                 .unwrap();
             let mut cursor = old_split_tree.cursor();
-            let mut new_split_tree =
-                cursor.slice(&fragment.start_offset, SeekBias::Right);
+            let mut new_split_tree = cursor.slice(&fragment.start_offset, SeekBias::Right);
 
             if let Some(ref fragment) = before_range {
                 new_split_tree.push(InsertionSplit {
                     extent: range.start - fragment.start_offset,
                     fragment_id: fragment.id.clone(),
-                })
+                });
             }
 
             if let Some(ref fragment) = within_range {
                 new_split_tree.push(InsertionSplit {
                     extent: range.end - range.start,
                     fragment_id: fragment.id.clone(),
-                })
+                });
             }
 
             if let Some(ref fragment) = after_range {
                 new_split_tree.push(InsertionSplit {
                     extent: fragment.end_offset - range.end,
                     fragment_id: fragment.id.clone(),
-                })
+                });
             }
 
             cursor.next();
             new_split_tree
-                .push_tree(cursor.slice(&old_split_tree.len(), SeekBias::Right));
+                .push_tree(cursor.slice(&old_split_tree.extent::<usize>(), SeekBias::Right));
 
             self.insertion_splits
                 .insert(fragment.insertion.id, new_split_tree);
@@ -1066,11 +916,11 @@ impl Buffer {
 
     fn build_fragment_to_insert(
         &mut self,
-        edit_id: EditId,
+        edit_id: time::Local,
         prev_fragment: &Fragment,
         next_fragment: Option<&Fragment>,
         text: Arc<Text>,
-        timestamp: LamportTimestamp,
+        timestamp: time::Lamport,
     ) -> Fragment {
         let new_fragment_id = FragmentId::between(
             &prev_fragment.id,
@@ -1092,7 +942,6 @@ impl Buffer {
                 id: edit_id,
                 parent_id: prev_fragment.insertion.id,
                 offset_in_parent: prev_fragment.end_offset,
-                replica_id: self.replica_id,
                 text,
                 timestamp,
             },
@@ -1134,7 +983,7 @@ impl Buffer {
         let mut cursor = self.fragments.cursor();
         cursor.seek(&offset, seek_bias);
         let fragment = cursor.item().unwrap();
-        let offset_in_fragment = offset - cursor.start().0;
+        let offset_in_fragment = offset - cursor.start::<usize>();
         let offset_in_insertion = fragment.start_offset + offset_in_fragment;
         let point = cursor.start::<Point>() + &fragment.point_for_offset(offset_in_fragment)?;
         let anchor = Anchor(AnchorInner::Middle {
@@ -1188,7 +1037,7 @@ impl Buffer {
             offset: offset_in_insertion,
             bias,
         });
-        let offset = cursor.start().0 + offset_in_fragment;
+        let offset = cursor.start::<usize>() + offset_in_fragment;
         self.cache_position(Some(anchor.clone()), offset, point);
         Ok(anchor)
     }
@@ -1204,7 +1053,7 @@ impl Buffer {
     fn position_for_anchor(&self, anchor: &Anchor) -> Result<(usize, Point), Error> {
         match &anchor.0 {
             &AnchorInner::Start => Ok((0, Point { row: 0, column: 0 })),
-            &AnchorInner::End => Ok((self.len(), self.fragments.len::<Point>())),
+            &AnchorInner::End => Ok((self.len(), self.fragments.extent())),
             &AnchorInner::Middle {
                 ref insertion_id,
                 offset,
@@ -1225,7 +1074,8 @@ impl Buffer {
                         &AnchorBias::Right => SeekBias::Right,
                     };
 
-                    let splits = self.insertion_splits
+                    let splits = self
+                        .insertion_splits
                         .get(&insertion_id)
                         .ok_or(Error::InvalidAnchor)?;
                     let mut splits_cursor = splits.cursor();
@@ -1245,8 +1095,7 @@ impl Buffer {
                                     } else {
                                         0
                                     };
-                                    let offset =
-                                        fragments_cursor.start().0 + overshoot;
+                                    let offset = fragments_cursor.start::<usize>() + overshoot;
                                     let point = fragments_cursor.start::<Point>()
                                         + &fragment.point_for_offset(overshoot)?;
                                     self.cache_position(Some(anchor.clone()), offset, point);
@@ -1278,7 +1127,7 @@ impl Buffer {
                     let overshoot = fragment
                         .offset_for_point(point - &fragments_cursor.start::<Point>())
                         .unwrap();
-                    let offset = &fragments_cursor.start().0 + &overshoot;
+                    let offset = &fragments_cursor.start::<usize>() + &overshoot;
                     self.cache_position(None, offset, point);
                     offset
                 })
@@ -1301,24 +1150,6 @@ impl Buffer {
         if let Ok(mut offset_cache) = self.offset_cache.try_borrow_mut() {
             offset_cache.insert(point, offset);
         }
-    }
-}
-
-impl BufferSnapshot {
-    pub fn iter<'a>(&'a self) -> impl 'a + Iterator<Item = &'a [u16]> {
-        self.fragments.iter().filter_map(|fragment| {
-            if fragment.is_visible() {
-                let range = fragment.start_offset..fragment.end_offset;
-                Some(&fragment.insertion.text.code_units[range])
-            } else {
-                None
-            }
-        })
-    }
-
-    #[cfg(test)]
-    pub fn to_string(&self) -> String {
-        String::from_utf16_lossy(&self.iter().flat_map(|c| c).cloned().collect::<Vec<u16>>())
     }
 }
 
@@ -1369,8 +1200,8 @@ impl<'a> Sub<&'a Self> for Point {
     }
 }
 
-impl AddAssign for Point {
-    fn add_assign(&mut self, other: Self) {
+impl<'a> AddAssign<&'a Self> for Point {
+    fn add_assign(&mut self, other: &'a Self) {
         if other.row == 0 {
             self.column += other.column;
         } else {
@@ -1412,17 +1243,17 @@ impl SelectionSet {
     }
 }
 
-impl<'a> Iter<'a> {
-    fn new(buffer: &'a Buffer) -> Self {
+impl Cursor {
+    fn new(buffer: &Buffer) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
-        fragment_cursor.seek(0, SeekBias::Right);
+        fragment_cursor.seek(&0, SeekBias::Right);
         Self {
             fragment_cursor,
             fragment_offset: 0,
         }
     }
 
-    fn starting_at_point(buffer: &'a Buffer, point: Point) -> Self {
+    fn at_point(buffer: &Buffer, point: Point) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
         fragment_cursor.seek(&point, SeekBias::Right);
         let fragment_offset = if let Some(fragment) = fragment_cursor.item() {
@@ -1437,79 +1268,41 @@ impl<'a> Iter<'a> {
             fragment_offset,
         }
     }
-}
 
-impl<'a> Iterator for Iter<'a> {
-    type Item = u16;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(fragment) = self.fragment_cursor.item() {
-            if let Some(c) = fragment.get_code_unit(self.fragment_offset) {
-                self.fragment_offset += 1;
-                return Some(c);
-            }
-        }
-
-        loop {
-            self.fragment_cursor.next();
-            if let Some(fragment) = self.fragment_cursor.item() {
-                if let Some(c) = fragment.get_code_unit(0) {
-                    self.fragment_offset = 1;
-                    return Some(c);
-                }
-            } else {
-                break;
-            }
-        }
-
-        None
+    fn code_unit(&self) -> Option<u16> {
+        self.fragment_cursor
+            .item()
+            .and_then(|fragment| fragment.get_code_unit(self.fragment_offset))
     }
-}
 
-impl<'a> BackwardIter<'a> {
-    fn starting_at_point(buffer: &'a Buffer, point: Point) -> Self {
-        let mut fragment_cursor = buffer.fragments.cursor();
-        fragment_cursor.seek(&point, SeekBias::Left);
-        let fragment_offset = if let Some(fragment) = fragment_cursor.item() {
-            let point_in_fragment = point - &fragment_cursor.start::<Point>();
-            fragment.offset_for_point(point_in_fragment).unwrap()
+    fn next(&mut self) {
+        self.fragment_offset += 1;
+        while let Some(fragment) = self.fragment_cursor.item() {
+            if fragment.get_code_unit(self.fragment_offset).is_some() {
+                break;
+            } else {
+                self.fragment_cursor.next();
+                self.fragment_offset = 0;
+            }
+        }
+    }
+
+    fn prev(&mut self) {
+        if self.fragment_offset > 0 {
+            self.fragment_offset -= 1;
         } else {
-            0
-        };
-
-        Self {
-            fragment_cursor,
-            fragment_offset,
-        }
-    }
-}
-
-impl<'a> Iterator for BackwardIter<'a> {
-    type Item = u16;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(fragment) = self.fragment_cursor.item() {
-            if self.fragment_offset > 0 {
-                self.fragment_offset -= 1;
-                if let Some(c) = fragment.get_code_unit(self.fragment_offset) {
-                    return Some(c);
+            loop {
+                self.fragment_cursor.prev();
+                if let Some(fragment) = self.fragment_cursor.item() {
+                    if fragment.len() > 0 {
+                        self.fragment_offset = fragment.len() - 1;
+                        break;
+                    }
+                } else {
+                    break;
                 }
             }
         }
-
-        loop {
-            self.fragment_cursor.prev();
-            if let Some(fragment) = self.fragment_cursor.item() {
-                if fragment.len() > 0 {
-                    self.fragment_offset = fragment.len() - 1;
-                    return fragment.get_code_unit(self.fragment_offset);
-                }
-            } else {
-                break;
-            }
-        }
-
-        None
     }
 }
 
@@ -1522,7 +1315,7 @@ impl Selection {
         }
     }
 
-    pub fn set_head(&mut self, buffer: &Buffer, cursor: Anchor) {
+    pub fn set_head<S>(&mut self, buffer: &Buffer, cursor: Anchor) {
         if buffer.cmp_anchors(&cursor, self.tail()).unwrap() < Ordering::Equal {
             if !self.reversed {
                 mem::swap(&mut self.start, &mut self.end);
@@ -1867,10 +1660,10 @@ impl<'a> Add<&'a Self> for FragmentId {
     }
 }
 
-impl AddAssign for FragmentId {
-    fn add_assign(&mut self, other: Self) {
-        if *self < other {
-            *self = other
+impl<'a> AddAssign<&'a Self> for FragmentId {
+    fn add_assign(&mut self, other: &'a Self) {
+        if *self < *other {
+            *self = other.clone();
         }
     }
 }
@@ -1910,10 +1703,8 @@ impl Fragment {
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
         let text = &self.insertion.text;
         let offset_in_insertion = self.start_offset + offset;
-        Ok(
-            text.point_for_offset(offset_in_insertion)?
-                - &text.point_for_offset(self.start_offset)?,
-        )
+        Ok(text.point_for_offset(offset_in_insertion)?
+            - &text.point_for_offset(self.start_offset)?)
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
@@ -1928,11 +1719,13 @@ impl btree::Item for Fragment {
 
     fn summarize(&self) -> Self::Summary {
         if self.is_visible() {
-            let fragment_2d_start = self.insertion
+            let fragment_2d_start = self
+                .insertion
                 .text
                 .point_for_offset(self.start_offset)
                 .unwrap();
-            let fragment_2d_end = self.insertion
+            let fragment_2d_end = self
+                .insertion
                 .text
                 .point_for_offset(self.end_offset)
                 .unwrap();
@@ -1940,13 +1733,16 @@ impl btree::Item for Fragment {
             let first_row_len = if fragment_2d_start.row == fragment_2d_end.row {
                 (self.end_offset - self.start_offset) as u32
             } else {
-                let first_row_end = self.insertion
+                let first_row_end = self
+                    .insertion
                     .text
                     .offset_for_point(Point::new(fragment_2d_start.row + 1, 0))
-                    .unwrap() - 1;
+                    .unwrap()
+                    - 1;
                 (first_row_end - self.start_offset) as u32
             };
-            let (longest_row, longest_row_len) = self.insertion
+            let (longest_row, longest_row_len) = self
+                .insertion
                 .text
                 .longest_row_in_range(self.start_offset..self.end_offset)
                 .unwrap();
@@ -1984,7 +1780,7 @@ impl<'a> AddAssign<&'a FragmentSummary> for FragmentSummary {
         }
 
         self.extent += other.extent;
-        self.extent_2d += other.extent_2d;
+        self.extent_2d += &other.extent_2d;
         if self.max_fragment_id < other.max_fragment_id {
             self.max_fragment_id = other.max_fragment_id.clone();
         }
@@ -2038,17 +1834,9 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
     }
 }
 
-impl Operation {
-    fn replica_id(&self) -> ReplicaId {
-        match *self {
-            Operation::Edit { ref id, .. } => id.replica_id,
-        }
-    }
-}
-
 fn should_insert_before(
     insertion: &Insertion,
-    other_timestamp: LamportTimestamp,
+    other_timestamp: time::Lamport,
     other_replica_id: ReplicaId,
 ) -> bool {
     match insertion.timestamp.cmp(&other_timestamp) {
@@ -2064,11 +1852,11 @@ mod tests {
 
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
-    use std::time::Duration;
+    use std::cell::Cell;
 
     #[test]
     fn test_edit() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
         buffer.edit(&[0..0], "abc");
         assert_eq!(buffer.to_string(), "abc");
         buffer.edit(&[3..3], "def");
@@ -2089,7 +1877,7 @@ mod tests {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new(0);
+            let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
             let mut reference_string = String::new();
 
             for _i in 0..10 {
@@ -2113,7 +1901,8 @@ mod tests {
                         &reference_string[0..old_range.start],
                         new_text.as_str(),
                         &reference_string[old_range.end..],
-                    ].concat();
+                    ]
+                        .concat();
                 }
                 assert_eq!(buffer.to_string(), reference_string);
             }
@@ -2122,7 +1911,7 @@ mod tests {
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
         buffer.edit(&[0..0], "abcd\nefg\nhij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs\n");
@@ -2139,7 +1928,7 @@ mod tests {
 
     #[test]
     fn test_longest_row() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
         assert_eq!(buffer.longest_row(), 0);
         buffer.edit(&[0..0], "abcd\nefg\nhij");
         assert_eq!(buffer.longest_row(), 0);
@@ -2155,94 +1944,55 @@ mod tests {
 
     #[test]
     fn iter_starting_at_point() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
         buffer.edit(&[0..0], "abcd\nefgh\nij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs");
         buffer.edit(&[18..21], "\nPQ");
 
-        let iter = buffer.iter_starting_at_point(Point::new(0, 0));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "abcd\nefgh\nijkl\nmno\nPQrs"
-        );
+        let cursor = buffer.cursor_at_point(Point::new(0, 0));
+        assert_eq!(cursor.read_to_end(), "abcd\nefgh\nijkl\nmno\nPQrs");
 
-        let iter = buffer.iter_starting_at_point(Point::new(1, 0));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "efgh\nijkl\nmno\nPQrs"
-        );
+        let cursor = buffer.cursor_at_point(Point::new(1, 0));
+        assert_eq!(cursor.read_to_end(), "efgh\nijkl\nmno\nPQrs");
 
-        let iter = buffer.iter_starting_at_point(Point::new(2, 0));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "ijkl\nmno\nPQrs"
-        );
+        let cursor = buffer.cursor_at_point(Point::new(2, 0));
+        assert_eq!(cursor.read_to_end(), "ijkl\nmno\nPQrs");
 
-        let iter = buffer.iter_starting_at_point(Point::new(3, 0));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "mno\nPQrs"
-        );
+        let cursor = buffer.cursor_at_point(Point::new(3, 0));
+        assert_eq!(cursor.read_to_end(), "mno\nPQrs");
 
-        let iter = buffer.iter_starting_at_point(Point::new(4, 0));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "PQrs"
-        );
+        let cursor = buffer.cursor_at_point(Point::new(4, 0));
+        assert_eq!(cursor.read_to_end(), "PQrs");
 
-        let iter = buffer.iter_starting_at_point(Point::new(5, 0));
-        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "");
+        let cursor = buffer.cursor_at_point(Point::new(5, 0));
+        assert_eq!(cursor.read_to_end(), "");
+
+        let cursor = buffer.cursor_at_point(Point::new(0, 0));
+        assert_eq!(cursor.read_to_start(), "");
+
+        let cursor = buffer.cursor_at_point(Point::new(0, 3));
+        assert_eq!(cursor.read_to_start(), "cba");
+
+        let cursor = buffer.cursor_at_point(Point::new(1, 4));
+        assert_eq!(cursor.read_to_start(), "hgfe\ndcba");
+
+        let cursor = buffer.cursor_at_point(Point::new(3, 2));
+        assert_eq!(cursor.read_to_start(), "nm\nlkji\nhgfe\ndcba");
+
+        let cursor = buffer.cursor_at_point(Point::new(4, 4));
+        assert_eq!(cursor.read_to_start(), "srQP\nonm\nlkji\nhgfe\ndcba");
+
+        let cursor = buffer.cursor_at_point(Point::new(5, 0));
+        assert_eq!(cursor.read_to_start(), "srQP\nonm\nlkji\nhgfe\ndcba");
 
         // Regression test:
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
         buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
         buffer.edit(&[60..60], "\n");
 
-        let iter = buffer.iter_starting_at_point(Point::new(6, 0));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "    \"xray_wasm\",\n]\n"
-        );
-    }
-
-    #[test]
-    fn backward_iter_starting_at_point() {
-        let mut buffer = Buffer::new(0);
-        buffer.edit(&[0..0], "abcd\nefgh\nij");
-        buffer.edit(&[12..12], "kl\nmno");
-        buffer.edit(&[18..18], "\npqrs");
-        buffer.edit(&[18..21], "\nPQ");
-
-        let iter = buffer.backward_iter_starting_at_point(Point::new(0, 0));
-        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "");
-
-        let iter = buffer.backward_iter_starting_at_point(Point::new(0, 3));
-        assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "cba");
-
-        let iter = buffer.backward_iter_starting_at_point(Point::new(1, 4));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "hgfe\ndcba"
-        );
-
-        let iter = buffer.backward_iter_starting_at_point(Point::new(3, 2));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "nm\nlkji\nhgfe\ndcba"
-        );
-
-        let iter = buffer.backward_iter_starting_at_point(Point::new(4, 4));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "srQP\nonm\nlkji\nhgfe\ndcba"
-        );
-
-        let iter = buffer.backward_iter_starting_at_point(Point::new(5, 0));
-        assert_eq!(
-            String::from_utf16_lossy(&iter.collect::<Vec<u16>>()),
-            "srQP\nonm\nlkji\nhgfe\ndcba"
-        );
+        let cursor = buffer.cursor_at_point(Point::new(6, 0));
+        assert_eq!(cursor.read_to_end(), "    \"xray_wasm\",\n]\n");
     }
 
     #[test]
@@ -2367,7 +2117,7 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
         buffer.edit(&[0..0], "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
@@ -2509,7 +2259,7 @@ mod tests {
 
     #[test]
     fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(0, Rc::new(TestContext::new(1)));
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
@@ -2531,22 +2281,6 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot() {
-        let mut buffer = Buffer::new(0);
-        buffer.edit(&[0..0], "abcdefghi");
-        buffer.edit(&[3..6], "DEF");
-
-        let snapshot = buffer.snapshot();
-        assert_eq!(buffer.to_string(), String::from("abcDEFghi"));
-        assert_eq!(snapshot.to_string(), String::from("abcDEFghi"));
-
-        buffer.edit(&[0..1], "A");
-        buffer.edit(&[8..9], "I");
-        assert_eq!(buffer.to_string(), String::from("AbcDEFghI"));
-        assert_eq!(snapshot.to_string(), String::from("abcDEFghi"));
-    }
-
-    #[test]
     fn test_random_concurrent_edits() {
         for seed in 0..100 {
             println!("{:?}", seed);
@@ -2556,15 +2290,14 @@ mod tests {
             let mut buffers = Vec::new();
             let mut queues = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new(0);
-                buffer.replica_id = i + 1;
+                let mut buffer = Buffer::new(0, Rc::new(TestContext::new(i)));
                 buffers.push(buffer);
                 queues.push(Vec::new());
             }
 
             let mut edit_count = 10;
             loop {
-                let replica_index = rng.gen_range::<usize>(site_range.start, site_range.end);
+                let replica_index = rng.gen_range(site_range.start, site_range.end) as usize;
                 let buffer = &mut buffers[replica_index];
                 if edit_count > 0 && rng.gen() {
                     let mut old_ranges: Vec<Range<usize>> = Vec::new();
@@ -2607,6 +2340,39 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct TestContext {
+        local_clock: Cell<time::Local>,
+        lamport_clock: Cell<time::Lamport>,
+    }
+
+    impl TestContext {
+        fn new(replica_id: ReplicaId) -> Self {
+            Self {
+                local_clock: Cell::new(time::Local::new(replica_id)),
+                lamport_clock: Cell::new(time::Lamport::new(replica_id)),
+            }
+        }
+    }
+
+    impl ReplicaContext for TestContext {
+        fn local_time(&self) -> time::Local {
+            let next_id = self.local_clock.get();
+            self.local_clock.replace(next_id.next());
+            next_id
+        }
+
+        fn lamport_time(&self) -> time::Lamport {
+            self.lamport_clock.replace(self.lamport_clock.get().inc());
+            self.lamport_clock.get()
+        }
+
+        fn observe_lamport_timestamp(&self, timestamp: time::Lamport) {
+            self.lamport_clock
+                .set(self.lamport_clock.get().update(timestamp));
+        }
+    }
+
     struct RandomCharIter<T: Rng>(T);
 
     impl<T: Rng> Iterator for RandomCharIter<T> {
@@ -2621,19 +2387,36 @@ mod tests {
         }
     }
 
-    fn selections(buffer: &Rc<RefCell<Buffer>>) -> Vec<(ReplicaId, SelectionSetId, Selection)> {
+    impl Cursor {
+        fn read_to_start(mut self) -> String {
+            let mut chars = Vec::new();
+            while let Some(c) = self.code_unit() {
+                chars.push(c);
+                self.prev();
+            }
+            String::from_utf16_lossy(&chars)
+        }
+
+        fn read_to_end(mut self) -> String {
+            let mut chars = Vec::new();
+            while let Some(c) = self.code_unit() {
+                chars.push(c);
+                self.next();
+            }
+            String::from_utf16_lossy(&chars)
+        }
+    }
+
+    fn selections(buffer: &Rc<RefCell<Buffer>>) -> Vec<(time::Local, Selection)> {
         let buffer = buffer.borrow();
 
         let mut selections = Vec::new();
-        for ((replica_id, set_id), selection_set) in &buffer.selections {
+        for (set_id, selection_set) in &buffer.selections {
             for selection in selection_set.selections.iter() {
-                selections.push((*replica_id, *set_id, selection.clone()));
+                selections.push((*set_id, selection.clone()));
             }
         }
-        selections.sort_by(|a, b| match a.0.cmp(&b.0) {
-            Ordering::Equal => a.1.cmp(&b.1),
-            comparison @ _ => comparison,
-        });
+        selections.sort_by_key(|(set_id, _)| *set_id);
 
         selections
     }

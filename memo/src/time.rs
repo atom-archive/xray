@@ -1,13 +1,17 @@
 use std::cmp;
+use std::collections::HashMap;
 use std::ops::{Add, AddAssign};
-
+use std::sync::Arc;
 use ReplicaId;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct Local {
     pub replica_id: ReplicaId,
     pub seq: u64,
 }
+
+#[derive(Clone, Debug)]
+pub struct Global(Arc<HashMap<ReplicaId, u64>>);
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Lamport {
@@ -49,6 +53,26 @@ impl<'a> AddAssign<&'a Local> for Local {
     fn add_assign(&mut self, other: &Self) {
         if *self < *other {
             *self = other.clone();
+        }
+    }
+}
+
+impl Global {
+    pub fn new() -> Self {
+        Global(Arc::new(HashMap::new()))
+    }
+
+    pub fn include(&mut self, timestamp: &Local) {
+        let map = Arc::make_mut(&mut self.0);
+        let seq = map.entry(timestamp.replica_id).or_insert(0);
+        *seq = cmp::max(*seq, timestamp.seq);
+    }
+
+    pub fn includes(&self, timestamp: &Local) -> bool {
+        if let Some(seq) = self.0.get(&timestamp.replica_id) {
+            *seq >= timestamp.seq
+        } else {
+            false
         }
     }
 }

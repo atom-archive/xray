@@ -7,6 +7,7 @@ extern crate uuid;
 
 mod btree;
 pub mod buffer;
+mod notify_cell;
 mod time;
 pub mod timeline;
 

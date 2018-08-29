@@ -65,7 +65,7 @@ pub enum Node<T: Item> {
 #[derive(Clone)]
 pub struct Cursor<T: Item> {
     tree: Tree<T>,
-    stack: SmallVec<[(Tree<T>, usize); 16]>,
+    stack: SmallVec<[(Tree<T>, usize, T::Summary); 16]>,
     summary: T::Summary,
     did_seek: bool,
 }
@@ -103,6 +103,12 @@ impl<T: Item> Tree<T> {
             summary: T::Summary::default(),
             items: SmallVec::new(),
         }))
+    }
+
+    pub fn from_item(item: T) -> Self {
+        let mut tree = Self::new();
+        tree.push(item);
+        tree
     }
 
     pub fn save<S>(
@@ -189,9 +195,16 @@ impl<T: Item> Tree<T> {
     }
 
     pub fn extent<D: Dimension<T::Summary>>(&self) -> D {
-        match *self.node() {
-            Node::Internal { ref summary, .. } => D::from_summary(summary).clone(),
-            Node::Leaf { ref summary, .. } => D::from_summary(summary).clone(),
+        match self.node().as_ref() {
+            Node::Internal { summary, .. } => D::from_summary(summary).clone(),
+            Node::Leaf { summary, .. } => D::from_summary(summary).clone(),
+        }
+    }
+
+    pub fn summary(&self) -> T::Summary {
+        match self.node().as_ref() {
+            Node::Internal { summary, .. } => summary.clone(),
+            Node::Leaf { summary, .. } => summary.clone(),
         }
     }
 
@@ -587,7 +600,7 @@ impl<T: Item> Cursor<T> {
 
     pub fn item(&self) -> Option<T> {
         assert!(self.did_seek, "Must seek before calling this method");
-        if let Some((subtree, index)) = self.stack.last() {
+        if let Some((subtree, index, _)) = self.stack.last() {
             match *subtree.node() {
                 Node::Leaf { ref items, .. } => {
                     if *index == items.len() {
@@ -605,7 +618,7 @@ impl<T: Item> Cursor<T> {
 
     pub fn prev_item(&self) -> Option<T> {
         assert!(self.did_seek, "Must seek before calling this method");
-        if let Some((cur_leaf, index)) = self.stack.last() {
+        if let Some((cur_leaf, index, _)) = self.stack.last() {
             if *index == 0 {
                 if let Some(prev_leaf) = self.prev_leaf() {
                     let prev_leaf = prev_leaf.node();
@@ -625,7 +638,7 @@ impl<T: Item> Cursor<T> {
     }
 
     fn prev_leaf(&self) -> Option<Tree<T>> {
-        for (ancestor, index) in self.stack.iter().rev().skip(1) {
+        for (ancestor, index, _) in self.stack.iter().rev().skip(1) {
             if *index != 0 {
                 match *ancestor.node() {
                     Node::Internal {
@@ -638,12 +651,52 @@ impl<T: Item> Cursor<T> {
         None
     }
 
+    pub fn prev(&mut self) {
+        assert!(self.did_seek, "Must seek before calling this method");
+
+        while self.stack.len() > 0 {
+            let subtree = {
+                let (subtree, index, summary) = self.stack.last_mut().unwrap();
+                if *index == 0 {
+                    None
+                } else {
+                    *index -= 1;
+                    self.summary = summary.clone();
+                    match subtree.node().as_ref() {
+                        Node::Internal {
+                            child_trees,
+                            child_summaries,
+                            ..
+                        } => {
+                            for summary in &child_summaries[0..*index] {
+                                self.summary += summary;
+                            }
+                            Some(child_trees[*index].clone())
+                        }
+                        Node::Leaf { items, .. } => {
+                            for item in &items[0..*index] {
+                                self.summary += &item.summarize();
+                            }
+                            None
+                        }
+                    }
+                }
+            };
+            if let Some(subtree) = subtree {
+                self.descend_to_end(subtree);
+                break;
+            } else {
+                self.stack.pop();
+            }
+        }
+    }
+
     pub fn next(&mut self) {
         assert!(self.did_seek, "Must seek before calling this method");
 
         while self.stack.len() > 0 {
             let new_subtree = {
-                let (subtree, index) = self.stack.last_mut().unwrap();
+                let (subtree, index, _) = self.stack.last_mut().unwrap();
                 match *subtree.node() {
                     Node::Internal {
                         ref child_trees, ..
@@ -675,12 +728,40 @@ impl<T: Item> Cursor<T> {
     fn descend_to_start(&mut self, mut subtree: Tree<T>) {
         self.did_seek = true;
         loop {
-            self.stack.push((subtree.clone(), 0));
+            self.stack.push((subtree.clone(), 0, self.summary.clone()));
             subtree = match *subtree.node() {
                 Node::Internal {
                     ref child_trees, ..
                 } => child_trees[0].clone(),
                 Node::Leaf { .. } => {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn descend_to_end(&mut self, mut subtree: Tree<T>) {
+        self.did_seek = true;
+        loop {
+            match subtree.node().as_ref() {
+                Node::Internal {
+                    child_trees,
+                    child_summaries,
+                    ..
+                } => {
+                    self.stack
+                        .push((subtree.clone(), child_trees.len() - 1, self.summary.clone()));
+                    for summary in &child_summaries[0..child_summaries.len() - 1] {
+                        self.summary += summary;
+                    }
+                    subtree = child_trees.last().unwrap().clone();
+                }
+                Node::Leaf { items, .. } => {
+                    self.stack
+                        .push((subtree.clone(), items.len() - 1, self.summary.clone()));
+                    for item in &items[0..items.len() - 1] {
+                        self.summary += &item.summarize();
+                    }
                     break;
                 }
             }
@@ -737,7 +818,7 @@ impl<T: Item> Cursor<T> {
         if self.did_seek {
             'outer: while self.stack.len() > 0 {
                 {
-                    let (parent_subtree, index) = self.stack.last_mut().unwrap();
+                    let (parent_subtree, index, _) = self.stack.last_mut().unwrap();
                     match *parent_subtree.node() {
                         Node::Internal {
                             ref child_summaries,
@@ -846,7 +927,8 @@ impl<T: Item> Cursor<T> {
                                 }
                             } else {
                                 pos = D::from_summary(&self.summary).clone();
-                                self.stack.push((subtree.clone(), index));
+                                self.stack
+                                    .push((subtree.clone(), index, self.summary.clone()));
                                 next_subtree = Some(child_trees[index].clone());
                                 break;
                             }
@@ -873,7 +955,8 @@ impl<T: Item> Cursor<T> {
                                 pos = child_end;
                             } else {
                                 pos = D::from_summary(&self.summary).clone();
-                                self.stack.push((subtree.clone(), index));
+                                self.stack
+                                    .push((subtree.clone(), index, self.summary.clone()));
                                 break;
                             }
                         }
