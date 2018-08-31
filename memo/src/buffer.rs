@@ -13,7 +13,6 @@ use time;
 use UserId;
 
 type SelectionSetVersion = usize;
-pub type BufferId = usize;
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum Error {
@@ -24,7 +23,6 @@ pub enum Error {
 }
 
 pub struct Buffer {
-    id: BufferId,
     fragments: btree::Tree<Fragment>,
     insertion_splits: HashMap<time::Local, btree::Tree<InsertionSplit>>,
     anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
@@ -165,7 +163,7 @@ pub struct Operation {
 }
 
 impl Buffer {
-    pub fn new(id: BufferId, ctx: Rc<RefCell<ReplicaContext>>) -> Self {
+    pub fn new(ctx: Rc<RefCell<ReplicaContext>>) -> Self {
         // Push start sentinel.
         let sentinel_id = time::Local::new(0);
         let fragments = btree::Tree::from_item(Fragment::new(
@@ -188,7 +186,6 @@ impl Buffer {
         );
 
         Self {
-            id,
             fragments,
             insertion_splits,
             anchor_cache: RefCell::new(HashMap::default()),
@@ -198,10 +195,6 @@ impl Buffer {
             selections: HashMap::default(),
             ctx,
         }
-    }
-
-    pub fn id(&self) -> BufferId {
-        self.id
     }
 
     pub fn len(&self) -> usize {
@@ -1826,7 +1819,7 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "abc");
         assert_eq!(buffer.to_string(), "abc");
         buffer.edit(&[3..3], "def");
@@ -1847,7 +1840,7 @@ mod tests {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+            let mut buffer = Buffer::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
             let mut reference_string = String::new();
 
             for _i in 0..10 {
@@ -1881,7 +1874,7 @@ mod tests {
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "abcd\nefg\nhij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs\n");
@@ -1898,7 +1891,7 @@ mod tests {
 
     #[test]
     fn test_longest_row() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
         assert_eq!(buffer.longest_row(), 0);
         buffer.edit(&[0..0], "abcd\nefg\nhij");
         assert_eq!(buffer.longest_row(), 0);
@@ -1914,7 +1907,7 @@ mod tests {
 
     #[test]
     fn iter_starting_at_point() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "abcd\nefgh\nij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs");
@@ -1957,7 +1950,7 @@ mod tests {
         assert_eq!(cursor.read_to_start(), "srQP\nonm\nlkji\nhgfe\ndcba");
 
         // Regression test:
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
         buffer.edit(&[60..60], "\n");
 
@@ -2087,7 +2080,7 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
         buffer.edit(&[0..0], "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
@@ -2229,7 +2222,7 @@ mod tests {
 
     #[test]
     fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new(Rc::new(RefCell::new(ReplicaContext::new(1))));
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
@@ -2260,7 +2253,7 @@ mod tests {
             let mut buffers = Vec::new();
             let mut queues = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(i + 1))));
+                let mut buffer = Buffer::new(Rc::new(RefCell::new(ReplicaContext::new(i + 1))));
                 buffers.push(buffer);
                 queues.push(Vec::new());
             }

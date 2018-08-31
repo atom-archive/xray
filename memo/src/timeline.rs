@@ -1,10 +1,12 @@
 use btree::{self, SeekBias};
+use buffer::Buffer;
 use replica_context::ReplicaContext;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
+use std::io::BufRead;
 use std::iter::FromIterator;
 use std::ops::{Add, AddAssign};
 use std::path::{Path, PathBuf};
@@ -22,7 +24,8 @@ pub trait FileSystem {
     fn hard_link(&mut self, src: &Path, dst: &Path) -> bool;
     fn remove(&mut self, path: &Path, is_dir: bool) -> bool;
     fn rename(&mut self, from: &Path, to: &Path) -> bool;
-    fn inode(&self, path: &Path) -> Option<Inode>;
+    fn inode(&self, path: &Path) -> Option<u64>;
+    fn read(&self, path: &Path, expected_inode: u64) -> Option<String>;
     fn entries(&self) -> Self::EntriesIterator;
 
     // TODO: Remove this
@@ -32,11 +35,12 @@ pub trait FileSystem {
 pub trait FileSystemEntry {
     fn depth(&self) -> usize;
     fn name(&self) -> &OsStr;
-    fn inode(&self) -> Inode;
+    fn path(&self) -> PathBuf;
+    fn inode(&self) -> u64;
+    fn mtime(&self) -> i64;
     fn is_dir(&self) -> bool;
 }
 
-type Inode = u64;
 type VisibleCount = usize;
 
 const ROOT_ID: time::Local = time::Local::DEFAULT;
@@ -46,7 +50,7 @@ pub struct Timeline {
     metadata: btree::Tree<Metadata>,
     parent_refs: btree::Tree<ParentRefValue>,
     child_refs: btree::Tree<ChildRefValue>,
-    inodes_to_file_ids: HashMap<Inode, time::Local>,
+    inodes_to_file_ids: HashMap<u64, time::Local>,
     ctx: Rc<RefCell<ReplicaContext>>,
 }
 
@@ -81,7 +85,8 @@ pub enum Error {
 pub struct Metadata {
     file_id: time::Local,
     is_dir: bool,
-    inode: Option<Inode>,
+    inode: Option<u64>,
+    mtime: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -395,6 +400,7 @@ impl Timeline {
         let mut visited_dir_ids = HashSet::new();
         let mut occupied_ref_ids = HashSet::new();
         let mut changes = HashMap::new();
+        let mut updated_files = HashMap::new();
 
         visited_dir_ids.insert(ROOT_ID);
         for entry in entries {
@@ -442,14 +448,27 @@ impl Timeline {
                     {
                         occupied_ref_ids.insert(parent_ref.ref_id);
                     } else {
-                        changes
-                            .entry(file_id)
-                            .or_insert_with(|| Change {
-                                inserted: false,
-                                entry,
-                                parents: SmallVec::new(),
-                            }).parents
-                            .extend(cur_parent);
+                        if let Some(metadata) = self.metadata(file_id) {
+                            if metadata.mtime.unwrap() > entry.mtime() {
+                                updated_files.insert(file_id, entry.mtime());
+                            }
+                        } else if let Some(contents) = fs.read(&entry.path(), entry.inode()) {
+                            self.create_buffer(file_id, contents);
+                        }
+                        match changes.entry(file_id) {
+                            Entry::Vacant(change_entry) => {
+                                change_entry.insert(Change {
+                                    inserted: false,
+                                    entry,
+                                    parents: SmallVec::from_iter(cur_parent),
+                                });
+                            }
+                            Entry::Occupied(change_entry) => {
+                                let change = change_entry.get_mut();
+                                change.entry = entry;
+                                change.parents.extend(cur_parent);
+                            }
+                        }
                     }
                 }
             } else {
@@ -532,11 +551,18 @@ impl Timeline {
         operations
     }
 
+    fn create_buffer(&mut self, file_id: time::Local, contents: String) {
+        let mut buffer = Buffer::new(self.ctx.clone());
+        buffer.edit(Some(0..0), contents);
+        self.file_ids_to_buffers
+            .insert(file_id, Rc::new(RefCell::new(buffer)));
+    }
+
     fn insert_metadata(
         &self,
         file_id: time::Local,
         is_dir: bool,
-        inode: Option<Inode>,
+        inode: Option<u64>,
         metadata_edits: &mut Vec<btree::Edit<Metadata>>,
     ) -> Operation {
         metadata_edits.push(btree::Edit::Insert(Metadata {
@@ -611,7 +637,7 @@ impl Timeline {
         &mut self,
         path: I,
         is_dir: bool,
-        inode: Option<Inode>,
+        inode: Option<u64>,
     ) -> Result<SmallVec<[Operation; 2]>, Error>
     where
         I: Into<PathBuf>,
@@ -693,7 +719,7 @@ impl Timeline {
     fn create_dir_all_internal<I>(
         &mut self,
         path: I,
-        next_inode: &mut Option<&mut Inode>,
+        next_inode: &mut Option<&mut u64>,
     ) -> Result<Vec<Operation>, Error>
     where
         I: Into<PathBuf>,
@@ -1300,11 +1326,11 @@ impl Timeline {
             .map(|(_, name)| name)
     }
 
-    fn inode_for_id(&self, child_id: time::Local) -> Option<Inode> {
+    fn inode_for_id(&self, child_id: time::Local) -> Option<u64> {
         self.metadata(child_id).and_then(|metadata| metadata.inode)
     }
 
-    fn set_inode_for_id(&mut self, child_id: time::Local, inode: Inode) -> bool {
+    fn set_inode_for_id(&mut self, child_id: time::Local, inode: u64) -> bool {
         let mut cursor = self.metadata.cursor();
         if cursor.seek(&child_id, SeekBias::Left) {
             let mut metadata = cursor.item().unwrap();
@@ -2018,7 +2044,7 @@ mod tests {
     #[derive(Clone)]
     struct FakeFileSystemState<T: Rng + Clone> {
         timeline: Timeline,
-        next_inode: Inode,
+        next_inode: u64,
         rng: T,
         version: usize,
     }
@@ -2033,7 +2059,7 @@ mod tests {
     struct FakeFileSystemEntry {
         depth: usize,
         name: Arc<OsString>,
-        inode: Inode,
+        inode: u64,
         is_dir: bool,
     }
 
@@ -2093,7 +2119,7 @@ mod tests {
             self.0.borrow_mut().rename(from, to)
         }
 
-        fn inode(&self, path: &Path) -> Option<Inode> {
+        fn inode(&self, path: &Path) -> Option<u64> {
             self.0.borrow_mut().inode(path)
         }
 
@@ -2199,7 +2225,7 @@ mod tests {
             !to.starts_with(from) && self.timeline.rename(from, to).is_ok()
         }
 
-        fn inode(&mut self, path: &Path) -> Option<Inode> {
+        fn inode(&mut self, path: &Path) -> Option<u64> {
             if self.rng.gen_weighted_bool(10) {
                 // println!("mutate before inode");
                 self.mutate(1);
@@ -2286,7 +2312,7 @@ mod tests {
             self.name.as_ref()
         }
 
-        fn inode(&self) -> Inode {
+        fn inode(&self) -> u64 {
             self.inode
         }
 
@@ -2300,7 +2326,7 @@ mod tests {
             &mut self,
             rng: &mut T,
             count: usize,
-            next_inode: &mut Inode,
+            next_inode: &mut u64,
         ) -> Vec<Operation> {
             let mut ops = Vec::new();
             for _ in 0..count {
