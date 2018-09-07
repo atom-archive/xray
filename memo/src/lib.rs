@@ -8,8 +8,9 @@ extern crate uuid;
 mod btree;
 pub mod buffer;
 mod notify_cell;
-mod time;
+mod patch;
 mod replica_context;
+mod time;
 pub mod timeline;
 
 pub type ReplicaId = u64;
