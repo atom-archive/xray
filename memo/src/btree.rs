@@ -945,6 +945,7 @@ impl<T: Item> Cursor<T> {
                     Node::Leaf { ref items, .. } => {
                         let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
                         let mut slice_items_summary = T::Summary::default();
+                        let start_summary = self.summary.clone();
 
                         for (index, item) in items.iter().enumerate() {
                             let item_summary = item.summarize();
@@ -964,7 +965,7 @@ impl<T: Item> Cursor<T> {
                             } else {
                                 pos = D::from_summary(&self.summary).clone();
                                 self.stack
-                                    .push((subtree.clone(), index, self.summary.clone()));
+                                    .push((subtree.clone(), index, start_summary));
                                 break;
                             }
                         }
