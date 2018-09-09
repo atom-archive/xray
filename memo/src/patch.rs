@@ -31,6 +31,22 @@ pub enum Operation {
         components: SmallVec<[(Arc<OsString>, FileId); 32]>,
         timestamp: time::Lamport,
     },
+    InsertMetadata {
+        file_id: FileId,
+        file_type: FileType,
+    },
+    UpdateParent {
+        child_id: FileId,
+        timestamp: time::Lamport,
+        prev_timestamp: time::Lamport,
+        new_parent: Option<(FileId, Arc<OsString>)>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileType {
+    Directory,
+    Text,
 }
 
 pub struct Changes {
@@ -47,8 +63,8 @@ pub enum Error {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Metadata {
-    id: FileId,
-    is_dir: Option<bool>,
+    file_id: FileId,
+    file_type: Option<FileType>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,18 +178,48 @@ impl Patch {
     where
         T: Into<Text>,
     {
-        unimplemented!()
+        let file_id = self.local_time();
+        let operation = Operation::InsertMetadata {
+            file_id,
+            file_type: FileType::Directory,
+        };
+        self.integrate_ops(Some(operation.clone()));
+
+        (file_id, operation)
     }
 
     pub fn new_text_file<T>(&mut self, text: T) -> (FileId, Operation)
     where
         T: Into<Text>,
     {
-        unimplemented!()
+        let file_id = self.local_time();
+        let operation = Operation::InsertMetadata {
+            file_id,
+            file_type: FileType::Text,
+        };
+        self.integrate_ops(Some(operation.clone()));
+
+        (file_id, operation)
     }
 
     fn rename(&mut self, file_id: FileId, new_parent_id: FileId, new_name: &OsStr) -> Operation {
-        unimplemented!()
+        let timestamp = self.lamport_time();
+        let mut cursor = self.parent_refs.cursor();
+        let prev_timestamp = if cursor.seek(&file_id, SeekBias::Left) {
+            cursor.item().unwrap().timestamp
+        } else {
+            timestamp
+        };
+        let operation = Operation::UpdateParent {
+            child_id: file_id,
+            timestamp,
+            prev_timestamp,
+            new_parent: Some((new_parent_id, Arc::new(new_name))),
+        };
+
+        self.integrate_op(operation.clone())
+
+        operation
     }
 
     fn remove(&mut self, file_id: FileId) -> Operation {
@@ -252,8 +298,8 @@ impl Patch {
                     } else {
                         parent_exists = false;
                         metadata_edits.push(btree::Edit::Insert(Metadata {
-                            id: file_id,
-                            is_dir: None,
+                            file_id,
+                            file_type: None,
                         }));
                         parent_ref_edits.push(btree::Edit::Insert(ParentRefValue {
                             child_id: file_id,
@@ -275,6 +321,12 @@ impl Patch {
                 self.metadata.edit(metadata_edits);
                 self.parent_refs.edit(parent_ref_edits);
                 self.child_refs.edit(child_ref_edits);
+            }
+            Operation::InsertMetadata { file_id, file_type } => {
+                self.metadata.insert(Metadata {
+                    file_id,
+                    file_type: Some(file_type),
+                });
             }
         }
     }
@@ -342,7 +394,7 @@ impl btree::KeyedItem for Metadata {
     type Key = time::Local;
 
     fn key(&self) -> Self::Key {
-        self.id
+        self.file_id
     }
 }
 
@@ -402,7 +454,7 @@ impl<'a> Add<&'a Self> for ParentRefValueKey {
     }
 }
 
-impl btree::Dimension<ParentRefValueKey> for time::Local {
+impl btree::Dimension<ParentRefValueKey> for FileId {
     fn from_summary(summary: &ParentRefValueKey) -> Self {
         summary.child_id
     }

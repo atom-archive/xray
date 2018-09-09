@@ -209,18 +209,6 @@ impl<T: Item> Tree<T> {
         }
     }
 
-    pub fn insert<D>(&mut self, position: &D, bias: SeekBias, item: T)
-    where
-        D: Dimension<T::Summary>,
-    {
-        let mut cursor = self.cursor();
-        let mut new_tree = cursor.slice(position, bias);
-        new_tree.push(item);
-        let suffix = cursor.slice(&self.extent::<D>(), SeekBias::Right);
-        new_tree.push_tree(suffix);
-        *self = new_tree;
-    }
-
     pub fn extend<I>(&mut self, iter: I)
     where
         I: IntoIterator<Item = T>,
@@ -422,6 +410,14 @@ impl<T: Item> Tree<T> {
 }
 
 impl<T: KeyedItem> Tree<T> {
+    pub fn insert(&mut self, item: T) {
+        let mut cursor = self.cursor();
+        let mut new_tree = cursor.slice(&item.key(), SeekBias::Left);
+        new_tree.push(item);
+        new_tree.push_tree(cursor.suffix::<T::Key>());
+        *self = new_tree;
+    }
+
     pub fn edit(&mut self, mut edits: Vec<Edit<T>>) {
         edits.sort_unstable_by_key(|item| item.key());
 
@@ -964,8 +960,7 @@ impl<T: Item> Cursor<T> {
                                 pos = child_end;
                             } else {
                                 pos = D::from_summary(&self.summary).clone();
-                                self.stack
-                                    .push((subtree.clone(), index, start_summary));
+                                self.stack.push((subtree.clone(), index, start_summary));
                                 break;
                             }
                         }
