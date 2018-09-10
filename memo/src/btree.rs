@@ -418,7 +418,11 @@ impl<T: KeyedItem> Tree<T> {
         *self = new_tree;
     }
 
-    pub fn edit(&mut self, mut edits: Vec<Edit<T>>) {
+    pub fn edit(&mut self, edits: &mut [Edit<T>]) {
+        if edits.is_empty() {
+            return;
+        }
+
         edits.sort_unstable_by_key(|item| item.key());
 
         let mut cursor = self.cursor();
@@ -444,7 +448,7 @@ impl<T: KeyedItem> Tree<T> {
             }
             match edit {
                 Edit::Insert(item) => {
-                    buffered_items.push(item);
+                    buffered_items.push(item.clone());
                 }
                 Edit::Remove(_) => {}
             }

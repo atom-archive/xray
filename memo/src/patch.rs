@@ -38,7 +38,6 @@ pub enum Operation {
     UpdateParent {
         child_id: FileId,
         timestamp: time::Lamport,
-        prev_timestamp: time::Lamport,
         new_parent: Option<(FileId, Arc<OsString>)>,
     },
 }
@@ -71,7 +70,6 @@ struct Metadata {
 struct ParentRefValue {
     child_id: FileId,
     timestamp: time::Lamport,
-    prev_timestamp: time::Lamport,
     parent: Option<(FileId, Arc<OsString>)>,
 }
 
@@ -87,7 +85,7 @@ struct ChildRefValue {
     name: Arc<OsString>,
     timestamp: time::Lamport,
     child_id: FileId,
-    deletions: SmallVec<[time::Local; 1]>,
+    visible: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -141,7 +139,7 @@ impl Patch {
                         let name = name.clone();
                         if cursor.seek(&ChildRefKey { parent_id, name }, SeekBias::Left) {
                             let child_ref = cursor.item().unwrap();
-                            if child_ref.is_visible() {
+                            if child_ref.visible {
                                 parent_id = child_ref.child_id;
                             } else {
                                 return Err(Error::InvalidPath);
@@ -203,27 +201,27 @@ impl Patch {
     }
 
     fn rename(&mut self, file_id: FileId, new_parent_id: FileId, new_name: &OsStr) -> Operation {
-        let timestamp = self.lamport_time();
-        let mut cursor = self.parent_refs.cursor();
-        let prev_timestamp = if cursor.seek(&file_id, SeekBias::Left) {
-            cursor.item().unwrap().timestamp
-        } else {
-            timestamp
-        };
         let operation = Operation::UpdateParent {
             child_id: file_id,
-            timestamp,
-            prev_timestamp,
-            new_parent: Some((new_parent_id, Arc::new(new_name))),
+            timestamp: self.lamport_time(),
+            new_parent: Some((new_parent_id, Arc::new(new_name.into()))),
         };
 
-        self.integrate_op(operation.clone())
+        self.integrate_op(operation.clone(), None);
 
         operation
     }
 
     fn remove(&mut self, file_id: FileId) -> Operation {
-        unimplemented!()
+        let operation = Operation::UpdateParent {
+            child_id: file_id,
+            timestamp: self.lamport_time(),
+            new_parent: None,
+        };
+
+        self.integrate_op(operation.clone(), None);
+
+        operation
     }
 
     fn edit<'a, I, T>(&mut self, file_id: FileId, old_ranges: I, new_text: T)
@@ -264,13 +262,13 @@ impl Patch {
         };
 
         for op in ops {
-            self.integrate_op(op, &mut changes);
+            self.integrate_op(op, Some(&mut changes));
         }
 
         (changes, Vec::new())
     }
 
-    fn integrate_op(&mut self, op: Operation, changes: &mut Changes) {
+    fn integrate_op(&mut self, op: Operation, changes: Option<&mut Changes>) {
         match op {
             Operation::RegisterBasePath {
                 mut parent_id,
@@ -304,7 +302,6 @@ impl Patch {
                         parent_ref_edits.push(btree::Edit::Insert(ParentRefValue {
                             child_id: file_id,
                             timestamp,
-                            prev_timestamp: timestamp,
                             parent: Some((parent_id, name.clone())),
                         }));
                         child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
@@ -312,21 +309,69 @@ impl Patch {
                             name,
                             timestamp,
                             child_id: file_id,
-                            deletions: SmallVec::new(),
+                            visible: true,
                         }));
                         parent_id = file_id;
                     }
                 }
 
-                self.metadata.edit(metadata_edits);
-                self.parent_refs.edit(parent_ref_edits);
-                self.child_refs.edit(child_ref_edits);
+                self.metadata.edit(&mut metadata_edits);
+                self.parent_refs.edit(&mut parent_ref_edits);
+                self.child_refs.edit(&mut child_ref_edits);
             }
             Operation::InsertMetadata { file_id, file_type } => {
                 self.metadata.insert(Metadata {
                     file_id,
                     file_type: Some(file_type),
                 });
+            }
+            Operation::UpdateParent {
+                child_id,
+                timestamp,
+                new_parent,
+            } => {
+                self.lamport_clock.observe(timestamp);
+
+                let mut child_ref_edits: SmallVec<[_; 3]> = SmallVec::new();
+
+                let mut parent_ref_cursor = self.parent_refs.cursor();
+                if parent_ref_cursor.seek(&child_id, SeekBias::Left) {
+                    let parent_ref = parent_ref_cursor.item().unwrap();
+                    if timestamp > parent_ref.timestamp {
+                        if let Some((parent_id, name)) = parent_ref.parent {
+                            let seek_key = ChildRefValueKey {
+                                parent_id,
+                                name,
+                                visible: true,
+                                timestamp: parent_ref.timestamp,
+                            };
+                            let mut child_ref_cursor = self.child_refs.cursor();
+                            child_ref_cursor.seek(&seek_key, SeekBias::Left);
+                            let mut child_ref = child_ref_cursor.item().unwrap();
+                            child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
+                            child_ref.visible = false;
+                            child_ref_edits.push(btree::Edit::Insert(child_ref));
+                        }
+                    } else {
+                        return;
+                    }
+                }
+
+                self.parent_refs.insert(ParentRefValue {
+                    child_id,
+                    timestamp,
+                    parent: new_parent.clone(),
+                });
+                if let Some((parent_id, name)) = new_parent {
+                    child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
+                        parent_id,
+                        name,
+                        timestamp,
+                        child_id,
+                        visible: true,
+                    }));
+                }
+                self.child_refs.edit(&mut child_ref_edits);
             }
         }
     }
@@ -381,8 +426,14 @@ impl Patch {
     }
 }
 
+impl btree::Dimension<FileId> for FileId {
+    fn from_summary(summary: &Self) -> Self {
+        *summary
+    }
+}
+
 impl btree::Item for Metadata {
-    type Summary = time::Local;
+    type Summary = FileId;
 
     fn summarize(&self) -> Self::Summary {
         use btree::KeyedItem;
@@ -391,7 +442,7 @@ impl btree::Item for Metadata {
 }
 
 impl btree::KeyedItem for Metadata {
-    type Key = time::Local;
+    type Key = FileId;
 
     fn key(&self) -> Self::Key {
         self.file_id
@@ -460,12 +511,6 @@ impl btree::Dimension<ParentRefValueKey> for FileId {
     }
 }
 
-impl ChildRefValue {
-    fn is_visible(&self) -> bool {
-        self.deletions.is_empty()
-    }
-}
-
 impl btree::Item for ChildRefValue {
     type Summary = ChildRefValueSummary;
 
@@ -473,9 +518,9 @@ impl btree::Item for ChildRefValue {
         ChildRefValueSummary {
             parent_id: self.parent_id,
             name: self.name.clone(),
-            visible: self.is_visible(),
+            visible: self.visible,
             timestamp: self.timestamp,
-            visible_count: if self.is_visible() { 1 } else { 0 },
+            visible_count: if self.visible { 1 } else { 0 },
         }
     }
 }
@@ -487,7 +532,7 @@ impl btree::KeyedItem for ChildRefValue {
         ChildRefValueKey {
             parent_id: self.parent_id,
             name: self.name.clone(),
-            visible: self.is_visible(),
+            visible: self.visible,
             timestamp: self.timestamp,
         }
     }
