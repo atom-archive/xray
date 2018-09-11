@@ -1,5 +1,4 @@
 use btree::{self, SeekBias};
-use buffer::Text;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -11,7 +10,7 @@ use std::sync::Arc;
 use time;
 use ReplicaId;
 
-type FileId = time::Local;
+pub type FileId = time::Local;
 
 pub const ROOT_FILE_ID: time::Local = time::Local::DEFAULT;
 
@@ -172,10 +171,7 @@ impl Patch {
         Ok((parent_id, operation))
     }
 
-    pub fn new_directory<T>(&mut self) -> (FileId, Operation)
-    where
-        T: Into<Text>,
-    {
+    pub fn new_directory(&mut self) -> (FileId, Operation) {
         let file_id = self.local_time();
         let operation = Operation::InsertMetadata {
             file_id,
@@ -186,21 +182,23 @@ impl Patch {
         (file_id, operation)
     }
 
-    pub fn new_text_file<T>(&mut self, text: T) -> (FileId, Operation)
-    where
-        T: Into<Text>,
-    {
-        let file_id = self.local_time();
-        let operation = Operation::InsertMetadata {
-            file_id,
-            file_type: FileType::Text,
-        };
-        self.integrate_ops(Some(operation.clone()));
+    // pub fn new_text_file<T>(&mut self, text: String) -> (FileId, Operation) {
+    //     let file_id = self.local_time();
+    //     let operation = Operation::InsertMetadata {
+    //         file_id,
+    //         file_type: FileType::Text,
+    //     };
+    //     self.integrate_ops(Some(operation.clone()));
+    //
+    //     (file_id, operation)
+    // }
 
-        (file_id, operation)
-    }
-
-    fn rename(&mut self, file_id: FileId, new_parent_id: FileId, new_name: &OsStr) -> Operation {
+    pub fn rename(
+        &mut self,
+        file_id: FileId,
+        new_parent_id: FileId,
+        new_name: &OsStr,
+    ) -> Operation {
         let operation = Operation::UpdateParent {
             child_id: file_id,
             timestamp: self.lamport_time(),
@@ -212,7 +210,7 @@ impl Patch {
         operation
     }
 
-    fn remove(&mut self, file_id: FileId) -> Operation {
+    pub fn remove(&mut self, file_id: FileId) -> Operation {
         let operation = Operation::UpdateParent {
             child_id: file_id,
             timestamp: self.lamport_time(),
@@ -224,13 +222,13 @@ impl Patch {
         operation
     }
 
-    fn edit<'a, I, T>(&mut self, file_id: FileId, old_ranges: I, new_text: T)
-    where
-        I: IntoIterator<Item = &'a Range<usize>>,
-        T: Into<Text>,
-    {
-        unimplemented!()
-    }
+    // pub fn edit<'a, I, T>(&mut self, file_id: FileId, old_ranges: I, new_text: T)
+    // where
+    //     I: IntoIterator<Item = &'a Range<usize>>,
+    //     T: Into<Text>,
+    // {
+    //     unimplemented!()
+    // }
 
     fn path(&self, file_id: FileId) -> Option<PathBuf> {
         let file_id = self.resolve_file_alias(file_id);
@@ -351,9 +349,15 @@ impl Patch {
                             child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
                             child_ref.visible = false;
                             child_ref_edits.push(btree::Edit::Insert(child_ref));
+                        } else {
+                            
                         }
                     } else {
                         return;
+                    }
+                } else {
+                    if let Some(changes) = changes {
+                        changes.inserted.insert(child_id);
                     }
                 }
 

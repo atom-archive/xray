@@ -1032,8 +1032,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    extern crate rand;
-
     use super::*;
 
     #[test]
@@ -1051,7 +1049,7 @@ mod tests {
     #[test]
     fn test_random() {
         for seed in 0..10000 {
-            use self::rand::{Rng, SeedableRng, StdRng};
+            use rand::{Rng, SeedableRng, StdRng};
 
             let mut rng = StdRng::from_seed(&[seed]);
 

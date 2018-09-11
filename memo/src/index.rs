@@ -1,97 +1,65 @@
 use btree::{Dimension, Item, SeekBias, Tree};
 #[cfg(test)]
 use rand::Rng;
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::ffi::{OsStr, OsString};
 use std::ops::{Add, AddAssign};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-const ROOT_DIR_ID: usize = 0;
-
-type FileId = usize;
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Index {
-    files: Tree<File>,
-    dir_entries: Tree<DirEntry>,
-    next_id: FileId,
+    root: File,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct File {
-    file_id: FileId,
-    parent_id: FileId,
-    name: Arc<OsString>,
-    is_dir: bool,
+#[derive(Clone, Debug)]
+enum File {
+    Dir(BTreeMap<OsString, File>),
+    File,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DirEntry {
-    parent_id: FileId,
-    name: Arc<OsString>,
-    child_id: FileId,
-}
-
-#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-struct DirEntryKey {
-    parent_id: FileId,
-    name: Arc<OsString>,
+pub enum Error {
+    InvalidPath,
 }
 
 impl Index {
     pub fn new() -> Self {
         Self {
-            files: Tree::new(),
-            dir_entries: Tree::new(),
-            next_id: 1,
+            root: File::Dir(BTreeMap::new()),
         }
     }
 
-    /// This method will create any directories along the path that don't already exist in the
-    /// index. It returns an array of file ids. The first is the id of the last directory that
-    /// already exists. After that are the ids of newly created directories.
-    pub fn create_dir_all(&mut self, path: &Path) -> Vec<FileId> {
-        unimplemented!()
-    }
-}
+    pub fn create_dir_all(&mut self, path: &Path) -> Result<(PathBuf, PathBuf), Error> {
+        let mut prefix = PathBuf::new();
+        let mut suffix = PathBuf::new();
+        let mut parent_exists = true;
+        let mut parent = &mut self.root;
 
-impl Item for File {
-    type Summary = FileId;
+        for component in path.components() {
+            match component {
+                Component::Normal(name) => {
+                    match { parent } {
+                        File::Dir(entries) => {
+                            if !entries.contains_key(name) {
+                                entries.insert(name.into(), File::Dir(BTreeMap::new()));
+                                parent_exists = false;
+                            }
 
-    fn summarize(&self) -> Self::Summary {
-        self.file_id
-    }
-}
+                            parent = entries.get_mut(name).unwrap();
+                        }
+                        File::File => return Err(Error::InvalidPath),
+                    }
 
-impl Item for DirEntry {
-    type Summary = DirEntryKey;
-
-    fn summarize(&self) -> Self::Summary {
-        DirEntryKey {
-            parent_id: self.parent_id,
-            name: self.name.clone(),
+                    if parent_exists {
+                        prefix.push(name);
+                    } else {
+                        suffix.push(name);
+                    }
+                }
+                _ => return Err(Error::InvalidPath),
+            }
         }
-    }
-}
 
-impl Dimension<DirEntryKey> for DirEntryKey {
-    fn from_summary(summary: &DirEntryKey) -> Self {
-        summary.clone()
-    }
-}
-
-impl<'a> Add<&'a Self> for DirEntryKey {
-    type Output = Self;
-
-    fn add(self, other: &Self) -> Self {
-        assert!(self <= *other);
-        other.clone()
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for DirEntryKey {
-    fn add_assign(&mut self, other: &Self) {
-        assert!(*self < *other);
-        *self = other.clone();
+        Ok((prefix, suffix))
     }
 }
