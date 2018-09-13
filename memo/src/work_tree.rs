@@ -159,13 +159,16 @@ impl WorkTree {
         }
     }
 
-    pub fn append_base_entries<I>(&mut self, entries: I)
+    pub fn append_base_entries<I>(&mut self, entries: I) -> Vec<Operation>
     where
         I: IntoIterator<Item = DirEntry>,
     {
         let mut metadata_edits = Vec::new();
         let mut parent_ref_edits = Vec::new();
         let mut child_ref_edits = Vec::new();
+
+        let mut child_ref_cursor = self.child_refs.cursor();
+        let mut name_conflicts = HashSet::new();
 
         for entry in entries {
             let depth = self.base_entries_stack.len();
@@ -178,7 +181,7 @@ impl WorkTree {
                 .cloned()
                 .unwrap_or(ROOT_FILE_ID);
             let name = Arc::new(entry.name);
-            let file_id = FileId::Base(self.base_entries_index);
+            let file_id = FileId::Base(self.base_entries_next_id);
             metadata_edits.push(btree::Edit::Insert(Metadata {
                 file_id,
                 file_type: entry.file_type,
@@ -190,13 +193,19 @@ impl WorkTree {
             }));
             child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
                 parent_id,
-                name,
+                name: name.clone(),
                 timestamp: time::Lamport::min_value(),
                 child_id: file_id,
                 visible: true,
             }));
 
-            self.base_entries_index += 1;
+            // In the rare case we already have a child ref with this name, remember to fix the
+            // name conflict later.
+            if child_ref_cursor.seek(&ChildRefKey { parent_id, name }, SeekBias::Left) {
+                name_conflicts.insert(file_id);
+            }
+
+            self.base_entries_next_id += 1;
             if entry.file_type == FileType::Directory {
                 self.base_entries_stack.push(file_id);
             }
@@ -205,6 +214,12 @@ impl WorkTree {
         self.metadata.edit(&mut metadata_edits);
         self.parent_refs.edit(&mut parent_ref_edits);
         self.child_refs.edit(&mut child_ref_edits);
+
+        let mut fixup_ops = Vec::new();
+        for file_id in name_conflicts {
+            fixup_ops.extend(self.fix_name_conflicts(file_id));
+        }
+        fixup_ops
     }
 
     pub fn apply_ops<I>(&mut self, ops: I) -> Vec<Operation>
@@ -310,20 +325,24 @@ impl WorkTree {
         file_id: FileId,
         new_parent_id: FileId,
         new_name: &OsStr,
-    ) -> Result<Operation, Error> {
-        self.check_file_id(file_id)?;
+    ) -> Result<SmallVec<[Operation; 1]>, Error> {
+        self.check_file_id(file_id, None)?;
+        self.check_file_id(file_id, Some(FileType::Directory))?;
 
         let operation = Operation::UpdateParent {
             child_id: file_id,
             timestamp: self.lamport_time(),
             new_parent: Some((new_parent_id, Arc::new(new_name.into()))),
         };
-        self.apply_op(operation.clone());
-        Ok(operation)
+        let fixup_ops = self.apply_ops(Some(operation.clone()));
+        let mut operations = SmallVec::new();
+        operations.push(operation);
+        operations.extend(fixup_ops);
+        Ok(operations)
     }
 
     pub fn remove(&mut self, file_id: FileId) -> Result<Operation, Error> {
-        self.check_file_id(file_id)?;
+        self.check_file_id(file_id, None)?;
 
         let operation = Operation::UpdateParent {
             child_id: file_id,
@@ -406,10 +425,23 @@ impl WorkTree {
         self.lamport_clock
     }
 
-    fn check_file_id(&self, file_id: FileId) -> Result<(), Error> {
+    fn check_file_id(
+        &self,
+        file_id: FileId,
+        expected_file_type: Option<FileType>,
+    ) -> Result<(), Error> {
         let mut cursor = self.metadata.cursor();
         if cursor.seek(&file_id, SeekBias::Left) {
-            Ok(())
+            if let Some(expected_file_type) = expected_file_type {
+                let metadata = cursor.item().unwrap();
+                if metadata.file_type == expected_file_type {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidFileId)
+                }
+            } else {
+                Ok(())
+            }
         } else {
             Err(Error::InvalidFileId)
         }
