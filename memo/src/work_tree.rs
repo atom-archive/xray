@@ -29,6 +29,7 @@ pub struct Cursor {
     work_tree: WorkTree,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub struct CursorEntry {
     file_id: FileId,
     file_type: FileType,
@@ -56,7 +57,7 @@ pub enum Operation {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidPath,
     InvalidFileId,
@@ -70,6 +71,7 @@ pub enum FileId {
     New(time::Local),
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum FileStatus {
     New,
     Renamed,
@@ -705,9 +707,13 @@ impl Cursor {
     }
 
     fn descend(&mut self) -> bool {
-        let mut cursor = self.stack.last().unwrap().clone();
-        let dir_id = cursor.item().unwrap().child_id;
-        self.descend_into(cursor, dir_id)
+        let cursor = self.stack.last().unwrap().clone();
+        let child_ref = cursor.item().unwrap();
+        if child_ref.visible {
+            self.descend_into(cursor, child_ref.child_id)
+        } else {
+            false
+        }
     }
 
     fn descend_into(
@@ -720,18 +726,9 @@ impl Cursor {
             if child_ref.parent_id == dir_id {
                 self.stack.push(child_ref_cursor.clone());
                 self.path.push(child_ref.name.as_ref());
-
-                let child_id = child_ref.child_id;
-                if child_ref.visible {
-                    self.metadata_cursor.seek(&child_id, SeekBias::Left);
-                    true
-                } else if self.next_sibling() {
-                    true
-                } else {
-                    self.stack.pop();
-                    self.path.pop();
-                    false
-                }
+                self.metadata_cursor
+                    .seek(&child_ref.child_id, SeekBias::Left);
+                true
             } else {
                 false
             }
@@ -743,17 +740,14 @@ impl Cursor {
     fn next_sibling(&mut self) -> bool {
         let cursor = self.stack.last_mut().unwrap();
         let parent_id = cursor.item().unwrap().parent_id;
-        let next_visible_index: usize = cursor.end();
-        cursor.seek(&next_visible_index, SeekBias::Right);
-        while let Some(child_ref) = cursor.item() {
+        cursor.next();
+        if let Some(child_ref) = cursor.item() {
             if child_ref.parent_id == parent_id {
                 self.metadata_cursor
                     .seek(&child_ref.child_id, SeekBias::Left);
                 self.path.pop();
                 self.path.push(child_ref.name.as_ref());
                 return true;
-            } else {
-                break;
             }
         }
 
@@ -1062,6 +1056,145 @@ mod tests {
             vec!["a", "a/b", "a/b/c", "a/d", "a/e", "a/e~", "a/z", "f"]
         );
         assert_eq!(fixup_ops.len(), 1);
+    }
+
+    #[test]
+    fn test_cursor() {
+        let mut tree = WorkTree::new(1);
+        tree.append_base_entries(vec![
+            DirEntry {
+                depth: 1,
+                name: OsString::from("a"),
+                file_type: FileType::Directory,
+            },
+            DirEntry {
+                depth: 2,
+                name: OsString::from("b"),
+                file_type: FileType::Directory,
+            },
+            DirEntry {
+                depth: 3,
+                name: OsString::from("c"),
+                file_type: FileType::Text,
+            },
+            DirEntry {
+                depth: 2,
+                name: OsString::from("d"),
+                file_type: FileType::Directory,
+            },
+            DirEntry {
+                depth: 2,
+                name: OsString::from("e"),
+                file_type: FileType::Directory,
+            },
+            DirEntry {
+                depth: 1,
+                name: OsString::from("f"),
+                file_type: FileType::Directory,
+            },
+        ]).unwrap();
+
+        let a = tree.file_id("a").unwrap();
+        let b = tree.file_id("a/b").unwrap();
+        let e = tree.file_id("a/e").unwrap();
+
+        tree.remove(b).unwrap();
+
+        let (new_file, _) = tree.new_text_file();
+        tree.rename(new_file, a, "x").unwrap();
+
+        let (new_file_that_got_removed, _) = tree.new_text_file();
+        tree.rename(new_file_that_got_removed, e, "y").unwrap();
+        tree.remove(new_file_that_got_removed).unwrap();
+
+        tree.rename(e, a, "z").unwrap();
+
+        let mut cursor = tree.cursor().unwrap();
+        assert_eq!(
+            cursor.entry().unwrap(),
+            CursorEntry {
+                file_id: a,
+                file_type: FileType::Directory,
+                depth: 1,
+                name: Arc::new(OsString::from("a")),
+                status: FileStatus::Unchanged
+            }
+        );
+
+        assert!(cursor.next(true));
+        assert_eq!(
+            cursor.entry().unwrap(),
+            CursorEntry {
+                file_id: b,
+                file_type: FileType::Directory,
+                depth: 2,
+                name: Arc::new(OsString::from("b")),
+                status: FileStatus::Removed
+            }
+        );
+
+        assert!(cursor.next(true));
+        assert_eq!(
+            cursor.entry().unwrap(),
+            CursorEntry {
+                file_id: tree.file_id("a/d").unwrap(),
+                file_type: FileType::Directory,
+                depth: 2,
+                name: Arc::new(OsString::from("d")),
+                status: FileStatus::Unchanged
+            }
+        );
+
+        assert!(cursor.next(true));
+        assert_eq!(
+            cursor.entry().unwrap(),
+            CursorEntry {
+                file_id: new_file,
+                file_type: FileType::Text,
+                depth: 2,
+                name: Arc::new(OsString::from("x")),
+                status: FileStatus::New
+            }
+        );
+
+        assert!(cursor.next(true));
+        assert_eq!(
+            cursor.entry().unwrap(),
+            CursorEntry {
+                file_id: e,
+                file_type: FileType::Directory,
+                depth: 2,
+                name: Arc::new(OsString::from("z")),
+                status: FileStatus::Renamed
+            }
+        );
+
+        assert!(cursor.next(true));
+        assert_eq!(
+            cursor.entry().unwrap(),
+            CursorEntry {
+                file_id: new_file_that_got_removed,
+                file_type: FileType::Text,
+                depth: 3,
+                name: Arc::new(OsString::from("y")),
+                status: FileStatus::Removed,
+            }
+        );
+
+        assert!(cursor.next(true));
+        assert_eq!(
+            cursor.entry().unwrap(),
+            CursorEntry {
+                file_id: tree.file_id("f").unwrap(),
+                file_type: FileType::Directory,
+                depth: 1,
+                name: Arc::new(OsString::from("f")),
+                status: FileStatus::Unchanged,
+            }
+        );
+
+        assert!(!cursor.next(true));
+        assert_eq!(cursor.entry(), Err(Error::CursorExhausted));
     }
 
     impl WorkTree {
