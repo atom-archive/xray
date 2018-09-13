@@ -273,8 +273,10 @@ impl WorkTree {
                             child_ref_cursor.seek(&seek_key, SeekBias::Left);
                             let mut child_ref = child_ref_cursor.item().unwrap();
                             child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
-                            child_ref.visible = false;
-                            child_ref_edits.push(btree::Edit::Insert(child_ref));
+                            if new_parent.is_none() {
+                                child_ref.visible = false;
+                                child_ref_edits.push(btree::Edit::Insert(child_ref));
+                            }
                         }
                     } else {
                         return;
