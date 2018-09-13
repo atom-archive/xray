@@ -25,6 +25,7 @@ pub struct WorkTree {
 pub struct Cursor {
     metadata_cursor: btree::Cursor<Metadata>,
     stack: Vec<btree::Cursor<ChildRefValue>>,
+    path: PathBuf,
     work_tree: WorkTree,
 }
 
@@ -59,7 +60,8 @@ pub enum Operation {
 pub enum Error {
     InvalidPath,
     InvalidFileId,
-    InvalidCursor,
+    InvalidDirEntry,
+    CursorExhausted,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -148,8 +150,9 @@ impl WorkTree {
 
     pub fn cursor(&self) -> Option<Cursor> {
         let mut cursor = Cursor {
-            stack: Vec::new(),
             metadata_cursor: self.metadata.cursor(),
+            stack: Vec::new(),
+            path: PathBuf::new(),
             work_tree: self.clone(),
         };
         if cursor.descend_into(self.child_refs.cursor(), ROOT_FILE_ID) {
@@ -159,7 +162,7 @@ impl WorkTree {
         }
     }
 
-    pub fn append_base_entries<I>(&mut self, entries: I) -> Vec<Operation>
+    pub fn append_base_entries<I>(&mut self, entries: I) -> Result<Vec<Operation>, Error>
     where
         I: IntoIterator<Item = DirEntry>,
     {
@@ -171,9 +174,11 @@ impl WorkTree {
         let mut name_conflicts = HashSet::new();
 
         for entry in entries {
-            let depth = self.base_entries_stack.len();
-            assert!(entry.depth <= depth || entry.depth == depth + 1);
-            self.base_entries_stack.truncate(entry.depth);
+            let stack_depth = self.base_entries_stack.len();
+            if entry.depth == 0 || entry.depth > stack_depth + 1 {
+                return Err(Error::InvalidDirEntry);
+            }
+            self.base_entries_stack.truncate(entry.depth - 1);
 
             let parent_id = self
                 .base_entries_stack
@@ -219,7 +224,7 @@ impl WorkTree {
         for file_id in name_conflicts {
             fixup_ops.extend(self.fix_name_conflicts(file_id));
         }
-        fixup_ops
+        Ok(fixup_ops)
     }
 
     pub fn apply_ops<I>(&mut self, ops: I) -> Vec<Operation>
@@ -322,19 +327,22 @@ impl WorkTree {
         (file_id, operation)
     }
 
-    pub fn rename(
+    pub fn rename<N>(
         &mut self,
         file_id: FileId,
         new_parent_id: FileId,
-        new_name: &OsStr,
-    ) -> Result<SmallVec<[Operation; 1]>, Error> {
+        new_name: N,
+    ) -> Result<SmallVec<[Operation; 1]>, Error>
+    where
+        N: AsRef<OsStr>,
+    {
         self.check_file_id(file_id, None)?;
-        self.check_file_id(file_id, Some(FileType::Directory))?;
+        self.check_file_id(new_parent_id, Some(FileType::Directory))?;
 
         let operation = Operation::UpdateParent {
             child_id: file_id,
             timestamp: self.lamport_time(),
-            new_parent: Some((new_parent_id, Arc::new(new_name.into()))),
+            new_parent: Some((new_parent_id, Arc::new(new_name.as_ref().into()))),
         };
         let fixup_ops = self.apply_ops(Some(operation.clone()));
         let mut operations = SmallVec::new();
@@ -355,10 +363,13 @@ impl WorkTree {
         Ok(operation)
     }
 
-    pub fn file_id(&self, path: &Path) -> Result<FileId, Error> {
+    pub fn file_id<P>(&self, path: P) -> Result<FileId, Error>
+    where
+        P: AsRef<Path>,
+    {
         let mut cursor = self.child_refs.cursor();
         let mut parent_id = ROOT_FILE_ID;
-        for component in path.components() {
+        for component in path.as_ref().components() {
             match component {
                 Component::Normal(name) => {
                     let name = Arc::new(name.into());
@@ -394,14 +405,14 @@ impl WorkTree {
     }
 
     pub fn status(&self, file_id: FileId) -> Result<FileStatus, Error> {
-        match file_id {
-            FileId::Base(_) => {
-                let mut cursor = self.parent_refs.cursor();
-                if cursor.seek(&file_id, SeekBias::Left) {
-                    let newest_parent_ref_value = cursor.item().unwrap();
-                    cursor.seek(&file_id, SeekBias::Right);
-                    cursor.prev();
-                    let oldest_parent_ref_value = cursor.item().unwrap();
+        let mut cursor = self.parent_refs.cursor();
+        if cursor.seek(&file_id, SeekBias::Left) {
+            let newest_parent_ref_value = cursor.item().unwrap();
+            cursor.seek(&file_id, SeekBias::Right);
+            cursor.prev();
+            let oldest_parent_ref_value = cursor.item().unwrap();
+            match file_id {
+                FileId::Base(_) => {
                     if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
                         Ok(FileStatus::Unchanged)
                     } else if newest_parent_ref_value.parent.is_some() {
@@ -409,11 +420,17 @@ impl WorkTree {
                     } else {
                         Ok(FileStatus::Removed)
                     }
-                } else {
-                    Err(Error::InvalidFileId)
+                }
+                FileId::New(_) => {
+                    if newest_parent_ref_value.parent.is_some() {
+                        Ok(FileStatus::New)
+                    } else {
+                        Ok(FileStatus::Removed)
+                    }
                 }
             }
-            FileId::New(_) => Ok(FileStatus::New),
+        } else {
+            Err(Error::InvalidFileId)
         }
     }
 
@@ -658,6 +675,7 @@ impl Cursor {
             if !can_descend || metadata.file_type != FileType::Directory || !self.descend() {
                 while !self.stack.is_empty() && !self.next_sibling() {
                     self.stack.pop();
+                    self.path.pop();
                 }
             }
         }
@@ -667,7 +685,7 @@ impl Cursor {
 
     fn entry(&self) -> Result<CursorEntry, Error> {
         let metadata = self.metadata_cursor.item().unwrap();
-        let child_ref_cursor = self.stack.last().ok_or(Error::InvalidCursor)?;
+        let child_ref_cursor = self.stack.last().ok_or(Error::CursorExhausted)?;
         let child_ref = child_ref_cursor.item().unwrap();
         Ok(CursorEntry {
             file_id: metadata.file_id,
@@ -676,6 +694,14 @@ impl Cursor {
             depth: self.stack.len(),
             status: self.work_tree.status(metadata.file_id)?,
         })
+    }
+
+    fn path(&self) -> Result<&Path, Error> {
+        if self.stack.is_empty() {
+            Err(Error::CursorExhausted)
+        } else {
+            Ok(&self.path)
+        }
     }
 
     fn descend(&mut self) -> bool {
@@ -693,6 +719,7 @@ impl Cursor {
         if let Some(child_ref) = child_ref_cursor.item() {
             if child_ref.parent_id == dir_id {
                 self.stack.push(child_ref_cursor.clone());
+                self.path.push(child_ref.name.as_ref());
 
                 let child_id = child_ref.child_id;
                 if child_ref.visible {
@@ -702,6 +729,7 @@ impl Cursor {
                     true
                 } else {
                     self.stack.pop();
+                    self.path.pop();
                     false
                 }
             } else {
@@ -721,6 +749,8 @@ impl Cursor {
             if child_ref.parent_id == parent_id {
                 self.metadata_cursor
                     .seek(&child_ref.child_id, SeekBias::Left);
+                self.path.pop();
+                self.path.push(child_ref.name.as_ref());
                 return true;
             } else {
                 break;
@@ -970,5 +1000,82 @@ impl<'a> Add<&'a Self> for ChildRefKey {
 impl btree::Dimension<ChildRefValueSummary> for usize {
     fn from_summary(summary: &ChildRefValueSummary) -> Self {
         summary.visible_count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_append_base_entries() {
+        let mut tree = WorkTree::new(1);
+        assert!(tree.paths().is_empty());
+
+        let fixup_ops = tree
+            .append_base_entries(vec![
+                DirEntry {
+                    depth: 1,
+                    name: OsString::from("a"),
+                    file_type: FileType::Directory,
+                },
+                DirEntry {
+                    depth: 2,
+                    name: OsString::from("b"),
+                    file_type: FileType::Directory,
+                },
+                DirEntry {
+                    depth: 3,
+                    name: OsString::from("c"),
+                    file_type: FileType::Text,
+                },
+                DirEntry {
+                    depth: 2,
+                    name: OsString::from("d"),
+                    file_type: FileType::Directory,
+                },
+            ]).unwrap();
+        assert_eq!(tree.paths(), vec!["a", "a/b", "a/b/c", "a/d"]);
+        assert_eq!(fixup_ops.len(), 0);
+
+        let (file_1, _) = tree.new_text_file();
+        let (file_2, _) = tree.new_dir();
+        let a = tree.file_id("a").unwrap();
+        tree.rename(file_1, a, "e").unwrap();
+        tree.rename(file_2, a, "z").unwrap();
+
+        let fixup_ops = tree
+            .append_base_entries(vec![
+                DirEntry {
+                    depth: 2,
+                    name: OsString::from("e"),
+                    file_type: FileType::Directory,
+                },
+                DirEntry {
+                    depth: 1,
+                    name: OsString::from("f"),
+                    file_type: FileType::Text,
+                },
+            ]).unwrap();
+        assert_eq!(
+            tree.paths(),
+            vec!["a", "a/b", "a/b/c", "a/d", "a/e", "a/e~", "a/z", "f"]
+        );
+        assert_eq!(fixup_ops.len(), 1);
+    }
+
+    impl WorkTree {
+        fn paths(&self) -> Vec<String> {
+            let mut paths = Vec::new();
+            if let Some(mut cursor) = self.cursor() {
+                loop {
+                    paths.push(cursor.path().unwrap().to_string_lossy().into_owned());
+                    if !cursor.next(true) {
+                        break;
+                    }
+                }
+            }
+            paths
+        }
     }
 }
