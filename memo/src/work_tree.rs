@@ -1,5 +1,7 @@
 use btree::{self, SeekBias};
+use smallvec::SmallVec;
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::ops::{Add, AddAssign};
 use std::path::{Component, Path, PathBuf};
@@ -45,7 +47,7 @@ pub enum Error {
     InvalidFileId,
 }
 
-#[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum FileId {
     Base(u64),
     New(time::Local),
@@ -169,11 +171,78 @@ impl WorkTree {
     where
         I: IntoIterator<Item = Operation>,
     {
-        unimplemented!()
+        let mut changed_file_ids = HashSet::new();
+        for op in ops {
+            match &op {
+                Operation::UpdateParent { child_id, .. } => {
+                    changed_file_ids.insert(*child_id);
+                }
+                _ => {}
+            }
+            self.apply_op(op);
+        }
+
+        let mut fixup_ops = Vec::new();
+        for file_id in changed_file_ids {
+            fixup_ops.extend(self.fix_conflicts(file_id));
+        }
+        fixup_ops
     }
 
     pub fn apply_op(&mut self, op: Operation) {
-        unimplemented!()
+        match op {
+            Operation::InsertMetadata { file_id, file_type } => {
+                self.metadata.insert(Metadata { file_id, file_type });
+            }
+            Operation::UpdateParent {
+                child_id,
+                timestamp,
+                new_parent,
+            } => {
+                self.lamport_clock.observe(timestamp);
+
+                let mut child_ref_edits: SmallVec<[_; 3]> = SmallVec::new();
+
+                let mut parent_ref_cursor = self.parent_refs.cursor();
+                if parent_ref_cursor.seek(&child_id, SeekBias::Left) {
+                    let parent_ref = parent_ref_cursor.item().unwrap();
+                    if timestamp > parent_ref.timestamp {
+                        if let Some((parent_id, name)) = parent_ref.parent {
+                            let seek_key = ChildRefValueKey {
+                                parent_id,
+                                name,
+                                visible: true,
+                                timestamp: parent_ref.timestamp,
+                            };
+                            let mut child_ref_cursor = self.child_refs.cursor();
+                            child_ref_cursor.seek(&seek_key, SeekBias::Left);
+                            let mut child_ref = child_ref_cursor.item().unwrap();
+                            child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
+                            child_ref.visible = false;
+                            child_ref_edits.push(btree::Edit::Insert(child_ref));
+                        }
+                    } else {
+                        return;
+                    }
+                }
+
+                self.parent_refs.insert(ParentRefValue {
+                    child_id,
+                    timestamp,
+                    parent: new_parent.clone(),
+                });
+                if let Some((parent_id, name)) = new_parent {
+                    child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
+                        parent_id,
+                        name,
+                        timestamp,
+                        child_id,
+                        visible: true,
+                    }));
+                }
+                self.child_refs.edit(&mut child_ref_edits);
+            }
+        }
     }
 
     pub fn new_text_file(&mut self) -> (FileId, Operation) {
@@ -263,8 +332,28 @@ impl WorkTree {
         }
     }
 
-    pub fn status(&self, file_id: FileId) -> Result<FileId, Error> {
-        unimplemented!()
+    pub fn status(&self, file_id: FileId) -> Result<FileStatus, Error> {
+        match file_id {
+            FileId::Base(_) => {
+                let mut cursor = self.parent_refs.cursor();
+                if cursor.seek(&file_id, SeekBias::Left) {
+                    let newest_parent_ref_value = cursor.item().unwrap();
+                    cursor.seek(&file_id, SeekBias::Right);
+                    cursor.prev();
+                    let oldest_parent_ref_value = cursor.item().unwrap();
+                    if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
+                        Ok(FileStatus::Unchanged)
+                    } else if newest_parent_ref_value.parent.is_some() {
+                        Ok(FileStatus::Renamed)
+                    } else {
+                        Ok(FileStatus::Removed)
+                    }
+                } else {
+                    Err(Error::InvalidFileId)
+                }
+            }
+            FileId::New(_) => Ok(FileStatus::New),
+        }
     }
 
     fn local_time(&mut self) -> time::Local {
@@ -319,6 +408,172 @@ impl WorkTree {
         } else {
             false
         }
+    }
+
+    fn fix_conflicts(&mut self, file_id: FileId) -> Vec<Operation> {
+        use btree::KeyedItem;
+
+        let mut fixup_ops = Vec::new();
+        let mut reverted_moves: HashMap<FileId, time::Lamport> = HashMap::new();
+
+        // TODO: Only check for cycles if the child was moved and is a directory.
+        let mut visited = HashSet::new();
+        let mut latest_move: Option<ParentRefValue> = None;
+        let mut cursor = self.parent_refs.cursor();
+        cursor.seek(&file_id, SeekBias::Left);
+
+        loop {
+            let mut parent_ref = cursor.item().unwrap();
+            if visited.contains(&parent_ref.child_id) {
+                // Cycle detected. Revert the most recent move contributing to the cycle.
+                cursor.seek(&latest_move.as_ref().unwrap().key(), SeekBias::Right);
+
+                // Find the previous value for this parent ref that isn't a deletion and store
+                // its timestamp in our reverted_moves map.
+                loop {
+                    let parent_ref = cursor.item().unwrap();
+                    if parent_ref.parent.is_some() {
+                        reverted_moves.insert(parent_ref.child_id, parent_ref.timestamp);
+                        break;
+                    } else {
+                        cursor.next();
+                    }
+                }
+
+                // Reverting this move may not have been enough to break the cycle. We clear
+                // the visited set but continue looping, potentially reverting multiple moves.
+                latest_move = None;
+                visited.clear();
+            } else {
+                visited.insert(parent_ref.child_id);
+
+                // If we have already reverted this parent ref to a previous value, interpret
+                // it as having the value we reverted to.
+                if let Some(prev_timestamp) = reverted_moves.get(&parent_ref.child_id) {
+                    while parent_ref.timestamp > *prev_timestamp {
+                        cursor.next();
+                        parent_ref = cursor.item().unwrap();
+                    }
+                }
+
+                // Check if this parent ref is a move and has the latest timestamp of any move
+                // we have seen so far. If so, it is a candidate to be reverted.
+                if latest_move
+                    .as_ref()
+                    .map_or(true, |m| parent_ref.timestamp > m.timestamp)
+                {
+                    cursor.next();
+                    if cursor.item().map_or(false, |next_parent_ref| {
+                        next_parent_ref.child_id == parent_ref.child_id
+                    }) {
+                        latest_move = Some(parent_ref.clone());
+                    }
+                }
+
+                // Walk up to the next parent or break if none exists or the parent is the root
+                if let Some((parent_id, _)) = parent_ref.parent {
+                    if parent_id == ROOT_FILE_ID {
+                        break;
+                    } else {
+                        cursor.seek(&parent_id, SeekBias::Left);
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Convert the reverted moves into new move operations.
+        let mut moved_file_ids = Vec::new();
+        for (child_id, timestamp) in &reverted_moves {
+            cursor.seek(
+                &ParentRefValueKey {
+                    child_id: *child_id,
+                    timestamp: *timestamp,
+                },
+                SeekBias::Left,
+            );
+            fixup_ops.push(Operation::UpdateParent {
+                child_id: *child_id,
+                timestamp: self.lamport_time(),
+                new_parent: cursor.item().unwrap().parent,
+            });
+            moved_file_ids.push(*child_id);
+        }
+
+        for op in &fixup_ops {
+            self.apply_op(op.clone());
+        }
+        for file_id in moved_file_ids {
+            fixup_ops.extend(self.fix_name_conflicts(file_id));
+        }
+
+        if !reverted_moves.contains_key(&file_id) {
+            fixup_ops.extend(self.fix_name_conflicts(file_id));
+        }
+
+        fixup_ops
+    }
+
+    fn fix_name_conflicts(&mut self, file_id: FileId) -> Vec<Operation> {
+        let mut fixup_ops = Vec::new();
+
+        let mut parent_ref_cursor = self.parent_refs.cursor();
+        parent_ref_cursor.seek(&file_id, SeekBias::Left);
+        if let Some((parent_id, name)) = parent_ref_cursor.item().unwrap().parent {
+            let mut cursor_1 = self.child_refs.cursor();
+            cursor_1.seek(
+                &ChildRefKey {
+                    parent_id,
+                    name: name.clone(),
+                },
+                SeekBias::Left,
+            );
+            cursor_1.next();
+
+            let mut cursor_2 = cursor_1.clone();
+            let mut unique_name = name.clone();
+
+            while let Some(child_ref) = cursor_1.item() {
+                if child_ref.visible && child_ref.parent_id == parent_id && child_ref.name == name {
+                    loop {
+                        Arc::make_mut(&mut unique_name).push("~");
+                        cursor_2.seek_forward(
+                            &ChildRefKey {
+                                parent_id,
+                                name: unique_name.clone(),
+                            },
+                            SeekBias::Left,
+                        );
+                        if let Some(conflicting_child_ref) = cursor_2.item() {
+                            if !conflicting_child_ref.visible
+                                || conflicting_child_ref.parent_id != parent_id
+                                || conflicting_child_ref.name != unique_name
+                            {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let fixup_op = Operation::UpdateParent {
+                        child_id: file_id,
+                        timestamp: self.lamport_time(),
+                        new_parent: Some((parent_id, unique_name.clone())),
+                    };
+                    self.apply_op(fixup_op.clone());
+                    fixup_ops.push(fixup_op);
+
+                    let visible_index = cursor_1.end::<usize>();
+                    cursor_1.seek_forward(&visible_index, SeekBias::Right);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        fixup_ops
     }
 }
 
@@ -571,5 +826,11 @@ impl<'a> Add<&'a Self> for ChildRefKey {
     fn add(self, other: &Self) -> Self {
         assert!(self <= *other);
         other.clone()
+    }
+}
+
+impl btree::Dimension<ChildRefValueSummary> for usize {
+    fn from_summary(summary: &ChildRefValueSummary) -> Self {
+        summary.visible_count
     }
 }
