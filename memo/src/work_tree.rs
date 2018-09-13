@@ -743,7 +743,7 @@ impl Default for FileId {
 
 impl<'a> AddAssign<&'a Self> for FileId {
     fn add_assign(&mut self, other: &Self) {
-        assert!(*self < *other);
+        assert!(*self <= *other);
         *self = other.clone();
     }
 }
@@ -752,7 +752,7 @@ impl<'a> Add<&'a Self> for FileId {
     type Output = Self;
 
     fn add(self, other: &Self) -> Self {
-        assert!(self < *other);
+        assert!(self <= *other);
         other.clone()
     }
 }
