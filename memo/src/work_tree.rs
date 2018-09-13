@@ -7,12 +7,13 @@ use std::ops::{Add, AddAssign};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use time;
+use ReplicaId;
 
-const ROOT_FILE_ID: FileId = FileId::New(time::Local::DEFAULT);
+const ROOT_FILE_ID: FileId = FileId::Base(0);
 
 #[derive(Clone)]
 pub struct WorkTree {
-    base_entries_index: u64,
+    base_entries_next_id: u64,
     base_entries_stack: Vec<FileId>,
     metadata: btree::Tree<Metadata>,
     parent_refs: btree::Tree<ParentRefValue>,
@@ -133,6 +134,18 @@ pub struct ChildRefKey {
 }
 
 impl WorkTree {
+    pub fn new(replica_id: ReplicaId) -> Self {
+        Self {
+            base_entries_next_id: 1,
+            base_entries_stack: Vec::new(),
+            metadata: btree::Tree::new(),
+            parent_refs: btree::Tree::new(),
+            child_refs: btree::Tree::new(),
+            local_clock: time::Local::new(replica_id),
+            lamport_clock: time::Lamport::new(replica_id),
+        }
+    }
+
     pub fn cursor(&self) -> Option<Cursor> {
         let mut cursor = Cursor {
             stack: Vec::new(),
