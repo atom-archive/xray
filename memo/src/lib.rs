@@ -10,11 +10,12 @@ extern crate uuid;
 mod btree;
 // pub mod buffer;
 // mod notify_cell;
-mod patch;
+// mod patch;
 // mod replica_context;
-mod index;
+// mod index;
 mod time;
-mod working_copy;
+mod work_tree;
+// mod working_copy;
 // pub mod timeline;
 
 pub type ReplicaId = u64;

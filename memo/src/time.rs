@@ -91,6 +91,13 @@ impl Lamport {
         }
     }
 
+    pub fn min_value() -> Self {
+        Self {
+            value: u64::min_value(),
+            replica_id: ReplicaId::min_value(),
+        }
+    }
+
     pub fn tick(&mut self) {
         self.value += 1;
     }
