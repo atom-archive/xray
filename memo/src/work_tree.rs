@@ -10,6 +10,7 @@ use time;
 
 const ROOT_FILE_ID: FileId = FileId::New(time::Local::DEFAULT);
 
+#[derive(Clone)]
 pub struct WorkTree {
     base_entries_index: u64,
     base_entries_stack: Vec<FileId>,
@@ -20,7 +21,19 @@ pub struct WorkTree {
     lamport_clock: time::Lamport,
 }
 
-pub struct Cursor {}
+pub struct Cursor {
+    metadata_cursor: btree::Cursor<Metadata>,
+    stack: Vec<btree::Cursor<ChildRefValue>>,
+    work_tree: WorkTree,
+}
+
+pub struct CursorEntry {
+    file_id: FileId,
+    file_type: FileType,
+    depth: usize,
+    name: Arc<OsString>,
+    status: FileStatus,
+}
 
 pub struct DirEntry {
     depth: usize,
@@ -45,6 +58,7 @@ pub enum Operation {
 pub enum Error {
     InvalidPath,
     InvalidFileId,
+    InvalidCursor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -119,6 +133,19 @@ pub struct ChildRefKey {
 }
 
 impl WorkTree {
+    pub fn cursor(&self) -> Option<Cursor> {
+        let mut cursor = Cursor {
+            stack: Vec::new(),
+            metadata_cursor: self.metadata.cursor(),
+            work_tree: self.clone(),
+        };
+        if cursor.descend_into(self.child_refs.cursor(), ROOT_FILE_ID) {
+            Some(cursor)
+        } else {
+            None
+        }
+    }
+
     pub fn append_base_entries<I>(&mut self, entries: I)
     where
         I: IntoIterator<Item = DirEntry>,
@@ -578,24 +605,82 @@ impl WorkTree {
 }
 
 impl Cursor {
-    fn next(&mut self, descend: bool) -> bool {
-        unimplemented!()
+    fn next(&mut self, can_descend: bool) -> bool {
+        if !self.stack.is_empty() {
+            let metadata = self.metadata_cursor.item().unwrap();
+            if !can_descend || metadata.file_type != FileType::Directory || !self.descend() {
+                while !self.stack.is_empty() && !self.next_sibling() {
+                    self.stack.pop();
+                }
+            }
+        }
+
+        !self.stack.is_empty()
     }
 
-    fn id(&self) -> FileId {
-        unimplemented!()
+    fn entry(&self) -> Result<CursorEntry, Error> {
+        let metadata = self.metadata_cursor.item().unwrap();
+        let child_ref_cursor = self.stack.last().ok_or(Error::InvalidCursor)?;
+        let child_ref = child_ref_cursor.item().unwrap();
+        Ok(CursorEntry {
+            file_id: metadata.file_id,
+            file_type: metadata.file_type,
+            name: child_ref.name,
+            depth: self.stack.len(),
+            status: self.work_tree.status(metadata.file_id)?,
+        })
     }
 
-    fn name(&self) -> Arc<OsString> {
-        unimplemented!()
+    fn descend(&mut self) -> bool {
+        let mut cursor = self.stack.last().unwrap().clone();
+        let dir_id = cursor.item().unwrap().child_id;
+        self.descend_into(cursor, dir_id)
     }
 
-    fn depth(&self) -> usize {
-        unimplemented!()
+    fn descend_into(
+        &mut self,
+        mut child_ref_cursor: btree::Cursor<ChildRefValue>,
+        dir_id: FileId,
+    ) -> bool {
+        child_ref_cursor.seek(&dir_id, SeekBias::Left);
+        if let Some(child_ref) = child_ref_cursor.item() {
+            if child_ref.parent_id == dir_id {
+                self.stack.push(child_ref_cursor.clone());
+
+                let child_id = child_ref.child_id;
+                if child_ref.visible {
+                    self.metadata_cursor.seek(&child_id, SeekBias::Left);
+                    true
+                } else if self.next_sibling() {
+                    true
+                } else {
+                    self.stack.pop();
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     }
 
-    fn status(&self) -> FileStatus {
-        unimplemented!()
+    fn next_sibling(&mut self) -> bool {
+        let cursor = self.stack.last_mut().unwrap();
+        let parent_id = cursor.item().unwrap().parent_id;
+        let next_visible_index: usize = cursor.end();
+        cursor.seek(&next_visible_index, SeekBias::Right);
+        while let Some(child_ref) = cursor.item() {
+            if child_ref.parent_id == parent_id {
+                self.metadata_cursor
+                    .seek(&child_ref.child_id, SeekBias::Left);
+                return true;
+            } else {
+                break;
+            }
+        }
+
+        false
     }
 }
 
@@ -758,6 +843,12 @@ impl<'a> AddAssign<&'a Self> for ChildRefValueSummary {
         self.visible = other.visible;
         self.timestamp = other.timestamp;
         self.visible_count += other.visible_count;
+    }
+}
+
+impl btree::Dimension<ChildRefValueSummary> for FileId {
+    fn from_summary(summary: &ChildRefValueSummary) -> Self {
+        summary.parent_id
     }
 }
 
