@@ -209,6 +209,13 @@ impl<T: Item> Tree<T> {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        match self.node().as_ref() {
+            Node::Internal { .. } => false,
+            Node::Leaf { items, .. } => items.is_empty(),
+        }
+    }
+
     pub fn extend<I>(&mut self, iter: I)
     where
         I: IntoIterator<Item = T>,
@@ -994,6 +1001,24 @@ impl<T: Item> Cursor<T> {
             *target == self.end::<D>()
         } else {
             *target == self.start::<D>()
+        }
+    }
+}
+
+impl<T: Item> Iterator for Cursor<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.did_seek {
+            let root = self.tree.clone();
+            self.descend_to_start(root);
+        }
+
+        if let Some(item) = self.item() {
+            self.next();
+            Some(item)
+        } else {
+            None
         }
     }
 }

@@ -1747,8 +1747,6 @@ impl btree::Dimension<ChildRefValueSummary> for VisibleCount {
 
 #[cfg(test)]
 mod tests {
-    extern crate rand;
-
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
 

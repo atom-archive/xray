@@ -46,7 +46,7 @@ pub struct DirEntry {
     file_type: FileType,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Operation {
     InsertMetadata {
         file_id: FileId,
@@ -64,6 +64,7 @@ pub enum Error {
     InvalidPath,
     InvalidFileId,
     InvalidDirEntry,
+    InvalidOperation,
     CursorExhausted,
 }
 
@@ -274,35 +275,60 @@ impl WorkTree {
 
                 let mut parent_ref_cursor = self.parent_refs.cursor();
                 if parent_ref_cursor.seek(&child_id, SeekBias::Left) {
-                    let parent_ref = parent_ref_cursor.item().unwrap();
-                    if timestamp > parent_ref.timestamp {
-                        if let Some((parent_id, name)) = parent_ref.parent {
-                            let seek_key = ChildRefValueKey {
+                    let latest_parent_ref = parent_ref_cursor.item().unwrap();
+                    let latest_visible_parent_ref = loop {
+                        let parent_ref = parent_ref_cursor.item().unwrap();
+                        if parent_ref.parent.is_some() {
+                            break parent_ref;
+                        } else {
+                            parent_ref_cursor.next();
+                        }
+                    };
+
+                    let mut child_ref = {
+                        let mut child_ref_cursor = self.child_refs.cursor();
+                        let (parent_id, name) = latest_visible_parent_ref.parent.unwrap();
+                        child_ref_cursor.seek(
+                            &ChildRefValueKey {
                                 parent_id,
                                 name,
-                                visible: true,
-                                timestamp: parent_ref.timestamp,
-                            };
-                            let mut child_ref_cursor = self.child_refs.cursor();
-                            child_ref_cursor.seek(&seek_key, SeekBias::Left);
-                            let mut child_ref = child_ref_cursor.item().unwrap();
-                            child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
-                            if new_parent.is_none() {
-                                child_ref.visible = false;
-                                child_ref_edits.push(btree::Edit::Insert(child_ref));
-                            }
-                        }
-                    } else {
-                        return;
-                    }
-                }
+                                visible: latest_parent_ref.parent.is_some(),
+                                timestamp: latest_visible_parent_ref.timestamp,
+                            },
+                            SeekBias::Left,
+                        );
+                        child_ref_cursor.item().unwrap()
+                    };
 
-                self.parent_refs.insert(ParentRefValue {
-                    child_id,
-                    timestamp,
-                    parent: new_parent.clone(),
-                });
-                if let Some((parent_id, name)) = new_parent {
+                    if timestamp > latest_parent_ref.timestamp {
+                        child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
+                        if let Some((parent_id, name)) = new_parent.clone() {
+                            child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
+                                parent_id,
+                                name,
+                                timestamp,
+                                child_id,
+                                visible: true,
+                            }));
+                        } else {
+                            child_ref.visible = false;
+                            child_ref_edits.push(btree::Edit::Insert(child_ref));
+                        }
+                    } else if timestamp > latest_visible_parent_ref.timestamp
+                        && latest_parent_ref.parent.is_none()
+                        && new_parent.is_some()
+                    {
+                        let (parent_id, name) = new_parent.clone().unwrap();
+                        child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
+                        child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
+                            parent_id,
+                            name,
+                            timestamp,
+                            child_id,
+                            visible: false,
+                        }));
+                    }
+                } else if let Some((parent_id, name)) = new_parent.clone() {
                     child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
                         parent_id,
                         name,
@@ -311,6 +337,12 @@ impl WorkTree {
                         visible: true,
                     }));
                 }
+
+                self.parent_refs.insert(ParentRefValue {
+                    child_id,
+                    timestamp,
+                    parent: new_parent,
+                });
                 self.child_refs.edit(&mut child_ref_edits);
             }
         }
@@ -341,23 +373,26 @@ impl WorkTree {
         file_id: FileId,
         new_parent_id: FileId,
         new_name: N,
-    ) -> Result<SmallVec<[Operation; 1]>, Error>
+    ) -> Result<Operation, Error>
     where
         N: AsRef<OsStr>,
     {
         self.check_file_id(file_id, None)?;
         self.check_file_id(new_parent_id, Some(FileType::Directory))?;
 
+        let mut new_tree = self.clone();
         let operation = Operation::UpdateParent {
             child_id: file_id,
-            timestamp: self.lamport_time(),
+            timestamp: new_tree.lamport_time(),
             new_parent: Some((new_parent_id, Arc::new(new_name.as_ref().into()))),
         };
-        let fixup_ops = self.apply_ops(Some(operation.clone()));
-        let mut operations = SmallVec::new();
-        operations.push(operation);
-        operations.extend(fixup_ops);
-        Ok(operations)
+        let fixup_ops = new_tree.apply_ops(Some(operation.clone()));
+        if fixup_ops.is_empty() {
+            *self = new_tree;
+            Ok(operation)
+        } else {
+            Err(Error::InvalidOperation)
+        }
     }
 
     pub fn remove(&mut self, file_id: FileId) -> Result<Operation, Error> {
@@ -413,6 +448,22 @@ impl WorkTree {
         }
     }
 
+    fn metadata(&self, file_id: FileId) -> Result<Metadata, Error> {
+        if file_id == ROOT_FILE_ID {
+            Ok(Metadata {
+                file_id: ROOT_FILE_ID,
+                file_type: FileType::Directory,
+            })
+        } else {
+            let mut cursor = self.metadata.cursor();
+            if cursor.seek(&file_id, SeekBias::Left) {
+                Ok(cursor.item().unwrap())
+            } else {
+                Err(Error::InvalidFileId)
+            }
+        }
+    }
+
     fn local_time(&mut self) -> time::Local {
         self.local_clock.tick();
         self.local_clock
@@ -423,23 +474,10 @@ impl WorkTree {
         self.lamport_clock
     }
 
-    fn check_file_id(
-        &self,
-        file_id: FileId,
-        expected_file_type: Option<FileType>,
-    ) -> Result<(), Error> {
-        let mut cursor = self.metadata.cursor();
-        if cursor.seek(&file_id, SeekBias::Left) {
-            if let Some(expected_file_type) = expected_file_type {
-                let metadata = cursor.item().unwrap();
-                if metadata.file_type == expected_file_type {
-                    Ok(())
-                } else {
-                    Err(Error::InvalidFileId)
-                }
-            } else {
-                Ok(())
-            }
+    fn check_file_id(&self, file_id: FileId, expected_type: Option<FileType>) -> Result<(), Error> {
+        let metadata = self.metadata(file_id)?;
+        if expected_type.map_or(true, |expected_type| expected_type == metadata.file_type) {
+            Ok(())
         } else {
             Err(Error::InvalidFileId)
         }
@@ -650,8 +688,11 @@ impl WorkTree {
 impl Cursor {
     fn next(&mut self, can_descend: bool) -> bool {
         if !self.stack.is_empty() {
-            let metadata = self.metadata_cursor.item().unwrap();
-            if !can_descend || metadata.file_type != FileType::Directory || !self.descend() {
+            let entry = self.entry().unwrap();
+            if !can_descend
+                || entry.file_type != FileType::Directory
+                || !self.descend_into(entry.status, entry.file_id)
+            {
                 while !self.stack.is_empty() && !self.next_sibling() {
                     self.stack.pop();
                     self.path.pop();
@@ -710,11 +751,6 @@ impl Cursor {
         } else {
             Ok(&self.path)
         }
-    }
-
-    fn descend(&mut self) -> bool {
-        let entry = self.entry().unwrap();
-        self.descend_into(entry.status, entry.file_id)
     }
 
     fn descend_into(&mut self, parent_status: FileStatus, dir_id: FileId) -> bool {
@@ -998,6 +1034,9 @@ impl btree::Dimension<ChildRefValueSummary> for usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{Rng, SeedableRng, StdRng};
+    use std::iter::FromIterator;
+    use std::mem;
 
     #[test]
     fn test_append_base_entries() {
@@ -1210,7 +1249,78 @@ mod tests {
         assert_eq!(cursor.entry(), Err(Error::CursorExhausted));
     }
 
+    #[test]
+    fn test_replication_random() {
+        const PEERS: usize = 5;
+
+        for seed in 0..100000 {
+            let seed = 2;
+            println!("SEED: {:?}", seed);
+            let mut rng = StdRng::from_seed(&[seed]);
+
+            let mut trees = Vec::from_iter((0..PEERS).map(|i| WorkTree::new(i as u64 + 1)));
+            let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
+
+            // Generate and deliver random mutations
+            for _ in 0..10 {
+                let replica_index = rng.gen_range(0, PEERS);
+                let tree = &mut trees[replica_index];
+                if !inboxes[replica_index].is_empty() && rng.gen() {
+                    let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
+                    let fixup_ops = tree.apply_ops(ops);
+                    deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                } else {
+                    let ops = tree.mutate(&mut rng, 5);
+                    deliver_ops(replica_index, &mut inboxes, ops);
+                }
+            }
+
+            // Allow system to quiesce
+            loop {
+                let mut done = true;
+                for replica_index in 0..PEERS {
+                    let tree = &mut trees[replica_index];
+                    let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
+                    if !ops.is_empty() {
+                        let fixup_ops = tree.apply_ops(ops);
+                        deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                        done = false;
+                    }
+                }
+
+                if done {
+                    break;
+                }
+            }
+
+            for i in 0..PEERS - 1 {
+                assert_eq!(trees[i].entries(), trees[i + 1].entries());
+            }
+
+            fn deliver_ops(sender: usize, inboxes: &mut Vec<Vec<Operation>>, ops: Vec<Operation>) {
+                for (i, inbox) in inboxes.iter_mut().enumerate() {
+                    if i != sender {
+                        inbox.extend(ops.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
+
     impl WorkTree {
+        fn entries(&self) -> Vec<CursorEntry> {
+            let mut entries = Vec::new();
+            if let Some(mut cursor) = self.cursor() {
+                loop {
+                    entries.push(cursor.entry().unwrap());
+                    if !cursor.next(true) {
+                        break;
+                    }
+                }
+            }
+            entries
+        }
+
         fn paths(&self) -> Vec<String> {
             let mut paths = Vec::new();
             if let Some(mut cursor) = self.cursor() {
@@ -1223,5 +1333,93 @@ mod tests {
             }
             paths
         }
+
+        fn mutate<T: Rng>(&mut self, rng: &mut T, count: usize) -> Vec<Operation> {
+            let mut ops = Vec::new();
+            for _ in 0..count {
+                let k = rng.gen_range(0, 3);
+                if self.child_refs.is_empty() || k == 0 {
+                    // println!("Random mutation: Creating file");
+                    let parent_id = self
+                        .select_file(rng, Some(FileType::Directory), true)
+                        .unwrap();
+                    let (file_id, op) = if rng.gen() {
+                        self.new_dir()
+                    } else {
+                        self.new_text_file()
+                    };
+                    ops.push(op);
+
+                    loop {
+                        match self.rename(file_id, parent_id, gen_name(rng)) {
+                            Ok(op) => {
+                                ops.push(op);
+                                break;
+                            }
+                            Err(error) => assert_eq!(error, Error::InvalidOperation),
+                        }
+                    }
+                } else if k == 1 {
+                    let file_id = self.select_file(rng, None, false).unwrap();
+                    // println!("Random mutation: Removing {:?}", file_id);
+                    ops.push(self.remove(file_id).unwrap());
+                } else {
+                    let file_id = self.select_file(rng, None, false).unwrap();
+                    loop {
+                        let new_parent_id = self
+                            .select_file(rng, Some(FileType::Directory), true)
+                            .unwrap();
+                        let new_name = gen_name(rng);
+                        // println!(
+                        //     "Random mutation: Attempting to move {:?} to ({:?}, {:?})",
+                        //     file_id, new_parent_id, new_name
+                        // );
+                        match self.rename(file_id, new_parent_id, new_name) {
+                            Ok(op) => {
+                                ops.push(op);
+                                break;
+                            }
+                            Err(error) => assert_eq!(error, Error::InvalidOperation),
+                        }
+                    }
+                }
+            }
+            ops
+        }
+
+        fn select_file<T: Rng>(
+            &self,
+            rng: &mut T,
+            file_type: Option<FileType>,
+            allow_root: bool,
+        ) -> Option<FileId> {
+            let metadata = self
+                .metadata
+                .cursor()
+                .filter(|metadata| file_type.is_none() || file_type.unwrap() == metadata.file_type)
+                .collect::<Vec<_>>();
+            if allow_root
+                && file_type.map_or(true, |file_type| file_type == FileType::Directory)
+                && rng.gen_weighted_bool(metadata.len() as u32 + 1)
+            {
+                Some(ROOT_FILE_ID)
+            } else {
+                rng.choose(&metadata).map(|metadata| metadata.file_id)
+            }
+        }
+    }
+
+    fn gen_name<T: Rng>(rng: &mut T) -> String {
+        let mut name = String::new();
+        for _ in 0..rng.gen_range(1, 4) {
+            name.push(rng.gen_range(b'a', b'z' + 1).into());
+        }
+        if rng.gen_weighted_bool(5) {
+            for _ in 0..rng.gen_range(1, 2) {
+                name.push('~');
+            }
+        }
+
+        name
     }
 }
