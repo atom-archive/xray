@@ -1253,9 +1253,8 @@ mod tests {
     fn test_replication_random() {
         const PEERS: usize = 5;
 
-        for seed in 0..100000 {
-            let seed = 2;
-            println!("SEED: {:?}", seed);
+        for seed in 0..1000 {
+            // println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut trees = Vec::from_iter((0..PEERS).map(|i| WorkTree::new(i as u64 + 1)));
