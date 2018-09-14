@@ -68,7 +68,7 @@ pub struct Cursor<T: Item> {
     stack: SmallVec<[(Tree<T>, usize, T::Summary); 16]>,
     summary: T::Summary,
     did_seek: bool,
-    is_at_end: bool,
+    at_end: bool,
 }
 
 #[derive(Eq, PartialEq)]
@@ -171,7 +171,7 @@ impl<T: Item> Tree<T> {
     pub fn items(&self) -> Vec<T> {
         let mut items = Vec::new();
         let mut cursor = self.cursor();
-        cursor.descend_to_start(self.clone());
+        cursor.descend_to_first_item(self.clone());
         loop {
             if let Some(item) = cursor.item() {
                 items.push(item);
@@ -585,13 +585,13 @@ impl<T: Item> Cursor<T> {
             stack: SmallVec::new(),
             summary: T::Summary::default(),
             did_seek: false,
-            is_at_end: false,
+            at_end: false,
         }
     }
 
     fn reset(&mut self) {
         self.did_seek = false;
-        self.is_at_end = false;
+        self.at_end = false;
         self.stack.truncate(0);
         self.summary = T::Summary::default();
     }
@@ -642,7 +642,7 @@ impl<T: Item> Cursor<T> {
                     _ => unreachable!(),
                 }
             }
-        } else if self.is_at_end {
+        } else if self.at_end {
             self.tree.last()
         } else {
             None
@@ -666,39 +666,51 @@ impl<T: Item> Cursor<T> {
     pub fn prev(&mut self) {
         assert!(self.did_seek, "Must seek before calling this method");
 
-        if self.is_at_end {
-            let tree = self.tree.clone();
+        if self.at_end {
             self.summary = T::Summary::default();
-            self.is_at_end = false;
-            self.descend_to_end(tree);
+            let root = self.tree.clone();
+            self.descend_to_last_item(root);
+            self.at_end = false;
         } else {
-            while self.stack.len() > 0 {
-                let (subtree, mut index, summary) = self.stack.last().unwrap().clone();
+            let search_result =
+                self.stack
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(depth, (_, index, _))| {
+                        if *index > 0 {
+                            Some((depth, *index - 1))
+                        } else {
+                            None
+                        }
+                    });
 
-                self.summary = summary.clone();
-                if index == 0 {
-                    self.stack.pop();
-                } else {
-                    index -= 1;
-                    match subtree.node().as_ref() {
-                        Node::Internal {
-                            child_trees,
-                            child_summaries,
-                            ..
-                        } => {
-                            for summary in &child_summaries[0..index] {
-                                self.summary += summary;
-                            }
-                            self.descend_to_end(child_trees[index].clone());
+            if let Some((depth, new_index)) = search_result {
+                let subtree = self.stack.get(depth).unwrap().0.clone();
+                self.stack.truncate(depth);
+                self.summary = self
+                    .stack
+                    .last()
+                    .map_or(T::Summary::default(), |(_, _, summary)| summary.clone());
+
+                match subtree.node().as_ref() {
+                    Node::Internal {
+                        child_trees,
+                        child_summaries,
+                        ..
+                    } => {
+                        for summary in &child_summaries[0..new_index] {
+                            self.summary += summary;
                         }
-                        Node::Leaf { items, .. } => {
-                            for item in &items[0..index] {
-                                self.summary += &item.summarize();
-                            }
-                        }
+                        self.stack.push((subtree.clone(), new_index, self.summary.clone()));
+                        self.descend_to_last_item(child_trees[new_index].clone());
                     }
-                    *self.stack.last_mut().unwrap() = (subtree, index, summary);
-                    break;
+                    Node::Leaf { items, .. } => {
+                        for item in &items[0..new_index] {
+                            self.summary += &item.summarize();
+                        }
+                        self.stack.push((subtree.clone(), new_index, self.summary.clone()));
+                    }
                 }
             }
         }
@@ -709,16 +721,19 @@ impl<T: Item> Cursor<T> {
 
         while self.stack.len() > 0 {
             let new_subtree = {
-                let (subtree, index, _) = self.stack.last_mut().unwrap();
-                match *subtree.node() {
+                let (subtree, index, summary) = self.stack.last_mut().unwrap();
+                match subtree.node().as_ref() {
                     Node::Internal {
-                        ref child_trees, ..
+                        child_trees, child_summaries, ..
                     } => {
+                        *summary += &child_summaries[*index];
                         *index += 1;
                         child_trees.get(*index).cloned()
                     }
-                    Node::Leaf { ref items, .. } => {
-                        self.summary += &items[*index].summarize();
+                    Node::Leaf { items, .. } => {
+                        let item_summary = items[*index].summarize();
+                        self.summary += &item_summary;
+                        *summary += &item_summary;
                         *index += 1;
                         if *index < items.len() {
                             return;
@@ -730,17 +745,17 @@ impl<T: Item> Cursor<T> {
             };
 
             if let Some(subtree) = new_subtree {
-                self.descend_to_start(subtree);
+                self.descend_to_first_item(subtree);
                 break;
             } else {
                 self.stack.pop();
             }
         }
 
-        self.is_at_end = self.stack.is_empty();
+        self.at_end = self.stack.is_empty();
     }
 
-    fn descend_to_start(&mut self, mut subtree: Tree<T>) {
+    fn descend_to_first_item(&mut self, mut subtree: Tree<T>) {
         self.did_seek = true;
         loop {
             self.stack.push((subtree.clone(), 0, self.summary.clone()));
@@ -755,7 +770,7 @@ impl<T: Item> Cursor<T> {
         }
     }
 
-    fn descend_to_end(&mut self, mut subtree: Tree<T>) {
+    fn descend_to_last_item(&mut self, mut subtree: Tree<T>) {
         self.did_seek = true;
         loop {
             match subtree.node().as_ref() {
@@ -764,19 +779,20 @@ impl<T: Item> Cursor<T> {
                     child_summaries,
                     ..
                 } => {
-                    self.stack
-                        .push((subtree.clone(), child_trees.len() - 1, self.summary.clone()));
                     for summary in &child_summaries[0..child_summaries.len() - 1] {
                         self.summary += summary;
                     }
+                    self.stack
+                        .push((subtree.clone(), child_trees.len() - 1, self.summary.clone()));
                     subtree = child_trees.last().unwrap().clone();
                 }
                 Node::Leaf { items, .. } => {
-                    self.stack
-                        .push((subtree.clone(), items.len() - 1, self.summary.clone()));
-                    for item in &items[0..items.len() - 1] {
+                    let last_index = items.len().saturating_sub(1);
+                    for item in &items[0..last_index] {
                         self.summary += &item.summarize();
                     }
+                    self.stack
+                        .push((subtree.clone(), last_index, self.summary.clone()));
                     break;
                 }
             }
@@ -952,7 +968,6 @@ impl<T: Item> Cursor<T> {
                     Node::Leaf { ref items, .. } => {
                         let mut slice_items = SmallVec::<[T; 2 * TREE_BASE]>::new();
                         let mut slice_items_summary = T::Summary::default();
-                        let start_summary = self.summary.clone();
 
                         for (index, item) in items.iter().enumerate() {
                             let item_summary = item.summarize();
@@ -971,7 +986,7 @@ impl<T: Item> Cursor<T> {
                                 pos = child_end;
                             } else {
                                 pos = D::from_summary(&self.summary).clone();
-                                self.stack.push((subtree.clone(), index, start_summary));
+                                self.stack.push((subtree.clone(), index, self.summary.clone()));
                                 break;
                             }
                         }
@@ -996,7 +1011,7 @@ impl<T: Item> Cursor<T> {
             }
         }
 
-        self.is_at_end = self.stack.is_empty();
+        self.at_end = self.stack.is_empty();
         if bias == SeekBias::Left {
             *target == self.end::<D>()
         } else {
@@ -1011,7 +1026,7 @@ impl<T: Item> Iterator for Cursor<T> {
     fn next(&mut self) -> Option<Self::Item> {
         if !self.did_seek {
             let root = self.tree.clone();
-            self.descend_to_start(root);
+            self.descend_to_first_item(root);
         }
 
         if let Some(item) = self.item() {
@@ -1082,7 +1097,7 @@ mod tests {
             let count = rng.gen_range(0, 10);
             tree.extend(rng.gen_iter().take(count));
 
-            for _i in 0..10 {
+            for _ in 0..5 {
                 let splice_end = rng.gen_range(0, tree.extent::<Count>().0 + 1);
                 let splice_start = rng.gen_range(0, splice_end + 1);
                 let count = rng.gen_range(0, 3);
@@ -1104,7 +1119,9 @@ mod tests {
                 let mut cursor = tree.cursor();
                 cursor.seek(&Count(pos), SeekBias::Right);
 
-                for _i in 0..5 {
+                for i in 0..10 {
+                    assert_eq!(cursor.start::<Count>().0, pos);
+
                     if pos > 0 {
                         assert_eq!(cursor.prev_item().unwrap(), reference_items[pos - 1]);
                     } else {
@@ -1117,9 +1134,14 @@ mod tests {
                         assert_eq!(cursor.item(), None);
                     }
 
-                    cursor.next();
-                    if pos < reference_items.len() {
-                        pos += 1;
+                    if i < 5 {
+                        cursor.next();
+                        if pos < reference_items.len() {
+                            pos += 1;
+                        }
+                    } else {
+                        cursor.prev();
+                        pos = pos.saturating_sub(1);
                     }
                 }
             }
@@ -1251,7 +1273,7 @@ mod tests {
         assert_eq!(cursor.start::<Sum>(), Sum(0));
 
         cursor.prev();
-        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.item(), Some(1));
         assert_eq!(cursor.prev_item(), None);
         assert_eq!(cursor.start::<Count>(), Count(0));
         assert_eq!(cursor.start::<Sum>(), Sum(0));
