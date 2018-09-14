@@ -24,7 +24,9 @@ pub struct WorkTree {
 
 pub struct Cursor {
     metadata_cursor: btree::Cursor<Metadata>,
-    stack: Vec<btree::Cursor<ChildRefValue>>,
+    parent_ref_cursor: btree::Cursor<ParentRefValue>,
+    child_ref_cursor: btree::Cursor<ChildRefValue>,
+    stack: Vec<(btree::Cursor<ChildRefValue>, FileStatus)>,
     path: PathBuf,
     work_tree: WorkTree,
 }
@@ -71,7 +73,7 @@ pub enum FileId {
     New(time::Local),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileStatus {
     New,
     Renamed,
@@ -151,13 +153,18 @@ impl WorkTree {
     }
 
     pub fn cursor(&self) -> Option<Cursor> {
+        let metadata_cursor = self.metadata.cursor();
+        let parent_ref_cursor = self.parent_refs.cursor();
+        let child_ref_cursor = self.child_refs.cursor();
         let mut cursor = Cursor {
-            metadata_cursor: self.metadata.cursor(),
+            metadata_cursor,
+            parent_ref_cursor,
+            child_ref_cursor,
             stack: Vec::new(),
             path: PathBuf::new(),
             work_tree: self.clone(),
         };
-        if cursor.descend_into(self.child_refs.cursor(), ROOT_FILE_ID) {
+        if cursor.descend_into(FileStatus::Unchanged, ROOT_FILE_ID) {
             Some(cursor)
         } else {
             None
@@ -403,36 +410,6 @@ impl WorkTree {
             Ok(path)
         } else {
             Err(Error::InvalidPath)
-        }
-    }
-
-    pub fn status(&self, file_id: FileId) -> Result<FileStatus, Error> {
-        let mut cursor = self.parent_refs.cursor();
-        if cursor.seek(&file_id, SeekBias::Left) {
-            let newest_parent_ref_value = cursor.item().unwrap();
-            cursor.seek(&file_id, SeekBias::Right);
-            cursor.prev();
-            let oldest_parent_ref_value = cursor.item().unwrap();
-            match file_id {
-                FileId::Base(_) => {
-                    if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
-                        Ok(FileStatus::Unchanged)
-                    } else if newest_parent_ref_value.parent.is_some() {
-                        Ok(FileStatus::Renamed)
-                    } else {
-                        Ok(FileStatus::Removed)
-                    }
-                }
-                FileId::New(_) => {
-                    if newest_parent_ref_value.parent.is_some() {
-                        Ok(FileStatus::New)
-                    } else {
-                        Ok(FileStatus::Removed)
-                    }
-                }
-            }
-        } else {
-            Err(Error::InvalidFileId)
         }
     }
 
@@ -686,15 +663,44 @@ impl Cursor {
     }
 
     fn entry(&self) -> Result<CursorEntry, Error> {
+        let (child_ref_cursor, parent_status) = self.stack.last().ok_or(Error::CursorExhausted)?;
         let metadata = self.metadata_cursor.item().unwrap();
-        let child_ref_cursor = self.stack.last().ok_or(Error::CursorExhausted)?;
         let child_ref = child_ref_cursor.item().unwrap();
+        let status = if *parent_status == FileStatus::Removed {
+            FileStatus::Removed
+        } else {
+            let mut parent_ref_cursor = self.parent_ref_cursor.clone();
+            parent_ref_cursor.seek(&metadata.file_id, SeekBias::Left);
+            let newest_parent_ref_value = parent_ref_cursor.item().unwrap();
+            parent_ref_cursor.seek(&metadata.file_id, SeekBias::Right);
+            parent_ref_cursor.prev();
+            let oldest_parent_ref_value = parent_ref_cursor.item().unwrap();
+            match metadata.file_id {
+                FileId::Base(_) => {
+                    if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
+                        FileStatus::Unchanged
+                    } else if newest_parent_ref_value.parent.is_some() {
+                        FileStatus::Renamed
+                    } else {
+                        FileStatus::Removed
+                    }
+                }
+                FileId::New(_) => {
+                    if newest_parent_ref_value.parent.is_some() {
+                        FileStatus::New
+                    } else {
+                        FileStatus::Removed
+                    }
+                }
+            }
+        };
+
         Ok(CursorEntry {
             file_id: metadata.file_id,
             file_type: metadata.file_type,
             name: child_ref.name,
             depth: self.stack.len(),
-            status: self.work_tree.status(metadata.file_id)?,
+            status,
         })
     }
 
@@ -707,24 +713,16 @@ impl Cursor {
     }
 
     fn descend(&mut self) -> bool {
-        let cursor = self.stack.last().unwrap().clone();
-        let child_ref = cursor.item().unwrap();
-        if child_ref.visible {
-            self.descend_into(cursor, child_ref.child_id)
-        } else {
-            false
-        }
+        let entry = self.entry().unwrap();
+        self.descend_into(entry.status, entry.file_id)
     }
 
-    fn descend_into(
-        &mut self,
-        mut child_ref_cursor: btree::Cursor<ChildRefValue>,
-        dir_id: FileId,
-    ) -> bool {
+    fn descend_into(&mut self, parent_status: FileStatus, dir_id: FileId) -> bool {
+        let mut child_ref_cursor = self.child_ref_cursor.clone();
         child_ref_cursor.seek(&dir_id, SeekBias::Left);
         if let Some(child_ref) = child_ref_cursor.item() {
             if child_ref.parent_id == dir_id {
-                self.stack.push(child_ref_cursor.clone());
+                self.stack.push((child_ref_cursor, parent_status));
                 self.path.push(child_ref.name.as_ref());
                 self.metadata_cursor
                     .seek(&child_ref.child_id, SeekBias::Left);
@@ -738,7 +736,7 @@ impl Cursor {
     }
 
     fn next_sibling(&mut self) -> bool {
-        let cursor = self.stack.last_mut().unwrap();
+        let (cursor, _) = self.stack.last_mut().unwrap();
         let parent_id = cursor.item().unwrap().parent_id;
         cursor.next();
         if let Some(child_ref) = cursor.item() {
@@ -1096,7 +1094,10 @@ mod tests {
 
         let a = tree.file_id("a").unwrap();
         let b = tree.file_id("a/b").unwrap();
+        let c = tree.file_id("a/b/c").unwrap();
+        let d = tree.file_id("a/d").unwrap();
         let e = tree.file_id("a/e").unwrap();
+        let f = tree.file_id("f").unwrap();
 
         tree.remove(b).unwrap();
 
@@ -1137,7 +1138,19 @@ mod tests {
         assert_eq!(
             cursor.entry().unwrap(),
             CursorEntry {
-                file_id: tree.file_id("a/d").unwrap(),
+                file_id: c,
+                file_type: FileType::Text,
+                depth: 3,
+                name: Arc::new(OsString::from("c")),
+                status: FileStatus::Removed
+            }
+        );
+
+        assert!(cursor.next(true));
+        assert_eq!(
+            cursor.entry().unwrap(),
+            CursorEntry {
+                file_id: d,
                 file_type: FileType::Directory,
                 depth: 2,
                 name: Arc::new(OsString::from("d")),
@@ -1185,7 +1198,7 @@ mod tests {
         assert_eq!(
             cursor.entry().unwrap(),
             CursorEntry {
-                file_id: tree.file_id("f").unwrap(),
+                file_id: f,
                 file_type: FileType::Directory,
                 depth: 1,
                 name: Arc::new(OsString::from("f")),
