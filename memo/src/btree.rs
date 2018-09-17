@@ -160,12 +160,10 @@ impl<T: Item> Tree<T> {
     }
 
     pub fn push(&mut self, item: T) {
-        self.push_tree(Tree::from_child_trees(vec![Tree(Arc::new(
-            Node::Leaf {
-                summary: item.summarize(),
-                items: SmallVec::from_vec(vec![item]),
-            },
-        ))]))
+        self.push_tree(Tree::from_child_trees(vec![Tree(Arc::new(Node::Leaf {
+            summary: item.summarize(),
+            items: SmallVec::from_vec(vec![item]),
+        }))]))
     }
 
     pub fn push_tree(&mut self, other: Self) {
@@ -548,47 +546,38 @@ impl<T: Item> Cursor<T> {
             self.descend_to_last_item(root);
             self.at_end = false;
         } else {
-            let search_result =
-                self.stack
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(depth, (_, index, _))| {
-                        if *index > 0 {
-                            Some((depth, *index - 1))
-                        } else {
-                            None
-                        }
-                    });
+            while let Some((subtree, index, _)) = self.stack.pop() {
+                if index > 0 {
+                    let new_index = index - 1;
 
-            if let Some((depth, new_index)) = search_result {
-                let subtree = self.stack.get(depth).unwrap().0.clone();
-                self.stack.truncate(depth);
-                self.summary = self
-                    .stack
-                    .last()
-                    .map_or(T::Summary::default(), |(_, _, summary)| summary.clone());
+                    self.summary = self
+                        .stack
+                        .last()
+                        .map_or(T::Summary::default(), |(_, _, summary)| summary.clone());
 
-                match subtree.0.as_ref() {
-                    Node::Internal {
-                        child_trees,
-                        child_summaries,
-                        ..
-                    } => {
-                        for summary in &child_summaries[0..new_index] {
-                            self.summary += summary;
+                    match subtree.0.as_ref() {
+                        Node::Internal {
+                            child_trees,
+                            child_summaries,
+                            ..
+                        } => {
+                            for summary in &child_summaries[0..new_index] {
+                                self.summary += summary;
+                            }
+                            self.stack
+                                .push((subtree.clone(), new_index, self.summary.clone()));
+                            self.descend_to_last_item(child_trees[new_index].clone());
                         }
-                        self.stack
-                            .push((subtree.clone(), new_index, self.summary.clone()));
-                        self.descend_to_last_item(child_trees[new_index].clone());
-                    }
-                    Node::Leaf { items, .. } => {
-                        for item in &items[0..new_index] {
-                            self.summary += &item.summarize();
+                        Node::Leaf { items, .. } => {
+                            for item in &items[0..new_index] {
+                                self.summary += &item.summarize();
+                            }
+                            self.stack
+                                .push((subtree.clone(), new_index, self.summary.clone()));
                         }
-                        self.stack
-                            .push((subtree.clone(), new_index, self.summary.clone()));
                     }
+
+                    break;
                 }
             }
         }
@@ -597,38 +586,45 @@ impl<T: Item> Cursor<T> {
     pub fn next(&mut self) {
         assert!(self.did_seek, "Must seek before calling this method");
 
-        while self.stack.len() > 0 {
-            let new_subtree = {
-                let (subtree, index, summary) = self.stack.last_mut().unwrap();
-                match subtree.0.as_ref() {
-                    Node::Internal {
-                        child_trees,
-                        child_summaries,
-                        ..
-                    } => {
-                        *summary += &child_summaries[*index];
-                        *index += 1;
-                        child_trees.get(*index).cloned()
-                    }
-                    Node::Leaf { items, .. } => {
-                        let item_summary = items[*index].summarize();
-                        self.summary += &item_summary;
-                        *summary += &item_summary;
-                        *index += 1;
-                        if *index < items.len() {
-                            return;
-                        } else {
-                            None
+        if self.stack.is_empty() {
+            if !self.at_end {
+                let root = self.tree.clone();
+                self.descend_to_first_item(root);
+            }
+        } else {
+            while self.stack.len() > 0 {
+                let new_subtree = {
+                    let (subtree, index, summary) = self.stack.last_mut().unwrap();
+                    match subtree.0.as_ref() {
+                        Node::Internal {
+                            child_trees,
+                            child_summaries,
+                            ..
+                        } => {
+                            *summary += &child_summaries[*index];
+                            *index += 1;
+                            child_trees.get(*index).cloned()
+                        }
+                        Node::Leaf { items, .. } => {
+                            let item_summary = items[*index].summarize();
+                            self.summary += &item_summary;
+                            *summary += &item_summary;
+                            *index += 1;
+                            if *index < items.len() {
+                                return;
+                            } else {
+                                None
+                            }
                         }
                     }
-                }
-            };
+                };
 
-            if let Some(subtree) = new_subtree {
-                self.descend_to_first_item(subtree);
-                break;
-            } else {
-                self.stack.pop();
+                if let Some(subtree) = new_subtree {
+                    self.descend_to_first_item(subtree);
+                    break;
+                } else {
+                    self.stack.pop();
+                }
             }
         }
 
@@ -994,6 +990,7 @@ mod tests {
                 assert_eq!(tree.items(), reference_items);
 
                 let mut pos = rng.gen_range(0, tree.extent::<Count>().0 + 1);
+                let mut before_start = false;
                 let mut cursor = tree.cursor();
                 cursor.seek(&Count(pos), SeekBias::Right);
 
@@ -1006,7 +1003,7 @@ mod tests {
                         assert_eq!(cursor.prev_item(), None);
                     }
 
-                    if pos < reference_items.len() {
+                    if pos < reference_items.len() && !before_start {
                         assert_eq!(cursor.item().unwrap(), reference_items[pos]);
                     } else {
                         assert_eq!(cursor.item(), None);
@@ -1016,10 +1013,15 @@ mod tests {
                         cursor.next();
                         if pos < reference_items.len() {
                             pos += 1;
+                            before_start = false;
                         }
                     } else {
                         cursor.prev();
+                        if pos == 0 {
+                            before_start = true;
+                        }
                         pos = pos.saturating_sub(1);
+
                     }
                 }
             }
@@ -1151,6 +1153,12 @@ mod tests {
         assert_eq!(cursor.start::<Sum>(), Sum(0));
 
         cursor.prev();
+        assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
+        cursor.next();
         assert_eq!(cursor.item(), Some(1));
         assert_eq!(cursor.prev_item(), None);
         assert_eq!(cursor.start::<Count>(), Count(0));
