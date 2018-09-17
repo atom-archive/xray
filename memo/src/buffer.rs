@@ -70,9 +70,10 @@ struct SelectionSet {
     version: SelectionSetVersion,
 }
 
-pub struct Cursor {
+pub struct Iter {
     fragment_cursor: btree::Cursor<Fragment>,
     fragment_offset: usize,
+    reversed: bool,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -215,44 +216,29 @@ impl Buffer {
     }
 
     pub fn line(&self, row: u32) -> Result<Vec<u16>, Error> {
-        let mut cursor = self.cursor_at_point(Point::new(row, 0));
-        if cursor.code_unit().is_none() {
+        let mut iterator = self.iter_at_point(Point::new(row, 0)).peekable();
+        if iterator.peek().is_none() {
             Err(Error::OffsetOutOfRange)
         } else {
-            let mut line = Vec::new();
-            while let Some(c) = cursor.code_unit() {
-                if c == b'\n' as u16 {
-                    break;
-                } else {
-                    line.push(c);
-                    cursor.next();
-                }
-            }
-            Ok(line)
+            Ok(iterator.take_while(|c| *c != u16::from(b'\n')).collect())
         }
     }
 
     pub fn to_u16_chars(&self) -> Vec<u16> {
-        let mut chars = Vec::with_capacity(self.len());
-        let mut cursor = self.cursor();
-        while let Some(c) = cursor.code_unit() {
-            chars.push(c);
-            cursor.next();
-        }
-        chars
+        self.iter().collect::<Vec<u16>>()
     }
 
     #[cfg(test)]
-    pub fn to_string(&self) -> String {
+    pub fn into_string(&self) -> String {
         String::from_utf16_lossy(&self.to_u16_chars())
     }
 
-    pub fn cursor(&self) -> Cursor {
-        Cursor::new(self)
+    pub fn iter(&self) -> Iter {
+        Iter::new(self)
     }
 
-    pub fn cursor_at_point(&self, point: Point) -> Cursor {
-        Cursor::at_point(self, point)
+    pub fn iter_at_point(&self, point: Point) -> Iter {
+        Iter::at_point(self, point)
     }
 
     pub fn edit<'a, I, T>(
@@ -1219,13 +1205,14 @@ impl Ord for Point {
     }
 }
 
-impl Cursor {
+impl Iter {
     fn new(buffer: &Buffer) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
         fragment_cursor.seek(&0, SeekBias::Right);
         Self {
             fragment_cursor,
             fragment_offset: 0,
+            reversed: false,
         }
     }
 
@@ -1242,42 +1229,64 @@ impl Cursor {
         Self {
             fragment_cursor,
             fragment_offset,
+            reversed: false,
         }
     }
 
-    fn code_unit(&self) -> Option<u16> {
-        self.fragment_cursor
-            .item()
-            .and_then(|fragment| fragment.get_code_unit(self.fragment_offset))
+    pub fn rev(mut self) -> Iter {
+        self.reversed = true;
+        self
     }
+}
 
-    pub fn next(&mut self) {
-        self.fragment_offset += 1;
-        while let Some(fragment) = self.fragment_cursor.item() {
-            if fragment.get_code_unit(self.fragment_offset).is_some() {
-                break;
-            } else {
-                self.fragment_cursor.next();
-                self.fragment_offset = 0;
+impl Iterator for Iter {
+    type Item = u16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.reversed {
+            if let Some(fragment) = self.fragment_cursor.item() {
+                if self.fragment_offset > 0 {
+                    self.fragment_offset -= 1;
+                    if let Some(c) = fragment.get_code_unit(self.fragment_offset) {
+                        return Some(c);
+                    }
+                }
             }
-        }
-    }
 
-    pub fn prev(&mut self) {
-        if self.fragment_offset > 0 {
-            self.fragment_offset -= 1;
-        } else {
             loop {
                 self.fragment_cursor.prev();
                 if let Some(fragment) = self.fragment_cursor.item() {
                     if fragment.len() > 0 {
                         self.fragment_offset = fragment.len() - 1;
-                        break;
+                        return fragment.get_code_unit(self.fragment_offset);
                     }
                 } else {
                     break;
                 }
             }
+
+            None
+        } else {
+            if let Some(fragment) = self.fragment_cursor.item() {
+                if let Some(c) = fragment.get_code_unit(self.fragment_offset) {
+                    self.fragment_offset += 1;
+                    return Some(c);
+                }
+            }
+
+            loop {
+                self.fragment_cursor.next();
+                if let Some(fragment) = self.fragment_cursor.item() {
+                    if let Some(c) = fragment.get_code_unit(0) {
+                        self.fragment_offset = 1;
+                        return Some(c);
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            None
         }
     }
 }
@@ -1823,17 +1832,17 @@ mod tests {
         let mut local_clock = time::Local::new(1);
         let mut lamport_clock = time::Lamport::new(1);
         buffer.edit(&[0..0], "abc", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "abc");
+        assert_eq!(buffer.into_string(), "abc");
         buffer.edit(&[3..3], "def", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "abcdef");
+        assert_eq!(buffer.into_string(), "abcdef");
         buffer.edit(&[0..0], "ghi", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "ghiabcdef");
+        assert_eq!(buffer.into_string(), "ghiabcdef");
         buffer.edit(&[5..5], "jkl", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "ghiabjklcdef");
+        assert_eq!(buffer.into_string(), "ghiabjklcdef");
         buffer.edit(&[6..7], "", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "ghiabjlcdef");
+        assert_eq!(buffer.into_string(), "ghiabjlcdef");
         buffer.edit(&[4..9], "mno", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "ghiamnoef");
+        assert_eq!(buffer.into_string(), "ghiamnoef");
     }
 
     #[test]
@@ -1862,7 +1871,12 @@ mod tests {
                     .take(rng.gen_range(0, 10))
                     .collect::<String>();
 
-                buffer.edit(&old_ranges, new_text.as_str(), &mut local_clock, &mut lamport_clock);
+                buffer.edit(
+                    &old_ranges,
+                    new_text.as_str(),
+                    &mut local_clock,
+                    &mut lamport_clock,
+                );
                 for old_range in old_ranges.iter().rev() {
                     reference_string = [
                         &reference_string[0..old_range.start],
@@ -1871,7 +1885,7 @@ mod tests {
                     ]
                         .concat();
                 }
-                assert_eq!(buffer.to_string(), reference_string);
+                assert_eq!(buffer.into_string(), reference_string);
             }
         }
     }
@@ -1881,7 +1895,12 @@ mod tests {
         let mut buffer = Buffer::new("");
         let mut local_clock = time::Local::new(1);
         let mut lamport_clock = time::Lamport::new(1);
-        buffer.edit(&[0..0], "abcd\nefg\nhij", &mut local_clock, &mut lamport_clock);
+        buffer.edit(
+            &[0..0],
+            "abcd\nefg\nhij",
+            &mut local_clock,
+            &mut lamport_clock,
+        );
         buffer.edit(&[12..12], "kl\nmno", &mut local_clock, &mut lamport_clock);
         buffer.edit(&[18..18], "\npqrs\n", &mut local_clock, &mut lamport_clock);
         buffer.edit(&[18..21], "\nPQ", &mut local_clock, &mut lamport_clock);
@@ -1901,7 +1920,12 @@ mod tests {
         let mut local_clock = time::Local::new(1);
         let mut lamport_clock = time::Lamport::new(1);
         assert_eq!(buffer.longest_row(), 0);
-        buffer.edit(&[0..0], "abcd\nefg\nhij", &mut local_clock, &mut lamport_clock);
+        buffer.edit(
+            &[0..0],
+            "abcd\nefg\nhij",
+            &mut local_clock,
+            &mut lamport_clock,
+        );
         assert_eq!(buffer.longest_row(), 0);
         buffer.edit(&[12..12], "kl\nmno", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 2);
@@ -1914,50 +1938,55 @@ mod tests {
     }
 
     #[test]
-    fn iter_starting_at_point() {
+    fn test_iter_starting_at_point() {
         let mut buffer = Buffer::new("");
         let mut local_clock = time::Local::new(1);
         let mut lamport_clock = time::Lamport::new(1);
-        buffer.edit(&[0..0], "abcd\nefgh\nij", &mut local_clock, &mut lamport_clock);
+        buffer.edit(
+            &[0..0],
+            "abcd\nefgh\nij",
+            &mut local_clock,
+            &mut lamport_clock,
+        );
         buffer.edit(&[12..12], "kl\nmno", &mut local_clock, &mut lamport_clock);
         buffer.edit(&[18..18], "\npqrs", &mut local_clock, &mut lamport_clock);
         buffer.edit(&[18..21], "\nPQ", &mut local_clock, &mut lamport_clock);
 
-        let cursor = buffer.cursor_at_point(Point::new(0, 0));
-        assert_eq!(cursor.read_to_end(), "abcd\nefgh\nijkl\nmno\nPQrs");
+        let cursor = buffer.iter_at_point(Point::new(0, 0));
+        assert_eq!(cursor.into_string(), "abcd\nefgh\nijkl\nmno\nPQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(1, 0));
-        assert_eq!(cursor.read_to_end(), "efgh\nijkl\nmno\nPQrs");
+        let cursor = buffer.iter_at_point(Point::new(1, 0));
+        assert_eq!(cursor.into_string(), "efgh\nijkl\nmno\nPQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(2, 0));
-        assert_eq!(cursor.read_to_end(), "ijkl\nmno\nPQrs");
+        let cursor = buffer.iter_at_point(Point::new(2, 0));
+        assert_eq!(cursor.into_string(), "ijkl\nmno\nPQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(3, 0));
-        assert_eq!(cursor.read_to_end(), "mno\nPQrs");
+        let cursor = buffer.iter_at_point(Point::new(3, 0));
+        assert_eq!(cursor.into_string(), "mno\nPQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(4, 0));
-        assert_eq!(cursor.read_to_end(), "PQrs");
+        let cursor = buffer.iter_at_point(Point::new(4, 0));
+        assert_eq!(cursor.into_string(), "PQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(5, 0));
-        assert_eq!(cursor.read_to_end(), "");
+        let cursor = buffer.iter_at_point(Point::new(5, 0));
+        assert_eq!(cursor.into_string(), "");
 
-        let cursor = buffer.cursor_at_point(Point::new(0, 0));
-        assert_eq!(cursor.read_to_start(), "");
+        let cursor = buffer.iter_at_point(Point::new(0, 0)).rev();
+        assert_eq!(cursor.into_string(), "");
 
-        let cursor = buffer.cursor_at_point(Point::new(0, 3));
-        assert_eq!(cursor.read_to_start(), "cba");
+        let cursor = buffer.iter_at_point(Point::new(0, 3)).rev();
+        assert_eq!(cursor.into_string(), "cba");
 
-        let cursor = buffer.cursor_at_point(Point::new(1, 4));
-        assert_eq!(cursor.read_to_start(), "hgfe\ndcba");
+        let cursor = buffer.iter_at_point(Point::new(1, 4)).rev();
+        assert_eq!(cursor.into_string(), "hgfe\ndcba");
 
-        let cursor = buffer.cursor_at_point(Point::new(3, 2));
-        assert_eq!(cursor.read_to_start(), "nm\nlkji\nhgfe\ndcba");
+        let cursor = buffer.iter_at_point(Point::new(3, 2)).rev();
+        assert_eq!(cursor.into_string(), "nm\nlkji\nhgfe\ndcba");
 
-        let cursor = buffer.cursor_at_point(Point::new(4, 4));
-        assert_eq!(cursor.read_to_start(), "srQP\nonm\nlkji\nhgfe\ndcba");
+        let cursor = buffer.iter_at_point(Point::new(4, 4)).rev();
+        assert_eq!(cursor.into_string(), "srQP\nonm\nlkji\nhgfe\ndcba");
 
-        let cursor = buffer.cursor_at_point(Point::new(5, 0));
-        assert_eq!(cursor.read_to_start(), "srQP\nonm\nlkji\nhgfe\ndcba");
+        let cursor = buffer.iter_at_point(Point::new(5, 0)).rev();
+        assert_eq!(cursor.into_string(), "srQP\nonm\nlkji\nhgfe\ndcba");
 
         // Regression test:
         let mut buffer = Buffer::new("");
@@ -1966,8 +1995,8 @@ mod tests {
         buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n", &mut local_clock, &mut lamport_clock);
         buffer.edit(&[60..60], "\n", &mut local_clock, &mut lamport_clock);
 
-        let cursor = buffer.cursor_at_point(Point::new(6, 0));
-        assert_eq!(cursor.read_to_end(), "    \"xray_wasm\",\n]\n");
+        let cursor = buffer.iter_at_point(Point::new(6, 0));
+        assert_eq!(cursor.into_string(), "    \"xray_wasm\",\n]\n");
     }
 
     #[test]
@@ -2100,7 +2129,7 @@ mod tests {
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
 
         buffer.edit(&[1..1], "def\n", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "adef\nbc");
+        assert_eq!(buffer.into_string(), "adef\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
         assert_eq!(
@@ -2113,7 +2142,7 @@ mod tests {
         );
 
         buffer.edit(&[2..3], "", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "adf\nbc");
+        assert_eq!(buffer.into_string(), "adf\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
         assert_eq!(
@@ -2126,7 +2155,7 @@ mod tests {
         );
 
         buffer.edit(&[5..5], "ghi\n", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "adf\nbghi\nc");
+        assert_eq!(buffer.into_string(), "adf\nbghi\nc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 9);
         assert_eq!(
@@ -2139,7 +2168,7 @@ mod tests {
         );
 
         buffer.edit(&[7..9], "", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "adf\nbghc");
+        assert_eq!(buffer.into_string(), "adf\nbghc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
         assert_eq!(
@@ -2243,7 +2272,7 @@ mod tests {
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
         buffer.edit(&[0..0], "abc", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "abc");
+        assert_eq!(buffer.into_string(), "abc");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 3);
 
@@ -2252,7 +2281,7 @@ mod tests {
 
         buffer.edit(&[3..3], "def", &mut local_clock, &mut lamport_clock);
         buffer.edit(&[0..0], "ghi", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.to_string(), "ghiabcdef");
+        assert_eq!(buffer.into_string(), "ghiabcdef");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
         assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
@@ -2322,7 +2351,7 @@ mod tests {
             }
 
             for buffer in &buffers[1..] {
-                assert_eq!(buffer.to_string(), buffers[0].to_string());
+                assert_eq!(buffer.into_string(), buffers[0].into_string());
             }
         }
     }
@@ -2341,26 +2370,9 @@ mod tests {
         }
     }
 
-    impl Cursor {
-        fn read_to_start(mut self) -> String {
-            // Exclude the character we're currently parked at.
-            self.prev();
-
-            let mut chars = Vec::new();
-            while let Some(c) = self.code_unit() {
-                chars.push(c);
-                self.prev();
-            }
-            String::from_utf16_lossy(&chars)
-        }
-
-        fn read_to_end(mut self) -> String {
-            let mut chars = Vec::new();
-            while let Some(c) = self.code_unit() {
-                chars.push(c);
-                self.next();
-            }
-            String::from_utf16_lossy(&chars)
+    impl Iter {
+        fn into_string(self) -> String {
+            String::from_utf16_lossy(&self.collect::<Vec<u16>>())
         }
     }
 }
