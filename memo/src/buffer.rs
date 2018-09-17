@@ -70,11 +70,6 @@ struct SelectionSet {
     version: SelectionSetVersion,
 }
 
-pub struct SelectionSetState {
-    user_id: UserId,
-    selections: Vec<Selection>,
-}
-
 pub struct Cursor {
     fragment_cursor: btree::Cursor<Fragment>,
     fragment_offset: usize,
@@ -1220,15 +1215,6 @@ impl Ord for Point {
         match self.row.cmp(&other.row) {
             Ordering::Equal => self.column.cmp(&other.column),
             comparison @ _ => comparison,
-        }
-    }
-}
-
-impl SelectionSet {
-    fn state(&self) -> SelectionSetState {
-        SelectionSetState {
-            user_id: self.user_id,
-            selections: self.selections.clone(),
         }
     }
 }

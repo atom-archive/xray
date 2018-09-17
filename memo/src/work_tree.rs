@@ -252,7 +252,7 @@ impl WorkTree {
         Ok(fixup_ops)
     }
 
-    pub fn apply_ops<I>(&mut self, ops: I) -> Vec<Operation>
+    pub fn apply_ops<I>(&mut self, ops: I) -> Result<Vec<Operation>, Error>
     where
         I: IntoIterator<Item = Operation>,
     {
@@ -264,17 +264,17 @@ impl WorkTree {
                 }
                 _ => {}
             }
-            self.apply_op(op);
+            self.apply_op(op)?;
         }
 
         let mut fixup_ops = Vec::new();
         for file_id in changed_file_ids {
             fixup_ops.extend(self.fix_conflicts(file_id));
         }
-        fixup_ops
+        Ok(fixup_ops)
     }
 
-    pub fn apply_op(&mut self, op: Operation) {
+    pub fn apply_op(&mut self, op: Operation) -> Result<(), Error> {
         match op {
             Operation::InsertMetadata { file_id, file_type } => {
                 self.metadata.insert(Metadata { file_id, file_type });
@@ -369,10 +369,14 @@ impl WorkTree {
                     operations.extend(edits);
                 }
                 TextFile::Buffered(buffer) => {
-                    buffer.apply_ops(edits, &mut self.lamport_clock);
+                    buffer
+                        .apply_ops(edits, &mut self.lamport_clock)
+                        .map_err(|_| Error::InvalidOperation)?;
                 }
             },
         }
+
+        Ok(())
     }
 
     pub fn new_text_file(&mut self) -> (FileId, Operation) {
@@ -381,7 +385,7 @@ impl WorkTree {
             file_id,
             file_type: FileType::Text,
         };
-        self.apply_op(operation.clone());
+        self.apply_op(operation.clone()).unwrap();
         (file_id, operation)
     }
 
@@ -391,7 +395,7 @@ impl WorkTree {
             file_id,
             file_type: FileType::Directory,
         };
-        self.apply_op(operation.clone());
+        self.apply_op(operation.clone()).unwrap();
         (file_id, operation)
     }
 
@@ -436,7 +440,7 @@ impl WorkTree {
             timestamp: new_tree.lamport_clock.tick(),
             new_parent: Some((new_parent_id, Arc::new(new_name.as_ref().into()))),
         };
-        let fixup_ops = new_tree.apply_ops(Some(operation.clone()));
+        let fixup_ops = new_tree.apply_ops(Some(operation.clone())).unwrap();
         if fixup_ops.is_empty() {
             *self = new_tree;
             Ok(operation)
@@ -453,7 +457,7 @@ impl WorkTree {
             timestamp: self.lamport_clock.tick(),
             new_parent: None,
         };
-        self.apply_op(operation.clone());
+        self.apply_op(operation.clone()).unwrap();
         Ok(operation)
     }
 
@@ -675,7 +679,7 @@ impl WorkTree {
         }
 
         for op in &fixup_ops {
-            self.apply_op(op.clone());
+            self.apply_op(op.clone()).unwrap();
         }
         for file_id in moved_file_ids {
             fixup_ops.extend(self.fix_name_conflicts(file_id));
@@ -735,7 +739,7 @@ impl WorkTree {
                         timestamp: self.lamport_clock.tick(),
                         new_parent: Some((parent_id, unique_name.clone())),
                     };
-                    self.apply_op(fixup_op.clone());
+                    self.apply_op(fixup_op.clone()).unwrap();
                     fixup_ops.push(fixup_op);
 
                     let visible_index = cursor_1.end::<usize>();
@@ -751,7 +755,7 @@ impl WorkTree {
 }
 
 impl Cursor {
-    fn next(&mut self, can_descend: bool) -> bool {
+    pub fn next(&mut self, can_descend: bool) -> bool {
         if !self.stack.is_empty() {
             let entry = self.entry().unwrap();
             if !can_descend
@@ -768,7 +772,7 @@ impl Cursor {
         !self.stack.is_empty()
     }
 
-    fn entry(&self) -> Result<CursorEntry, Error> {
+    pub fn entry(&self) -> Result<CursorEntry, Error> {
         let (child_ref_cursor, parent_status) = self.stack.last().ok_or(Error::CursorExhausted)?;
         let metadata = self.metadata_cursor.item().unwrap();
         let child_ref = child_ref_cursor.item().unwrap();
@@ -810,7 +814,7 @@ impl Cursor {
         })
     }
 
-    fn path(&self) -> Result<&Path, Error> {
+    pub fn path(&self) -> Result<&Path, Error> {
         if self.stack.is_empty() {
             Err(Error::CursorExhausted)
         } else {
@@ -836,7 +840,7 @@ impl Cursor {
         }
     }
 
-    fn next_sibling(&mut self) -> bool {
+    pub fn next_sibling(&mut self) -> bool {
         let (cursor, _) = self.stack.last_mut().unwrap();
         let parent_id = cursor.item().unwrap().parent_id;
         cursor.next();
@@ -1331,7 +1335,7 @@ mod tests {
                 let tree = &mut trees[replica_index];
                 if !inboxes[replica_index].is_empty() && rng.gen() {
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = tree.apply_ops(ops);
+                    let fixup_ops = tree.apply_ops(ops).unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
                 } else {
                     let ops = tree.mutate(&mut rng, 5);
@@ -1346,7 +1350,7 @@ mod tests {
                     let tree = &mut trees[replica_index];
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
                     if !ops.is_empty() {
-                        let fixup_ops = tree.apply_ops(ops);
+                        let fixup_ops = tree.apply_ops(ops).unwrap();
                         deliver_ops(replica_index, &mut inboxes, fixup_ops);
                         done = false;
                     }
