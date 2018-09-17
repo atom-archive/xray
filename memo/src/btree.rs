@@ -80,7 +80,7 @@ impl<T: Item> Tree<T> {
         tree
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn items(&self) -> Vec<T> {
         let mut items = Vec::new();
         let mut cursor = self.cursor();

@@ -160,36 +160,41 @@ impl Buffer {
     where
         T: Into<Text>,
     {
-        let text = text.into();
+        let mut local_clock = time::Local::new(0);
+        let mut lamport_clock = time::Lamport::new(0);
+
         // Push start sentinel.
-        let sentinel_id = time::Local::new(0);
+        let sentinel_id = local_clock.tick();
         let mut insertion_splits = HashMap::new();
         insertion_splits.insert(
             sentinel_id,
             btree::Tree::from_item(InsertionSplit {
                 fragment_id: FragmentId::min_value(),
-                extent: text.len(),
+                extent: 0,
             }),
         );
         let fragments = btree::Tree::from_item(Fragment::new(
             FragmentId::min_value(),
             Insertion {
                 id: sentinel_id,
-                parent_id: time::Local::new(0),
+                parent_id: sentinel_id,
                 offset_in_parent: 0,
-                text: Arc::new(text),
-                timestamp: time::Lamport::new(0),
+                text: Arc::new("".into()),
+                timestamp: lamport_clock, // Don't tick so that the base text gets the same timestamp.
             },
         ));
 
-        Self {
+        let mut buffer = Self {
             fragments,
             insertion_splits,
             anchor_cache: RefCell::new(HashMap::default()),
             offset_cache: RefCell::new(HashMap::default()),
             version: time::Global::new(),
             selections: HashMap::default(),
-        }
+        };
+
+        buffer.edit(&[0..0], text, &mut local_clock, &mut lamport_clock);
+        buffer
     }
 
     pub fn len(&self) -> usize {
@@ -1828,10 +1833,9 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut buffer = Buffer::new("");
         let mut local_clock = time::Local::new(1);
         let mut lamport_clock = time::Lamport::new(1);
-        buffer.edit(&[0..0], "abc", &mut local_clock, &mut lamport_clock);
+        let mut buffer = Buffer::new("abc");
         assert_eq!(buffer.into_string(), "abc");
         buffer.edit(&[3..3], "def", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.into_string(), "abcdef");
@@ -1851,10 +1855,12 @@ mod tests {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new("");
+            let mut reference_string = RandomCharIter(rng)
+                .take(rng.gen_range(0, 10))
+                .collect::<String>();
+            let mut buffer = Buffer::new(reference_string.as_str());
             let mut local_clock = time::Local::new(1);
             let mut lamport_clock = time::Lamport::new(1);
-            let mut reference_string = String::new();
 
             for _i in 0..10 {
                 let mut old_ranges: Vec<Range<usize>> = Vec::new();
@@ -2295,12 +2301,15 @@ mod tests {
             let mut rng = StdRng::from_seed(&[seed]);
 
             let site_range = 0..5;
+            let base_text = RandomCharIter(rng)
+                .take(rng.gen_range(0, 10))
+                .collect::<String>();
             let mut buffers = Vec::new();
             let mut local_clocks = Vec::new();
             let mut lamport_clocks = Vec::new();
             let mut queues = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new("");
+                let mut buffer = Buffer::new(base_text.as_str());
                 buffers.push(buffer);
                 local_clocks.push(time::Local::new(i + 1));
                 lamport_clocks.push(time::Lamport::new(i + 1));
