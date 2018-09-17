@@ -2099,7 +2099,7 @@ mod tests {
     }
 
     #[test]
-    fn fragment_ids() {
+    fn test_fragment_ids() {
         for seed in 0..10 {
             use self::rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
@@ -2264,7 +2264,7 @@ mod tests {
     }
 
     #[test]
-    fn anchors_at_start_and_end() {
+    fn test_anchors_at_start_and_end() {
         let mut buffer = Buffer::new("");
         let mut local_clock = time::Local::new(1);
         let mut lamport_clock = time::Lamport::new(1);
