@@ -1,5 +1,5 @@
-const { app, BrowserWindow } = require('electron');
-const { spawn } = require('child_process');
+const {app, BrowserWindow} = require('electron');
+const {spawn} = require('child_process');
 const path = require('path');
 const url = require('url');
 const XrayClient = require('../shared/xray_client');
@@ -17,7 +17,7 @@ if (!SOCKET_PATH) {
 }
 
 class XrayApplication {
-  constructor(serverPath, socketPath) {
+  constructor (serverPath, socketPath) {
     this.serverPath = serverPath;
     this.socketPath = socketPath;
     this.windowsById = new Map();
@@ -25,8 +25,8 @@ class XrayApplication {
     this.xrayClient = new XrayClient();
   }
 
-  async start() {
-    const serverProcess = spawn(this.serverPath, [], { stdio: ['ignore', 'pipe', 'inherit'] });
+  async start () {
+    const serverProcess = spawn(this.serverPath, [], {stdio: ['ignore', 'pipe', 'inherit']});
     app.on('before-quit', () => serverProcess.kill());
 
     serverProcess.on('error', console.error);
@@ -42,10 +42,10 @@ class XrayApplication {
 
     await this.xrayClient.start(this.socketPath);
     this.xrayClient.addMessageListener(this._handleMessage.bind(this));
-    this.xrayClient.sendMessage({ type: 'StartApp' });
+    this.xrayClient.sendMessage({type: 'StartApp'});
   }
 
-  async _handleMessage(message) {
+  async _handleMessage (message) {
     await this.readyPromise;
     switch (message.type) {
       case 'OpenWindow': {
@@ -55,11 +55,8 @@ class XrayApplication {
     }
   }
 
-  _createWindow(windowId) {
-    const window = new BrowserWindow({
-      width: 800, height: 600, webSecurity: false,
-      icon: path.join(__dirname, '../../resources/app-icons/png/64.png')
-    });
+  _createWindow (windowId) {
+    const window = new BrowserWindow({width: 800, height: 600, webSecurity: false});
     window.loadURL(url.format({
       pathname: path.join(__dirname, '../../index.html'),
       search: `windowId=${windowId}&socketPath=${encodeURIComponent(this.socketPath)}`,
@@ -69,7 +66,7 @@ class XrayApplication {
     this.windowsById.set(windowId, window);
     window.on('closed', () => {
       this.windowsById.delete(windowId);
-      this.xrayClient.sendMessage({ type: 'CloseWindow', window_id: windowId });
+      this.xrayClient.sendMessage({type: 'CloseWindow', window_id: windowId});
     });
   }
 }
