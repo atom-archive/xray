@@ -29,8 +29,10 @@ impl Local {
         Self { replica_id, seq: 0 }
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> Self {
+        let timestamp = *self;
         self.seq += 1;
+        timestamp
     }
 }
 
@@ -98,8 +100,10 @@ impl Lamport {
         }
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> Self {
+        let timestamp = *self;
         self.value += 1;
+        timestamp
     }
 
     pub fn observe(&mut self, timestamp: Self) {

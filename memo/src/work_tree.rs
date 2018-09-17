@@ -1,9 +1,10 @@
 use btree::{self, SeekBias};
+use buffer::{self, Buffer, Text};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::ops::{Add, AddAssign};
+use std::ops::{Add, AddAssign, Range};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use time;
@@ -20,6 +21,7 @@ pub struct WorkTree {
     child_refs: btree::Tree<ChildRefValue>,
     local_clock: time::Local,
     lamport_clock: time::Lamport,
+    text_files: HashMap<FileId, TextFile>,
 }
 
 pub struct Cursor {
@@ -28,7 +30,6 @@ pub struct Cursor {
     child_ref_cursor: btree::Cursor<ChildRefValue>,
     stack: Vec<(btree::Cursor<ChildRefValue>, FileStatus)>,
     path: PathBuf,
-    work_tree: WorkTree,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -57,12 +58,17 @@ pub enum Operation {
         timestamp: time::Lamport,
         new_parent: Option<(FileId, Arc<OsString>)>,
     },
+    EditTextFile {
+        file_id: FileId,
+        edits: Vec<buffer::Operation>,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidPath,
     InvalidFileId,
+    InvalidBufferId,
     InvalidDirEntry,
     InvalidOperation,
     CursorExhausted,
@@ -73,6 +79,9 @@ pub enum FileId {
     Base(u64),
     New(time::Local),
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct BufferId(FileId);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileStatus {
@@ -140,6 +149,12 @@ pub struct ChildRefKey {
     name: Arc<OsString>,
 }
 
+#[derive(Clone)]
+enum TextFile {
+    Deferred(Vec<buffer::Operation>),
+    Buffered(Buffer),
+}
+
 impl WorkTree {
     pub fn new(replica_id: ReplicaId) -> Self {
         Self {
@@ -150,6 +165,7 @@ impl WorkTree {
             child_refs: btree::Tree::new(),
             local_clock: time::Local::new(replica_id),
             lamport_clock: time::Lamport::new(replica_id),
+            text_files: HashMap::new(),
         }
     }
 
@@ -163,7 +179,6 @@ impl WorkTree {
             child_ref_cursor,
             stack: Vec::new(),
             path: PathBuf::new(),
-            work_tree: self.clone(),
         };
         if cursor.descend_into(FileStatus::Unchanged, ROOT_FILE_ID) {
             Some(cursor)
@@ -345,11 +360,23 @@ impl WorkTree {
                 });
                 self.child_refs.edit(&mut child_ref_edits);
             }
+            Operation::EditTextFile { file_id, edits } => match self
+                .text_files
+                .entry(file_id)
+                .or_insert_with(|| TextFile::Deferred(Vec::new()))
+            {
+                TextFile::Deferred(operations) => {
+                    operations.extend(edits);
+                }
+                TextFile::Buffered(buffer) => {
+                    buffer.apply_ops(edits, &mut self.lamport_clock);
+                }
+            },
         }
     }
 
     pub fn new_text_file(&mut self) -> (FileId, Operation) {
-        let file_id = FileId::New(self.local_time());
+        let file_id = FileId::New(self.local_clock.tick());
         let operation = Operation::InsertMetadata {
             file_id,
             file_type: FileType::Text,
@@ -359,13 +386,36 @@ impl WorkTree {
     }
 
     pub fn new_dir(&mut self) -> (FileId, Operation) {
-        let file_id = FileId::New(self.local_time());
+        let file_id = FileId::New(self.local_clock.tick());
         let operation = Operation::InsertMetadata {
             file_id,
             file_type: FileType::Directory,
         };
         self.apply_op(operation.clone());
         (file_id, operation)
+    }
+
+    pub fn open_text_file(&mut self, file_id: FileId, base_text: Text) -> Result<BufferId, Error> {
+        self.check_file_id(file_id, Some(FileType::Text))?;
+
+        match self.text_files.remove(&file_id) {
+            Some(TextFile::Deferred(operations)) => {
+                let mut buffer = Buffer::new(base_text);
+                buffer
+                    .apply_ops(operations, &mut self.lamport_clock)
+                    .map_err(|_| Error::InvalidOperation)?;
+                self.text_files.insert(file_id, TextFile::Buffered(buffer));
+            }
+            Some(text_file) => {
+                self.text_files.insert(file_id, text_file);
+            }
+            None => {
+                self.text_files
+                    .insert(file_id, TextFile::Buffered(Buffer::new(base_text)));
+            }
+        }
+
+        Ok(BufferId(file_id))
     }
 
     pub fn rename<N>(
@@ -383,7 +433,7 @@ impl WorkTree {
         let mut new_tree = self.clone();
         let operation = Operation::UpdateParent {
             child_id: file_id,
-            timestamp: new_tree.lamport_time(),
+            timestamp: new_tree.lamport_clock.tick(),
             new_parent: Some((new_parent_id, Arc::new(new_name.as_ref().into()))),
         };
         let fixup_ops = new_tree.apply_ops(Some(operation.clone()));
@@ -400,11 +450,36 @@ impl WorkTree {
 
         let operation = Operation::UpdateParent {
             child_id: file_id,
-            timestamp: self.lamport_time(),
+            timestamp: self.lamport_clock.tick(),
             new_parent: None,
         };
         self.apply_op(operation.clone());
         Ok(operation)
+    }
+
+    pub fn edit<'a, I, T>(
+        &mut self,
+        buffer_id: BufferId,
+        old_ranges: I,
+        new_text: T,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = &'a Range<usize>>,
+        T: Into<Text>,
+    {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
+            Ok(Operation::EditTextFile {
+                file_id: buffer_id.0,
+                edits: buffer.edit(
+                    old_ranges,
+                    new_text,
+                    &mut self.local_clock,
+                    &mut self.lamport_clock,
+                ),
+            })
+        } else {
+            Err(Error::InvalidBufferId)
+        }
     }
 
     pub fn file_id<P>(&self, path: P) -> Result<FileId, Error>
@@ -462,16 +537,6 @@ impl WorkTree {
                 Err(Error::InvalidFileId)
             }
         }
-    }
-
-    fn local_time(&mut self) -> time::Local {
-        self.local_clock.tick();
-        self.local_clock
-    }
-
-    fn lamport_time(&mut self) -> time::Lamport {
-        self.lamport_clock.tick();
-        self.lamport_clock
     }
 
     fn check_file_id(&self, file_id: FileId, expected_type: Option<FileType>) -> Result<(), Error> {
@@ -603,7 +668,7 @@ impl WorkTree {
             );
             fixup_ops.push(Operation::UpdateParent {
                 child_id: *child_id,
-                timestamp: self.lamport_time(),
+                timestamp: self.lamport_clock.tick(),
                 new_parent: cursor.item().unwrap().parent,
             });
             moved_file_ids.push(*child_id);
@@ -667,7 +732,7 @@ impl WorkTree {
 
                     let fixup_op = Operation::UpdateParent {
                         child_id: file_id,
-                        timestamp: self.lamport_time(),
+                        timestamp: self.lamport_clock.tick(),
                         new_parent: Some((parent_id, unique_name.clone())),
                     };
                     self.apply_op(fixup_op.clone());

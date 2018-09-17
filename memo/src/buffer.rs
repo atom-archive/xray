@@ -1,19 +1,15 @@
 use btree::{self, SeekBias};
-use notify_cell::{NotifyCell, NotifyCellObserver};
-use replica_context::ReplicaContext;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::iter;
 use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
-use std::rc::Rc;
 use std::sync::Arc;
 use time;
 use UserId;
 
 type SelectionSetVersion = usize;
-pub type BufferId = usize;
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum Error {
@@ -23,16 +19,14 @@ pub enum Error {
     SelectionSetNotFound,
 }
 
+#[derive(Clone)]
 pub struct Buffer {
-    id: BufferId,
     fragments: btree::Tree<Fragment>,
     insertion_splits: HashMap<time::Local, btree::Tree<InsertionSplit>>,
     anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
     offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: time::Global,
-    updates: NotifyCell<()>,
     selections: HashMap<time::Local, SelectionSet>,
-    ctx: Rc<RefCell<ReplicaContext>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
@@ -69,6 +63,7 @@ pub struct Selection {
     pub goal_column: Option<u32>,
 }
 
+#[derive(Clone)]
 struct SelectionSet {
     user_id: UserId,
     selections: Vec<Selection>,
@@ -152,7 +147,7 @@ struct InsertionSplitSummary {
     extent: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Operation {
     id: time::Local,
     start_id: time::Local,
@@ -165,43 +160,40 @@ pub struct Operation {
 }
 
 impl Buffer {
-    pub fn new(id: BufferId, ctx: Rc<RefCell<ReplicaContext>>) -> Self {
+    pub fn new<T>(text: T) -> Self
+    where
+        T: Into<Text>,
+    {
+        let text = text.into();
         // Push start sentinel.
         let sentinel_id = time::Local::new(0);
+        let mut insertion_splits = HashMap::new();
+        insertion_splits.insert(
+            sentinel_id,
+            btree::Tree::from_item(InsertionSplit {
+                fragment_id: FragmentId::min_value(),
+                extent: text.len(),
+            }),
+        );
         let fragments = btree::Tree::from_item(Fragment::new(
             FragmentId::min_value(),
             Insertion {
                 id: sentinel_id,
                 parent_id: time::Local::new(0),
                 offset_in_parent: 0,
-                text: Arc::new(Text::new(vec![])),
+                text: Arc::new(text),
                 timestamp: time::Lamport::new(0),
             },
         ));
-        let mut insertion_splits = HashMap::new();
-        insertion_splits.insert(
-            sentinel_id,
-            btree::Tree::from_item(InsertionSplit {
-                fragment_id: FragmentId::min_value(),
-                extent: 0,
-            }),
-        );
 
         Self {
-            id,
             fragments,
             insertion_splits,
             anchor_cache: RefCell::new(HashMap::default()),
             offset_cache: RefCell::new(HashMap::default()),
             version: time::Global::new(),
-            updates: NotifyCell::new(()),
             selections: HashMap::default(),
-            ctx,
         }
-    }
-
-    pub fn id(&self) -> BufferId {
-        self.id
     }
 
     pub fn len(&self) -> usize {
@@ -268,7 +260,13 @@ impl Buffer {
         Cursor::at_point(self, point)
     }
 
-    pub fn edit<'a, I, T>(&mut self, old_ranges: I, new_text: T) -> Vec<Arc<Operation>>
+    pub fn edit<'a, I, T>(
+        &mut self,
+        old_ranges: I,
+        new_text: T,
+        local_clock: &mut time::Local,
+        lamport_clock: &mut time::Lamport,
+    ) -> Vec<Operation>
     where
         I: IntoIterator<Item = &'a Range<usize>>,
         T: Into<Text>,
@@ -287,11 +285,12 @@ impl Buffer {
                 .into_iter()
                 .filter(|old_range| new_text.is_some() || old_range.end > old_range.start),
             new_text.clone(),
+            local_clock,
+            lamport_clock,
         );
         if let Some(op) = ops.last() {
             self.version.include(&op.id);
         }
-        self.updates.set(());
         ops
     }
 
@@ -299,15 +298,15 @@ impl Buffer {
         &mut self,
         user_id: UserId,
         selections: Vec<Selection>,
+        local_clock: &mut time::Local,
     ) -> time::Local {
         let set = SelectionSet {
             version: 0,
             selections,
             user_id,
         };
-        let id = self.ctx.borrow_mut().local_time();
+        let id = local_clock.tick();
         self.selections.insert(id, set);
-        self.updates.set(());
         id
     }
 
@@ -315,7 +314,6 @@ impl Buffer {
         self.selections
             .remove(&id)
             .ok_or(Error::SelectionSetNotFound)?;
-        self.updates.set(());
         Ok(())
     }
 
@@ -386,7 +384,6 @@ impl Buffer {
         self.merge_selections(&mut set.selections);
         set.version += 1;
         self.selections.insert(set_id, set);
-        self.updates.set(());
         Ok(())
     }
 
@@ -418,12 +415,19 @@ impl Buffer {
         *selections = new_selections;
     }
 
-    pub fn updates(&self) -> NotifyCellObserver<()> {
-        self.updates.observe()
+    pub fn apply_ops<I: IntoIterator<Item = Operation>>(
+        &mut self,
+        ops: I,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<(), Error> {
+        for op in ops {
+            self.apply_op(op, lamport_clock)?;
+        }
+        Ok(())
     }
 
-    fn integrate_op(&mut self, op: Arc<Operation>) -> Result<(), Error> {
-        self.integrate_edit(
+    fn apply_op(&mut self, op: Operation, lamport_clock: &mut time::Lamport) -> Result<(), Error> {
+        self.apply_edit(
             op.id,
             op.start_id,
             op.start_offset,
@@ -432,14 +436,14 @@ impl Buffer {
             op.new_text.as_ref().cloned(),
             &op.version_in_range,
             op.timestamp,
+            lamport_clock,
         )?;
         self.anchor_cache.borrow_mut().clear();
         self.offset_cache.borrow_mut().clear();
-        self.updates.set(());
         Ok(())
     }
 
-    fn integrate_edit(
+    fn apply_edit(
         &mut self,
         id: time::Local,
         start_id: time::Local,
@@ -449,6 +453,7 @@ impl Buffer {
         new_text: Option<Arc<Text>>,
         version_in_range: &time::Global,
         timestamp: time::Lamport,
+        lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
         let mut new_text = new_text.as_ref().cloned();
         let start_fragment_id = self.resolve_fragment_id(start_id, start_offset)?;
@@ -548,7 +553,7 @@ impl Buffer {
 
         new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
-        self.ctx.borrow_mut().observe_lamport_timestamp(timestamp);
+        lamport_clock.observe(timestamp);
         Ok(())
     }
 
@@ -574,7 +579,9 @@ impl Buffer {
         &mut self,
         mut old_ranges: I,
         new_text: Option<Arc<Text>>,
-    ) -> Vec<Arc<Operation>>
+        local_clock: &mut time::Local,
+        lamport_clock: &mut time::Lamport,
+    ) -> Vec<Operation>
     where
         I: Iterator<Item = &'a Range<usize>>,
     {
@@ -596,8 +603,8 @@ impl Buffer {
         let mut end_offset = None;
         let mut version_in_range = time::Global::new();
 
-        let mut op_id = self.ctx.borrow_mut().local_time();
-        let mut op_timestamp = self.ctx.borrow_mut().lamport_time();
+        let mut op_id = local_clock.tick();
+        let mut op_timestamp = lamport_clock.tick();
 
         while cur_range.is_some() && cursor.item().is_some() {
             let mut fragment = cursor.item().unwrap();
@@ -685,7 +692,7 @@ impl Buffer {
                 // check if it also intersects the current fragment. Otherwise we break out of the
                 // loop and find the first fragment that the splice does not contain fully.
                 if range.end <= fragment_end {
-                    ops.push(Arc::new(Operation {
+                    ops.push(Operation {
                         id: op_id,
                         start_id: start_id.unwrap(),
                         start_offset: start_offset.unwrap(),
@@ -694,7 +701,7 @@ impl Buffer {
                         new_text: new_text.clone(),
                         timestamp: op_timestamp,
                         version_in_range,
-                    }));
+                    });
 
                     start_id = None;
                     start_offset = None;
@@ -703,8 +710,8 @@ impl Buffer {
                     version_in_range = time::Global::new();
                     cur_range = old_ranges.next();
                     if cur_range.is_some() {
-                        op_id = self.ctx.borrow_mut().local_time();
-                        op_timestamp = self.ctx.borrow_mut().lamport_time();
+                        op_id = local_clock.tick();
+                        op_timestamp = lamport_clock.tick();
                     }
                 } else {
                     break;
@@ -738,7 +745,7 @@ impl Buffer {
                         if range.end == fragment_end {
                             end_id = Some(fragment.insertion.id);
                             end_offset = Some(fragment.end_offset);
-                            ops.push(Arc::new(Operation {
+                            ops.push(Operation {
                                 id: op_id,
                                 start_id: start_id.unwrap(),
                                 start_offset: start_offset.unwrap(),
@@ -747,7 +754,7 @@ impl Buffer {
                                 new_text: new_text.clone(),
                                 timestamp: op_timestamp,
                                 version_in_range,
-                            }));
+                            });
 
                             start_id = None;
                             start_offset = None;
@@ -757,8 +764,8 @@ impl Buffer {
 
                             cur_range = old_ranges.next();
                             if cur_range.is_some() {
-                                op_id = self.ctx.borrow_mut().local_time();
-                                op_timestamp = self.ctx.borrow_mut().lamport_time();
+                                op_id = local_clock.tick();
+                                op_timestamp = lamport_clock.tick();
                             }
                             break;
                         }
@@ -783,7 +790,7 @@ impl Buffer {
         if cur_range.is_some() {
             debug_assert_eq!(old_ranges.next(), None);
             let last_fragment = new_fragments.last().unwrap();
-            ops.push(Arc::new(Operation {
+            ops.push(Operation {
                 id: op_id,
                 start_id: last_fragment.insertion.id,
                 start_offset: last_fragment.end_offset,
@@ -792,7 +799,7 @@ impl Buffer {
                 new_text: new_text.clone(),
                 timestamp: op_timestamp,
                 version_in_range: time::Global::new(),
-            }));
+            });
 
             if let Some(new_text) = new_text {
                 new_fragments.push(self.build_fragment_to_insert(
@@ -1826,18 +1833,20 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "abc");
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        buffer.edit(&[0..0], "abc", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "abc");
-        buffer.edit(&[3..3], "def");
+        buffer.edit(&[3..3], "def", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "abcdef");
-        buffer.edit(&[0..0], "ghi");
+        buffer.edit(&[0..0], "ghi", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiabcdef");
-        buffer.edit(&[5..5], "jkl");
+        buffer.edit(&[5..5], "jkl", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiabjklcdef");
-        buffer.edit(&[6..7], "");
+        buffer.edit(&[6..7], "", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiabjlcdef");
-        buffer.edit(&[4..9], "mno");
+        buffer.edit(&[4..9], "mno", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiamnoef");
     }
 
@@ -1847,7 +1856,9 @@ mod tests {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+            let mut buffer = Buffer::new("");
+            let mut local_clock = time::Local::new(1);
+            let mut lamport_clock = time::Lamport::new(1);
             let mut reference_string = String::new();
 
             for _i in 0..10 {
@@ -1865,7 +1876,7 @@ mod tests {
                     .take(rng.gen_range(0, 10))
                     .collect::<String>();
 
-                buffer.edit(&old_ranges, new_text.as_str());
+                buffer.edit(&old_ranges, new_text.as_str(), &mut local_clock, &mut lamport_clock);
                 for old_range in old_ranges.iter().rev() {
                     reference_string = [
                         &reference_string[0..old_range.start],
@@ -1881,11 +1892,13 @@ mod tests {
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "abcd\nefg\nhij");
-        buffer.edit(&[12..12], "kl\nmno");
-        buffer.edit(&[18..18], "\npqrs\n");
-        buffer.edit(&[18..21], "\nPQ");
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        buffer.edit(&[0..0], "abcd\nefg\nhij", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[12..12], "kl\nmno", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[18..18], "\npqrs\n", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[18..21], "\nPQ", &mut local_clock, &mut lamport_clock);
 
         assert_eq!(buffer.len_for_row(0), Ok(4));
         assert_eq!(buffer.len_for_row(1), Ok(3));
@@ -1898,27 +1911,31 @@ mod tests {
 
     #[test]
     fn test_longest_row() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
         assert_eq!(buffer.longest_row(), 0);
-        buffer.edit(&[0..0], "abcd\nefg\nhij");
+        buffer.edit(&[0..0], "abcd\nefg\nhij", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 0);
-        buffer.edit(&[12..12], "kl\nmno");
+        buffer.edit(&[12..12], "kl\nmno", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 2);
-        buffer.edit(&[18..18], "\npqrs");
+        buffer.edit(&[18..18], "\npqrs", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 2);
-        buffer.edit(&[10..12], "");
+        buffer.edit(&[10..12], "", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 0);
-        buffer.edit(&[24..24], "tuv");
+        buffer.edit(&[24..24], "tuv", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 4);
     }
 
     #[test]
     fn iter_starting_at_point() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "abcd\nefgh\nij");
-        buffer.edit(&[12..12], "kl\nmno");
-        buffer.edit(&[18..18], "\npqrs");
-        buffer.edit(&[18..21], "\nPQ");
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        buffer.edit(&[0..0], "abcd\nefgh\nij", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[12..12], "kl\nmno", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[18..18], "\npqrs", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[18..21], "\nPQ", &mut local_clock, &mut lamport_clock);
 
         let cursor = buffer.cursor_at_point(Point::new(0, 0));
         assert_eq!(cursor.read_to_end(), "abcd\nefgh\nijkl\nmno\nPQrs");
@@ -1957,9 +1974,11 @@ mod tests {
         assert_eq!(cursor.read_to_start(), "srQP\nonm\nlkji\nhgfe\ndcba");
 
         // Regression test:
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
-        buffer.edit(&[60..60], "\n");
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[60..60], "\n", &mut local_clock, &mut lamport_clock);
 
         let cursor = buffer.cursor_at_point(Point::new(6, 0));
         assert_eq!(cursor.read_to_end(), "    \"xray_wasm\",\n]\n");
@@ -2087,12 +2106,14 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "abc");
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        buffer.edit(&[0..0], "abc", &mut local_clock, &mut lamport_clock);
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
 
-        buffer.edit(&[1..1], "def\n");
+        buffer.edit(&[1..1], "def\n", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "adef\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
@@ -2105,7 +2126,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.edit(&[2..3], "");
+        buffer.edit(&[2..3], "", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "adf\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
@@ -2118,7 +2139,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.edit(&[5..5], "ghi\n");
+        buffer.edit(&[5..5], "ghi\n", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "adf\nbghi\nc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 9);
@@ -2131,7 +2152,7 @@ mod tests {
             Point { row: 2, column: 0 }
         );
 
-        buffer.edit(&[7..9], "");
+        buffer.edit(&[7..9], "", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "adf\nbghc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
@@ -2229,11 +2250,13 @@ mod tests {
 
     #[test]
     fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
-        buffer.edit(&[0..0], "abc");
+        buffer.edit(&[0..0], "abc", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "abc");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 3);
@@ -2241,8 +2264,8 @@ mod tests {
         let after_start_anchor = buffer.anchor_after_offset(0).unwrap();
         let before_end_anchor = buffer.anchor_before_offset(3).unwrap();
 
-        buffer.edit(&[3..3], "def");
-        buffer.edit(&[0..0], "ghi");
+        buffer.edit(&[3..3], "def", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[0..0], "ghi", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiabcdef");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
@@ -2258,10 +2281,14 @@ mod tests {
 
             let site_range = 0..5;
             let mut buffers = Vec::new();
+            let mut local_clocks = Vec::new();
+            let mut lamport_clocks = Vec::new();
             let mut queues = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(i + 1))));
+                let mut buffer = Buffer::new("");
                 buffers.push(buffer);
+                local_clocks.push(time::Local::new(i + 1));
+                lamport_clocks.push(time::Lamport::new(i + 1));
                 queues.push(Vec::new());
             }
 
@@ -2269,6 +2296,8 @@ mod tests {
             loop {
                 let replica_index = rng.gen_range(site_range.start, site_range.end) as usize;
                 let buffer = &mut buffers[replica_index];
+                let local_clock = &mut local_clocks[replica_index];
+                let lamport_clock = &mut lamport_clocks[replica_index];
                 if edit_count > 0 && rng.gen() {
                     let mut old_ranges: Vec<Range<usize>> = Vec::new();
                     for _ in 0..5 {
@@ -2284,7 +2313,9 @@ mod tests {
                         .take(rng.gen_range(0, 10))
                         .collect::<String>();
 
-                    for op in buffer.edit(&old_ranges, new_text.as_str()) {
+                    for op in
+                        buffer.edit(&old_ranges, new_text.as_str(), local_clock, lamport_clock)
+                    {
                         for (index, queue) in queues.iter_mut().enumerate() {
                             if index != replica_index {
                                 queue.push(op.clone());
@@ -2295,7 +2326,7 @@ mod tests {
                     edit_count -= 1;
                 } else if !queues[replica_index].is_empty() {
                     buffer
-                        .integrate_op(queues[replica_index].remove(0))
+                        .apply_op(queues[replica_index].remove(0), lamport_clock)
                         .unwrap();
                 }
 

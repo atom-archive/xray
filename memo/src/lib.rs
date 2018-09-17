@@ -8,10 +8,9 @@ extern crate smallvec;
 extern crate uuid;
 
 mod btree;
-// pub mod buffer;
-// mod notify_cell;
+pub mod buffer;
 mod time;
-mod work_tree;
+pub mod work_tree;
 
 pub type ReplicaId = u64;
 pub type UserId = u64;
