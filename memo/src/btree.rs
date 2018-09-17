@@ -1088,7 +1088,7 @@ mod tests {
 
     #[test]
     fn test_random() {
-        for seed in 0..10000 {
+        for seed in 0..100 {
             use rand::{Rng, SeedableRng, StdRng};
 
             let mut rng = StdRng::from_seed(&[seed]);

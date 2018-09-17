@@ -1253,7 +1253,7 @@ mod tests {
     fn test_replication_random() {
         const PEERS: usize = 5;
 
-        for seed in 0..1000 {
+        for seed in 0..100 {
             // println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1261,7 +1261,7 @@ mod tests {
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
             // Generate and deliver random mutations
-            for _ in 0..10 {
+            for _ in 0..5 {
                 let replica_index = rng.gen_range(0, PEERS);
                 let tree = &mut trees[replica_index];
                 if !inboxes[replica_index].is_empty() && rng.gen() {
