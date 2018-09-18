@@ -9,6 +9,7 @@ extern crate uuid;
 
 mod btree;
 pub mod buffer;
+mod operation_queue;
 mod time;
 pub mod work_tree;
 

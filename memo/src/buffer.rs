@@ -1,4 +1,5 @@
 use btree::{self, SeekBias};
+use operation_queue::{self, OperationQueue};
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
@@ -28,7 +29,7 @@ pub struct Buffer {
     offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: time::Global,
     selections: HashMap<time::Local, SelectionSet>,
-    deferred_ops: btree::Tree<Operation>,
+    deferred_ops: OperationQueue<Operation>,
     deferred_replicas: HashSet<ReplicaId>,
 }
 
@@ -205,7 +206,7 @@ impl Buffer {
             offset_cache: RefCell::new(HashMap::default()),
             version: time::Global::new(),
             selections: HashMap::default(),
-            deferred_ops: btree::Tree::new(),
+            deferred_ops: OperationQueue::new(),
             deferred_replicas: HashSet::new(),
         };
 
@@ -433,10 +434,10 @@ impl Buffer {
                 self.apply_op(op, lamport_clock)?;
             } else {
                 self.deferred_replicas.insert(op.id.replica_id);
-                deferred_ops.push(btree::Edit::Insert(op));
+                deferred_ops.push(op);
             }
         }
-        self.deferred_ops.edit(&mut deferred_ops);
+        self.deferred_ops.insert(deferred_ops);
         self.flush_deferred_ops(lamport_clock)?;
         Ok(())
     }
@@ -579,19 +580,16 @@ impl Buffer {
 
     fn flush_deferred_ops(&mut self, lamport_clock: &mut time::Lamport) -> Result<(), Error> {
         self.deferred_replicas.clear();
-        let mut deferred_ops = btree::Tree::new();
-        let mut cursor = self.deferred_ops.cursor();
-        cursor.seek(&time::Lamport::min_value(), SeekBias::Left);
-        while let Some(op) = cursor.item() {
+        let mut deferred_ops = Vec::new();
+        for op in self.deferred_ops.drain() {
             if self.can_apply_op(&op) {
                 self.apply_op(op, lamport_clock)?;
             } else {
                 self.deferred_replicas.insert(op.id.replica_id);
                 deferred_ops.push(op);
             }
-            cursor.next();
         }
-        self.deferred_ops = deferred_ops;
+        self.deferred_ops.insert(deferred_ops);
         Ok(())
     }
 
@@ -1946,41 +1944,9 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
     }
 }
 
-impl btree::Item for Operation {
-    type Summary = time::Lamport;
-
-    fn summarize(&self) -> Self::Summary {
+impl operation_queue::Operation for Operation {
+    fn timestamp(&self) -> time::Lamport {
         self.timestamp
-    }
-}
-
-impl btree::KeyedItem for Operation {
-    type Key = time::Lamport;
-
-    fn key(&self) -> Self::Key {
-        self.timestamp
-    }
-}
-
-impl btree::Dimension<time::Lamport> for time::Lamport {
-    fn from_summary(summary: &Self) -> Self {
-        *summary
-    }
-}
-
-impl<'a> Add<&'a Self> for time::Lamport {
-    type Output = Self;
-
-    fn add(self, other: &'a Self) -> Self {
-        assert!(self < *other);
-        *other
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for time::Lamport {
-    fn add_assign(&mut self, other: &'a Self) {
-        assert!(*self < *other);
-        *self = *other;
     }
 }
 
