@@ -735,6 +735,10 @@ impl Buffer {
         self.fragments.len::<Point>()
     }
 
+    pub fn clip_point(&self, original: Point) -> Point {
+        return cmp::max(cmp::min(original,self.max_point()),Point::new(0,0));
+    }
+
     pub fn line(&self, row: u32) -> Result<Vec<u16>, Error> {
         let mut iterator = self.iter_starting_at_point(Point::new(row, 0)).peekable();
         if iterator.peek().is_none() {
