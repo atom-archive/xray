@@ -7,6 +7,7 @@ use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
 use std::sync::Arc;
 use time;
+use ReplicaId;
 use UserId;
 
 type SelectionSetVersion = usize;
@@ -28,6 +29,7 @@ pub struct Buffer {
     pub version: time::Global,
     selections: HashMap<time::Local, SelectionSet>,
     deferred_ops: btree::Tree<Operation>,
+    deferred_replicas: HashSet<ReplicaId>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
@@ -204,6 +206,7 @@ impl Buffer {
             version: time::Global::new(),
             selections: HashMap::default(),
             deferred_ops: btree::Tree::new(),
+            deferred_replicas: HashSet::new(),
         };
 
         buffer.version.include(sentinel_id);
@@ -426,9 +429,10 @@ impl Buffer {
     ) -> Result<(), Error> {
         let mut deferred_ops = Vec::new();
         for op in ops {
-            if self.can_apply(&op) {
+            if self.can_apply_op(&op) {
                 self.apply_op(op, lamport_clock)?;
             } else {
+                self.deferred_replicas.insert(op.id.replica_id);
                 deferred_ops.push(btree::Edit::Insert(op));
             }
         }
@@ -570,13 +574,15 @@ impl Buffer {
     }
 
     fn flush_deferred_ops(&mut self, lamport_clock: &mut time::Lamport) -> Result<(), Error> {
+        self.deferred_replicas.clear();
         let mut deferred_ops = btree::Tree::new();
         let mut cursor = self.deferred_ops.cursor();
         cursor.seek(&time::Lamport::min_value(), SeekBias::Left);
         while let Some(op) = cursor.item() {
-            if self.can_apply(&op) {
+            if self.can_apply_op(&op) {
                 self.apply_op(op, lamport_clock)?;
             } else {
+                self.deferred_replicas.insert(op.id.replica_id);
                 deferred_ops.push(op);
             }
             cursor.next();
@@ -585,10 +591,10 @@ impl Buffer {
         Ok(())
     }
 
-    fn can_apply(&self, op: &Operation) -> bool {
-        self.version.includes(op.start_id)
+    fn can_apply_op(&self, op: &Operation) -> bool {
+        !self.deferred_replicas.contains(&op.id.replica_id)
+            && self.version.includes(op.start_id)
             && self.version.includes(op.end_id)
-            && op.id.seq == self.version.get(op.id.replica_id) + 1
             && op.version_in_range <= self.version
     }
 
@@ -2474,7 +2480,7 @@ mod tests {
             let mut buffers = Vec::new();
             let mut local_clocks = Vec::new();
             let mut lamport_clocks = Vec::new();
-            let mut queues = Vec::new();
+            let mut queues: Vec<Vec<Operation>> = Vec::new();
             for i in site_range.clone() {
                 let mut buffer = Buffer::new(base_text.as_str());
                 buffers.push(buffer);
@@ -2504,12 +2510,29 @@ mod tests {
                         .take(rng.gen_range(0, 10))
                         .collect::<String>();
 
+                    if rng.gen_weighted_bool(5) {
+                        local_clock.tick();
+                    }
+
                     for op in
                         buffer.edit(&old_ranges, new_text.as_str(), local_clock, lamport_clock)
                     {
                         for (index, queue) in queues.iter_mut().enumerate() {
                             if index != replica_index {
-                                queue.push(op.clone());
+                                let min_index = queue
+                                    .iter()
+                                    .enumerate()
+                                    .rev()
+                                    .find_map(|(index, existing_op)| {
+                                        if existing_op.id.replica_id == op.id.replica_id {
+                                            Some(index + 1)
+                                        } else {
+                                            None
+                                        }
+                                    }).unwrap_or(0);
+
+                                let insertion_index = rng.gen_range(min_index, queue.len() + 1);
+                                queue.insert(insertion_index, op.clone());
                             }
                         }
                     }
@@ -2517,7 +2540,6 @@ mod tests {
                     edit_count -= 1;
                 } else if !queues[replica_index].is_empty() {
                     let count = rng.gen_range(1, queues[replica_index].len() + 1);
-                    rng.shuffle(&mut queues[replica_index]);
                     buffer
                         .apply_ops(queues[replica_index].drain(0..count), lamport_clock)
                         .unwrap();
