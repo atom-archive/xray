@@ -1,5 +1,6 @@
 use btree::{self, SeekBias};
 use buffer::{self, Buffer, Text};
+use operation_queue::{self, OperationQueue};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -22,6 +23,8 @@ pub struct WorkTree {
     local_clock: time::Local,
     lamport_clock: time::Lamport,
     text_files: HashMap<FileId, TextFile>,
+    deferred_operations: OperationQueue<Operation>,
+    deferred_replicas: HashSet<ReplicaId>,
 }
 
 pub struct Cursor {
@@ -41,26 +44,29 @@ pub struct CursorEntry {
     status: FileStatus,
 }
 
+#[derive(Clone)]
 pub struct DirEntry {
     depth: usize,
     name: OsString,
     file_type: FileType,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Operation {
     InsertMetadata {
         file_id: FileId,
         file_type: FileType,
+        timestamp: time::Lamport,
     },
     UpdateParent {
         child_id: FileId,
-        timestamp: time::Lamport,
         new_parent: Option<(FileId, Arc<OsString>)>,
+        timestamp: time::Lamport,
     },
     EditText {
         file_id: FileId,
         edits: Vec<buffer::Operation>,
+        timestamp: time::Lamport,
     },
 }
 
@@ -166,6 +172,8 @@ impl WorkTree {
             local_clock: time::Local::new(replica_id),
             lamport_clock: time::Lamport::new(replica_id),
             text_files: HashMap::new(),
+            deferred_operations: OperationQueue::new(),
+            deferred_replicas: HashSet::new(),
         }
     }
 
@@ -257,16 +265,22 @@ impl WorkTree {
         I: IntoIterator<Item = Operation>,
     {
         let mut new_tree = self.clone();
+        let mut deferred_ops = Vec::new();
 
         let mut changed_file_ids = HashSet::new();
         for op in ops {
-            match &op {
-                Operation::UpdateParent { child_id, .. } => {
-                    changed_file_ids.insert(*child_id);
+            if self.can_apply_op(&op) {
+                match &op {
+                    Operation::UpdateParent { child_id, .. } => {
+                        changed_file_ids.insert(*child_id);
+                    }
+                    _ => {}
                 }
-                _ => {}
+                new_tree.apply_op(op)?;
+            } else {
+                self.deferred_replicas.insert(op.timestamp().replica_id);
+                deferred_ops.push(op);
             }
-            new_tree.apply_op(op)?;
         }
 
         let mut fixup_ops = Vec::new();
@@ -280,7 +294,9 @@ impl WorkTree {
 
     pub fn apply_op(&mut self, op: Operation) -> Result<(), Error> {
         match op {
-            Operation::InsertMetadata { file_id, file_type } => {
+            Operation::InsertMetadata {
+                file_id, file_type, ..
+            } => {
                 self.metadata.insert(Metadata { file_id, file_type });
             }
             Operation::UpdateParent {
@@ -364,7 +380,7 @@ impl WorkTree {
                 });
                 self.child_refs.edit(&mut child_ref_edits);
             }
-            Operation::EditText { file_id, edits } => match self
+            Operation::EditText { file_id, edits, .. } => match self
                 .text_files
                 .entry(file_id)
                 .or_insert_with(|| TextFile::Deferred(Vec::new()))
@@ -388,6 +404,7 @@ impl WorkTree {
         let operation = Operation::InsertMetadata {
             file_id,
             file_type: FileType::Text,
+            timestamp: self.lamport_clock.tick(),
         };
         self.apply_op(operation.clone()).unwrap();
         (file_id, operation)
@@ -398,6 +415,7 @@ impl WorkTree {
         let operation = Operation::InsertMetadata {
             file_id,
             file_type: FileType::Directory,
+            timestamp: self.lamport_clock.tick(),
         };
         self.apply_op(operation.clone()).unwrap();
         (file_id, operation)
@@ -441,8 +459,8 @@ impl WorkTree {
         let mut new_tree = self.clone();
         let operation = Operation::UpdateParent {
             child_id: file_id,
-            timestamp: new_tree.lamport_clock.tick(),
             new_parent: Some((new_parent_id, Arc::new(new_name.as_ref().into()))),
+            timestamp: new_tree.lamport_clock.tick(),
         };
         let fixup_ops = new_tree.apply_ops(Some(operation.clone())).unwrap();
         if fixup_ops.is_empty() {
@@ -458,8 +476,8 @@ impl WorkTree {
 
         let operation = Operation::UpdateParent {
             child_id: file_id,
-            timestamp: self.lamport_clock.tick(),
             new_parent: None,
+            timestamp: self.lamport_clock.tick(),
         };
         self.apply_op(operation.clone()).unwrap();
         Ok(operation)
@@ -484,6 +502,7 @@ impl WorkTree {
                     &mut self.local_clock,
                     &mut self.lamport_clock,
                 ),
+                timestamp: self.lamport_clock.tick(),
             })
         } else {
             Err(Error::InvalidBufferId)
@@ -740,8 +759,8 @@ impl WorkTree {
 
                     let fixup_op = Operation::UpdateParent {
                         child_id: file_id,
-                        timestamp: self.lamport_clock.tick(),
                         new_parent: Some((parent_id, unique_name.clone())),
+                        timestamp: self.lamport_clock.tick(),
                     };
                     self.apply_op(fixup_op.clone()).unwrap();
                     fixup_ops.push(fixup_op);
@@ -859,6 +878,22 @@ impl Cursor {
         }
 
         false
+    }
+}
+
+impl Operation {
+    fn timestamp(&self) -> time::Lamport {
+        match self {
+            Operation::InsertMetadata { timestamp, .. } => *timestamp,
+            Operation::UpdateParent { timestamp, .. } => *timestamp,
+            Operation::EditText { timestamp, .. } => *timestamp,
+        }
+    }
+}
+
+impl operation_queue::Operation for Operation {
+    fn timestamp(&self) -> time::Lamport {
+        self.timestamp()
     }
 }
 
@@ -1327,17 +1362,40 @@ mod tests {
         const PEERS: usize = 5;
 
         for seed in 0..100 {
-            // println!("SEED: {:?}", seed);
+            println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
+            let mut base_tree = WorkTree::new(999);
+            base_tree.mutate(&mut rng, 20);
+            let base_entries = base_tree.entries();
+            let base_entries = base_entries
+                .iter()
+                .filter(|entry| entry.status != FileStatus::Removed)
+                .map(|entry| DirEntry {
+                    depth: entry.depth,
+                    name: entry.name.as_ref().clone(),
+                    file_type: entry.file_type,
+                }).collect::<Vec<_>>();
+
             let mut trees = Vec::from_iter((0..PEERS).map(|i| WorkTree::new(i as u64 + 1)));
+            let mut base_entries_to_append =
+                Vec::from_iter((0..PEERS).map(|_| base_entries.clone()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
             // Generate and deliver random mutations
             for _ in 0..5 {
+                let k = rng.gen_range(0, 3);
                 let replica_index = rng.gen_range(0, PEERS);
                 let tree = &mut trees[replica_index];
-                if !inboxes[replica_index].is_empty() && rng.gen() {
+                let base_entries_to_append = &mut base_entries_to_append[replica_index];
+
+                if k == 0 && !base_entries_to_append.is_empty() {
+                    let count = rng.gen_range(0, base_entries_to_append.len());
+                    let fixup_ops = tree
+                        .append_base_entries(base_entries_to_append.drain(0..count))
+                        .unwrap();
+                    deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                } else if k == 1 && !inboxes[replica_index].is_empty() {
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
                     let fixup_ops = tree.apply_ops(ops).unwrap();
                     deliver_ops(replica_index, &mut inboxes, fixup_ops);
@@ -1352,6 +1410,14 @@ mod tests {
                 let mut done = true;
                 for replica_index in 0..PEERS {
                     let tree = &mut trees[replica_index];
+                    let base_entries_to_append = &mut base_entries_to_append[replica_index];
+                    if !base_entries_to_append.is_empty() {
+                        let fixup_ops = tree
+                            .append_base_entries(base_entries_to_append.drain(..))
+                            .unwrap();
+                        deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                    }
+
                     let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
                     if !ops.is_empty() {
                         let fixup_ops = tree.apply_ops(ops).unwrap();
