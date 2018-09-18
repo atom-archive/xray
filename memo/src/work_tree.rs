@@ -58,7 +58,7 @@ pub enum Operation {
         timestamp: time::Lamport,
         new_parent: Option<(FileId, Arc<OsString>)>,
     },
-    EditTextFile {
+    EditText {
         file_id: FileId,
         edits: Vec<buffer::Operation>,
     },
@@ -364,7 +364,7 @@ impl WorkTree {
                 });
                 self.child_refs.edit(&mut child_ref_edits);
             }
-            Operation::EditTextFile { file_id, edits } => match self
+            Operation::EditText { file_id, edits } => match self
                 .text_files
                 .entry(file_id)
                 .or_insert_with(|| TextFile::Deferred(Vec::new()))
@@ -476,7 +476,7 @@ impl WorkTree {
         T: Into<Text>,
     {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
-            Ok(Operation::EditTextFile {
+            Ok(Operation::EditText {
                 file_id: buffer_id.0,
                 edits: buffer.edit(
                     old_ranges,
