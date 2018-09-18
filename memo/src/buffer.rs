@@ -84,7 +84,7 @@ struct ChangesIter {
 #[derive(Debug, Eq, PartialEq)]
 pub struct Change {
     range: Range<usize>,
-    text: Text,
+    code_units: Vec<u16>,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -1329,23 +1329,20 @@ impl Iterator for ChangesIter {
             let position = self.cursor.start::<usize>();
             if !fragment.was_visible(&self.since) && fragment.is_visible() {
                 if let Some(ref mut change) = change {
-                    if change.range.start + change.text.len() == position {
-                        let text = mem::replace(&mut change.text, Text::new(Vec::new()));
-                        let mut code_units = text.code_units;
-                        code_units.extend(fragment.code_units());
-                        change.text = Text::new(Vec::from(code_units));
+                    if change.range.start + change.code_units.len() == position {
+                        change.code_units.extend(fragment.code_units());
                     } else {
                         break;
                     }
                 } else {
                     change = Some(Change {
                         range: position..position,
-                        text: Text::new(Vec::from(fragment.code_units())),
+                        code_units: Vec::from(fragment.code_units()),
                     });
                 }
             } else if fragment.was_visible(&self.since) && !fragment.is_visible() {
                 if let Some(ref mut change) = change {
-                    if change.range.start == position {
+                    if change.range.start + change.code_units.len() == position {
                         change.range.end += &fragment.extent();
                     } else {
                         break;
@@ -1353,7 +1350,7 @@ impl Iterator for ChangesIter {
                 } else {
                     change = Some(Change {
                         range: position..position + &fragment.extent(),
-                        text: Text::new(Vec::new()),
+                        code_units: Vec::new(),
                     });
                 }
             }
@@ -1984,7 +1981,7 @@ mod tests {
                 for change in buffer.changes_since(old_buffer.version.clone()) {
                     old_buffer.edit(
                         &[change.range],
-                        change.text,
+                        Text::new(change.code_units),
                         &mut local_clock,
                         &mut lamport_clock,
                     );
