@@ -63,13 +63,13 @@ impl Global {
         Global(Arc::new(HashMap::new()))
     }
 
-    pub fn include(&mut self, timestamp: &Local) {
+    pub fn include(&mut self, timestamp: Local) {
         let map = Arc::make_mut(&mut self.0);
         let seq = map.entry(timestamp.replica_id).or_insert(0);
         *seq = cmp::max(*seq, timestamp.seq);
     }
 
-    pub fn includes(&self, timestamp: &Local) -> bool {
+    pub fn includes(&self, timestamp: Local) -> bool {
         if let Some(seq) = self.0.get(&timestamp.replica_id) {
             *seq >= timestamp.seq
         } else {

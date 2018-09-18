@@ -76,6 +76,17 @@ pub struct Iter {
     reversed: bool,
 }
 
+struct ChangesIter {
+    cursor: btree::Cursor<Fragment>,
+    since: time::Global,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Change {
+    range: Range<usize>,
+    text: Text,
+}
+
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Insertion {
     id: time::Local,
@@ -246,6 +257,10 @@ impl Buffer {
         Iter::at_point(self, point)
     }
 
+    pub fn changes_since(&self, version: time::Global) -> impl Iterator<Item = Change> {
+        ChangesIter::new(self, version)
+    }
+
     pub fn edit<'a, I, T>(
         &mut self,
         old_ranges: I,
@@ -275,7 +290,7 @@ impl Buffer {
             lamport_clock,
         );
         if let Some(op) = ops.last() {
-            self.version.include(&op.id);
+            self.version.include(op.id);
         }
         ops
     }
@@ -498,7 +513,7 @@ impl Buffer {
                     new_fragments.push(fragment);
                 }
                 if let Some(mut fragment) = within_range {
-                    if version_in_range.includes(&fragment.insertion.id) {
+                    if version_in_range.includes(fragment.insertion.id) {
                         fragment.deletions.insert(id);
                     }
                     new_fragments.push(fragment);
@@ -518,7 +533,7 @@ impl Buffer {
                 }
 
                 let mut fragment = fragment.clone();
-                if version_in_range.includes(&fragment.insertion.id) {
+                if version_in_range.includes(fragment.insertion.id) {
                     fragment.deletions.insert(id);
                 }
                 new_fragments.push(fragment);
@@ -665,10 +680,10 @@ impl Buffer {
                         fragment_start = range.end;
                         end_id = Some(fragment.insertion.id);
                         end_offset = Some(fragment.start_offset);
-                        version_in_range.include(&fragment.insertion.id);
+                        version_in_range.include(fragment.insertion.id);
                     }
                 } else {
-                    version_in_range.include(&fragment.insertion.id);
+                    version_in_range.include(fragment.insertion.id);
                     if fragment.is_visible() {
                         fragment.deletions.insert(op_id);
                     }
@@ -724,7 +739,7 @@ impl Buffer {
                         if fragment.is_visible() {
                             fragment.deletions.insert(op_id);
                         }
-                        version_in_range.include(&fragment.insertion.id);
+                        version_in_range.include(fragment.insertion.id);
                         new_fragments.push(fragment.clone());
                         cursor.next();
 
@@ -1252,7 +1267,7 @@ impl Iterator for Iter {
             if let Some(fragment) = self.fragment_cursor.item() {
                 if self.fragment_offset > 0 {
                     self.fragment_offset -= 1;
-                    if let Some(c) = fragment.get_code_unit(self.fragment_offset) {
+                    if let Some(c) = fragment.code_unit(self.fragment_offset) {
                         return Some(c);
                     }
                 }
@@ -1263,7 +1278,7 @@ impl Iterator for Iter {
                 if let Some(fragment) = self.fragment_cursor.item() {
                     if fragment.len() > 0 {
                         self.fragment_offset = fragment.len() - 1;
-                        return fragment.get_code_unit(self.fragment_offset);
+                        return fragment.code_unit(self.fragment_offset);
                     }
                 } else {
                     break;
@@ -1273,7 +1288,7 @@ impl Iterator for Iter {
             None
         } else {
             if let Some(fragment) = self.fragment_cursor.item() {
-                if let Some(c) = fragment.get_code_unit(self.fragment_offset) {
+                if let Some(c) = fragment.code_unit(self.fragment_offset) {
                     self.fragment_offset += 1;
                     return Some(c);
                 }
@@ -1282,7 +1297,7 @@ impl Iterator for Iter {
             loop {
                 self.fragment_cursor.next();
                 if let Some(fragment) = self.fragment_cursor.item() {
-                    if let Some(c) = fragment.get_code_unit(0) {
+                    if let Some(c) = fragment.code_unit(0) {
                         self.fragment_offset = 1;
                         return Some(c);
                     }
@@ -1293,6 +1308,60 @@ impl Iterator for Iter {
 
             None
         }
+    }
+}
+
+impl ChangesIter {
+    fn new(buffer: &Buffer, since: time::Global) -> Self {
+        let mut cursor = buffer.fragments.cursor();
+        cursor.seek(&0, SeekBias::Left);
+        ChangesIter { cursor, since }
+    }
+}
+
+impl Iterator for ChangesIter {
+    type Item = Change;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut change: Option<Change> = None;
+
+        while let Some(fragment) = self.cursor.item() {
+            let position = self.cursor.start::<usize>();
+            if !fragment.was_visible(&self.since) && fragment.is_visible() {
+                if let Some(ref mut change) = change {
+                    if change.range.start + change.text.len() == position {
+                        let text = mem::replace(&mut change.text, Text::new(Vec::new()));
+                        let mut code_units = text.code_units;
+                        code_units.extend(fragment.code_units());
+                        change.text = Text::new(Vec::from(code_units));
+                    } else {
+                        break;
+                    }
+                } else {
+                    change = Some(Change {
+                        range: position..position,
+                        text: Text::new(Vec::from(fragment.code_units())),
+                    });
+                }
+            } else if fragment.was_visible(&self.since) && !fragment.is_visible() {
+                if let Some(ref mut change) = change {
+                    if change.range.start == position {
+                        change.range.end += &fragment.extent();
+                    } else {
+                        break;
+                    }
+                } else {
+                    change = Some(Change {
+                        range: position..position + &fragment.extent(),
+                        text: Text::new(Vec::new()),
+                    });
+                }
+            }
+
+            self.cursor.next();
+        }
+
+        change
     }
 }
 
@@ -1670,7 +1739,7 @@ impl Fragment {
         }
     }
 
-    fn get_code_unit(&self, offset: usize) -> Option<u16> {
+    fn code_unit(&self, offset: usize) -> Option<u16> {
         if offset < self.len() {
             Some(self.insertion.text.code_units[self.start_offset + offset].clone())
         } else {
@@ -1678,16 +1747,28 @@ impl Fragment {
         }
     }
 
+    fn code_units(&self) -> &[u16] {
+        &self.insertion.text.code_units[self.start_offset..self.end_offset]
+    }
+
     fn len(&self) -> usize {
         if self.is_visible() {
-            self.end_offset - self.start_offset
+            self.extent()
         } else {
             0
         }
     }
 
+    fn extent(&self) -> usize {
+        self.end_offset - self.start_offset
+    }
+
     fn is_visible(&self) -> bool {
         self.deletions.is_empty()
+    }
+
+    fn was_visible(&self, version: &time::Global) -> bool {
+        version.includes(self.insertion.id) && self.deletions.iter().all(|d| !version.includes(*d))
     }
 
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
@@ -1859,6 +1940,7 @@ mod tests {
                 .take(rng.gen_range(0, 10))
                 .collect::<String>();
             let mut buffer = Buffer::new(reference_string.as_str());
+            let mut buffer_versions = Vec::new();
             let mut local_clock = time::Local::new(1);
             let mut lamport_clock = time::Lamport::new(1);
 
@@ -1892,6 +1974,22 @@ mod tests {
                         .concat();
                 }
                 assert_eq!(buffer.into_string(), reference_string);
+
+                if rng.gen_weighted_bool(3) {
+                    buffer_versions.push(buffer.clone());
+                }
+            }
+
+            for mut old_buffer in buffer_versions {
+                for change in buffer.changes_since(old_buffer.version.clone()) {
+                    old_buffer.edit(
+                        &[change.range],
+                        change.text,
+                        &mut local_clock,
+                        &mut lamport_clock,
+                    );
+                }
+                assert_eq!(old_buffer.into_string(), buffer.into_string());
             }
         }
     }
