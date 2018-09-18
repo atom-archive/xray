@@ -271,11 +271,11 @@ impl BufferView {
     }
 
     pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool) {
+        let clipped_point = self.buffer.borrow().clip_point(position);
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                // TODO: Clip point or return a result.
-                let anchor = buffer.anchor_before_point(position).unwrap();
+                let anchor = buffer.anchor_before_point(clipped_point).unwrap();
                 selections.clear();
                 selections.push(Selection {
                     start: anchor.clone(),
@@ -292,13 +292,13 @@ impl BufferView {
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
         debug_assert!(start <= end); // TODO: Reverse selection if end < start
-
+        let clipped_start = self.buffer.borrow().clip_point(start);
+        let clipped_end = self.buffer.borrow().clip_point(end);
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                // TODO: Clip points or return a result.
-                let start_anchor = buffer.anchor_before_point(start).unwrap();
-                let end_anchor = buffer.anchor_before_point(end).unwrap();
+                let start_anchor = buffer.anchor_before_point(clipped_start).unwrap();
+                let end_anchor = buffer.anchor_before_point(clipped_end).unwrap();
 
                 let index = match selections.binary_search_by(|probe| {
                     buffer.cmp_anchors(&probe.start, &start_anchor).unwrap()
