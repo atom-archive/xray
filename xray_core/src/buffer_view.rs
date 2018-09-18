@@ -271,7 +271,7 @@ impl BufferView {
     }
 
     pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool) {
-        let clipped_point = self.buffer.borrow_mut().clip_point(position);
+        let clipped_point = self.buffer.borrow().clip_point(position);
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
@@ -292,8 +292,8 @@ impl BufferView {
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
         debug_assert!(start <= end); // TODO: Reverse selection if end < start
-        let clipped_start = self.buffer.borrow_mut().clip_point(start);
-        let clipped_end = self.buffer.borrow_mut().clip_point(end);
+        let clipped_start = self.buffer.borrow().clip_point(start);
+        let clipped_end = self.buffer.borrow().clip_point(end);
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
