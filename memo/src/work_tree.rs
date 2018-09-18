@@ -256,6 +256,8 @@ impl WorkTree {
     where
         I: IntoIterator<Item = Operation>,
     {
+        let mut new_tree = self.clone();
+
         let mut changed_file_ids = HashSet::new();
         for op in ops {
             match &op {
@@ -264,13 +266,15 @@ impl WorkTree {
                 }
                 _ => {}
             }
-            self.apply_op(op)?;
+            new_tree.apply_op(op)?;
         }
 
         let mut fixup_ops = Vec::new();
-        for file_id in changed_file_ids {
-            fixup_ops.extend(self.fix_conflicts(file_id));
+        for file_id in &changed_file_ids {
+            fixup_ops.extend(new_tree.fix_conflicts(*file_id));
         }
+
+        *self = new_tree;
         Ok(fixup_ops)
     }
 
