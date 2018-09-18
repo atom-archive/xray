@@ -470,6 +470,10 @@ impl Buffer {
         timestamp: time::Lamport,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
+        if id.seq <= self.version.get(id.replica_id) {
+            return Err(Error::InvalidOperation);
+        }
+
         let mut new_text = new_text.as_ref().cloned();
         let start_fragment_id = self.resolve_fragment_id(start_id, start_offset)?;
         let end_fragment_id = self.resolve_fragment_id(end_id, end_offset)?;
