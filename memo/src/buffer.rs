@@ -27,6 +27,7 @@ pub struct Buffer {
     offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: time::Global,
     selections: HashMap<time::Local, SelectionSet>,
+    deferred_ops: btree::Tree<Operation>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
@@ -154,7 +155,7 @@ struct InsertionSplitSummary {
     extent: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Operation {
     id: time::Local,
     start_id: time::Local,
@@ -202,8 +203,10 @@ impl Buffer {
             offset_cache: RefCell::new(HashMap::default()),
             version: time::Global::new(),
             selections: HashMap::default(),
+            deferred_ops: btree::Tree::new(),
         };
 
+        buffer.version.include(sentinel_id);
         buffer.edit(&[0..0], text, &mut local_clock, &mut lamport_clock);
         buffer
     }
@@ -421,9 +424,16 @@ impl Buffer {
         ops: I,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
+        let mut deferred_ops = Vec::new();
         for op in ops {
-            self.apply_op(op, lamport_clock)?;
+            if self.can_apply(&op) {
+                self.apply_op(op, lamport_clock)?;
+            } else {
+                deferred_ops.push(btree::Edit::Insert(op));
+            }
         }
+        self.deferred_ops.edit(&mut deferred_ops);
+        self.flush_deferred_ops(lamport_clock)?;
         Ok(())
     }
 
@@ -554,8 +564,32 @@ impl Buffer {
 
         new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
+        self.version.include(id);
         lamport_clock.observe(timestamp);
         Ok(())
+    }
+
+    fn flush_deferred_ops(&mut self, lamport_clock: &mut time::Lamport) -> Result<(), Error> {
+        let mut deferred_ops = btree::Tree::new();
+        let mut cursor = self.deferred_ops.cursor();
+        cursor.seek(&time::Lamport::min_value(), SeekBias::Left);
+        while let Some(op) = cursor.item() {
+            if self.can_apply(&op) {
+                self.apply_op(op, lamport_clock)?;
+            } else {
+                deferred_ops.push(op);
+            }
+            cursor.next();
+        }
+        self.deferred_ops = deferred_ops;
+        Ok(())
+    }
+
+    fn can_apply(&self, op: &Operation) -> bool {
+        self.version.includes(op.start_id)
+            && self.version.includes(op.end_id)
+            && op.id.seq == self.version.get(op.id.replica_id) + 1
+            && op.version_in_range <= self.version
     }
 
     fn resolve_fragment_id(
@@ -1902,6 +1936,44 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
     }
 }
 
+impl btree::Item for Operation {
+    type Summary = time::Lamport;
+
+    fn summarize(&self) -> Self::Summary {
+        self.timestamp
+    }
+}
+
+impl btree::KeyedItem for Operation {
+    type Key = time::Lamport;
+
+    fn key(&self) -> Self::Key {
+        self.timestamp
+    }
+}
+
+impl btree::Dimension<time::Lamport> for time::Lamport {
+    fn from_summary(summary: &Self) -> Self {
+        *summary
+    }
+}
+
+impl<'a> Add<&'a Self> for time::Lamport {
+    type Output = Self;
+
+    fn add(self, other: &'a Self) -> Self {
+        assert!(self < *other);
+        *other
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for time::Lamport {
+    fn add_assign(&mut self, other: &'a Self) {
+        assert!(*self < *other);
+        *self = *other;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate rand;
@@ -2444,8 +2516,10 @@ mod tests {
 
                     edit_count -= 1;
                 } else if !queues[replica_index].is_empty() {
+                    let count = rng.gen_range(1, queues[replica_index].len() + 1);
+                    rng.shuffle(&mut queues[replica_index]);
                     buffer
-                        .apply_op(queues[replica_index].remove(0), lamport_clock)
+                        .apply_ops(queues[replica_index].drain(0..count), lamport_clock)
                         .unwrap();
                 }
 

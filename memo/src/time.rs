@@ -1,4 +1,4 @@
-use std::cmp;
+use std::cmp::{self, Ordering};
 use std::collections::HashMap;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
@@ -10,7 +10,7 @@ pub struct Local {
     pub seq: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Global(Arc<HashMap<ReplicaId, u64>>);
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -26,7 +26,7 @@ impl Local {
     };
 
     pub fn new(replica_id: u64) -> Self {
-        Self { replica_id, seq: 0 }
+        Self { replica_id, seq: 1 }
     }
 
     pub fn tick(&mut self) -> Self {
@@ -63,6 +63,10 @@ impl Global {
         Global(Arc::new(HashMap::new()))
     }
 
+    pub fn get(&self, replica_id: ReplicaId) -> u64 {
+        *self.0.get(&replica_id).unwrap_or(&0)
+    }
+
     pub fn include(&mut self, timestamp: Local) {
         let map = Arc::make_mut(&mut self.0);
         let seq = map.entry(timestamp.replica_id).or_insert(0);
@@ -70,18 +74,33 @@ impl Global {
     }
 
     pub fn includes(&self, timestamp: Local) -> bool {
-        if let Some(seq) = self.0.get(&timestamp.replica_id) {
-            *seq >= timestamp.seq
-        } else {
-            false
+        self.get(timestamp.replica_id) >= timestamp.seq
+    }
+}
+
+impl PartialOrd for Global {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let mut global_ordering = Ordering::Equal;
+
+        for replica_id in self.0.keys().chain(other.0.keys()) {
+            let ordering = self.get(*replica_id).cmp(&other.get(*replica_id));
+            if ordering != Ordering::Equal {
+                if global_ordering == Ordering::Equal {
+                    global_ordering = ordering;
+                } else if ordering != global_ordering {
+                    return None;
+                }
+            }
         }
+
+        Some(global_ordering)
     }
 }
 
 impl Lamport {
     pub fn new(replica_id: ReplicaId) -> Self {
         Self {
-            value: 0,
+            value: 1,
             replica_id,
         }
     }
