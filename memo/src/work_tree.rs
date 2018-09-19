@@ -55,6 +55,7 @@ pub enum Operation {
     InsertMetadata {
         file_id: FileId,
         file_type: FileType,
+        parent: Option<(FileId, Arc<OsString>)>,
         timestamp: time::Lamport,
     },
     UpdateParent {
@@ -255,7 +256,8 @@ impl WorkTree {
         for file_id in name_conflicts {
             fixup_ops.extend(self.fix_name_conflicts(file_id));
         }
-        fixup_ops.extend(self.flush_deferred_ops()?);
+        let deferred_ops = self.deferred_ops.drain();
+        fixup_ops.extend(self.apply_ops_internal(deferred_ops)?);
 
         Ok(fixup_ops)
     }
@@ -264,14 +266,35 @@ impl WorkTree {
     where
         I: IntoIterator<Item = Operation>,
     {
+        let mut fixup_ops = Vec::new();
+        fixup_ops.extend(self.apply_ops_internal(ops)?);
+        let deferred_ops = self.deferred_ops.drain();
+        fixup_ops.extend(self.apply_ops_internal(deferred_ops)?);
+        Ok(fixup_ops)
+    }
+
+    fn apply_ops_internal<I>(&mut self, ops: I) -> Result<Vec<Operation>, Error>
+    where
+        I: IntoIterator<Item = Operation>,
+    {
         let mut new_tree = self.clone();
         let mut deferred_ops = Vec::new();
+        let mut potential_conflicts = HashSet::new();
 
-        let mut changed_file_ids = HashSet::new();
         for op in ops {
             if new_tree.can_apply_op(&op) {
-                if let Operation::UpdateParent { child_id, .. } = op {
-                    changed_file_ids.insert(child_id);
+                match &op {
+                    Operation::InsertMetadata {
+                        file_id, parent, ..
+                    } => {
+                        if parent.is_some() {
+                            potential_conflicts.insert(*file_id);
+                        }
+                    }
+                    Operation::UpdateParent { child_id, .. } => {
+                        potential_conflicts.insert(*child_id);
+                    }
+                    _ => {}
                 }
                 new_tree.apply_op(op)?;
             } else {
@@ -281,7 +304,7 @@ impl WorkTree {
         new_tree.deferred_ops.insert(deferred_ops);
 
         let mut fixup_ops = Vec::new();
-        for file_id in &changed_file_ids {
+        for file_id in &potential_conflicts {
             fixup_ops.extend(new_tree.fix_conflicts(*file_id));
         }
 
@@ -293,14 +316,31 @@ impl WorkTree {
         self.lamport_clock.observe(op.timestamp());
         match op {
             Operation::InsertMetadata {
-                file_id, file_type, ..
+                file_id,
+                file_type,
+                parent,
+                timestamp,
             } => {
                 self.metadata.insert(Metadata { file_id, file_type });
+                if let Some((parent_id, name)) = parent {
+                    self.parent_refs.insert(ParentRefValue {
+                        child_id: file_id,
+                        parent: Some((parent_id, name.clone())),
+                        timestamp,
+                    });
+                    self.child_refs.insert(ChildRefValue {
+                        parent_id,
+                        name,
+                        timestamp,
+                        child_id: file_id,
+                        visible: true,
+                    });
+                }
             }
             Operation::UpdateParent {
                 child_id,
-                timestamp,
                 new_parent,
+                timestamp,
             } => {
                 let mut child_ref_edits: SmallVec<[_; 3]> = SmallVec::new();
 
@@ -404,29 +444,6 @@ impl WorkTree {
         Ok(())
     }
 
-    fn flush_deferred_ops(&mut self) -> Result<Vec<Operation>, Error> {
-        let mut changed_file_ids = HashSet::new();
-
-        let mut deferred_ops = Vec::new();
-        for op in self.deferred_ops.drain() {
-            if self.can_apply_op(&op) {
-                if let Operation::UpdateParent { child_id, .. } = op {
-                    changed_file_ids.insert(child_id);
-                }
-                self.apply_op(op)?;
-            } else {
-                deferred_ops.push(op);
-            }
-        }
-        self.deferred_ops.insert(deferred_ops);
-
-        let mut fixup_ops = Vec::new();
-        for file_id in changed_file_ids {
-            fixup_ops.extend(self.fix_conflicts(file_id));
-        }
-        Ok(fixup_ops)
-    }
-
     fn can_apply_op(&self, op: &Operation) -> bool {
         match op {
             Operation::InsertMetadata { .. } => true,
@@ -440,21 +457,36 @@ impl WorkTree {
         let operation = Operation::InsertMetadata {
             file_id,
             file_type: FileType::Text,
+            parent: None,
             timestamp: self.lamport_clock.tick(),
         };
         self.apply_op(operation.clone()).unwrap();
         (file_id, operation)
     }
 
-    pub fn new_dir(&mut self) -> (FileId, Operation) {
-        let file_id = FileId::New(self.local_clock.tick());
+    pub fn new_dir<N>(&mut self, parent_id: FileId, name: N) -> Result<(FileId, Operation), Error>
+    where
+        N: AsRef<OsStr>,
+    {
+        self.check_file_id(parent_id, Some(FileType::Directory))?;
+
+        let mut new_tree = self.clone();
+        let file_id = FileId::New(new_tree.local_clock.tick());
         let operation = Operation::InsertMetadata {
             file_id,
             file_type: FileType::Directory,
-            timestamp: self.lamport_clock.tick(),
+            parent: Some((parent_id, Arc::new(name.as_ref().into()))),
+            timestamp: new_tree.lamport_clock.tick(),
         };
-        self.apply_op(operation.clone()).unwrap();
-        (file_id, operation)
+        let fixup_ops = new_tree
+            .apply_ops_internal(Some(operation.clone()))
+            .unwrap();
+        if fixup_ops.is_empty() {
+            *self = new_tree;
+            Ok((file_id, operation))
+        } else {
+            Err(Error::InvalidOperation)
+        }
     }
 
     pub fn open_text_file(&mut self, file_id: FileId, base_text: Text) -> Result<BufferId, Error> {
@@ -498,7 +530,9 @@ impl WorkTree {
             new_parent: Some((new_parent_id, Arc::new(new_name.as_ref().into()))),
             timestamp: new_tree.lamport_clock.tick(),
         };
-        let fixup_ops = new_tree.apply_ops(Some(operation.clone())).unwrap();
+        let fixup_ops = new_tree
+            .apply_ops_internal(Some(operation.clone()))
+            .unwrap();
         if fixup_ops.is_empty() {
             *self = new_tree;
             Ok(operation)
@@ -1182,7 +1216,6 @@ mod tests {
     use super::*;
     use rand::{Rng, SeedableRng, StdRng};
     use std::iter::FromIterator;
-    use std::mem;
 
     #[test]
     fn test_append_base_entries() {
@@ -1215,11 +1248,10 @@ mod tests {
         assert_eq!(tree.paths(), vec!["a", "a/b", "a/b/c", "a/d"]);
         assert_eq!(fixup_ops.len(), 0);
 
-        let (file_1, _) = tree.new_text_file();
-        let (file_2, _) = tree.new_dir();
         let a = tree.file_id("a").unwrap();
+        let (file_1, _) = tree.new_text_file();
         tree.rename(file_1, a, "e").unwrap();
-        tree.rename(file_2, a, "z").unwrap();
+        tree.new_dir(a, "z").unwrap();
 
         let fixup_ops = tree
             .append_base_entries(vec![
@@ -1432,14 +1464,16 @@ mod tests {
                     let fixup_ops = tree
                         .append_base_entries(base_entries_to_append.drain(0..count))
                         .unwrap();
-                    deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                    deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
                 } else if k == 1 && !inboxes[replica_index].is_empty() {
-                    let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    let fixup_ops = tree.apply_ops(ops).unwrap();
-                    deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                    let count = rng.gen_range(1, inboxes[replica_index].len() + 1);
+                    let fixup_ops = tree
+                        .apply_ops(inboxes[replica_index].drain(0..count))
+                        .unwrap();
+                    deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
                 } else {
                     let ops = tree.mutate(&mut rng, 5);
-                    deliver_ops(replica_index, &mut inboxes, ops);
+                    deliver_ops(&mut rng, replica_index, &mut inboxes, ops);
                 }
             }
 
@@ -1453,13 +1487,15 @@ mod tests {
                         let fixup_ops = tree
                             .append_base_entries(base_entries_to_append.drain(..))
                             .unwrap();
-                        deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                        deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
                     }
 
-                    let ops = mem::replace(&mut inboxes[replica_index], Vec::new());
-                    if !ops.is_empty() {
-                        let fixup_ops = tree.apply_ops(ops).unwrap();
-                        deliver_ops(replica_index, &mut inboxes, fixup_ops);
+                    if !inboxes[replica_index].is_empty() {
+                        let count = rng.gen_range(1, inboxes[replica_index].len() + 1);
+                        let fixup_ops = tree
+                            .apply_ops(inboxes[replica_index].drain(0..count))
+                            .unwrap();
+                        deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
                         done = false;
                     }
                 }
@@ -1473,10 +1509,31 @@ mod tests {
                 assert_eq!(trees[i].entries(), trees[i + 1].entries());
             }
 
-            fn deliver_ops(sender: usize, inboxes: &mut Vec<Vec<Operation>>, ops: Vec<Operation>) {
+            fn deliver_ops<T: Rng>(
+                rng: &mut T,
+                sender: usize,
+                inboxes: &mut Vec<Vec<Operation>>,
+                ops: Vec<Operation>,
+            ) {
                 for (i, inbox) in inboxes.iter_mut().enumerate() {
                     if i != sender {
-                        inbox.extend(ops.iter().cloned());
+                        for op in &ops {
+                            let min_index = inbox
+                                .iter()
+                                .enumerate()
+                                .rev()
+                                .find_map(|(index, existing_op)| {
+                                    if existing_op.timestamp().replica_id
+                                        == op.timestamp().replica_id
+                                    {
+                                        Some(index + 1)
+                                    } else {
+                                        None
+                                    }
+                                }).unwrap_or(0);
+                            let insertion_index = rng.gen_range(min_index, inbox.len() + 1);
+                            inbox.insert(insertion_index, op.clone());
+                        }
                     }
                 }
             }
@@ -1519,20 +1576,28 @@ mod tests {
                     let parent_id = self
                         .select_file(rng, Some(FileType::Directory), true)
                         .unwrap();
-                    let (file_id, op) = if rng.gen() {
-                        self.new_dir()
-                    } else {
-                        self.new_text_file()
-                    };
-                    ops.push(op);
 
-                    loop {
-                        match self.rename(file_id, parent_id, gen_name(rng)) {
-                            Ok(op) => {
-                                ops.push(op);
-                                break;
+                    if rng.gen() {
+                        loop {
+                            match self.new_dir(parent_id, gen_name(rng)) {
+                                Ok((_, op)) => {
+                                    ops.push(op);
+                                    break;
+                                }
+                                Err(error) => assert_eq!(error, Error::InvalidOperation),
                             }
-                            Err(error) => assert_eq!(error, Error::InvalidOperation),
+                        }
+                    } else {
+                        let (file_id, op) = self.new_text_file();
+                        ops.push(op);
+                        loop {
+                            match self.rename(file_id, parent_id, gen_name(rng)) {
+                                Ok(op) => {
+                                    ops.push(op);
+                                    break;
+                                }
+                                Err(error) => assert_eq!(error, Error::InvalidOperation),
+                            }
                         }
                     }
                 } else if k == 1 {
