@@ -167,22 +167,13 @@ enum TextFile {
 
 impl WorkTree {
     pub fn new(replica_id: ReplicaId) -> Self {
-        let mut version = time::Global::new();
-
-        // This is a hack to ensure that the base text of all buffers is included. It would be nice
-        // if we just included the base text in the sentinel fragment of every buffer so we didn't
-        // have to do this.
-        let mut base_time = time::Local::new(0);
-        base_time.tick();
-        version.observe(base_time);
-
         Self {
             base_entries_next_id: 1,
             base_entries_stack: Vec::new(),
             metadata: btree::Tree::new(),
             parent_refs: btree::Tree::new(),
             child_refs: btree::Tree::new(),
-            version,
+            version: time::Global::new(),
             local_clock: time::Local::new(replica_id),
             lamport_clock: time::Lamport::new(replica_id),
             text_files: HashMap::new(),

@@ -171,35 +171,57 @@ pub struct Operation {
 }
 
 impl Buffer {
-    pub fn new<T>(text: T) -> Self
+    pub fn new<T>(base_text: T) -> Self
     where
         T: Into<Text>,
     {
-        let mut local_clock = time::Local::new(0);
-        let mut lamport_clock = time::Lamport::new(0);
-
-        // Push start sentinel.
-        let sentinel_id = local_clock.tick();
         let mut insertion_splits = HashMap::new();
+        let mut fragments = btree::Tree::new();
+
+        let base_insertion = Insertion {
+            id: time::Local::default(),
+            parent_id: time::Local::default(),
+            offset_in_parent: 0,
+            text: Arc::new(base_text.into()),
+            timestamp: time::Lamport::default(),
+        };
+
         insertion_splits.insert(
-            sentinel_id,
+            base_insertion.id,
             btree::Tree::from_item(InsertionSplit {
                 fragment_id: FragmentId::min_value(),
                 extent: 0,
             }),
         );
-        let fragments = btree::Tree::from_item(Fragment::new(
-            FragmentId::min_value(),
-            Insertion {
-                id: sentinel_id,
-                parent_id: sentinel_id,
-                offset_in_parent: 0,
-                text: Arc::new("".into()),
-                timestamp: lamport_clock, // Don't tick so that the base text gets the same timestamp.
-            },
-        ));
+        fragments.push(Fragment {
+            id: FragmentId::min_value(),
+            insertion: base_insertion.clone(),
+            start_offset: 0,
+            end_offset: 0,
+            deletions: HashSet::new(),
+        });
 
-        let mut buffer = Self {
+        if base_insertion.text.len() > 0 {
+            let base_fragment_id =
+                FragmentId::between(&FragmentId::min_value(), &FragmentId::max_value());
+
+            insertion_splits
+                .get_mut(&base_insertion.id)
+                .unwrap()
+                .push(InsertionSplit {
+                    fragment_id: base_fragment_id.clone(),
+                    extent: base_insertion.text.len(),
+                });
+            fragments.push(Fragment {
+                id: base_fragment_id,
+                start_offset: 0,
+                end_offset: base_insertion.text.len(),
+                insertion: base_insertion,
+                deletions: HashSet::new(),
+            });
+        }
+
+        Self {
             fragments,
             insertion_splits,
             anchor_cache: RefCell::new(HashMap::default()),
@@ -208,11 +230,7 @@ impl Buffer {
             selections: HashMap::default(),
             deferred_ops: OperationQueue::new(),
             deferred_replicas: HashSet::new(),
-        };
-
-        buffer.version.observe(sentinel_id);
-        buffer.edit(&[0..0], text, &mut local_clock, &mut lamport_clock);
-        buffer
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -488,7 +506,7 @@ impl Buffer {
             cursor.next();
         }
 
-        while let Some(fragment) = cursor.item() {
+        while let Some(mut fragment) = cursor.item() {
             if new_text.is_none() && fragment.id > end_fragment_id {
                 break;
             }
@@ -551,8 +569,8 @@ impl Buffer {
                     ));
                 }
 
-                let mut fragment = fragment.clone();
-                if version_in_range.observed(fragment.insertion.id) {
+                if fragment.id < end_fragment_id && version_in_range.observed(fragment.insertion.id)
+                {
                     fragment.deletions.insert(id);
                 }
                 new_fragments.push(fragment);
