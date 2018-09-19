@@ -1453,7 +1453,7 @@ mod tests {
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
 
             // Generate and deliver random mutations
-            for _ in 0..5 {
+            for _ in 0..10 {
                 let k = rng.gen_range(0, 3);
                 let replica_index = rng.gen_range(0, PEERS);
                 let tree = &mut trees[replica_index];
