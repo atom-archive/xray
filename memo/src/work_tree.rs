@@ -23,8 +23,7 @@ pub struct WorkTree {
     local_clock: time::Local,
     lamport_clock: time::Lamport,
     text_files: HashMap<FileId, TextFile>,
-    deferred_operations: OperationQueue<Operation>,
-    deferred_replicas: HashSet<ReplicaId>,
+    deferred_ops: OperationQueue<Operation>,
 }
 
 pub struct Cursor {
@@ -44,7 +43,7 @@ pub struct CursorEntry {
     status: FileStatus,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DirEntry {
     depth: usize,
     name: OsString,
@@ -172,8 +171,7 @@ impl WorkTree {
             local_clock: time::Local::new(replica_id),
             lamport_clock: time::Lamport::new(replica_id),
             text_files: HashMap::new(),
-            deferred_operations: OperationQueue::new(),
-            deferred_replicas: HashSet::new(),
+            deferred_ops: OperationQueue::new(),
         }
     }
 
@@ -257,6 +255,8 @@ impl WorkTree {
         for file_id in name_conflicts {
             fixup_ops.extend(self.fix_name_conflicts(file_id));
         }
+        fixup_ops.extend(self.flush_deferred_ops()?);
+
         Ok(fixup_ops)
     }
 
@@ -269,19 +269,16 @@ impl WorkTree {
 
         let mut changed_file_ids = HashSet::new();
         for op in ops {
-            if self.can_apply_op(&op) {
-                match &op {
-                    Operation::UpdateParent { child_id, .. } => {
-                        changed_file_ids.insert(*child_id);
-                    }
-                    _ => {}
+            if new_tree.can_apply_op(&op) {
+                if let Operation::UpdateParent { child_id, .. } = op {
+                    changed_file_ids.insert(child_id);
                 }
                 new_tree.apply_op(op)?;
             } else {
-                self.deferred_replicas.insert(op.timestamp().replica_id);
                 deferred_ops.push(op);
             }
         }
+        new_tree.deferred_ops.insert(deferred_ops);
 
         let mut fixup_ops = Vec::new();
         for file_id in &changed_file_ids {
@@ -293,6 +290,7 @@ impl WorkTree {
     }
 
     pub fn apply_op(&mut self, op: Operation) -> Result<(), Error> {
+        self.lamport_clock.observe(op.timestamp());
         match op {
             Operation::InsertMetadata {
                 file_id, file_type, ..
@@ -304,25 +302,27 @@ impl WorkTree {
                 timestamp,
                 new_parent,
             } => {
-                self.lamport_clock.observe(timestamp);
-
                 let mut child_ref_edits: SmallVec<[_; 3]> = SmallVec::new();
 
                 let mut parent_ref_cursor = self.parent_refs.cursor();
                 if parent_ref_cursor.seek(&child_id, SeekBias::Left) {
                     let latest_parent_ref = parent_ref_cursor.item().unwrap();
-                    let latest_visible_parent_ref = loop {
-                        let parent_ref = parent_ref_cursor.item().unwrap();
-                        if parent_ref.parent.is_some() {
-                            break parent_ref;
+                    let mut latest_visible_parent_ref = None;
+                    while let Some(parent_ref) = parent_ref_cursor.item() {
+                        if parent_ref.child_id != child_id {
+                            break;
+                        } else if parent_ref.parent.is_some() {
+                            latest_visible_parent_ref = Some(parent_ref);
+                            break;
                         } else {
                             parent_ref_cursor.next();
                         }
-                    };
+                    }
 
-                    let mut child_ref = {
+                    let mut child_ref = None;
+                    if let Some(ref latest_visible_parent_ref) = latest_visible_parent_ref {
                         let mut child_ref_cursor = self.child_refs.cursor();
-                        let (parent_id, name) = latest_visible_parent_ref.parent.unwrap();
+                        let (parent_id, name) = latest_visible_parent_ref.parent.clone().unwrap();
                         child_ref_cursor.seek(
                             &ChildRefValueKey {
                                 parent_id,
@@ -332,11 +332,14 @@ impl WorkTree {
                             },
                             SeekBias::Left,
                         );
-                        child_ref_cursor.item().unwrap()
-                    };
+                        child_ref = child_ref_cursor.item();
+                    }
 
                     if timestamp > latest_parent_ref.timestamp {
-                        child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
+                        if let Some(ref child_ref) = child_ref {
+                            child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
+                        }
+
                         if let Some((parent_id, name)) = new_parent.clone() {
                             child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
                                 parent_id,
@@ -345,16 +348,18 @@ impl WorkTree {
                                 child_id,
                                 visible: true,
                             }));
-                        } else {
+                        } else if let Some(mut child_ref) = child_ref {
                             child_ref.visible = false;
                             child_ref_edits.push(btree::Edit::Insert(child_ref));
                         }
-                    } else if timestamp > latest_visible_parent_ref.timestamp
+                    } else if latest_visible_parent_ref.map_or(true, |r| timestamp > r.timestamp)
                         && latest_parent_ref.parent.is_none()
                         && new_parent.is_some()
                     {
                         let (parent_id, name) = new_parent.clone().unwrap();
-                        child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
+                        if let Some(child_ref) = child_ref {
+                            child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
+                        }
                         child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
                             parent_id,
                             name,
@@ -397,6 +402,37 @@ impl WorkTree {
         }
 
         Ok(())
+    }
+
+    fn flush_deferred_ops(&mut self) -> Result<Vec<Operation>, Error> {
+        let mut changed_file_ids = HashSet::new();
+
+        let mut deferred_ops = Vec::new();
+        for op in self.deferred_ops.drain() {
+            if self.can_apply_op(&op) {
+                if let Operation::UpdateParent { child_id, .. } = op {
+                    changed_file_ids.insert(child_id);
+                }
+                self.apply_op(op)?;
+            } else {
+                deferred_ops.push(op);
+            }
+        }
+        self.deferred_ops.insert(deferred_ops);
+
+        let mut fixup_ops = Vec::new();
+        for file_id in changed_file_ids {
+            fixup_ops.extend(self.fix_conflicts(file_id));
+        }
+        Ok(fixup_ops)
+    }
+
+    fn can_apply_op(&self, op: &Operation) -> bool {
+        match op {
+            Operation::InsertMetadata { .. } => true,
+            Operation::UpdateParent { child_id, .. } => self.metadata(*child_id).is_ok(),
+            Operation::EditText { file_id, .. } => self.metadata(*file_id).is_ok(),
+        }
     }
 
     pub fn new_text_file(&mut self) -> (FileId, Operation) {
@@ -596,8 +632,8 @@ impl WorkTree {
                     f(name);
                     if parent_id == ROOT_FILE_ID {
                         break;
-                    } else {
-                        cursor.seek(&parent_id, SeekBias::Left);
+                    } else if !cursor.seek(&parent_id, SeekBias::Left) {
+                        return false;
                     }
                 } else {
                     return false;
@@ -675,7 +711,9 @@ impl WorkTree {
                     if parent_id == ROOT_FILE_ID {
                         break;
                     } else {
-                        cursor.seek(&parent_id, SeekBias::Left);
+                        if !cursor.seek(&parent_id, SeekBias::Left) {
+                            break;
+                        }
                     }
                 } else {
                     break;
