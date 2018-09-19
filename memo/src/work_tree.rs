@@ -20,6 +20,7 @@ pub struct WorkTree {
     metadata: btree::Tree<Metadata>,
     parent_refs: btree::Tree<ParentRefValue>,
     child_refs: btree::Tree<ChildRefValue>,
+    version: time::Global,
     local_clock: time::Local,
     lamport_clock: time::Lamport,
     text_files: HashMap<FileId, TextFile>,
@@ -56,17 +57,20 @@ pub enum Operation {
         file_id: FileId,
         file_type: FileType,
         parent: Option<(FileId, Arc<OsString>)>,
-        timestamp: time::Lamport,
+        local_timestamp: time::Local,
+        lamport_timestamp: time::Lamport,
     },
     UpdateParent {
         child_id: FileId,
         new_parent: Option<(FileId, Arc<OsString>)>,
-        timestamp: time::Lamport,
+        local_timestamp: time::Local,
+        lamport_timestamp: time::Lamport,
     },
     EditText {
         file_id: FileId,
         edits: Vec<buffer::Operation>,
-        timestamp: time::Lamport,
+        local_timestamp: time::Local,
+        lamport_timestamp: time::Lamport,
     },
 }
 
@@ -163,17 +167,31 @@ enum TextFile {
 
 impl WorkTree {
     pub fn new(replica_id: ReplicaId) -> Self {
+        let mut version = time::Global::new();
+
+        // This is a hack to ensure that the base text of all buffers is included. It would be nice
+        // if we just included the base text in the sentinel fragment of every buffer so we didn't
+        // have to do this.
+        let mut base_time = time::Local::new(0);
+        base_time.tick();
+        version.observe(base_time);
+
         Self {
             base_entries_next_id: 1,
             base_entries_stack: Vec::new(),
             metadata: btree::Tree::new(),
             parent_refs: btree::Tree::new(),
             child_refs: btree::Tree::new(),
+            version,
             local_clock: time::Local::new(replica_id),
             lamport_clock: time::Lamport::new(replica_id),
             text_files: HashMap::new(),
             deferred_ops: OperationQueue::new(),
         }
+    }
+
+    pub fn version(&self) -> time::Global {
+        self.version.clone()
     }
 
     pub fn cursor(&self) -> Option<Cursor> {
@@ -277,6 +295,11 @@ impl WorkTree {
     where
         I: IntoIterator<Item = Operation>,
     {
+        let mut ops = ops.into_iter().peekable();
+        if ops.peek().is_none() {
+            return Ok(Vec::new());
+        }
+
         let mut new_tree = self.clone();
         let mut deferred_ops = Vec::new();
         let mut potential_conflicts = HashSet::new();
@@ -313,25 +336,28 @@ impl WorkTree {
     }
 
     pub fn apply_op(&mut self, op: Operation) -> Result<(), Error> {
-        self.lamport_clock.observe(op.timestamp());
+        self.version.observe(op.local_timestamp());
+        self.lamport_clock.observe(op.lamport_timestamp());
+
         match op {
             Operation::InsertMetadata {
                 file_id,
                 file_type,
                 parent,
-                timestamp,
+                lamport_timestamp,
+                ..
             } => {
                 self.metadata.insert(Metadata { file_id, file_type });
                 if let Some((parent_id, name)) = parent {
                     self.parent_refs.insert(ParentRefValue {
                         child_id: file_id,
                         parent: Some((parent_id, name.clone())),
-                        timestamp,
+                        timestamp: lamport_timestamp,
                     });
                     self.child_refs.insert(ChildRefValue {
                         parent_id,
                         name,
-                        timestamp,
+                        timestamp: lamport_timestamp,
                         child_id: file_id,
                         visible: true,
                     });
@@ -340,7 +366,8 @@ impl WorkTree {
             Operation::UpdateParent {
                 child_id,
                 new_parent,
-                timestamp,
+                lamport_timestamp,
+                ..
             } => {
                 let mut child_ref_edits: SmallVec<[_; 3]> = SmallVec::new();
 
@@ -375,7 +402,7 @@ impl WorkTree {
                         child_ref = child_ref_cursor.item();
                     }
 
-                    if timestamp > latest_parent_ref.timestamp {
+                    if lamport_timestamp > latest_parent_ref.timestamp {
                         if let Some(ref child_ref) = child_ref {
                             child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
                         }
@@ -384,7 +411,7 @@ impl WorkTree {
                             child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
                                 parent_id,
                                 name,
-                                timestamp,
+                                timestamp: lamport_timestamp,
                                 child_id,
                                 visible: true,
                             }));
@@ -392,7 +419,8 @@ impl WorkTree {
                             child_ref.visible = false;
                             child_ref_edits.push(btree::Edit::Insert(child_ref));
                         }
-                    } else if latest_visible_parent_ref.map_or(true, |r| timestamp > r.timestamp)
+                    } else if latest_visible_parent_ref
+                        .map_or(true, |r| lamport_timestamp > r.timestamp)
                         && latest_parent_ref.parent.is_none()
                         && new_parent.is_some()
                     {
@@ -403,7 +431,7 @@ impl WorkTree {
                         child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
                             parent_id,
                             name,
-                            timestamp,
+                            timestamp: lamport_timestamp,
                             child_id,
                             visible: false,
                         }));
@@ -412,7 +440,7 @@ impl WorkTree {
                     child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
                         parent_id,
                         name,
-                        timestamp,
+                        timestamp: lamport_timestamp,
                         child_id,
                         visible: true,
                     }));
@@ -420,7 +448,7 @@ impl WorkTree {
 
                 self.parent_refs.insert(ParentRefValue {
                     child_id,
-                    timestamp,
+                    timestamp: lamport_timestamp,
                     parent: new_parent,
                 });
                 self.child_refs.edit(&mut child_ref_edits);
@@ -458,7 +486,8 @@ impl WorkTree {
             file_id,
             file_type: FileType::Text,
             parent: None,
-            timestamp: self.lamport_clock.tick(),
+            local_timestamp: self.local_clock.tick(),
+            lamport_timestamp: self.lamport_clock.tick(),
         };
         self.apply_op(operation.clone()).unwrap();
         (file_id, operation)
@@ -476,7 +505,8 @@ impl WorkTree {
             file_id,
             file_type: FileType::Directory,
             parent: Some((parent_id, Arc::new(name.as_ref().into()))),
-            timestamp: new_tree.lamport_clock.tick(),
+            local_timestamp: new_tree.local_clock.tick(),
+            lamport_timestamp: new_tree.lamport_clock.tick(),
         };
         let fixup_ops = new_tree
             .apply_ops_internal(Some(operation.clone()))
@@ -528,7 +558,8 @@ impl WorkTree {
         let operation = Operation::UpdateParent {
             child_id: file_id,
             new_parent: Some((new_parent_id, Arc::new(new_name.as_ref().into()))),
-            timestamp: new_tree.lamport_clock.tick(),
+            local_timestamp: new_tree.local_clock.tick(),
+            lamport_timestamp: new_tree.lamport_clock.tick(),
         };
         let fixup_ops = new_tree
             .apply_ops_internal(Some(operation.clone()))
@@ -547,7 +578,8 @@ impl WorkTree {
         let operation = Operation::UpdateParent {
             child_id: file_id,
             new_parent: None,
-            timestamp: self.lamport_clock.tick(),
+            local_timestamp: self.local_clock.tick(),
+            lamport_timestamp: self.lamport_clock.tick(),
         };
         self.apply_op(operation.clone()).unwrap();
         Ok(operation)
@@ -564,15 +596,19 @@ impl WorkTree {
         T: Into<Text>,
     {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
+            let edits = buffer.edit(
+                old_ranges,
+                new_text,
+                &mut self.local_clock,
+                &mut self.lamport_clock,
+            );
+            let local_timestamp = self.local_clock.tick();
+            self.version.observe(local_timestamp);
             Ok(Operation::EditText {
                 file_id: buffer_id.0,
-                edits: buffer.edit(
-                    old_ranges,
-                    new_text,
-                    &mut self.local_clock,
-                    &mut self.lamport_clock,
-                ),
-                timestamp: self.lamport_clock.tick(),
+                edits,
+                local_timestamp,
+                lamport_timestamp: self.lamport_clock.tick(),
             })
         } else {
             Err(Error::InvalidBufferId)
@@ -623,6 +659,18 @@ impl WorkTree {
     pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&buffer_id.0) {
             Ok(buffer.iter())
+        } else {
+            Err(Error::InvalidBufferId)
+        }
+    }
+
+    pub fn changes_since(
+        &self,
+        buffer_id: BufferId,
+        version: time::Global,
+    ) -> Result<impl Iterator<Item = buffer::Change>, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&buffer_id.0) {
+            Ok(buffer.changes_since(version))
         } else {
             Err(Error::InvalidBufferId)
         }
@@ -775,8 +823,9 @@ impl WorkTree {
             );
             fixup_ops.push(Operation::UpdateParent {
                 child_id: *child_id,
-                timestamp: self.lamport_clock.tick(),
                 new_parent: cursor.item().unwrap().parent,
+                local_timestamp: self.local_clock.tick(),
+                lamport_timestamp: self.lamport_clock.tick(),
             });
             moved_file_ids.push(*child_id);
         }
@@ -840,7 +889,8 @@ impl WorkTree {
                     let fixup_op = Operation::UpdateParent {
                         child_id: file_id,
                         new_parent: Some((parent_id, unique_name.clone())),
-                        timestamp: self.lamport_clock.tick(),
+                        local_timestamp: self.local_clock.tick(),
+                        lamport_timestamp: self.lamport_clock.tick(),
                     };
                     self.apply_op(fixup_op.clone()).unwrap();
                     fixup_ops.push(fixup_op);
@@ -962,18 +1012,38 @@ impl Cursor {
 }
 
 impl Operation {
-    fn timestamp(&self) -> time::Lamport {
+    fn local_timestamp(&self) -> time::Local {
         match self {
-            Operation::InsertMetadata { timestamp, .. } => *timestamp,
-            Operation::UpdateParent { timestamp, .. } => *timestamp,
-            Operation::EditText { timestamp, .. } => *timestamp,
+            Operation::InsertMetadata {
+                local_timestamp, ..
+            } => *local_timestamp,
+            Operation::UpdateParent {
+                local_timestamp, ..
+            } => *local_timestamp,
+            Operation::EditText {
+                local_timestamp, ..
+            } => *local_timestamp,
+        }
+    }
+
+    fn lamport_timestamp(&self) -> time::Lamport {
+        match self {
+            Operation::InsertMetadata {
+                lamport_timestamp, ..
+            } => *lamport_timestamp,
+            Operation::UpdateParent {
+                lamport_timestamp, ..
+            } => *lamport_timestamp,
+            Operation::EditText {
+                lamport_timestamp, ..
+            } => *lamport_timestamp,
         }
     }
 }
 
 impl operation_queue::Operation for Operation {
     fn timestamp(&self) -> time::Lamport {
-        self.timestamp()
+        self.lamport_timestamp()
     }
 }
 
@@ -1436,7 +1506,7 @@ mod tests {
     }
 
     #[test]
-    fn test_edit() {
+    fn test_buffers() {
         let base_entries = vec![
             DirEntry {
                 depth: 1,
@@ -1466,6 +1536,24 @@ mod tests {
         tree_1.open_text_file(file_id, base_text).unwrap();
         assert_eq!(tree_1.text(buffer_id).unwrap().into_string(), "axcx");
         assert_eq!(tree_2.text(buffer_id).unwrap().into_string(), "axcx");
+
+        let ops = tree_1.edit(buffer_id, &[1..2, 4..4], "y");
+        let base_version = tree_2.version();
+
+        tree_2.apply_ops(ops).unwrap();
+
+        assert_eq!(tree_1.text(buffer_id).unwrap().into_string(), "aycxy");
+        assert_eq!(tree_2.text(buffer_id).unwrap().into_string(), "aycxy");
+
+        let changes = tree_2
+            .changes_since(buffer_id, base_version.clone())
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].range, 1..2);
+        assert_eq!(changes[0].code_units, [b'y' as u16]);
+        assert_eq!(changes[1].range, 4..4);
+        assert_eq!(changes[1].code_units, [b'y' as u16]);
 
         let dir_id = tree_1.file_id("dir").unwrap();
         assert_eq!(
@@ -1570,8 +1658,8 @@ mod tests {
                                 .enumerate()
                                 .rev()
                                 .find_map(|(index, existing_op)| {
-                                    if existing_op.timestamp().replica_id
-                                        == op.timestamp().replica_id
+                                    if existing_op.lamport_timestamp().replica_id
+                                        == op.lamport_timestamp().replica_id
                                     {
                                         Some(index + 1)
                                     } else {

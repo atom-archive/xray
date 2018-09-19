@@ -67,13 +67,13 @@ impl Global {
         *self.0.get(&replica_id).unwrap_or(&0)
     }
 
-    pub fn include(&mut self, timestamp: Local) {
+    pub fn observe(&mut self, timestamp: Local) {
         let map = Arc::make_mut(&mut self.0);
         let seq = map.entry(timestamp.replica_id).or_insert(0);
         *seq = cmp::max(*seq, timestamp.seq);
     }
 
-    pub fn includes(&self, timestamp: Local) -> bool {
+    pub fn observed(&self, timestamp: Local) -> bool {
         self.get(timestamp.replica_id) >= timestamp.seq
     }
 }

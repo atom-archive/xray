@@ -87,8 +87,8 @@ struct ChangesIter {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Change {
-    range: Range<usize>,
-    code_units: Vec<u16>,
+    pub range: Range<usize>,
+    pub code_units: Vec<u16>,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -210,7 +210,7 @@ impl Buffer {
             deferred_replicas: HashSet::new(),
         };
 
-        buffer.version.include(sentinel_id);
+        buffer.version.observe(sentinel_id);
         buffer.edit(&[0..0], text, &mut local_clock, &mut lamport_clock);
         buffer
     }
@@ -297,7 +297,7 @@ impl Buffer {
             lamport_clock,
         );
         if let Some(op) = ops.last() {
-            self.version.include(op.id);
+            self.version.observe(op.id);
         }
         ops
     }
@@ -532,7 +532,7 @@ impl Buffer {
                     new_fragments.push(fragment);
                 }
                 if let Some(mut fragment) = within_range {
-                    if version_in_range.includes(fragment.insertion.id) {
+                    if version_in_range.observed(fragment.insertion.id) {
                         fragment.deletions.insert(id);
                     }
                     new_fragments.push(fragment);
@@ -552,7 +552,7 @@ impl Buffer {
                 }
 
                 let mut fragment = fragment.clone();
-                if version_in_range.includes(fragment.insertion.id) {
+                if version_in_range.observed(fragment.insertion.id) {
                     fragment.deletions.insert(id);
                 }
                 new_fragments.push(fragment);
@@ -573,7 +573,7 @@ impl Buffer {
 
         new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
-        self.version.include(id);
+        self.version.observe(id);
         lamport_clock.observe(timestamp);
         Ok(())
     }
@@ -595,8 +595,8 @@ impl Buffer {
 
     fn can_apply_op(&self, op: &Operation) -> bool {
         !self.deferred_replicas.contains(&op.id.replica_id)
-            && self.version.includes(op.start_id)
-            && self.version.includes(op.end_id)
+            && self.version.observed(op.start_id)
+            && self.version.observed(op.end_id)
             && op.version_in_range <= self.version
     }
 
@@ -722,10 +722,10 @@ impl Buffer {
                         fragment_start = range.end;
                         end_id = Some(fragment.insertion.id);
                         end_offset = Some(fragment.start_offset);
-                        version_in_range.include(fragment.insertion.id);
+                        version_in_range.observe(fragment.insertion.id);
                     }
                 } else {
-                    version_in_range.include(fragment.insertion.id);
+                    version_in_range.observe(fragment.insertion.id);
                     if fragment.is_visible() {
                         fragment.deletions.insert(op_id);
                     }
@@ -781,7 +781,7 @@ impl Buffer {
                         if fragment.is_visible() {
                             fragment.deletions.insert(op_id);
                         }
-                        version_in_range.include(fragment.insertion.id);
+                        version_in_range.observe(fragment.insertion.id);
                         new_fragments.push(fragment.clone());
                         cursor.next();
 
@@ -1812,7 +1812,7 @@ impl Fragment {
     }
 
     fn was_visible(&self, version: &time::Global) -> bool {
-        version.includes(self.insertion.id) && self.deletions.iter().all(|d| !version.includes(*d))
+        version.observed(self.insertion.id) && self.deletions.iter().all(|d| !version.observed(*d))
     }
 
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
