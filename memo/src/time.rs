@@ -20,11 +20,6 @@ pub struct Lamport {
 }
 
 impl Local {
-    pub const DEFAULT: Local = Local {
-        replica_id: 0,
-        seq: 0,
-    };
-
     pub fn new(replica_id: u64) -> Self {
         Self { replica_id, seq: 1 }
     }
@@ -38,7 +33,10 @@ impl Local {
 
 impl Default for Local {
     fn default() -> Self {
-        Local::DEFAULT
+        Local {
+            replica_id: 0,
+            seq: 0,
+        }
     }
 }
 
