@@ -86,7 +86,7 @@ pub enum FileId {
     New(time::Local),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BufferId(FileId);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -617,6 +617,14 @@ impl WorkTree {
             Ok(path)
         } else {
             Err(Error::InvalidPath)
+        }
+    }
+
+    pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&buffer_id.0) {
+            Ok(buffer.iter())
+        } else {
+            Err(Error::InvalidBufferId)
         }
     }
 
@@ -1425,6 +1433,45 @@ mod tests {
 
         assert!(!cursor.next(true));
         assert_eq!(cursor.entry(), Err(Error::CursorExhausted));
+    }
+
+    #[test]
+    fn test_edit() {
+        let base_entries = vec![
+            DirEntry {
+                depth: 1,
+                name: OsString::from("dir"),
+                file_type: FileType::Directory,
+            },
+            DirEntry {
+                depth: 1,
+                name: OsString::from("file"),
+                file_type: FileType::Text,
+            },
+        ];
+        let base_text = Text::from("abc");
+
+        let mut tree_1 = WorkTree::new(1);
+        tree_1.append_base_entries(base_entries.clone()).unwrap();
+        let mut tree_2 = WorkTree::new(2);
+        tree_2.append_base_entries(base_entries).unwrap();
+
+        let file_id = tree_1.file_id("file").unwrap();
+        let buffer_id = tree_2.open_text_file(file_id, base_text.clone()).unwrap();
+        let ops = tree_2.edit(buffer_id, &[1..2, 3..3], "x");
+        tree_1.apply_ops(ops).unwrap();
+
+        // Must call open_text_file on any given replica first before interacting with a buffer.
+        assert_eq!(tree_1.text(buffer_id).err(), Some(Error::InvalidBufferId));
+        tree_1.open_text_file(file_id, base_text).unwrap();
+        assert_eq!(tree_1.text(buffer_id).unwrap().into_string(), "axcx");
+        assert_eq!(tree_2.text(buffer_id).unwrap().into_string(), "axcx");
+
+        let dir_id = tree_1.file_id("dir").unwrap();
+        assert_eq!(
+            tree_1.open_text_file(dir_id, Text::from("")),
+            Err(Error::InvalidFileId)
+        );
     }
 
     #[test]

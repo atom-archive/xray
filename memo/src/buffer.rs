@@ -252,7 +252,7 @@ impl Buffer {
     }
 
     #[cfg(test)]
-    pub fn into_string(&self) -> String {
+    pub fn to_string(&self) -> String {
         String::from_utf16_lossy(&self.to_u16_chars())
     }
 
@@ -1299,6 +1299,11 @@ impl Iter {
         self.reversed = true;
         self
     }
+
+    #[cfg(test)]
+    pub fn into_string(self) -> String {
+        String::from_utf16_lossy(&self.collect::<Vec<u16>>())
+    }
 }
 
 impl Iterator for Iter {
@@ -1962,17 +1967,17 @@ mod tests {
         let mut local_clock = time::Local::new(1);
         let mut lamport_clock = time::Lamport::new(1);
         let mut buffer = Buffer::new("abc");
-        assert_eq!(buffer.into_string(), "abc");
+        assert_eq!(buffer.to_string(), "abc");
         buffer.edit(&[3..3], "def", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "abcdef");
+        assert_eq!(buffer.to_string(), "abcdef");
         buffer.edit(&[0..0], "ghi", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "ghiabcdef");
+        assert_eq!(buffer.to_string(), "ghiabcdef");
         buffer.edit(&[5..5], "jkl", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "ghiabjklcdef");
+        assert_eq!(buffer.to_string(), "ghiabjklcdef");
         buffer.edit(&[6..7], "", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "ghiabjlcdef");
+        assert_eq!(buffer.to_string(), "ghiabjlcdef");
         buffer.edit(&[4..9], "mno", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "ghiamnoef");
+        assert_eq!(buffer.to_string(), "ghiamnoef");
     }
 
     #[test]
@@ -2018,7 +2023,7 @@ mod tests {
                     ]
                         .concat();
                 }
-                assert_eq!(buffer.into_string(), reference_string);
+                assert_eq!(buffer.to_string(), reference_string);
 
                 if rng.gen_weighted_bool(3) {
                     buffer_versions.push(buffer.clone());
@@ -2034,7 +2039,7 @@ mod tests {
                         &mut lamport_clock,
                     );
                 }
-                assert_eq!(old_buffer.into_string(), buffer.into_string());
+                assert_eq!(old_buffer.to_string(), buffer.to_string());
             }
         }
     }
@@ -2278,7 +2283,7 @@ mod tests {
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
 
         buffer.edit(&[1..1], "def\n", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "adef\nbc");
+        assert_eq!(buffer.to_string(), "adef\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
         assert_eq!(
@@ -2291,7 +2296,7 @@ mod tests {
         );
 
         buffer.edit(&[2..3], "", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "adf\nbc");
+        assert_eq!(buffer.to_string(), "adf\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
         assert_eq!(
@@ -2304,7 +2309,7 @@ mod tests {
         );
 
         buffer.edit(&[5..5], "ghi\n", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "adf\nbghi\nc");
+        assert_eq!(buffer.to_string(), "adf\nbghi\nc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 9);
         assert_eq!(
@@ -2317,7 +2322,7 @@ mod tests {
         );
 
         buffer.edit(&[7..9], "", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "adf\nbghc");
+        assert_eq!(buffer.to_string(), "adf\nbghc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
         assert_eq!(
@@ -2421,7 +2426,7 @@ mod tests {
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
         buffer.edit(&[0..0], "abc", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "abc");
+        assert_eq!(buffer.to_string(), "abc");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 3);
 
@@ -2430,7 +2435,7 @@ mod tests {
 
         buffer.edit(&[3..3], "def", &mut local_clock, &mut lamport_clock);
         buffer.edit(&[0..0], "ghi", &mut local_clock, &mut lamport_clock);
-        assert_eq!(buffer.into_string(), "ghiabcdef");
+        assert_eq!(buffer.to_string(), "ghiabcdef");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
         assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
@@ -2521,7 +2526,7 @@ mod tests {
             }
 
             for buffer in &buffers[1..] {
-                assert_eq!(buffer.into_string(), buffers[0].into_string());
+                assert_eq!(buffer.to_string(), buffers[0].to_string());
             }
         }
     }
@@ -2537,12 +2542,6 @@ mod tests {
             } else {
                 Some(self.0.gen_range(b'a', b'z' + 1).into())
             }
-        }
-    }
-
-    impl Iter {
-        fn into_string(self) -> String {
-            String::from_utf16_lossy(&self.collect::<Vec<u16>>())
         }
     }
 }
