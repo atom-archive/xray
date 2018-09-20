@@ -1,6 +1,6 @@
 export let memoPromise = import("../dist/memo_wasm");
 
-async function initialize() {
+export async function initialize() {
   const memo = await memoPromise;
 
   class WorkTree {
@@ -56,33 +56,3 @@ function collect(iterator) {
   }
   return items;
 }
-
-async function test() {
-  const { WorkTree, FileType } = await initialize();
-
-  const baseEntries = [
-    { depth: 1, name: "a", type: FileType.Directory },
-    { depth: 2, name: "b", type: FileType.Directory },
-    { depth: 3, name: "c", type: FileType.Text }
-  ];
-
-  const tree1 = new WorkTree(1);
-  tree1.appendBaseEntries(baseEntries);
-  let file1 = tree1.newTextFile();
-
-  const tree2 = new WorkTree(2);
-  tree2.appendBaseEntries(baseEntries);
-  let file2 = tree2.newTextFile();
-
-  try {
-    tree1.openTextFile(file2.fileId, "");
-  } catch (error) {
-    console.log(`Caught error`)
-  }
-
-  tree1.applyOps([file2.operation]);
-  tree2.applyOps([file1.operation]);
-  const buffer1 = tree1.openTextFile(file2.fileId, "");
-}
-
-test();
