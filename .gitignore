@@ -2,6 +2,7 @@
 **/target/
 **/*.rs.bk
 **/.DS_Store
+**/.cargo
 Icon*
 .tags*
 xray_wasm/dist

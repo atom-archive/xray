@@ -83,7 +83,7 @@ pub enum Operation {
     },
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidPath,
     InvalidFileId,

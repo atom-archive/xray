@@ -35,6 +35,15 @@ async function initialize() {
       let result = this.workTree.new_directory(parentId, name);
       return { fileId: result.file_id(), operation: result.operation() };
     }
+
+    openTextFile(fileId, baseText) {
+      let result = this.workTree.open_text_file(fileId, baseText);
+      if (result.is_ok()) {
+        return result.buffer_id();
+      } else {
+        throw new Error(result.error().to_string());
+      }
+    }
   }
 
   return { WorkTree, FileType: memo.FileType };
@@ -65,8 +74,15 @@ async function test() {
   tree2.appendBaseEntries(baseEntries);
   let file2 = tree2.newTextFile();
 
+  try {
+    tree1.openTextFile(file2.fileId, "");
+  } catch (error) {
+    console.log(`Caught error`)
+  }
+
   tree1.applyOps([file2.operation]);
   tree2.applyOps([file1.operation]);
+  const buffer1 = tree1.openTextFile(file2.fileId, "");
 }
 
 test();
