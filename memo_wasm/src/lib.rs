@@ -17,6 +17,7 @@ pub struct GlobalTime(time::Global);
 pub struct WorkTree {
     tree: memo_core::WorkTree,
     base_entries_to_append: Vec<memo_core::DirEntry>,
+    ops_to_apply: Vec<memo_core::Operation>,
 }
 
 #[wasm_bindgen]
@@ -59,6 +60,7 @@ impl WorkTree {
         WorkTree {
             tree: memo_core::WorkTree::new(replica_id),
             base_entries_to_append: Vec::new(),
+            ops_to_apply: Vec::new(),
         }
     }
 
@@ -66,7 +68,7 @@ impl WorkTree {
         GlobalTime(self.tree.version())
     }
 
-    pub fn append_base_entry(&mut self, depth: usize, name: String, file_type: FileType) {
+    pub fn push_base_entry(&mut self, depth: usize, name: String, file_type: FileType) {
         self.base_entries_to_append.push(memo_core::DirEntry {
             depth,
             name: OsString::from(name),
@@ -83,12 +85,13 @@ impl WorkTree {
         OperationIter(fixup_ops.into_iter().peekable())
     }
 
-    pub fn apply_ops(&mut self, ops: Vec<u8>) -> OperationIter {
+    pub fn push_op(&mut self, op: Operation) {
+        self.ops_to_apply.push(op.0.as_ref().clone());
+    }
+
+    pub fn flush_ops(&mut self) -> OperationIter {
         // TODO: return an error instead of unwrapping once wasm_bindgen supports Result.
-        let fixup_ops = self
-            .tree
-            .apply_ops(bincode::deserialize::<Vec<_>>(&ops).unwrap())
-            .unwrap();
+        let fixup_ops = self.tree.apply_ops(self.ops_to_apply.drain(..)).unwrap();
         OperationIter(fixup_ops.into_iter().peekable())
     }
 
