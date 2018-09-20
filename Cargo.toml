@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "memo",
+    "memo_core",
     "xray_core",
     "xray_server",
     "xray_cli",
