@@ -2,13 +2,21 @@
 extern crate lazy_static;
 #[cfg(test)]
 extern crate rand;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde;
 extern crate smallvec;
 
 mod btree;
-pub mod buffer;
+mod buffer;
 mod operation_queue;
-mod time;
-pub mod work_tree;
+pub mod time;
+mod work_tree;
 
+pub use buffer::Buffer;
+pub use work_tree::{
+    BufferId, Cursor, CursorEntry, DirEntry, Error, FileId, FileStatus, FileType, Operation,
+    WorkTree,
+};
 pub type ReplicaId = u64;
 pub type UserId = u64;

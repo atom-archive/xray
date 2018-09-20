@@ -1,6 +1,7 @@
 use btree::{self, SeekBias};
 use buffer::{self, Buffer, Text};
 use operation_queue::{self, OperationQueue};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -46,22 +47,30 @@ pub struct CursorEntry {
 
 #[derive(Clone, Debug)]
 pub struct DirEntry {
-    depth: usize,
-    name: OsString,
-    file_type: FileType,
+    pub depth: usize,
+    pub name: OsString,
+    pub file_type: FileType,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Operation {
     InsertMetadata {
         file_id: FileId,
         file_type: FileType,
+        #[serde(
+            serialize_with = "serialize_parent",
+            deserialize_with = "deserialize_parent"
+        )]
         parent: Option<(FileId, Arc<OsString>)>,
         local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
     },
     UpdateParent {
         child_id: FileId,
+        #[serde(
+            serialize_with = "serialize_parent",
+            deserialize_with = "deserialize_parent"
+        )]
         new_parent: Option<(FileId, Arc<OsString>)>,
         local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
@@ -84,7 +93,7 @@ pub enum Error {
     CursorExhausted,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum FileId {
     Base(u64),
     New(time::Local),
@@ -102,7 +111,7 @@ pub enum FileStatus {
     Unchanged,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FileType {
     Directory,
     Text,
@@ -1278,6 +1287,27 @@ impl btree::Dimension<ChildRefValueSummary> for usize {
     fn from_summary(summary: &ChildRefValueSummary) -> Self {
         summary.visible_count
     }
+}
+
+fn serialize_parent<S>(
+    parent: &Option<(FileId, Arc<OsString>)>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    parent
+        .as_ref()
+        .map(|(parent_id, name)| (parent_id, name.to_string_lossy()))
+        .serialize(serializer)
+}
+
+fn deserialize_parent<'de, D>(deserializer: D) -> Result<Option<(FileId, Arc<OsString>)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let parent = <Option<(FileId, String)>>::deserialize(deserializer)?;
+    Ok(parent.map(|(parent_id, name)| (parent_id, Arc::new(OsString::from(name)))))
 }
 
 #[cfg(test)]

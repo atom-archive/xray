@@ -1,5 +1,6 @@
 use btree::{self, SeekBias};
 use operation_queue::{self, OperationQueue};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
@@ -158,7 +159,7 @@ struct InsertionSplitSummary {
     extent: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Operation {
     id: time::Local,
     start_id: time::Local,
@@ -167,6 +168,10 @@ pub struct Operation {
     end_offset: usize,
     version_in_range: time::Global,
     timestamp: time::Lamport,
+    #[serde(
+        serialize_with = "serialize_op_text",
+        deserialize_with = "deserialize_op_text"
+    )]
     new_text: Option<Arc<Text>>,
 }
 
@@ -1971,6 +1976,24 @@ impl operation_queue::Operation for Operation {
     fn timestamp(&self) -> time::Lamport {
         self.timestamp
     }
+}
+
+fn serialize_op_text<S>(op_text: &Option<Arc<Text>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    op_text
+        .as_ref()
+        .map(|text| &text.code_units)
+        .serialize(serializer)
+}
+
+fn deserialize_op_text<'de, D>(deserializer: D) -> Result<Option<Arc<Text>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let code_units = <Option<Vec<u16>>>::deserialize(deserializer)?;
+    Ok(code_units.map(|code_units| Arc::new(Text::new(code_units))))
 }
 
 #[cfg(test)]

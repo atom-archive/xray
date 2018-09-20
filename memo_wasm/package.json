@@ -1,0 +1,13 @@
+{
+  "name": "memo_wasm",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "install": "script/build"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "webpack": "^4.6.0",
+    "webpack-cli": "^2.0.15"
+  }
+}

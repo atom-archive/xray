@@ -1,0 +1,13 @@
+[package]
+name = "memo_wasm"
+version = "0.1.0"
+authors = ["Antonio Scandurra <as-cii@github.com>", "Nathan Sobo <nathan@github.com>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bincode = "1.0"
+js-sys = "0.2"
+memo_core = { path = "../memo_core" }
+wasm-bindgen = "0.2.21"

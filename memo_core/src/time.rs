@@ -1,19 +1,26 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::{self, Ordering};
 use std::collections::HashMap;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 use ReplicaId;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize)]
 pub struct Local {
     pub replica_id: ReplicaId,
     pub seq: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Global(Arc<HashMap<ReplicaId, u64>>);
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Global(
+    #[serde(
+        serialize_with = "Global::serialize_inner",
+        deserialize_with = "Global::deserialize_inner"
+    )]
+    Arc<HashMap<ReplicaId, u64>>,
+);
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Lamport {
     pub value: u64,
     pub replica_id: ReplicaId,
@@ -73,6 +80,23 @@ impl Global {
 
     pub fn observed(&self, timestamp: Local) -> bool {
         self.get(timestamp.replica_id) >= timestamp.seq
+    }
+
+    fn serialize_inner<S>(
+        inner: &Arc<HashMap<ReplicaId, u64>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        inner.serialize(serializer)
+    }
+
+    fn deserialize_inner<'de, D>(deserializer: D) -> Result<Arc<HashMap<ReplicaId, u64>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Arc::new(HashMap::deserialize(deserializer)?))
     }
 }
 
