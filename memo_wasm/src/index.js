@@ -1,58 +1,82 @@
-export let memoPromise = import("../dist/memo_wasm");
+let server;
+
+const memoImportPromise = import("../dist/memo_wasm");
 
 export async function initialize() {
-  const memo = await memoPromise;
-
-  class WorkTree {
-    constructor(replicaId) {
-      this.workTree = memo.WorkTree.new(BigInt(replicaId));
-    }
-
-    appendBaseEntries(baseEntries) {
-      for (const baseEntry of baseEntries) {
-        this.workTree.push_base_entry(
-          baseEntry.depth,
-          baseEntry.name,
-          baseEntry.type
-        );
-      }
-      return collect(this.workTree.flush_base_entries());
-    }
-
-    applyOps(ops) {
-      for (const op of ops) {
-        this.workTree.push_op(op);
-      }
-      return collect(this.workTree.flush_ops());
-    }
-
-    newTextFile() {
-      let result = this.workTree.new_text_file();
-      return { fileId: result.file_id(), operation: result.operation() };
-    }
-
-    newDirectory(parentId, name) {
-      let result = this.workTree.new_directory(parentId, name);
-      return { fileId: result.file_id(), operation: result.operation() };
-    }
-
-    openTextFile(fileId, baseText) {
-      let result = this.workTree.open_text_file(fileId, baseText);
-      if (result.is_ok()) {
-        return result.buffer_id();
-      } else {
-        throw new Error(result.error().to_string());
-      }
-    }
+  const memo = await memoImportPromise;
+  if (!server) {
+    server = memo.Server.new();
   }
-
-  return { WorkTree, FileType: memo.FileType };
+  return { WorkTree };
 }
 
-function collect(iterator) {
-  let items = [];
-  while (iterator.has_next()) {
-    items.push(iterator.next());
+function request(req) {
+  const response = server.request(req);
+  if (response.type == "Error") {
+    throw new Error(response.message);
+  } else {
+    return response;
   }
-  return items;
+}
+
+class WorkTree {
+  static getRootFileId() {
+    if (!WorkTree.rootFileId) {
+      WorkTree.rootFileId = request({ type: "GetRootFileId" }).file_id;
+    }
+    return WorkTree.rootFileId;
+  }
+
+  constructor(replicaId) {
+    this.id = request({
+      type: "CreateWorkTree",
+      replica_id: replicaId
+    }).tree_id;
+  }
+
+  appendBaseEntries(baseEntries) {
+    request({
+      type: "AppendBaseEntries",
+      tree_id: this.id,
+      entries: baseEntries
+    });
+  }
+
+  applyOps(operations) {
+    const response = request({
+      type: "ApplyOperations",
+      tree_id: this.id,
+      operations
+    });
+    return response.operations;
+  }
+
+  newTextFile() {
+    const { file_id, operation } = request({
+      type: "NewTextFile",
+      tree_id: this.id
+    });
+    return { fileId: file_id, operation };
+  }
+
+  createDirectory(parentId, name) {
+    const { file_id, operation } = request({
+      type: "CreateDirectory",
+      tree_id: this.id,
+      parent_id: parentId,
+      name
+    });
+
+    return { fileId: file_id, operation };
+  }
+
+  openTextFile(fileId, baseText) {
+    const response = request({
+      type: "OpenTextFile",
+      tree_id: this.id,
+      file_id: fileId,
+      base_text: baseText
+    });
+    return response.buffer_id;
+  }
 }

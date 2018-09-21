@@ -1,185 +1,206 @@
 extern crate bincode;
 extern crate js_sys;
 extern crate memo_core;
+#[macro_use]
+extern crate serde_derive;
+extern crate base64;
+extern crate serde;
 extern crate wasm_bindgen;
 
-use memo_core::time;
-use std::ffi::OsString;
-use std::iter;
-use std::rc::Rc;
-use std::vec;
+use memo_core::*;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
-#[wasm_bindgen]
-pub struct GlobalTime(time::Global);
+pub type WorkTreeId = u32;
 
 #[wasm_bindgen]
-pub struct WorkTree {
-    tree: memo_core::WorkTree,
-    base_entries_to_append: Vec<memo_core::DirEntry>,
-    ops_to_apply: Vec<memo_core::Operation>,
+pub struct Server {
+    work_trees: HashMap<WorkTreeId, WorkTree>,
+    next_work_tree_id: WorkTreeId,
 }
 
-#[wasm_bindgen]
-#[derive(Clone, Copy)]
-pub struct Error(memo_core::Error);
-
-#[wasm_bindgen]
-#[derive(Clone, Copy)]
-pub struct FileId(memo_core::FileId);
-
-#[wasm_bindgen]
-#[derive(Clone, Copy)]
-pub struct BufferId(memo_core::BufferId);
-
-#[wasm_bindgen]
-#[derive(Clone)]
-pub struct Operation(Rc<memo_core::Operation>);
-
-#[wasm_bindgen]
-pub struct OperationIter(iter::Peekable<vec::IntoIter<memo_core::Operation>>);
-
-#[wasm_bindgen]
-pub struct NewFileResult {
-    file_id: FileId,
-    operation: Operation,
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum Request {
+    GetRootFileId,
+    CreateWorkTree {
+        replica_id: ReplicaId,
+    },
+    AppendBaseEntries {
+        tree_id: WorkTreeId,
+        entries: Vec<DirEntry>,
+    },
+    ApplyOperations {
+        tree_id: WorkTreeId,
+        operations: Vec<Base64<Operation>>,
+    },
+    NewTextFile {
+        tree_id: WorkTreeId,
+    },
+    CreateDirectory {
+        tree_id: WorkTreeId,
+        parent_id: Base64<FileId>,
+        name: String,
+    },
+    OpenTextFile {
+        tree_id: WorkTreeId,
+        file_id: Base64<FileId>,
+        base_text: String,
+    },
 }
 
-#[wasm_bindgen]
-pub struct OpenTextFileResult {
-    buffer_id: Option<BufferId>,
-    error: Option<Error>,
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum Response {
+    Ok,
+    Error {
+        message: String,
+    },
+    GetRootFileId {
+        file_id: Base64<FileId>,
+    },
+    CreateWorkTree {
+        tree_id: WorkTreeId,
+    },
+    NewTextFile {
+        file_id: Base64<FileId>,
+        operation: Base64<Operation>,
+    },
+    CreateDirectory {
+        file_id: Base64<FileId>,
+        operation: Base64<Operation>,
+    },
+    OpenTextFile {
+        buffer_id: Base64<BufferId>,
+    },
+    ApplyOperations {
+        operations: Vec<Base64<Operation>>,
+    },
 }
 
-#[wasm_bindgen]
-pub enum FileType {
-    Directory,
-    Text,
-}
+struct Base64<T>(T);
 
 #[wasm_bindgen]
-impl WorkTree {
-    pub fn new(replica_id: memo_core::ReplicaId) -> Self {
-        WorkTree {
-            tree: memo_core::WorkTree::new(replica_id),
-            base_entries_to_append: Vec::new(),
-            ops_to_apply: Vec::new(),
+impl Server {
+    pub fn new() -> Self {
+        Self {
+            work_trees: HashMap::new(),
+            next_work_tree_id: 0,
         }
     }
 
-    pub fn version(&self) -> GlobalTime {
-        GlobalTime(self.tree.version())
-    }
-
-    pub fn push_base_entry(&mut self, depth: usize, name: String, file_type: FileType) {
-        self.base_entries_to_append.push(memo_core::DirEntry {
-            depth,
-            name: OsString::from(name),
-            file_type: file_type.into(),
-        });
-    }
-
-    pub fn flush_base_entries(&mut self) -> OperationIter {
-        // TODO: return an error instead of unwrapping once wasm_bindgen supports Result.
-        let fixup_ops = self
-            .tree
-            .append_base_entries(self.base_entries_to_append.drain(..))
-            .unwrap();
-        OperationIter(fixup_ops.into_iter().peekable())
-    }
-
-    pub fn push_op(&mut self, op: &Operation) {
-        self.ops_to_apply.push(op.0.as_ref().clone());
-    }
-
-    pub fn flush_ops(&mut self) -> OperationIter {
-        // TODO: return an error instead of unwrapping once wasm_bindgen supports Result.
-        let fixup_ops = self.tree.apply_ops(self.ops_to_apply.drain(..)).unwrap();
-        OperationIter(fixup_ops.into_iter().peekable())
-    }
-
-    pub fn new_text_file(&mut self) -> NewFileResult {
-        let (file_id, op) = self.tree.new_text_file();
-        NewFileResult {
-            file_id: FileId(file_id),
-            operation: Operation(Rc::new(op)),
-        }
-    }
-
-    pub fn new_dir(&mut self, parent_id: &FileId, name: String) -> NewFileResult {
-        // TODO: return an error instead of unwrapping once wasm_bindgen supports Result.
-        let (file_id, op) = self
-            .tree
-            .new_dir(parent_id.0, OsString::from(name))
-            .unwrap();
-        NewFileResult {
-            file_id: FileId(file_id),
-            operation: Operation(Rc::new(op)),
-        }
-    }
-
-    pub fn open_text_file(&mut self, file_id: &FileId, base_text: String) -> OpenTextFileResult {
-        let result = self
-            .tree
-            .open_text_file(file_id.0, base_text.as_str().into());
-
-        OpenTextFileResult {
-            buffer_id: result.ok().map(|buffer_id| BufferId(buffer_id)),
-            error: result.err().map(|err| Error(err)),
-        }
-    }
-
-    //                 pub fn rename<N>(
-    //                     pub fn remove(&mut self, file_id: FileId) -> Result<Operation, Error> {
-    //                         pub fn edit<'a, I, T>(
-    //                             pub fn file_id<P>(&self, path: P) -> Result<FileId, Error>
-    //                             pub fn path(&self, file_id: FileId) -> Result<PathBuf, Error> {
-    //                                 pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
-    //                                     pub fn changes_since(
-}
-
-#[wasm_bindgen]
-impl OperationIter {
-    pub fn has_next(&mut self) -> bool {
-        self.0.peek().is_some()
-    }
-
-    pub fn next(&mut self) -> Operation {
-        Operation(Rc::new(self.0.next().unwrap()))
+    pub fn request(&mut self, request: JsValue) -> JsValue {
+        let response = match request.into_serde::<Request>() {
+            Ok(request) => match self.request_internal(request) {
+                Ok(response) => response,
+                Err(message) => Response::Error {
+                    message: message.into(),
+                },
+            },
+            Err(error) => Response::Error {
+                message: error.to_string(),
+            },
+        };
+        JsValue::from_serde(&response).unwrap()
     }
 }
 
-#[wasm_bindgen]
-impl NewFileResult {
-    pub fn file_id(&self) -> FileId {
-        self.file_id
-    }
-
-    pub fn operation(&mut self) -> Operation {
-        self.operation.clone()
-    }
-}
-
-#[wasm_bindgen]
-impl OpenTextFileResult {
-    pub fn is_ok(&self) -> bool {
-        self.buffer_id.is_some()
-    }
-
-    pub fn buffer_id(&self) -> BufferId {
-        self.buffer_id.unwrap()
-    }
-
-    pub fn error(&self) -> Error {
-        self.error.unwrap()
-    }
-}
-
-impl Into<memo_core::FileType> for FileType {
-    fn into(self) -> memo_core::FileType {
-        match self {
-            FileType::Text => memo_core::FileType::Text,
-            FileType::Directory => memo_core::FileType::Directory,
+impl Server {
+    fn request_internal(&mut self, request: Request) -> Result<Response, String> {
+        match request {
+            Request::GetRootFileId => Ok(Response::GetRootFileId {
+                file_id: Base64(ROOT_FILE_ID),
+            }),
+            Request::CreateWorkTree { replica_id } => {
+                let tree_id = self.next_work_tree_id;
+                self.next_work_tree_id += 1;
+                self.work_trees.insert(tree_id, WorkTree::new(replica_id));
+                Ok(Response::CreateWorkTree { tree_id })
+            }
+            Request::AppendBaseEntries { tree_id, entries } => {
+                self.get_work_tree(tree_id)?
+                    .append_base_entries(entries)
+                    .map_err(|e| e.to_string())?;
+                Ok(Response::Ok)
+            }
+            Request::ApplyOperations {
+                tree_id,
+                operations,
+            } => {
+                let fixup_ops = self
+                    .get_work_tree(tree_id)?
+                    .apply_ops(operations.into_iter().map(|op| op.0))
+                    .map_err(|e| e.to_string())?;
+                Ok(Response::ApplyOperations {
+                    operations: fixup_ops
+                        .into_iter()
+                        .map(|op| Base64(op))
+                        .collect::<Vec<_>>(),
+                })
+            }
+            Request::NewTextFile { tree_id } => {
+                let (file_id, operation) = self.get_work_tree(tree_id)?.new_text_file();
+                Ok(Response::NewTextFile {
+                    file_id: Base64(file_id),
+                    operation: Base64(operation),
+                })
+            }
+            Request::CreateDirectory {
+                tree_id,
+                parent_id: Base64(parent_id),
+                name,
+            } => {
+                let (file_id, operation) = self
+                    .get_work_tree(tree_id)?
+                    .create_dir(parent_id, name)
+                    .map_err(|e| e.to_string())?;
+                Ok(Response::CreateDirectory {
+                    file_id: Base64(file_id),
+                    operation: Base64(operation),
+                })
+            }
+            Request::OpenTextFile {
+                tree_id,
+                file_id: Base64(file_id),
+                base_text,
+            } => {
+                let buffer_id = self
+                    .get_work_tree(tree_id)?
+                    .open_text_file(file_id, base_text.as_str())
+                    .map_err(|e| e.to_string())?;
+                Ok(Response::OpenTextFile {
+                    buffer_id: Base64(buffer_id),
+                })
+            }
         }
+    }
+
+    fn get_work_tree(&mut self, tree_id: WorkTreeId) -> Result<&mut WorkTree, String> {
+        self.work_trees
+            .get_mut(&tree_id)
+            .ok_or_else(|| "WorkTree not found".into())
+    }
+}
+
+impl<T: Serialize> Serialize for Base64<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::Error;
+        base64::encode(&bincode::serialize(&self.0).map_err(Error::custom)?).serialize(serializer)
+    }
+}
+
+impl<'de1, T: for<'de2> Deserialize<'de2>> Deserialize<'de1> for Base64<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de1>,
+    {
+        use serde::de::Error;
+        let bytes = base64::decode(&String::deserialize(deserializer)?).map_err(Error::custom)?;
+        let inner = bincode::deserialize::<T>(&bytes).map_err(D::Error::custom)?;
+        Ok(Base64(inner))
     }
 }

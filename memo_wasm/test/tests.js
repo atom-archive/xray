@@ -2,22 +2,24 @@ const memo = require("../dist");
 const assert = require("assert");
 
 suite("WorkTree", () => {
-  let WorkTree, FileType;
+  let WorkTree;
 
   suiteSetup(async () => {
-    ({WorkTree, FileType} = await memo.initialize());
+    ({WorkTree} = await memo.initialize());
   });
 
   test("basic API interaction", () => {
+    const rootFileId = WorkTree.getRootFileId();
     const baseEntries = [
-      { depth: 1, name: "a", type: FileType.Directory },
-      { depth: 2, name: "b", type: FileType.Directory },
-      { depth: 3, name: "c", type: FileType.Text }
+      { depth: 1, name: "a", file_type: "Directory" },
+      { depth: 2, name: "b", file_type: "Directory" },
+      { depth: 3, name: "c", file_type: "Text" }
     ];
 
     const tree1 = new WorkTree(1);
     tree1.appendBaseEntries(baseEntries);
-    let file1 = tree1.newTextFile();
+    const file1 = tree1.newTextFile();
+    const dir1 = tree1.createDirectory(rootFileId, "x");
 
     const tree2 = new WorkTree(2);
     tree2.appendBaseEntries(baseEntries);
@@ -25,7 +27,7 @@ suite("WorkTree", () => {
 
     assert.throws(() => {
       tree1.openTextFile(file2.fileId, "");
-    })
+    });
 
     tree1.applyOps([file2.operation]);
     tree2.applyOps([file1.operation]);

@@ -6,13 +6,14 @@ use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::ops::{Add, AddAssign, Range};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use time;
 use ReplicaId;
 
-const ROOT_FILE_ID: FileId = FileId::Base(0);
+pub const ROOT_FILE_ID: FileId = FileId::Base(0);
 
 #[derive(Clone)]
 pub struct WorkTree {
@@ -45,9 +46,13 @@ pub struct CursorEntry {
     status: FileStatus,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DirEntry {
     pub depth: usize,
+    #[serde(
+        serialize_with = "serialize_os_string",
+        deserialize_with = "deserialize_os_string"
+    )]
     pub name: OsString,
     pub file_type: FileType,
 }
@@ -99,7 +104,7 @@ pub enum FileId {
     New(time::Local),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BufferId(FileId);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -493,7 +498,11 @@ impl WorkTree {
         (file_id, operation)
     }
 
-    pub fn new_dir<N>(&mut self, parent_id: FileId, name: N) -> Result<(FileId, Operation), Error>
+    pub fn create_dir<N>(
+        &mut self,
+        parent_id: FileId,
+        name: N,
+    ) -> Result<(FileId, Operation), Error>
     where
         N: AsRef<OsStr>,
     {
@@ -519,7 +528,10 @@ impl WorkTree {
         }
     }
 
-    pub fn open_text_file(&mut self, file_id: FileId, base_text: Text) -> Result<BufferId, Error> {
+    pub fn open_text_file<T>(&mut self, file_id: FileId, base_text: T) -> Result<BufferId, Error>
+    where
+        T: Into<Text>,
+    {
         self.check_file_id(file_id, Some(FileType::Text))?;
 
         match self.text_files.remove(&file_id) {
@@ -1047,6 +1059,12 @@ impl operation_queue::Operation for Operation {
     }
 }
 
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
 impl btree::Dimension<FileId> for FileId {
     fn from_summary(summary: &Self) -> Self {
         *summary
@@ -1289,6 +1307,20 @@ impl btree::Dimension<ChildRefValueSummary> for usize {
     }
 }
 
+fn serialize_os_string<S>(os_string: &OsString, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    os_string.to_string_lossy().serialize(serializer)
+}
+
+fn deserialize_os_string<'de, D>(deserializer: D) -> Result<OsString, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(OsString::from(String::deserialize(deserializer)?))
+}
+
 fn serialize_parent<S>(
     parent: &Option<(FileId, Arc<OsString>)>,
     serializer: S,
@@ -1350,7 +1382,7 @@ mod tests {
         let a = tree.file_id("a").unwrap();
         let (file_1, _) = tree.new_text_file();
         tree.rename(file_1, a, "e").unwrap();
-        tree.new_dir(a, "z").unwrap();
+        tree.create_dir(a, "z").unwrap();
 
         let fixup_ops = tree
             .append_base_entries(vec![
@@ -1735,7 +1767,7 @@ mod tests {
 
                     if rng.gen() {
                         loop {
-                            match self.new_dir(parent_id, gen_name(rng)) {
+                            match self.create_dir(parent_id, gen_name(rng)) {
                                 Ok((_, op)) => {
                                     ops.push(op);
                                     break;
