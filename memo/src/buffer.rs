@@ -1,19 +1,17 @@
 use btree::{self, SeekBias};
-use notify_cell::{NotifyCell, NotifyCellObserver};
-use replica_context::ReplicaContext;
+use operation_queue::{self, OperationQueue};
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::iter;
 use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
-use std::rc::Rc;
 use std::sync::Arc;
 use time;
+use ReplicaId;
 use UserId;
 
 type SelectionSetVersion = usize;
-pub type BufferId = usize;
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum Error {
@@ -23,16 +21,16 @@ pub enum Error {
     SelectionSetNotFound,
 }
 
+#[derive(Clone)]
 pub struct Buffer {
-    id: BufferId,
     fragments: btree::Tree<Fragment>,
     insertion_splits: HashMap<time::Local, btree::Tree<InsertionSplit>>,
     anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
     offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: time::Global,
-    updates: NotifyCell<()>,
     selections: HashMap<time::Local, SelectionSet>,
-    ctx: Rc<RefCell<ReplicaContext>>,
+    deferred_ops: OperationQueue<Operation>,
+    deferred_replicas: HashSet<ReplicaId>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
@@ -69,20 +67,28 @@ pub struct Selection {
     pub goal_column: Option<u32>,
 }
 
+#[derive(Clone)]
 struct SelectionSet {
     user_id: UserId,
     selections: Vec<Selection>,
     version: SelectionSetVersion,
 }
 
-pub struct SelectionSetState {
-    user_id: UserId,
-    selections: Vec<Selection>,
-}
-
-pub struct Cursor {
+pub struct Iter {
     fragment_cursor: btree::Cursor<Fragment>,
     fragment_offset: usize,
+    reversed: bool,
+}
+
+struct ChangesIter {
+    cursor: btree::Cursor<Fragment>,
+    since: time::Global,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Change {
+    pub range: Range<usize>,
+    pub code_units: Vec<u16>,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -152,7 +158,7 @@ struct InsertionSplitSummary {
     extent: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Operation {
     id: time::Local,
     start_id: time::Local,
@@ -165,43 +171,66 @@ pub struct Operation {
 }
 
 impl Buffer {
-    pub fn new(id: BufferId, ctx: Rc<RefCell<ReplicaContext>>) -> Self {
-        // Push start sentinel.
-        let sentinel_id = time::Local::new(0);
-        let fragments = btree::Tree::from_item(Fragment::new(
-            FragmentId::min_value(),
-            Insertion {
-                id: sentinel_id,
-                parent_id: time::Local::new(0),
-                offset_in_parent: 0,
-                text: Arc::new(Text::new(vec![])),
-                timestamp: time::Lamport::new(0),
-            },
-        ));
+    pub fn new<T>(base_text: T) -> Self
+    where
+        T: Into<Text>,
+    {
         let mut insertion_splits = HashMap::new();
+        let mut fragments = btree::Tree::new();
+
+        let base_insertion = Insertion {
+            id: time::Local::default(),
+            parent_id: time::Local::default(),
+            offset_in_parent: 0,
+            text: Arc::new(base_text.into()),
+            timestamp: time::Lamport::default(),
+        };
+
         insertion_splits.insert(
-            sentinel_id,
+            base_insertion.id,
             btree::Tree::from_item(InsertionSplit {
                 fragment_id: FragmentId::min_value(),
                 extent: 0,
             }),
         );
+        fragments.push(Fragment {
+            id: FragmentId::min_value(),
+            insertion: base_insertion.clone(),
+            start_offset: 0,
+            end_offset: 0,
+            deletions: HashSet::new(),
+        });
+
+        if base_insertion.text.len() > 0 {
+            let base_fragment_id =
+                FragmentId::between(&FragmentId::min_value(), &FragmentId::max_value());
+
+            insertion_splits
+                .get_mut(&base_insertion.id)
+                .unwrap()
+                .push(InsertionSplit {
+                    fragment_id: base_fragment_id.clone(),
+                    extent: base_insertion.text.len(),
+                });
+            fragments.push(Fragment {
+                id: base_fragment_id,
+                start_offset: 0,
+                end_offset: base_insertion.text.len(),
+                insertion: base_insertion,
+                deletions: HashSet::new(),
+            });
+        }
 
         Self {
-            id,
             fragments,
             insertion_splits,
             anchor_cache: RefCell::new(HashMap::default()),
             offset_cache: RefCell::new(HashMap::default()),
             version: time::Global::new(),
-            updates: NotifyCell::new(()),
             selections: HashMap::default(),
-            ctx,
+            deferred_ops: OperationQueue::new(),
+            deferred_replicas: HashSet::new(),
         }
-    }
-
-    pub fn id(&self) -> BufferId {
-        self.id
     }
 
     pub fn len(&self) -> usize {
@@ -228,31 +257,16 @@ impl Buffer {
     }
 
     pub fn line(&self, row: u32) -> Result<Vec<u16>, Error> {
-        let mut cursor = self.cursor_at_point(Point::new(row, 0));
-        if cursor.code_unit().is_none() {
+        let mut iterator = self.iter_at_point(Point::new(row, 0)).peekable();
+        if iterator.peek().is_none() {
             Err(Error::OffsetOutOfRange)
         } else {
-            let mut line = Vec::new();
-            while let Some(c) = cursor.code_unit() {
-                if c == b'\n' as u16 {
-                    break;
-                } else {
-                    line.push(c);
-                    cursor.next();
-                }
-            }
-            Ok(line)
+            Ok(iterator.take_while(|c| *c != u16::from(b'\n')).collect())
         }
     }
 
     pub fn to_u16_chars(&self) -> Vec<u16> {
-        let mut chars = Vec::with_capacity(self.len());
-        let mut cursor = self.cursor();
-        while let Some(c) = cursor.code_unit() {
-            chars.push(c);
-            cursor.next();
-        }
-        chars
+        self.iter().collect::<Vec<u16>>()
     }
 
     #[cfg(test)]
@@ -260,15 +274,25 @@ impl Buffer {
         String::from_utf16_lossy(&self.to_u16_chars())
     }
 
-    pub fn cursor(&self) -> Cursor {
-        Cursor::new(self)
+    pub fn iter(&self) -> Iter {
+        Iter::new(self)
     }
 
-    pub fn cursor_at_point(&self, point: Point) -> Cursor {
-        Cursor::at_point(self, point)
+    pub fn iter_at_point(&self, point: Point) -> Iter {
+        Iter::at_point(self, point)
     }
 
-    pub fn edit<'a, I, T>(&mut self, old_ranges: I, new_text: T) -> Vec<Arc<Operation>>
+    pub fn changes_since(&self, version: time::Global) -> impl Iterator<Item = Change> {
+        ChangesIter::new(self, version)
+    }
+
+    pub fn edit<'a, I, T>(
+        &mut self,
+        old_ranges: I,
+        new_text: T,
+        local_clock: &mut time::Local,
+        lamport_clock: &mut time::Lamport,
+    ) -> Vec<Operation>
     where
         I: IntoIterator<Item = &'a Range<usize>>,
         T: Into<Text>,
@@ -287,11 +311,12 @@ impl Buffer {
                 .into_iter()
                 .filter(|old_range| new_text.is_some() || old_range.end > old_range.start),
             new_text.clone(),
+            local_clock,
+            lamport_clock,
         );
         if let Some(op) = ops.last() {
-            self.version.include(&op.id);
+            self.version.observe(op.id);
         }
-        self.updates.set(());
         ops
     }
 
@@ -299,15 +324,15 @@ impl Buffer {
         &mut self,
         user_id: UserId,
         selections: Vec<Selection>,
+        local_clock: &mut time::Local,
     ) -> time::Local {
         let set = SelectionSet {
             version: 0,
             selections,
             user_id,
         };
-        let id = self.ctx.borrow_mut().local_time();
+        let id = local_clock.tick();
         self.selections.insert(id, set);
-        self.updates.set(());
         id
     }
 
@@ -315,7 +340,6 @@ impl Buffer {
         self.selections
             .remove(&id)
             .ok_or(Error::SelectionSetNotFound)?;
-        self.updates.set(());
         Ok(())
     }
 
@@ -386,7 +410,6 @@ impl Buffer {
         self.merge_selections(&mut set.selections);
         set.version += 1;
         self.selections.insert(set_id, set);
-        self.updates.set(());
         Ok(())
     }
 
@@ -418,12 +441,27 @@ impl Buffer {
         *selections = new_selections;
     }
 
-    pub fn updates(&self) -> NotifyCellObserver<()> {
-        self.updates.observe()
+    pub fn apply_ops<I: IntoIterator<Item = Operation>>(
+        &mut self,
+        ops: I,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<(), Error> {
+        let mut deferred_ops = Vec::new();
+        for op in ops {
+            if self.can_apply_op(&op) {
+                self.apply_op(op, lamport_clock)?;
+            } else {
+                self.deferred_replicas.insert(op.id.replica_id);
+                deferred_ops.push(op);
+            }
+        }
+        self.deferred_ops.insert(deferred_ops);
+        self.flush_deferred_ops(lamport_clock)?;
+        Ok(())
     }
 
-    fn integrate_op(&mut self, op: Arc<Operation>) -> Result<(), Error> {
-        self.integrate_edit(
+    fn apply_op(&mut self, op: Operation, lamport_clock: &mut time::Lamport) -> Result<(), Error> {
+        self.apply_edit(
             op.id,
             op.start_id,
             op.start_offset,
@@ -432,14 +470,14 @@ impl Buffer {
             op.new_text.as_ref().cloned(),
             &op.version_in_range,
             op.timestamp,
+            lamport_clock,
         )?;
         self.anchor_cache.borrow_mut().clear();
         self.offset_cache.borrow_mut().clear();
-        self.updates.set(());
         Ok(())
     }
 
-    fn integrate_edit(
+    fn apply_edit(
         &mut self,
         id: time::Local,
         start_id: time::Local,
@@ -449,7 +487,12 @@ impl Buffer {
         new_text: Option<Arc<Text>>,
         version_in_range: &time::Global,
         timestamp: time::Lamport,
+        lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
+        if id.seq <= self.version.get(id.replica_id) {
+            return Err(Error::InvalidOperation);
+        }
+
         let mut new_text = new_text.as_ref().cloned();
         let start_fragment_id = self.resolve_fragment_id(start_id, start_offset)?;
         let end_fragment_id = self.resolve_fragment_id(end_id, end_offset)?;
@@ -463,7 +506,7 @@ impl Buffer {
             cursor.next();
         }
 
-        while let Some(fragment) = cursor.item() {
+        while let Some(mut fragment) = cursor.item() {
             if new_text.is_none() && fragment.id > end_fragment_id {
                 break;
             }
@@ -507,7 +550,7 @@ impl Buffer {
                     new_fragments.push(fragment);
                 }
                 if let Some(mut fragment) = within_range {
-                    if version_in_range.includes(&fragment.insertion.id) {
+                    if version_in_range.observed(fragment.insertion.id) {
                         fragment.deletions.insert(id);
                     }
                     new_fragments.push(fragment);
@@ -526,8 +569,8 @@ impl Buffer {
                     ));
                 }
 
-                let mut fragment = fragment.clone();
-                if version_in_range.includes(&fragment.insertion.id) {
+                if fragment.id < end_fragment_id && version_in_range.observed(fragment.insertion.id)
+                {
                     fragment.deletions.insert(id);
                 }
                 new_fragments.push(fragment);
@@ -548,8 +591,31 @@ impl Buffer {
 
         new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
-        self.ctx.borrow_mut().observe_lamport_timestamp(timestamp);
+        self.version.observe(id);
+        lamport_clock.observe(timestamp);
         Ok(())
+    }
+
+    fn flush_deferred_ops(&mut self, lamport_clock: &mut time::Lamport) -> Result<(), Error> {
+        self.deferred_replicas.clear();
+        let mut deferred_ops = Vec::new();
+        for op in self.deferred_ops.drain() {
+            if self.can_apply_op(&op) {
+                self.apply_op(op, lamport_clock)?;
+            } else {
+                self.deferred_replicas.insert(op.id.replica_id);
+                deferred_ops.push(op);
+            }
+        }
+        self.deferred_ops.insert(deferred_ops);
+        Ok(())
+    }
+
+    fn can_apply_op(&self, op: &Operation) -> bool {
+        !self.deferred_replicas.contains(&op.id.replica_id)
+            && self.version.observed(op.start_id)
+            && self.version.observed(op.end_id)
+            && op.version_in_range <= self.version
     }
 
     fn resolve_fragment_id(
@@ -574,7 +640,9 @@ impl Buffer {
         &mut self,
         mut old_ranges: I,
         new_text: Option<Arc<Text>>,
-    ) -> Vec<Arc<Operation>>
+        local_clock: &mut time::Local,
+        lamport_clock: &mut time::Lamport,
+    ) -> Vec<Operation>
     where
         I: Iterator<Item = &'a Range<usize>>,
     {
@@ -596,8 +664,8 @@ impl Buffer {
         let mut end_offset = None;
         let mut version_in_range = time::Global::new();
 
-        let mut op_id = self.ctx.borrow_mut().local_time();
-        let mut op_timestamp = self.ctx.borrow_mut().lamport_time();
+        let mut op_id = local_clock.tick();
+        let mut op_timestamp = lamport_clock.tick();
 
         while cur_range.is_some() && cursor.item().is_some() {
             let mut fragment = cursor.item().unwrap();
@@ -672,10 +740,10 @@ impl Buffer {
                         fragment_start = range.end;
                         end_id = Some(fragment.insertion.id);
                         end_offset = Some(fragment.start_offset);
-                        version_in_range.include(&fragment.insertion.id);
+                        version_in_range.observe(fragment.insertion.id);
                     }
                 } else {
-                    version_in_range.include(&fragment.insertion.id);
+                    version_in_range.observe(fragment.insertion.id);
                     if fragment.is_visible() {
                         fragment.deletions.insert(op_id);
                     }
@@ -685,7 +753,7 @@ impl Buffer {
                 // check if it also intersects the current fragment. Otherwise we break out of the
                 // loop and find the first fragment that the splice does not contain fully.
                 if range.end <= fragment_end {
-                    ops.push(Arc::new(Operation {
+                    ops.push(Operation {
                         id: op_id,
                         start_id: start_id.unwrap(),
                         start_offset: start_offset.unwrap(),
@@ -694,7 +762,7 @@ impl Buffer {
                         new_text: new_text.clone(),
                         timestamp: op_timestamp,
                         version_in_range,
-                    }));
+                    });
 
                     start_id = None;
                     start_offset = None;
@@ -703,8 +771,8 @@ impl Buffer {
                     version_in_range = time::Global::new();
                     cur_range = old_ranges.next();
                     if cur_range.is_some() {
-                        op_id = self.ctx.borrow_mut().local_time();
-                        op_timestamp = self.ctx.borrow_mut().lamport_time();
+                        op_id = local_clock.tick();
+                        op_timestamp = lamport_clock.tick();
                     }
                 } else {
                     break;
@@ -731,14 +799,14 @@ impl Buffer {
                         if fragment.is_visible() {
                             fragment.deletions.insert(op_id);
                         }
-                        version_in_range.include(&fragment.insertion.id);
+                        version_in_range.observe(fragment.insertion.id);
                         new_fragments.push(fragment.clone());
                         cursor.next();
 
                         if range.end == fragment_end {
                             end_id = Some(fragment.insertion.id);
                             end_offset = Some(fragment.end_offset);
-                            ops.push(Arc::new(Operation {
+                            ops.push(Operation {
                                 id: op_id,
                                 start_id: start_id.unwrap(),
                                 start_offset: start_offset.unwrap(),
@@ -747,7 +815,7 @@ impl Buffer {
                                 new_text: new_text.clone(),
                                 timestamp: op_timestamp,
                                 version_in_range,
-                            }));
+                            });
 
                             start_id = None;
                             start_offset = None;
@@ -757,8 +825,8 @@ impl Buffer {
 
                             cur_range = old_ranges.next();
                             if cur_range.is_some() {
-                                op_id = self.ctx.borrow_mut().local_time();
-                                op_timestamp = self.ctx.borrow_mut().lamport_time();
+                                op_id = local_clock.tick();
+                                op_timestamp = lamport_clock.tick();
                             }
                             break;
                         }
@@ -783,7 +851,7 @@ impl Buffer {
         if cur_range.is_some() {
             debug_assert_eq!(old_ranges.next(), None);
             let last_fragment = new_fragments.last().unwrap();
-            ops.push(Arc::new(Operation {
+            ops.push(Operation {
                 id: op_id,
                 start_id: last_fragment.insertion.id,
                 start_offset: last_fragment.end_offset,
@@ -792,7 +860,7 @@ impl Buffer {
                 new_text: new_text.clone(),
                 timestamp: op_timestamp,
                 version_in_range: time::Global::new(),
-            }));
+            });
 
             if let Some(new_text) = new_text {
                 new_fragments.push(self.build_fragment_to_insert(
@@ -1217,22 +1285,14 @@ impl Ord for Point {
     }
 }
 
-impl SelectionSet {
-    fn state(&self) -> SelectionSetState {
-        SelectionSetState {
-            user_id: self.user_id,
-            selections: self.selections.clone(),
-        }
-    }
-}
-
-impl Cursor {
+impl Iter {
     fn new(buffer: &Buffer) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
         fragment_cursor.seek(&0, SeekBias::Right);
         Self {
             fragment_cursor,
             fragment_offset: 0,
+            reversed: false,
         }
     }
 
@@ -1249,43 +1309,121 @@ impl Cursor {
         Self {
             fragment_cursor,
             fragment_offset,
+            reversed: false,
         }
     }
 
-    fn code_unit(&self) -> Option<u16> {
-        self.fragment_cursor
-            .item()
-            .and_then(|fragment| fragment.get_code_unit(self.fragment_offset))
+    pub fn rev(mut self) -> Iter {
+        self.reversed = true;
+        self
     }
 
-    pub fn next(&mut self) {
-        self.fragment_offset += 1;
-        while let Some(fragment) = self.fragment_cursor.item() {
-            if fragment.get_code_unit(self.fragment_offset).is_some() {
-                break;
-            } else {
-                self.fragment_cursor.next();
-                self.fragment_offset = 0;
+    #[cfg(test)]
+    pub fn into_string(self) -> String {
+        String::from_utf16_lossy(&self.collect::<Vec<u16>>())
+    }
+}
+
+impl Iterator for Iter {
+    type Item = u16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.reversed {
+            if let Some(fragment) = self.fragment_cursor.item() {
+                if self.fragment_offset > 0 {
+                    self.fragment_offset -= 1;
+                    if let Some(c) = fragment.code_unit(self.fragment_offset) {
+                        return Some(c);
+                    }
+                }
             }
-        }
-    }
 
-    pub fn prev(&mut self) {
-        if self.fragment_offset > 0 {
-            self.fragment_offset -= 1;
-        } else {
             loop {
                 self.fragment_cursor.prev();
                 if let Some(fragment) = self.fragment_cursor.item() {
                     if fragment.len() > 0 {
                         self.fragment_offset = fragment.len() - 1;
-                        break;
+                        return fragment.code_unit(self.fragment_offset);
                     }
                 } else {
                     break;
                 }
             }
+
+            None
+        } else {
+            if let Some(fragment) = self.fragment_cursor.item() {
+                if let Some(c) = fragment.code_unit(self.fragment_offset) {
+                    self.fragment_offset += 1;
+                    return Some(c);
+                }
+            }
+
+            loop {
+                self.fragment_cursor.next();
+                if let Some(fragment) = self.fragment_cursor.item() {
+                    if let Some(c) = fragment.code_unit(0) {
+                        self.fragment_offset = 1;
+                        return Some(c);
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            None
         }
+    }
+}
+
+impl ChangesIter {
+    fn new(buffer: &Buffer, since: time::Global) -> Self {
+        let mut cursor = buffer.fragments.cursor();
+        cursor.seek(&0, SeekBias::Left);
+        ChangesIter { cursor, since }
+    }
+}
+
+impl Iterator for ChangesIter {
+    type Item = Change;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut change: Option<Change> = None;
+
+        while let Some(fragment) = self.cursor.item() {
+            let position = self.cursor.start::<usize>();
+            if !fragment.was_visible(&self.since) && fragment.is_visible() {
+                if let Some(ref mut change) = change {
+                    if change.range.start + change.code_units.len() == position {
+                        change.code_units.extend(fragment.code_units());
+                    } else {
+                        break;
+                    }
+                } else {
+                    change = Some(Change {
+                        range: position..position,
+                        code_units: Vec::from(fragment.code_units()),
+                    });
+                }
+            } else if fragment.was_visible(&self.since) && !fragment.is_visible() {
+                if let Some(ref mut change) = change {
+                    if change.range.start + change.code_units.len() == position {
+                        change.range.end += &fragment.extent();
+                    } else {
+                        break;
+                    }
+                } else {
+                    change = Some(Change {
+                        range: position..position + &fragment.extent(),
+                        code_units: Vec::new(),
+                    });
+                }
+            }
+
+            self.cursor.next();
+        }
+
+        change
     }
 }
 
@@ -1663,7 +1801,7 @@ impl Fragment {
         }
     }
 
-    fn get_code_unit(&self, offset: usize) -> Option<u16> {
+    fn code_unit(&self, offset: usize) -> Option<u16> {
         if offset < self.len() {
             Some(self.insertion.text.code_units[self.start_offset + offset].clone())
         } else {
@@ -1671,16 +1809,28 @@ impl Fragment {
         }
     }
 
+    fn code_units(&self) -> &[u16] {
+        &self.insertion.text.code_units[self.start_offset..self.end_offset]
+    }
+
     fn len(&self) -> usize {
         if self.is_visible() {
-            self.end_offset - self.start_offset
+            self.extent()
         } else {
             0
         }
     }
 
+    fn extent(&self) -> usize {
+        self.end_offset - self.start_offset
+    }
+
     fn is_visible(&self) -> bool {
         self.deletions.is_empty()
+    }
+
+    fn was_visible(&self, version: &time::Global) -> bool {
+        version.observed(self.insertion.id) && self.deletions.iter().all(|d| !version.observed(*d))
     }
 
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
@@ -1817,6 +1967,12 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
     }
 }
 
+impl operation_queue::Operation for Operation {
+    fn timestamp(&self) -> time::Lamport {
+        self.timestamp
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate rand;
@@ -1826,18 +1982,19 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "abc");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        let mut buffer = Buffer::new("abc");
         assert_eq!(buffer.to_string(), "abc");
-        buffer.edit(&[3..3], "def");
+        buffer.edit(&[3..3], "def", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "abcdef");
-        buffer.edit(&[0..0], "ghi");
+        buffer.edit(&[0..0], "ghi", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiabcdef");
-        buffer.edit(&[5..5], "jkl");
+        buffer.edit(&[5..5], "jkl", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiabjklcdef");
-        buffer.edit(&[6..7], "");
+        buffer.edit(&[6..7], "", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiabjlcdef");
-        buffer.edit(&[4..9], "mno");
+        buffer.edit(&[4..9], "mno", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiamnoef");
     }
 
@@ -1847,8 +2004,13 @@ mod tests {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-            let mut reference_string = String::new();
+            let mut reference_string = RandomCharIter(rng)
+                .take(rng.gen_range(0, 10))
+                .collect::<String>();
+            let mut buffer = Buffer::new(reference_string.as_str());
+            let mut buffer_versions = Vec::new();
+            let mut local_clock = time::Local::new(1);
+            let mut lamport_clock = time::Lamport::new(1);
 
             for _i in 0..10 {
                 let mut old_ranges: Vec<Range<usize>> = Vec::new();
@@ -1865,7 +2027,12 @@ mod tests {
                     .take(rng.gen_range(0, 10))
                     .collect::<String>();
 
-                buffer.edit(&old_ranges, new_text.as_str());
+                buffer.edit(
+                    &old_ranges,
+                    new_text.as_str(),
+                    &mut local_clock,
+                    &mut lamport_clock,
+                );
                 for old_range in old_ranges.iter().rev() {
                     reference_string = [
                         &reference_string[0..old_range.start],
@@ -1875,17 +2042,40 @@ mod tests {
                         .concat();
                 }
                 assert_eq!(buffer.to_string(), reference_string);
+
+                if rng.gen_weighted_bool(3) {
+                    buffer_versions.push(buffer.clone());
+                }
+            }
+
+            for mut old_buffer in buffer_versions {
+                for change in buffer.changes_since(old_buffer.version.clone()) {
+                    old_buffer.edit(
+                        &[change.range],
+                        Text::new(change.code_units),
+                        &mut local_clock,
+                        &mut lamport_clock,
+                    );
+                }
+                assert_eq!(old_buffer.to_string(), buffer.to_string());
             }
         }
     }
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "abcd\nefg\nhij");
-        buffer.edit(&[12..12], "kl\nmno");
-        buffer.edit(&[18..18], "\npqrs\n");
-        buffer.edit(&[18..21], "\nPQ");
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        buffer.edit(
+            &[0..0],
+            "abcd\nefg\nhij",
+            &mut local_clock,
+            &mut lamport_clock,
+        );
+        buffer.edit(&[12..12], "kl\nmno", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[18..18], "\npqrs\n", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[18..21], "\nPQ", &mut local_clock, &mut lamport_clock);
 
         assert_eq!(buffer.len_for_row(0), Ok(4));
         assert_eq!(buffer.len_for_row(1), Ok(3));
@@ -1898,71 +2088,87 @@ mod tests {
 
     #[test]
     fn test_longest_row() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
         assert_eq!(buffer.longest_row(), 0);
-        buffer.edit(&[0..0], "abcd\nefg\nhij");
+        buffer.edit(
+            &[0..0],
+            "abcd\nefg\nhij",
+            &mut local_clock,
+            &mut lamport_clock,
+        );
         assert_eq!(buffer.longest_row(), 0);
-        buffer.edit(&[12..12], "kl\nmno");
+        buffer.edit(&[12..12], "kl\nmno", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 2);
-        buffer.edit(&[18..18], "\npqrs");
+        buffer.edit(&[18..18], "\npqrs", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 2);
-        buffer.edit(&[10..12], "");
+        buffer.edit(&[10..12], "", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 0);
-        buffer.edit(&[24..24], "tuv");
+        buffer.edit(&[24..24], "tuv", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.longest_row(), 4);
     }
 
     #[test]
-    fn iter_starting_at_point() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "abcd\nefgh\nij");
-        buffer.edit(&[12..12], "kl\nmno");
-        buffer.edit(&[18..18], "\npqrs");
-        buffer.edit(&[18..21], "\nPQ");
+    fn test_iter_starting_at_point() {
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        buffer.edit(
+            &[0..0],
+            "abcd\nefgh\nij",
+            &mut local_clock,
+            &mut lamport_clock,
+        );
+        buffer.edit(&[12..12], "kl\nmno", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[18..18], "\npqrs", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[18..21], "\nPQ", &mut local_clock, &mut lamport_clock);
 
-        let cursor = buffer.cursor_at_point(Point::new(0, 0));
-        assert_eq!(cursor.read_to_end(), "abcd\nefgh\nijkl\nmno\nPQrs");
+        let cursor = buffer.iter_at_point(Point::new(0, 0));
+        assert_eq!(cursor.into_string(), "abcd\nefgh\nijkl\nmno\nPQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(1, 0));
-        assert_eq!(cursor.read_to_end(), "efgh\nijkl\nmno\nPQrs");
+        let cursor = buffer.iter_at_point(Point::new(1, 0));
+        assert_eq!(cursor.into_string(), "efgh\nijkl\nmno\nPQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(2, 0));
-        assert_eq!(cursor.read_to_end(), "ijkl\nmno\nPQrs");
+        let cursor = buffer.iter_at_point(Point::new(2, 0));
+        assert_eq!(cursor.into_string(), "ijkl\nmno\nPQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(3, 0));
-        assert_eq!(cursor.read_to_end(), "mno\nPQrs");
+        let cursor = buffer.iter_at_point(Point::new(3, 0));
+        assert_eq!(cursor.into_string(), "mno\nPQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(4, 0));
-        assert_eq!(cursor.read_to_end(), "PQrs");
+        let cursor = buffer.iter_at_point(Point::new(4, 0));
+        assert_eq!(cursor.into_string(), "PQrs");
 
-        let cursor = buffer.cursor_at_point(Point::new(5, 0));
-        assert_eq!(cursor.read_to_end(), "");
+        let cursor = buffer.iter_at_point(Point::new(5, 0));
+        assert_eq!(cursor.into_string(), "");
 
-        let cursor = buffer.cursor_at_point(Point::new(0, 0));
-        assert_eq!(cursor.read_to_start(), "");
+        let cursor = buffer.iter_at_point(Point::new(0, 0)).rev();
+        assert_eq!(cursor.into_string(), "");
 
-        let cursor = buffer.cursor_at_point(Point::new(0, 3));
-        assert_eq!(cursor.read_to_start(), "cba");
+        let cursor = buffer.iter_at_point(Point::new(0, 3)).rev();
+        assert_eq!(cursor.into_string(), "cba");
 
-        let cursor = buffer.cursor_at_point(Point::new(1, 4));
-        assert_eq!(cursor.read_to_start(), "hgfe\ndcba");
+        let cursor = buffer.iter_at_point(Point::new(1, 4)).rev();
+        assert_eq!(cursor.into_string(), "hgfe\ndcba");
 
-        let cursor = buffer.cursor_at_point(Point::new(3, 2));
-        assert_eq!(cursor.read_to_start(), "nm\nlkji\nhgfe\ndcba");
+        let cursor = buffer.iter_at_point(Point::new(3, 2)).rev();
+        assert_eq!(cursor.into_string(), "nm\nlkji\nhgfe\ndcba");
 
-        let cursor = buffer.cursor_at_point(Point::new(4, 4));
-        assert_eq!(cursor.read_to_start(), "srQP\nonm\nlkji\nhgfe\ndcba");
+        let cursor = buffer.iter_at_point(Point::new(4, 4)).rev();
+        assert_eq!(cursor.into_string(), "srQP\nonm\nlkji\nhgfe\ndcba");
 
-        let cursor = buffer.cursor_at_point(Point::new(5, 0));
-        assert_eq!(cursor.read_to_start(), "srQP\nonm\nlkji\nhgfe\ndcba");
+        let cursor = buffer.iter_at_point(Point::new(5, 0)).rev();
+        assert_eq!(cursor.into_string(), "srQP\nonm\nlkji\nhgfe\ndcba");
 
         // Regression test:
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
-        buffer.edit(&[60..60], "\n");
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[60..60], "\n", &mut local_clock, &mut lamport_clock);
 
-        let cursor = buffer.cursor_at_point(Point::new(6, 0));
-        assert_eq!(cursor.read_to_end(), "    \"xray_wasm\",\n]\n");
+        let cursor = buffer.iter_at_point(Point::new(6, 0));
+        assert_eq!(cursor.into_string(), "    \"xray_wasm\",\n]\n");
     }
 
     #[test]
@@ -2065,7 +2271,7 @@ mod tests {
     }
 
     #[test]
-    fn fragment_ids() {
+    fn test_fragment_ids() {
         for seed in 0..10 {
             use self::rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
@@ -2087,12 +2293,14 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
-        buffer.edit(&[0..0], "abc");
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+        buffer.edit(&[0..0], "abc", &mut local_clock, &mut lamport_clock);
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
 
-        buffer.edit(&[1..1], "def\n");
+        buffer.edit(&[1..1], "def\n", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "adef\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 6);
@@ -2105,7 +2313,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.edit(&[2..3], "");
+        buffer.edit(&[2..3], "", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "adf\nbc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 5);
@@ -2118,7 +2326,7 @@ mod tests {
             Point { row: 1, column: 1 }
         );
 
-        buffer.edit(&[5..5], "ghi\n");
+        buffer.edit(&[5..5], "ghi\n", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "adf\nbghi\nc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 9);
@@ -2131,7 +2339,7 @@ mod tests {
             Point { row: 2, column: 0 }
         );
 
-        buffer.edit(&[7..9], "");
+        buffer.edit(&[7..9], "", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "adf\nbghc");
         assert_eq!(buffer.offset_for_anchor(&left_anchor).unwrap(), 5);
         assert_eq!(buffer.offset_for_anchor(&right_anchor).unwrap(), 7);
@@ -2228,12 +2436,14 @@ mod tests {
     }
 
     #[test]
-    fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(1))));
+    fn test_anchors_at_start_and_end() {
+        let mut buffer = Buffer::new("");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
-        buffer.edit(&[0..0], "abc");
+        buffer.edit(&[0..0], "abc", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "abc");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 3);
@@ -2241,8 +2451,8 @@ mod tests {
         let after_start_anchor = buffer.anchor_after_offset(0).unwrap();
         let before_end_anchor = buffer.anchor_before_offset(3).unwrap();
 
-        buffer.edit(&[3..3], "def");
-        buffer.edit(&[0..0], "ghi");
+        buffer.edit(&[3..3], "def", &mut local_clock, &mut lamport_clock);
+        buffer.edit(&[0..0], "ghi", &mut local_clock, &mut lamport_clock);
         assert_eq!(buffer.to_string(), "ghiabcdef");
         assert_eq!(buffer.offset_for_anchor(&before_start_anchor).unwrap(), 0);
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
@@ -2257,11 +2467,18 @@ mod tests {
             let mut rng = StdRng::from_seed(&[seed]);
 
             let site_range = 0..5;
+            let base_text = RandomCharIter(rng)
+                .take(rng.gen_range(0, 10))
+                .collect::<String>();
             let mut buffers = Vec::new();
-            let mut queues = Vec::new();
+            let mut local_clocks = Vec::new();
+            let mut lamport_clocks = Vec::new();
+            let mut queues: Vec<Vec<Operation>> = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new(0, Rc::new(RefCell::new(ReplicaContext::new(i + 1))));
+                let mut buffer = Buffer::new(base_text.as_str());
                 buffers.push(buffer);
+                local_clocks.push(time::Local::new(i + 1));
+                lamport_clocks.push(time::Lamport::new(i + 1));
                 queues.push(Vec::new());
             }
 
@@ -2269,6 +2486,8 @@ mod tests {
             loop {
                 let replica_index = rng.gen_range(site_range.start, site_range.end) as usize;
                 let buffer = &mut buffers[replica_index];
+                let local_clock = &mut local_clocks[replica_index];
+                let lamport_clock = &mut lamport_clocks[replica_index];
                 if edit_count > 0 && rng.gen() {
                     let mut old_ranges: Vec<Range<usize>> = Vec::new();
                     for _ in 0..5 {
@@ -2284,18 +2503,38 @@ mod tests {
                         .take(rng.gen_range(0, 10))
                         .collect::<String>();
 
-                    for op in buffer.edit(&old_ranges, new_text.as_str()) {
+                    if rng.gen_weighted_bool(5) {
+                        local_clock.tick();
+                    }
+
+                    for op in
+                        buffer.edit(&old_ranges, new_text.as_str(), local_clock, lamport_clock)
+                    {
                         for (index, queue) in queues.iter_mut().enumerate() {
                             if index != replica_index {
-                                queue.push(op.clone());
+                                let min_index = queue
+                                    .iter()
+                                    .enumerate()
+                                    .rev()
+                                    .find_map(|(index, existing_op)| {
+                                        if existing_op.id.replica_id == op.id.replica_id {
+                                            Some(index + 1)
+                                        } else {
+                                            None
+                                        }
+                                    }).unwrap_or(0);
+
+                                let insertion_index = rng.gen_range(min_index, queue.len() + 1);
+                                queue.insert(insertion_index, op.clone());
                             }
                         }
                     }
 
                     edit_count -= 1;
                 } else if !queues[replica_index].is_empty() {
+                    let count = rng.gen_range(1, queues[replica_index].len() + 1);
                     buffer
-                        .integrate_op(queues[replica_index].remove(0))
+                        .apply_ops(queues[replica_index].drain(0..count), lamport_clock)
                         .unwrap();
                 }
 
@@ -2321,29 +2560,6 @@ mod tests {
             } else {
                 Some(self.0.gen_range(b'a', b'z' + 1).into())
             }
-        }
-    }
-
-    impl Cursor {
-        fn read_to_start(mut self) -> String {
-            // Exclude the character we're currently parked at.
-            self.prev();
-
-            let mut chars = Vec::new();
-            while let Some(c) = self.code_unit() {
-                chars.push(c);
-                self.prev();
-            }
-            String::from_utf16_lossy(&chars)
-        }
-
-        fn read_to_end(mut self) -> String {
-            let mut chars = Vec::new();
-            while let Some(c) = self.code_unit() {
-                chars.push(c);
-                self.next();
-            }
-            String::from_utf16_lossy(&chars)
         }
     }
 }

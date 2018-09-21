@@ -1,7 +1,3 @@
-use futures::future::{self, ExecuteError, Executor};
-use futures::sync::oneshot;
-use futures::Future;
-use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::fmt;
@@ -9,7 +5,6 @@ use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 
 const TREE_BASE: usize = 16;
-pub type NodeId = usize;
 
 pub trait Item: Clone + Eq + fmt::Debug {
     type Summary: for<'a> AddAssign<&'a Self::Summary> + Default + Clone + fmt::Debug;
@@ -33,30 +28,18 @@ pub trait Dimension<Summary: Default>:
     }
 }
 
-pub trait Store<T: Item>: Clone {
-    type WriteError;
-
-    fn read(&self, id: NodeId) -> Node<T>;
-    fn write(&self, node: &Node<T>) -> Result<NodeId, Self::WriteError>;
-}
-
-#[derive(Debug)]
-pub enum Tree<T: Item> {
-    Resident(Arc<Node<T>>),
-    NonResident(NodeId),
-}
+#[derive(Debug, Clone)]
+pub struct Tree<T: Item>(Arc<Node<T>>);
 
 #[derive(Debug)]
 pub enum Node<T: Item> {
     Internal {
-        store_id: Mutex<Option<NodeId>>,
         height: u8,
         summary: T::Summary,
         child_summaries: SmallVec<[T::Summary; 2 * TREE_BASE]>,
         child_trees: SmallVec<[Tree<T>; 2 * TREE_BASE]>,
     },
     Leaf {
-        store_id: Mutex<Option<NodeId>>,
         summary: T::Summary,
         items: SmallVec<[T; 2 * TREE_BASE]>,
     },
@@ -68,7 +51,7 @@ pub struct Cursor<T: Item> {
     stack: SmallVec<[(Tree<T>, usize, T::Summary); 16]>,
     summary: T::Summary,
     did_seek: bool,
-    is_at_end: bool,
+    at_end: bool,
 }
 
 #[derive(Eq, PartialEq)]
@@ -83,24 +66,9 @@ pub enum Edit<T: KeyedItem> {
     Remove(T),
 }
 
-pub struct SaveResult<
-    W,
-    B: Future<Item = (), Error = ()>,
-    F: Future<Item = (), Error = SaveError<W>>,
-> {
-    background: B,
-    foreground: F,
-}
-
-pub enum SaveError<W> {
-    WriteError(W),
-    Canceled,
-}
-
 impl<T: Item> Tree<T> {
     pub fn new() -> Self {
-        Tree::Resident(Arc::new(Node::Leaf {
-            store_id: Mutex::new(None),
+        Tree(Arc::new(Node::Leaf {
             summary: T::Summary::default(),
             items: SmallVec::new(),
         }))
@@ -112,66 +80,11 @@ impl<T: Item> Tree<T> {
         tree
     }
 
-    pub fn save<S>(
-        &self,
-        store: S,
-    ) -> SaveResult<
-        S::WriteError,
-        impl Future<Item = (), Error = ()>,
-        impl Future<Item = (), Error = SaveError<S::WriteError>>,
-    >
-    where
-        S: 'static + Store<T>,
-    {
-        let snapshot = self.clone();
-        let (tx, rx) = oneshot::channel();
-        SaveResult {
-            background: future::lazy(move || {
-                let _ = tx.send(snapshot.save_internal(store));
-                Ok(())
-            }),
-            foreground: rx
-                .map_err(|_| SaveError::Canceled)
-                .and_then(|result| result.map_err(|err| SaveError::WriteError(err))),
-        }
-    }
-
-    pub fn save_internal<S>(&self, store: S) -> Result<(), S::WriteError>
-    where
-        S: Store<T>,
-    {
-        match self {
-            Tree::Resident(node) => match node.as_ref() {
-                Node::Internal {
-                    store_id,
-                    child_trees,
-                    ..
-                } => {
-                    let mut store_id = store_id.lock();
-                    if store_id.is_none() {
-                        for tree in child_trees {
-                            tree.save_internal(store.clone())?;
-                        }
-                        *store_id = Some(store.write(node)?)
-                    }
-                }
-                Node::Leaf { store_id, .. } => {
-                    let mut store_id = store_id.lock();
-                    if store_id.is_none() {
-                        *store_id = Some(store.write(node)?)
-                    }
-                }
-            },
-            _ => {}
-        }
-
-        Ok(())
-    }
-
+    #[allow(dead_code)]
     pub fn items(&self) -> Vec<T> {
         let mut items = Vec::new();
         let mut cursor = self.cursor();
-        cursor.descend_to_start(self.clone());
+        cursor.descend_to_first_item(self.clone());
         loop {
             if let Some(item) = cursor.item() {
                 items.push(item);
@@ -187,38 +100,35 @@ impl<T: Item> Tree<T> {
         Cursor::new(self.clone())
     }
 
+    #[allow(dead_code)]
     pub fn first(&self) -> Option<T> {
-        self.leftmost_leaf().node().items().first().cloned()
+        self.leftmost_leaf().0.items().first().cloned()
     }
 
     pub fn last(&self) -> Option<T> {
-        self.rightmost_leaf().node().items().last().cloned()
+        self.rightmost_leaf().0.items().last().cloned()
     }
 
     pub fn extent<D: Dimension<T::Summary>>(&self) -> D {
-        match self.node().as_ref() {
+        match self.0.as_ref() {
             Node::Internal { summary, .. } => D::from_summary(summary).clone(),
             Node::Leaf { summary, .. } => D::from_summary(summary).clone(),
         }
     }
 
     pub fn summary(&self) -> T::Summary {
-        match self.node().as_ref() {
+        match self.0.as_ref() {
             Node::Internal { summary, .. } => summary.clone(),
             Node::Leaf { summary, .. } => summary.clone(),
         }
     }
 
-    pub fn insert<D>(&mut self, position: &D, bias: SeekBias, item: T)
-    where
-        D: Dimension<T::Summary>,
-    {
-        let mut cursor = self.cursor();
-        let mut new_tree = cursor.slice(position, bias);
-        new_tree.push(item);
-        let suffix = cursor.slice(&self.extent::<D>(), SeekBias::Right);
-        new_tree.push_tree(suffix);
-        *self = new_tree;
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        match self.0.as_ref() {
+            Node::Internal { .. } => false,
+            Node::Leaf { items, .. } => items.is_empty(),
+        }
     }
 
     pub fn extend<I>(&mut self, iter: I)
@@ -229,12 +139,11 @@ impl<T: Item> Tree<T> {
 
         for item in iter {
             if leaf.is_some() && leaf.as_ref().unwrap().items().len() == 2 * TREE_BASE {
-                self.push_tree(Tree::Resident(Arc::new(leaf.take().unwrap())));
+                self.push_tree(Tree(Arc::new(leaf.take().unwrap())));
             }
 
             if leaf.is_none() {
                 leaf = Some(Node::Leaf::<T> {
-                    store_id: Mutex::new(None),
                     summary: T::Summary::default(),
                     items: SmallVec::new(),
                 });
@@ -246,24 +155,21 @@ impl<T: Item> Tree<T> {
         }
 
         if leaf.is_some() {
-            self.push_tree(Tree::Resident(Arc::new(leaf.take().unwrap())));
+            self.push_tree(Tree(Arc::new(leaf.take().unwrap())));
         }
     }
 
     pub fn push(&mut self, item: T) {
-        self.push_tree(Tree::from_child_trees(vec![Tree::Resident(Arc::new(
-            Node::Leaf {
-                store_id: Mutex::new(None),
-                summary: item.summarize(),
-                items: SmallVec::from_vec(vec![item]),
-            },
-        ))]))
+        self.push_tree(Tree::from_child_trees(vec![Tree(Arc::new(Node::Leaf {
+            summary: item.summarize(),
+            items: SmallVec::from_vec(vec![item]),
+        }))]))
     }
 
     pub fn push_tree(&mut self, other: Self) {
-        let other_node = other.node();
+        let other_node = other.0.clone();
         if !other_node.is_leaf() || other_node.items().len() > 0 {
-            if self.node().height() < other_node.height() {
+            if self.0.height() < other_node.height() {
                 for tree in other_node.child_trees() {
                     self.push_tree(tree.clone());
                 }
@@ -274,7 +180,7 @@ impl<T: Item> Tree<T> {
     }
 
     fn push_tree_recursive(&mut self, other: Tree<T>) -> Option<Tree<T>> {
-        match self.make_mut_node() {
+        match Arc::make_mut(&mut self.0) {
             Node::Internal {
                 height,
                 summary,
@@ -282,7 +188,7 @@ impl<T: Item> Tree<T> {
                 child_trees,
                 ..
             } => {
-                let other_node = other.node();
+                let other_node = other.0.clone();
                 *summary += other_node.summary();
 
                 let height_delta = *height - other_node.height();
@@ -297,10 +203,10 @@ impl<T: Item> Tree<T> {
                 } else {
                     let tree_to_append = child_trees.last_mut().unwrap().push_tree_recursive(other);
                     *child_summaries.last_mut().unwrap() =
-                        child_trees.last().unwrap().node().summary().clone();
+                        child_trees.last().unwrap().0.summary().clone();
 
                     if let Some(split_tree) = tree_to_append {
-                        summaries_to_append.push(split_tree.node().summary().clone());
+                        summaries_to_append.push(split_tree.0.summary().clone());
                         trees_to_append.push(split_tree);
                     }
                 }
@@ -329,8 +235,7 @@ impl<T: Item> Tree<T> {
                     *child_summaries = left_summaries;
                     *child_trees = left_trees;
 
-                    Some(Tree::Resident(Arc::new(Node::Internal {
-                        store_id: Mutex::new(None),
+                    Some(Tree(Arc::new(Node::Internal {
                         height: *height,
                         summary: sum(right_summaries.iter()),
                         child_summaries: right_summaries,
@@ -343,7 +248,7 @@ impl<T: Item> Tree<T> {
                 }
             }
             Node::Leaf { summary, items, .. } => {
-                let other_node = other.node();
+                let other_node = other.0;
 
                 let child_count = items.len() + other_node.items().len();
                 if child_count > 2 * TREE_BASE {
@@ -358,8 +263,7 @@ impl<T: Item> Tree<T> {
                     }
                     *items = left_items;
                     *summary = sum_owned(items.iter().map(|item| item.summarize()));
-                    Some(Tree::Resident(Arc::new(Node::Leaf {
-                        store_id: Mutex::new(None),
+                    Some(Tree(Arc::new(Node::Leaf {
                         summary: sum_owned(right_items.iter().map(|item| item.summarize())),
                         items: right_items,
                     })))
@@ -373,14 +277,13 @@ impl<T: Item> Tree<T> {
     }
 
     fn from_child_trees(child_trees: Vec<Tree<T>>) -> Self {
-        let height = child_trees[0].node().height() + 1;
+        let height = child_trees[0].0.height() + 1;
         let mut child_summaries = SmallVec::new();
         for child in &child_trees {
-            child_summaries.push(child.node().summary().clone());
+            child_summaries.push(child.0.summary().clone());
         }
         let summary = sum(child_summaries.iter());
-        Tree::Resident(Arc::new(Node::Internal {
-            store_id: Mutex::new(None),
+        Tree(Arc::new(Node::Internal {
             height,
             summary,
             child_summaries,
@@ -388,22 +291,8 @@ impl<T: Item> Tree<T> {
         }))
     }
 
-    fn make_mut_node(&mut self) -> &mut Node<T> {
-        match self {
-            Tree::Resident(node) => Arc::make_mut(node),
-            Tree::NonResident(_) => panic!(),
-        }
-    }
-
-    fn node(&self) -> Arc<Node<T>> {
-        match self {
-            Tree::Resident(node) => node.clone(),
-            Tree::NonResident(_) => panic!(),
-        }
-    }
-
     fn leftmost_leaf(&self) -> Tree<T> {
-        match *self.node() {
+        match *self.0 {
             Node::Leaf { .. } => self.clone(),
             Node::Internal {
                 ref child_trees, ..
@@ -412,7 +301,7 @@ impl<T: Item> Tree<T> {
     }
 
     fn rightmost_leaf(&self) -> Tree<T> {
-        match *self.node() {
+        match *self.0 {
             Node::Leaf { .. } => self.clone(),
             Node::Internal {
                 ref child_trees, ..
@@ -422,7 +311,19 @@ impl<T: Item> Tree<T> {
 }
 
 impl<T: KeyedItem> Tree<T> {
-    pub fn edit(&mut self, mut edits: Vec<Edit<T>>) {
+    pub fn insert(&mut self, item: T) {
+        let mut cursor = self.cursor();
+        let mut new_tree = cursor.slice(&item.key(), SeekBias::Left);
+        new_tree.push(item);
+        new_tree.push_tree(cursor.suffix::<T::Key>());
+        *self = new_tree;
+    }
+
+    pub fn edit(&mut self, edits: &mut [Edit<T>]) {
+        if edits.is_empty() {
+            return;
+        }
+
         edits.sort_unstable_by_key(|item| item.key());
 
         let mut cursor = self.cursor();
@@ -448,7 +349,7 @@ impl<T: KeyedItem> Tree<T> {
             }
             match edit {
                 Edit::Insert(item) => {
-                    buffered_items.push(item);
+                    buffered_items.push(item.clone());
                 }
                 Edit::Remove(_) => {}
             }
@@ -458,15 +359,6 @@ impl<T: KeyedItem> Tree<T> {
         new_tree.push_tree(cursor.suffix::<T::Key>());
 
         *self = new_tree;
-    }
-}
-
-impl<T: Item> Clone for Tree<T> {
-    fn clone(&self) -> Self {
-        match self {
-            Tree::Resident(node) => Tree::Resident(node.clone()),
-            Tree::NonResident(id) => Tree::NonResident(*id),
-        }
     }
 }
 
@@ -537,15 +429,6 @@ impl<T: Item> Node<T> {
     }
 }
 
-impl<T: Item> Node<T> {
-    fn store_id(&self) -> &Mutex<Option<NodeId>> {
-        match self {
-            Node::Internal { store_id, .. } => store_id,
-            Node::Leaf { store_id, .. } => store_id,
-        }
-    }
-}
-
 impl<T: Item> Clone for Node<T> {
     fn clone(&self) -> Self {
         match self {
@@ -556,14 +439,12 @@ impl<T: Item> Clone for Node<T> {
                 child_trees,
                 ..
             } => Node::Internal {
-                store_id: Mutex::new(None),
                 height: *height,
                 summary: summary.clone(),
                 child_summaries: child_summaries.clone(),
                 child_trees: child_trees.clone(),
             },
             Node::Leaf { summary, items, .. } => Node::Leaf {
-                store_id: Mutex::new(None),
                 summary: summary.clone(),
                 items: items.clone(),
             },
@@ -578,13 +459,13 @@ impl<T: Item> Cursor<T> {
             stack: SmallVec::new(),
             summary: T::Summary::default(),
             did_seek: false,
-            is_at_end: false,
+            at_end: false,
         }
     }
 
     fn reset(&mut self) {
         self.did_seek = false;
-        self.is_at_end = false;
+        self.at_end = false;
         self.stack.truncate(0);
         self.summary = T::Summary::default();
     }
@@ -604,7 +485,7 @@ impl<T: Item> Cursor<T> {
     pub fn item(&self) -> Option<T> {
         assert!(self.did_seek, "Must seek before calling this method");
         if let Some((subtree, index, _)) = self.stack.last() {
-            match *subtree.node() {
+            match *subtree.0 {
                 Node::Leaf { ref items, .. } => {
                     if *index == items.len() {
                         None
@@ -624,18 +505,18 @@ impl<T: Item> Cursor<T> {
         if let Some((cur_leaf, index, _)) = self.stack.last() {
             if *index == 0 {
                 if let Some(prev_leaf) = self.prev_leaf() {
-                    let prev_leaf = prev_leaf.node();
+                    let prev_leaf = prev_leaf.0;
                     Some(prev_leaf.items().last().unwrap().clone())
                 } else {
                     None
                 }
             } else {
-                match *cur_leaf.node() {
+                match *cur_leaf.0 {
                     Node::Leaf { ref items, .. } => Some(items[index - 1].clone()),
                     _ => unreachable!(),
                 }
             }
-        } else if self.is_at_end {
+        } else if self.at_end {
             self.tree.last()
         } else {
             None
@@ -645,7 +526,7 @@ impl<T: Item> Cursor<T> {
     fn prev_leaf(&self) -> Option<Tree<T>> {
         for (ancestor, index, _) in self.stack.iter().rev().skip(1) {
             if *index != 0 {
-                match *ancestor.node() {
+                match *ancestor.0 {
                     Node::Internal {
                         ref child_trees, ..
                     } => return Some(child_trees[index - 1].rightmost_leaf()),
@@ -659,38 +540,43 @@ impl<T: Item> Cursor<T> {
     pub fn prev(&mut self) {
         assert!(self.did_seek, "Must seek before calling this method");
 
-        if self.is_at_end {
-            let tree = self.tree.clone();
+        if self.at_end {
             self.summary = T::Summary::default();
-            self.is_at_end = false;
-            self.descend_to_end(tree);
+            let root = self.tree.clone();
+            self.descend_to_last_item(root);
+            self.at_end = false;
         } else {
-            while self.stack.len() > 0 {
-                let (subtree, mut index, summary) = self.stack.last().unwrap().clone();
+            while let Some((subtree, index, _)) = self.stack.pop() {
+                if index > 0 {
+                    let new_index = index - 1;
 
-                self.summary = summary.clone();
-                if index == 0 {
-                    self.stack.pop();
-                } else {
-                    index -= 1;
-                    match subtree.node().as_ref() {
+                    self.summary = self
+                        .stack
+                        .last()
+                        .map_or(T::Summary::default(), |(_, _, summary)| summary.clone());
+
+                    match subtree.0.as_ref() {
                         Node::Internal {
                             child_trees,
                             child_summaries,
                             ..
                         } => {
-                            for summary in &child_summaries[0..index] {
+                            for summary in &child_summaries[0..new_index] {
                                 self.summary += summary;
                             }
-                            self.descend_to_end(child_trees[index].clone());
+                            self.stack
+                                .push((subtree.clone(), new_index, self.summary.clone()));
+                            self.descend_to_last_item(child_trees[new_index].clone());
                         }
                         Node::Leaf { items, .. } => {
-                            for item in &items[0..index] {
+                            for item in &items[0..new_index] {
                                 self.summary += &item.summarize();
                             }
+                            self.stack
+                                .push((subtree.clone(), new_index, self.summary.clone()));
                         }
                     }
-                    *self.stack.last_mut().unwrap() = (subtree, index, summary);
+
                     break;
                 }
             }
@@ -700,44 +586,56 @@ impl<T: Item> Cursor<T> {
     pub fn next(&mut self) {
         assert!(self.did_seek, "Must seek before calling this method");
 
-        while self.stack.len() > 0 {
-            let new_subtree = {
-                let (subtree, index, _) = self.stack.last_mut().unwrap();
-                match *subtree.node() {
-                    Node::Internal {
-                        ref child_trees, ..
-                    } => {
-                        *index += 1;
-                        child_trees.get(*index).cloned()
-                    }
-                    Node::Leaf { ref items, .. } => {
-                        self.summary += &items[*index].summarize();
-                        *index += 1;
-                        if *index < items.len() {
-                            return;
-                        } else {
-                            None
+        if self.stack.is_empty() {
+            if !self.at_end {
+                let root = self.tree.clone();
+                self.descend_to_first_item(root);
+            }
+        } else {
+            while self.stack.len() > 0 {
+                let new_subtree = {
+                    let (subtree, index, summary) = self.stack.last_mut().unwrap();
+                    match subtree.0.as_ref() {
+                        Node::Internal {
+                            child_trees,
+                            child_summaries,
+                            ..
+                        } => {
+                            *summary += &child_summaries[*index];
+                            *index += 1;
+                            child_trees.get(*index).cloned()
+                        }
+                        Node::Leaf { items, .. } => {
+                            let item_summary = items[*index].summarize();
+                            self.summary += &item_summary;
+                            *summary += &item_summary;
+                            *index += 1;
+                            if *index < items.len() {
+                                return;
+                            } else {
+                                None
+                            }
                         }
                     }
-                }
-            };
+                };
 
-            if let Some(subtree) = new_subtree {
-                self.descend_to_start(subtree);
-                break;
-            } else {
-                self.stack.pop();
+                if let Some(subtree) = new_subtree {
+                    self.descend_to_first_item(subtree);
+                    break;
+                } else {
+                    self.stack.pop();
+                }
             }
         }
 
-        self.is_at_end = self.stack.is_empty();
+        self.at_end = self.stack.is_empty();
     }
 
-    fn descend_to_start(&mut self, mut subtree: Tree<T>) {
+    fn descend_to_first_item(&mut self, mut subtree: Tree<T>) {
         self.did_seek = true;
         loop {
             self.stack.push((subtree.clone(), 0, self.summary.clone()));
-            subtree = match *subtree.node() {
+            subtree = match *subtree.0 {
                 Node::Internal {
                     ref child_trees, ..
                 } => child_trees[0].clone(),
@@ -748,28 +646,29 @@ impl<T: Item> Cursor<T> {
         }
     }
 
-    fn descend_to_end(&mut self, mut subtree: Tree<T>) {
+    fn descend_to_last_item(&mut self, mut subtree: Tree<T>) {
         self.did_seek = true;
         loop {
-            match subtree.node().as_ref() {
+            match subtree.0.clone().as_ref() {
                 Node::Internal {
                     child_trees,
                     child_summaries,
                     ..
                 } => {
-                    self.stack
-                        .push((subtree.clone(), child_trees.len() - 1, self.summary.clone()));
                     for summary in &child_summaries[0..child_summaries.len() - 1] {
                         self.summary += summary;
                     }
+                    self.stack
+                        .push((subtree.clone(), child_trees.len() - 1, self.summary.clone()));
                     subtree = child_trees.last().unwrap().clone();
                 }
                 Node::Leaf { items, .. } => {
-                    self.stack
-                        .push((subtree.clone(), items.len() - 1, self.summary.clone()));
-                    for item in &items[0..items.len() - 1] {
+                    let last_index = items.len().saturating_sub(1);
+                    for item in &items[0..last_index] {
                         self.summary += &item.summarize();
                     }
+                    self.stack
+                        .push((subtree.clone(), last_index, self.summary.clone()));
                     break;
                 }
             }
@@ -827,7 +726,7 @@ impl<T: Item> Cursor<T> {
             'outer: while self.stack.len() > 0 {
                 {
                     let (parent_subtree, index, _) = self.stack.last_mut().unwrap();
-                    match *parent_subtree.node() {
+                    match *parent_subtree.0 {
                         Node::Internal {
                             ref child_summaries,
                             ref child_trees,
@@ -881,8 +780,7 @@ impl<T: Item> Cursor<T> {
                                 } else {
                                     pos = D::from_summary(&self.summary).clone();
                                     if let Some(slice) = slice.as_mut() {
-                                        slice.push_tree(Tree::Resident(Arc::new(Node::Leaf {
-                                            store_id: Mutex::new(None),
+                                        slice.push_tree(Tree(Arc::new(Node::Leaf {
                                             summary: slice_items_summary,
                                             items: slice_items,
                                         })));
@@ -893,8 +791,7 @@ impl<T: Item> Cursor<T> {
 
                             if let Some(slice) = slice.as_mut() {
                                 if slice_items.len() > 0 {
-                                    slice.push_tree(Tree::Resident(Arc::new(Node::Leaf {
-                                        store_id: Mutex::new(None),
+                                    slice.push_tree(Tree(Arc::new(Node::Leaf {
                                         summary: slice_items_summary,
                                         items: slice_items,
                                     })));
@@ -914,7 +811,7 @@ impl<T: Item> Cursor<T> {
         if let Some(mut subtree) = containing_subtree {
             loop {
                 let mut next_subtree = None;
-                match *subtree.node() {
+                match *subtree.0 {
                     Node::Internal {
                         ref child_summaries,
                         ref child_trees,
@@ -971,8 +868,7 @@ impl<T: Item> Cursor<T> {
 
                         if let Some(slice) = slice.as_mut() {
                             if slice_items.len() > 0 {
-                                slice.push_tree(Tree::Resident(Arc::new(Node::Leaf {
-                                    store_id: Mutex::new(None),
+                                slice.push_tree(Tree(Arc::new(Node::Leaf {
                                     summary: slice_items_summary,
                                     items: slice_items,
                                 })));
@@ -989,11 +885,29 @@ impl<T: Item> Cursor<T> {
             }
         }
 
-        self.is_at_end = self.stack.is_empty();
+        self.at_end = self.stack.is_empty();
         if bias == SeekBias::Left {
             *target == self.end::<D>()
         } else {
             *target == self.start::<D>()
+        }
+    }
+}
+
+impl<T: Item> Iterator for Cursor<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.did_seek {
+            let root = self.tree.clone();
+            self.descend_to_first_item(root);
+        }
+
+        if let Some(item) = self.item() {
+            self.next();
+            Some(item)
+        } else {
+            None
         }
     }
 }
@@ -1032,8 +946,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    extern crate rand;
-
     use super::*;
 
     #[test]
@@ -1050,8 +962,8 @@ mod tests {
 
     #[test]
     fn test_random() {
-        for seed in 0..10000 {
-            use self::rand::{Rng, SeedableRng, StdRng};
+        for seed in 0..100 {
+            use rand::{Rng, SeedableRng, StdRng};
 
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1059,7 +971,7 @@ mod tests {
             let count = rng.gen_range(0, 10);
             tree.extend(rng.gen_iter().take(count));
 
-            for _i in 0..10 {
+            for _ in 0..5 {
                 let splice_end = rng.gen_range(0, tree.extent::<Count>().0 + 1);
                 let splice_start = rng.gen_range(0, splice_end + 1);
                 let count = rng.gen_range(0, 3);
@@ -1078,25 +990,38 @@ mod tests {
                 assert_eq!(tree.items(), reference_items);
 
                 let mut pos = rng.gen_range(0, tree.extent::<Count>().0 + 1);
+                let mut before_start = false;
                 let mut cursor = tree.cursor();
                 cursor.seek(&Count(pos), SeekBias::Right);
 
-                for _i in 0..5 {
+                for i in 0..10 {
+                    assert_eq!(cursor.start::<Count>().0, pos);
+
                     if pos > 0 {
                         assert_eq!(cursor.prev_item().unwrap(), reference_items[pos - 1]);
                     } else {
                         assert_eq!(cursor.prev_item(), None);
                     }
 
-                    if pos < reference_items.len() {
+                    if pos < reference_items.len() && !before_start {
                         assert_eq!(cursor.item().unwrap(), reference_items[pos]);
                     } else {
                         assert_eq!(cursor.item(), None);
                     }
 
-                    cursor.next();
-                    if pos < reference_items.len() {
-                        pos += 1;
+                    if i < 5 {
+                        cursor.next();
+                        if pos < reference_items.len() {
+                            pos += 1;
+                            before_start = false;
+                        }
+                    } else {
+                        cursor.prev();
+                        if pos == 0 {
+                            before_start = true;
+                        }
+                        pos = pos.saturating_sub(1);
+
                     }
                 }
             }
@@ -1229,6 +1154,12 @@ mod tests {
 
         cursor.prev();
         assert_eq!(cursor.item(), None);
+        assert_eq!(cursor.prev_item(), None);
+        assert_eq!(cursor.start::<Count>(), Count(0));
+        assert_eq!(cursor.start::<Sum>(), Sum(0));
+
+        cursor.next();
+        assert_eq!(cursor.item(), Some(1));
         assert_eq!(cursor.prev_item(), None);
         assert_eq!(cursor.start::<Count>(), Count(0));
         assert_eq!(cursor.start::<Sum>(), Sum(0));
