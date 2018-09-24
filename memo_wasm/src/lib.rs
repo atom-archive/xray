@@ -89,7 +89,8 @@ enum Request {
     },
     Entries {
         tree_id: WorkTreeId,
-        descend_into: HashSet<Base64<FileId>>,
+        show_deleted: bool,
+        descend_into: Option<HashSet<Base64<FileId>>>,
     },
 }
 
@@ -361,6 +362,7 @@ impl Server {
             }
             Request::Entries {
                 tree_id,
+                show_deleted,
                 descend_into,
             } => {
                 let tree = self.get_work_tree(tree_id)?;
@@ -368,15 +370,20 @@ impl Server {
                 if let Some(mut cursor) = tree.cursor() {
                     loop {
                         let entry = cursor.entry().unwrap();
-                        entries.push(Entry {
-                            file_id: Base64(entry.file_id),
-                            file_type: entry.file_type,
-                            depth: entry.depth,
-                            name: entry.name.to_string_lossy().into_owned(),
-                            status: entry.status,
-                        });
+                        let mut descend = false;
+                        if show_deleted || entry.status != FileStatus::Removed {
+                            entries.push(Entry {
+                                file_id: Base64(entry.file_id),
+                                file_type: entry.file_type,
+                                depth: entry.depth,
+                                name: entry.name.to_string_lossy().into_owned(),
+                                status: entry.status,
+                            });
+                            descend = descend_into
+                                .as_ref()
+                                .map_or(true, |d| d.contains(&Base64(entry.file_id)));
+                        }
 
-                        let descend = descend_into.contains(&Base64(entry.file_id));
                         if !cursor.next(descend) {
                             break;
                         }

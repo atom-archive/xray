@@ -189,11 +189,21 @@ class WorkTree {
     }).path;
   }
 
-  entries(descendInto?: [FileId]): Entry {
+  entries(options?: {showDeleted?: boolean,  descendInto?: [FileId]}): Entry {
+    let showDeleted, descendInto;
+    if (options) {
+      showDeleted = options.showDeleted || false;
+      descendInto = options.descendInto || null;
+    } else {
+      showDeleted = false;
+      descendInto = null;
+    }
+
     return request({
       type: "Entries",
       tree_id: this.id,
-      descend_into: descendInto || []
+      show_deleted: showDeleted,
+      descend_into: descendInto
     }).entries;
   }
 }
