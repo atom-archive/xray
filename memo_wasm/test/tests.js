@@ -40,6 +40,7 @@ suite("WorkTree", () => {
     const tree2VersionBeforeEdit = tree2.getVersion();
     tree2.applyOps([editOperation]);
     tree2.openTextFile(file2.fileId, "abc");
+    assert.deepEqual(tree2.getText(buffer1), "123a123c123");
     assert.deepEqual(tree2.changesSince(buffer1, tree2VersionBeforeEdit), [
       { start: 0, end: 0, text: "123" },
       { start: 4, end: 5, text: "123" },

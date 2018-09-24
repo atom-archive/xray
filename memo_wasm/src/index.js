@@ -122,6 +122,14 @@ class WorkTree {
     }).changes;
   }
 
+  getText(bufferId) {
+    return request({
+      type: "GetText",
+      tree_id: this.id,
+      buffer_id: bufferId
+    }).text;
+  }
+
   fileIdForPath(path) {
     return request({
       type: "FileIdForPath",

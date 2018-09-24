@@ -9,6 +9,7 @@ extern crate wasm_bindgen;
 
 use memo_core::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::char;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -74,6 +75,10 @@ enum Request {
         buffer_id: Base64<BufferId>,
         version: Base64<time::Global>,
     },
+    GetText {
+        tree_id: WorkTreeId,
+        buffer_id: Base64<BufferId>,
+    },
     FileIdForPath {
         tree_id: WorkTreeId,
         path: String,
@@ -131,6 +136,9 @@ enum Response {
     },
     ChangesSince {
         changes: Vec<Change>,
+    },
+    GetText {
+        text: String,
     },
     FileIdForPath {
         file_id: Option<Base64<FileId>>,
@@ -320,6 +328,18 @@ impl Server {
                         text: String::from_utf16_lossy(&change.code_units),
                     }).collect();
                 Ok(Response::ChangesSince { changes })
+            }
+            Request::GetText {
+                tree_id,
+                buffer_id: Base64(buffer_id),
+            } => {
+                let tree = self.get_work_tree(tree_id)?;
+                let text_iter = tree.text(buffer_id).map_err(|err| err.to_string())?;
+                let mut text = String::new();
+                for ch in char::decode_utf16(text_iter) {
+                    text.push(ch.unwrap_or(char::REPLACEMENT_CHARACTER));
+                }
+                Ok(Response::GetText { text })
             }
             Request::FileIdForPath { tree_id, path } => {
                 let tree = self.get_work_tree(tree_id)?;
