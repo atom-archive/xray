@@ -137,4 +137,12 @@ class WorkTree {
       file_id: id
     }).path;
   }
+
+  entries(descendInto = []) {
+    return request({
+      type: "Entries",
+      tree_id: this.id,
+      descend_into: descendInto
+    }).entries;
+  }
 }

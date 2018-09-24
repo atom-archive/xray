@@ -39,11 +39,11 @@ pub struct Cursor {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct CursorEntry {
-    file_id: FileId,
-    file_type: FileType,
-    depth: usize,
-    name: Arc<OsString>,
-    status: FileStatus,
+    pub file_id: FileId,
+    pub file_type: FileType,
+    pub depth: usize,
+    pub name: Arc<OsString>,
+    pub status: FileStatus,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -107,7 +107,7 @@ pub enum FileId {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BufferId(FileId);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum FileStatus {
     New,
     Renamed,

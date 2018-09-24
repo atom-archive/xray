@@ -10,6 +10,7 @@ extern crate wasm_bindgen;
 use memo_core::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use wasm_bindgen::prelude::*;
 
@@ -81,6 +82,10 @@ enum Request {
         tree_id: WorkTreeId,
         file_id: Base64<FileId>,
     },
+    Entries {
+        tree_id: WorkTreeId,
+        descend_into: HashSet<Base64<FileId>>,
+    },
 }
 
 #[derive(Serialize)]
@@ -133,6 +138,9 @@ enum Response {
     PathForFileId {
         path: Option<String>,
     },
+    Entries {
+        entries: Vec<Entry>,
+    },
 }
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
@@ -148,6 +156,17 @@ struct Change {
     text: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Entry {
+    file_id: Base64<FileId>,
+    file_type: FileType,
+    depth: usize,
+    name: String,
+    status: FileStatus,
+}
+
+#[derive(Eq, Hash, PartialEq)]
 struct Base64<T>(T);
 
 #[wasm_bindgen]
@@ -318,6 +337,32 @@ impl Server {
                 Ok(Response::PathForFileId {
                     path: path.map(|p| p.to_string_lossy().into_owned()),
                 })
+            }
+            Request::Entries {
+                tree_id,
+                descend_into,
+            } => {
+                let tree = self.get_work_tree(tree_id)?;
+                let mut entries = Vec::new();
+                if let Some(mut cursor) = tree.cursor() {
+                    loop {
+                        let entry = cursor.entry().unwrap();
+                        entries.push(Entry {
+                            file_id: Base64(entry.file_id),
+                            file_type: entry.file_type,
+                            depth: entry.depth,
+                            name: entry.name.to_string_lossy().into_owned(),
+                            status: entry.status,
+                        });
+
+                        let descend = descend_into.contains(&Base64(entry.file_id));
+                        if !cursor.next(descend) {
+                            break;
+                        }
+                    }
+                }
+
+                Ok(Response::Entries { entries })
             }
         }
     }

@@ -15,8 +15,8 @@ mod work_tree;
 
 pub use buffer::Buffer;
 pub use work_tree::{
-    BufferId, Cursor, CursorEntry, DirEntry, Error, FileId, FileStatus, FileType, Operation,
-    WorkTree, ROOT_FILE_ID
+    BufferId, Cursor, DirEntry, Error, FileId, FileStatus, FileType, Operation, WorkTree,
+    ROOT_FILE_ID,
 };
 pub type ReplicaId = u64;
 pub type UserId = u64;
