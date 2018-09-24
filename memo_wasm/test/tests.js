@@ -5,7 +5,7 @@ suite("WorkTree", () => {
   let WorkTree;
 
   suiteSetup(async () => {
-    ({WorkTree} = await memo.initialize());
+    ({ WorkTree } = await memo.initialize());
   });
 
   test("basic API interaction", () => {
@@ -31,6 +31,20 @@ suite("WorkTree", () => {
 
     tree1.applyOps([file2.operation]);
     tree2.applyOps([file1.operation]);
-    const buffer1 = tree1.openTextFile(file2.fileId, "");
+    const buffer1 = tree1.openTextFile(file2.fileId, "abc");
+    const editOperation = tree1.edit(
+      buffer1,
+      [{ start: 0, end: 0 }, { start: 1, end: 2 }, { start: 3, end: 3 }],
+      "123"
+    );
+
+    const tree2VersionBeforeEdit = tree2.getVersion();
+    tree2.applyOps([editOperation]);
+    tree2.openTextFile(file2.fileId, "abc");
+    assert.deepEqual(tree2.changesSince(buffer1, tree2VersionBeforeEdit), [
+      { start: 0, end: 0, text: "123" },
+      { start: 4, end: 5, text: "123" },
+      { start: 8, end: 8, text: "123" }
+    ]);
   });
 });

@@ -34,6 +34,10 @@ class WorkTree {
     }).tree_id;
   }
 
+  getVersion() {
+    return request({ tree_id: this.id, type: "GetVersion" }).version;
+  }
+
   appendBaseEntries(baseEntries) {
     request({
       type: "AppendBaseEntries",
@@ -78,5 +82,27 @@ class WorkTree {
       base_text: baseText
     });
     return response.buffer_id;
+  }
+
+  edit(bufferId, ranges, newText) {
+    const response = request({
+      type: "Edit",
+      tree_id: this.id,
+      buffer_id: bufferId,
+      ranges,
+      new_text: newText
+    });
+    return response.operation;
+  }
+
+  changesSince(bufferId, version) {
+    return request({
+      type: "ChangesSince",
+      tree_id: this.id,
+      buffer_id: bufferId,
+      version
+    }).changes;
+  }
+
   }
 }

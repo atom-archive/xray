@@ -27,6 +27,9 @@ enum Request {
     CreateWorkTree {
         replica_id: ReplicaId,
     },
+    GetVersion {
+        tree_id: WorkTreeId,
+    },
     AppendBaseEntries {
         tree_id: WorkTreeId,
         entries: Vec<DirEntry>,
@@ -48,12 +51,32 @@ enum Request {
         file_id: Base64<FileId>,
         base_text: String,
     },
+    Rename {
+        tree_id: WorkTreeId,
+        file_id: Base64<FileId>,
+        new_parent_id: Base64<FileId>,
+        new_name: String,
+    },
+    Remove {
+        tree_id: WorkTreeId,
+        file_id: Base64<FileId>,
+    },
+    Edit {
+        tree_id: WorkTreeId,
+        buffer_id: Base64<BufferId>,
+        ranges: Vec<EditRange>,
+        new_text: String,
+    },
+    ChangesSince {
+        tree_id: WorkTreeId,
+        buffer_id: Base64<BufferId>,
+        version: Base64<time::Global>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum Response {
-    Ok,
     Error {
         message: String,
     },
@@ -62,6 +85,12 @@ enum Response {
     },
     CreateWorkTree {
         tree_id: WorkTreeId,
+    },
+    GetVersion {
+        version: Base64<time::Global>,
+    },
+    AppendBaseEntries {
+        operations: Vec<Base64<Operation>>,
     },
     NewTextFile {
         file_id: Base64<FileId>,
@@ -77,6 +106,31 @@ enum Response {
     ApplyOperations {
         operations: Vec<Base64<Operation>>,
     },
+    Rename {
+        operation: Base64<Operation>,
+    },
+    Remove {
+        operation: Base64<Operation>,
+    },
+    Edit {
+        operation: Base64<Operation>,
+    },
+    ChangesSince {
+        changes: Vec<Change>,
+    },
+}
+
+#[derive(Copy, Clone, Serialize, Deserialize)]
+struct EditRange {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Change {
+    start: usize,
+    end: usize,
+    text: String,
 }
 
 struct Base64<T>(T);
@@ -118,11 +172,17 @@ impl Server {
                 self.work_trees.insert(tree_id, WorkTree::new(replica_id));
                 Ok(Response::CreateWorkTree { tree_id })
             }
+            Request::GetVersion { tree_id } => Ok(Response::GetVersion {
+                version: Base64(self.get_work_tree(tree_id)?.version()),
+            }),
             Request::AppendBaseEntries { tree_id, entries } => {
-                self.get_work_tree(tree_id)?
+                let fixup_ops = self
+                    .get_work_tree(tree_id)?
                     .append_base_entries(entries)
                     .map_err(|e| e.to_string())?;
-                Ok(Response::Ok)
+                Ok(Response::AppendBaseEntries {
+                    operations: fixup_ops.into_iter().map(|op| Base64(op)).collect(),
+                })
             }
             Request::ApplyOperations {
                 tree_id,
@@ -133,10 +193,7 @@ impl Server {
                     .apply_ops(operations.into_iter().map(|op| op.0))
                     .map_err(|e| e.to_string())?;
                 Ok(Response::ApplyOperations {
-                    operations: fixup_ops
-                        .into_iter()
-                        .map(|op| Base64(op))
-                        .collect::<Vec<_>>(),
+                    operations: fixup_ops.into_iter().map(|op| Base64(op)).collect(),
                 })
             }
             Request::NewTextFile { tree_id } => {
@@ -172,6 +229,63 @@ impl Server {
                 Ok(Response::OpenTextFile {
                     buffer_id: Base64(buffer_id),
                 })
+            }
+            Request::Rename {
+                tree_id,
+                file_id: Base64(file_id),
+                new_parent_id: Base64(new_parent_id),
+                new_name,
+            } => {
+                let tree = self.get_work_tree(tree_id)?;
+                let op = tree
+                    .rename(file_id, new_parent_id, new_name)
+                    .map_err(|e| e.to_string())?;
+                Ok(Response::Rename {
+                    operation: Base64(op),
+                })
+            }
+            Request::Remove {
+                tree_id,
+                file_id: Base64(file_id),
+            } => {
+                let tree = self.get_work_tree(tree_id)?;
+                let op = tree.remove(file_id).map_err(|e| e.to_string())?;
+                Ok(Response::Remove {
+                    operation: Base64(op),
+                })
+            }
+            Request::Edit {
+                tree_id,
+                buffer_id: Base64(buffer_id),
+                ranges,
+                new_text,
+            } => {
+                let tree = self.get_work_tree(tree_id)?;
+                let op = tree
+                    .edit(
+                        buffer_id,
+                        ranges.into_iter().map(|range| range.start..range.end),
+                        new_text.as_str(),
+                    ).map_err(|e| e.to_string())?;
+                Ok(Response::Edit {
+                    operation: Base64(op),
+                })
+            }
+            Request::ChangesSince {
+                tree_id,
+                buffer_id: Base64(buffer_id),
+                version: Base64(version),
+            } => {
+                let tree = self.get_work_tree(tree_id)?;
+                let changes = tree
+                    .changes_since(buffer_id, version)
+                    .map_err(|e| e.to_string())?
+                    .map(|change| Change {
+                        start: change.range.start,
+                        end: change.range.end,
+                        text: change.code_units,
+                    }).collect();
+                Ok(Response::ChangesSince { changes })
             }
         }
     }
