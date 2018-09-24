@@ -54,6 +54,7 @@ pub struct DirEntry {
         deserialize_with = "deserialize_os_string"
     )]
     pub name: OsString,
+    #[serde(rename = "type")]
     pub file_type: FileType,
 }
 

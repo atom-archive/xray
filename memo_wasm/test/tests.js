@@ -11,9 +11,9 @@ suite("WorkTree", () => {
   test("basic API interaction", () => {
     const rootFileId = WorkTree.getRootFileId();
     const baseEntries = [
-      { depth: 1, name: "a", file_type: "Directory" },
-      { depth: 2, name: "b", file_type: "Directory" },
-      { depth: 3, name: "c", file_type: "Text" }
+      { depth: 1, name: "a", type: "Directory" },
+      { depth: 2, name: "b", type: "Directory" },
+      { depth: 3, name: "c", type: "Text" }
     ];
 
     const tree1 = new WorkTree(1);
@@ -64,7 +64,7 @@ suite("WorkTree", () => {
       {
         depth: 1,
         fileId: tree1.fileIdForPath("a"),
-        fileType: "Directory",
+        type: "Directory",
         name: "a",
         status: "Unchanged"
       }
@@ -75,28 +75,28 @@ suite("WorkTree", () => {
         {
           depth: 1,
           fileId: tree1.fileIdForPath("a"),
-          fileType: "Directory",
+          type: "Directory",
           name: "a",
           status: "Unchanged"
         },
         {
           depth: 2,
           fileId: tree1.fileIdForPath("a/b"),
-          fileType: "Directory",
+          type: "Directory",
           name: "b",
           status: "Unchanged"
         },
         {
           depth: 3,
           fileId: c,
-          fileType: "Text",
+          type: "Text",
           name: "c",
           status: "Removed"
         },
         {
           depth: 3,
           fileId: dir1.fileId,
-          fileType: "Directory",
+          type: "Directory",
           name: "x",
           status: "New"
         }

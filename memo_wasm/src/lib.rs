@@ -165,9 +165,10 @@ struct Change {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct Entry {
+    #[serde(rename = "fileId")]
     file_id: Base64<FileId>,
+    #[serde(rename = "type")]
     file_type: FileType,
     depth: usize,
     name: String,

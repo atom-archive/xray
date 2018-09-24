@@ -10,6 +10,8 @@
   "license": "MIT",
   "devDependencies": {
     "mocha": "^5.2.0",
+    "ts-loader": "^5.2.0",
+    "typescript": "^3.0.3",
     "webpack": "^4.6.0",
     "webpack-cli": "^2.0.15"
   }

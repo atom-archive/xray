@@ -1,16 +1,14 @@
-let server;
-
-const memoImportPromise = import("../dist/memo_wasm");
+let server: any;
 
 export async function init() {
-  const memo = await memoImportPromise;
+  const memo = await import("../dist/memo_wasm");
   if (!server) {
     server = memo.Server.new();
   }
   return { WorkTree };
 }
 
-function request(req) {
+function request(req: any) {
   const response = server.request(req);
   if (response.type == "Error") {
     throw new Error(response.message);
@@ -19,34 +17,69 @@ function request(req) {
   }
 }
 
+type FileId = string;
+type BufferId = string;
+type Version = object;
+type Operation = string;
+
+enum FileType {
+  Directory = "Directory",
+  File = "File"
+}
+
+enum FileStatus {
+  New = "New",
+  Renamed = "Renamed",
+  Removed = "Removed",
+  Modified = "Modified",
+  Unchanged = "Unchanged"
+}
+
+interface BaseEntry {
+  depth: number;
+  name: string;
+  type: FileType;
+}
+
+interface Entry {
+  depth: number;
+  fileId: FileId;
+  type: FileType;
+  name: string;
+  status: FileStatus;
+}
+
 class WorkTree {
-  static getRootFileId() {
+  static rootFileId: FileId;
+  id: number;
+
+  static getRootFileId(): FileId {
     if (!WorkTree.rootFileId) {
       WorkTree.rootFileId = request({ type: "GetRootFileId" }).file_id;
     }
     return WorkTree.rootFileId;
   }
 
-  constructor(replicaId) {
+  constructor(replicaId: number) {
     this.id = request({
       type: "CreateWorkTree",
       replica_id: replicaId
     }).tree_id;
   }
 
-  getVersion() {
+  getVersion(): Version {
     return request({ tree_id: this.id, type: "GetVersion" }).version;
   }
 
-  appendBaseEntries(baseEntries) {
-    request({
+  appendBaseEntries(baseEntries: [BaseEntry]): [Operation] {
+    return request({
       type: "AppendBaseEntries",
       tree_id: this.id,
       entries: baseEntries
-    });
+    }).operations;
   }
 
-  applyOps(operations) {
+  applyOps(operations: [Operation]): [Operation] {
     const response = request({
       type: "ApplyOperations",
       tree_id: this.id,
@@ -55,7 +88,7 @@ class WorkTree {
     return response.operations;
   }
 
-  newTextFile() {
+  newTextFile(): { fileId: FileId; operation: Operation } {
     const { file_id, operation } = request({
       type: "NewTextFile",
       tree_id: this.id
@@ -63,7 +96,10 @@ class WorkTree {
     return { fileId: file_id, operation };
   }
 
-  createDirectory(parentId, name) {
+  createDirectory(
+    parentId: FileId,
+    name: string
+  ): { fileId: FileId; operation: Operation } {
     const { file_id, operation } = request({
       type: "CreateDirectory",
       tree_id: this.id,
@@ -74,7 +110,7 @@ class WorkTree {
     return { fileId: file_id, operation };
   }
 
-  openTextFile(fileId, baseText) {
+  openTextFile(fileId: FileId, baseText: string): BufferId {
     const response = request({
       type: "OpenTextFile",
       tree_id: this.id,
@@ -84,7 +120,7 @@ class WorkTree {
     return response.buffer_id;
   }
 
-  rename(fileId, newParentId, newName) {
+  rename(fileId: FileId, newParentId: FileId, newName: string): Operation {
     return request({
       type: "Rename",
       tree_id: this.id,
@@ -94,7 +130,7 @@ class WorkTree {
     }).operation;
   }
 
-  remove(fileId) {
+  remove(fileId: FileId): Operation {
     return request({
       type: "Remove",
       tree_id: this.id,
@@ -102,7 +138,11 @@ class WorkTree {
     }).operation;
   }
 
-  edit(bufferId, ranges, newText) {
+  edit(
+    bufferId: BufferId,
+    ranges: [{ start: number; end: number }],
+    newText: string
+  ): Operation {
     const response = request({
       type: "Edit",
       tree_id: this.id,
@@ -113,7 +153,10 @@ class WorkTree {
     return response.operation;
   }
 
-  changesSince(bufferId, version) {
+  changesSince(
+    bufferId: BufferId,
+    version: Version
+  ): [{ start: number; end: number; text: string }] {
     return request({
       type: "ChangesSince",
       tree_id: this.id,
@@ -122,7 +165,7 @@ class WorkTree {
     }).changes;
   }
 
-  getText(bufferId) {
+  getText(bufferId: BufferId): string {
     return request({
       type: "GetText",
       tree_id: this.id,
@@ -130,7 +173,7 @@ class WorkTree {
     }).text;
   }
 
-  fileIdForPath(path) {
+  fileIdForPath(path: string): FileId {
     return request({
       type: "FileIdForPath",
       tree_id: this.id,
@@ -138,7 +181,7 @@ class WorkTree {
     }).file_id;
   }
 
-  pathForFileId(id) {
+  pathForFileId(id: FileId): string {
     return request({
       type: "PathForFileId",
       tree_id: this.id,
@@ -146,11 +189,11 @@ class WorkTree {
     }).path;
   }
 
-  entries(descendInto = []) {
+  entries(descendInto?: [FileId]): Entry {
     return request({
       type: "Entries",
       tree_id: this.id,
-      descend_into: descendInto
+      descend_into: descendInto || []
     }).entries;
   }
 }
