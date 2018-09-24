@@ -50,8 +50,8 @@ interface Entry {
 }
 
 class WorkTree {
-  static rootFileId: FileId;
-  id: number;
+  private static rootFileId: FileId;
+  private id: number;
 
   static getRootFileId(): FileId {
     if (!WorkTree.rootFileId) {
