@@ -174,6 +174,7 @@ struct Entry {
     depth: usize,
     name: String,
     status: FileStatus,
+    visible: bool,
 }
 
 #[derive(Eq, Hash, PartialEq)]
@@ -378,6 +379,7 @@ impl Server {
                                 depth: entry.depth,
                                 name: entry.name.to_string_lossy().into_owned(),
                                 status: entry.status,
+                                visible: entry.visible,
                             });
                             descend = descend_into
                                 .as_ref()

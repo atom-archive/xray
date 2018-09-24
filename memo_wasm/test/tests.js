@@ -66,7 +66,8 @@ suite("WorkTree", () => {
         fileId: tree1.fileIdForPath("a"),
         type: "Directory",
         name: "a",
-        status: "Unchanged"
+        status: "Unchanged",
+        visible: true
       }
     ]);
     assert.deepEqual(
@@ -80,28 +81,32 @@ suite("WorkTree", () => {
           fileId: tree1.fileIdForPath("a"),
           type: "Directory",
           name: "a",
-          status: "Unchanged"
+          status: "Unchanged",
+          visible: true
         },
         {
           depth: 2,
           fileId: tree1.fileIdForPath("a/b"),
           type: "Directory",
           name: "b",
-          status: "Unchanged"
+          status: "Unchanged",
+          visible: true
         },
         {
           depth: 3,
           fileId: c,
           type: "Text",
           name: "c",
-          status: "Removed"
+          status: "Removed",
+          visible: false
         },
         {
           depth: 3,
           fileId: dir1.fileId,
           type: "Directory",
           name: "x",
-          status: "New"
+          status: "New",
+          visible: true
         }
       ]
     );

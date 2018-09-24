@@ -47,6 +47,7 @@ interface Entry {
   type: FileType;
   name: string;
   status: FileStatus;
+  visible: boolean;
 }
 
 class WorkTree {

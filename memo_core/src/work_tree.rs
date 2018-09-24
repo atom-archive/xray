@@ -33,8 +33,13 @@ pub struct Cursor {
     metadata_cursor: btree::Cursor<Metadata>,
     parent_ref_cursor: btree::Cursor<ParentRefValue>,
     child_ref_cursor: btree::Cursor<ChildRefValue>,
-    stack: Vec<(btree::Cursor<ChildRefValue>, FileStatus)>,
+    stack: Vec<CursorStackEntry>,
     path: PathBuf,
+}
+
+struct CursorStackEntry {
+    cursor: btree::Cursor<ChildRefValue>,
+    visible: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -44,6 +49,7 @@ pub struct CursorEntry {
     pub depth: usize,
     pub name: Arc<OsString>,
     pub status: FileStatus,
+    pub visible: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -211,7 +217,7 @@ impl WorkTree {
             stack: Vec::new(),
             path: PathBuf::new(),
         };
-        if cursor.descend_into(FileStatus::Unchanged, ROOT_FILE_ID) {
+        if cursor.descend_into(true, ROOT_FILE_ID) {
             Some(cursor)
         } else {
             None
@@ -926,7 +932,7 @@ impl Cursor {
             let entry = self.entry().unwrap();
             if !can_descend
                 || entry.file_type != FileType::Directory
-                || !self.descend_into(entry.status, entry.file_id)
+                || !self.descend_into(entry.visible, entry.file_id)
             {
                 while !self.stack.is_empty() && !self.next_sibling() {
                     self.stack.pop();
@@ -939,37 +945,38 @@ impl Cursor {
     }
 
     pub fn entry(&self) -> Result<CursorEntry, Error> {
-        let (child_ref_cursor, parent_status) = self.stack.last().ok_or(Error::CursorExhausted)?;
+        let CursorStackEntry {
+            cursor: child_ref_cursor,
+            visible: parent_visible,
+        } = self.stack.last().ok_or(Error::CursorExhausted)?;
         let metadata = self.metadata_cursor.item().unwrap();
         let child_ref = child_ref_cursor.item().unwrap();
-        let status = if *parent_status == FileStatus::Removed {
-            FileStatus::Removed
-        } else {
-            let mut parent_ref_cursor = self.parent_ref_cursor.clone();
-            parent_ref_cursor.seek(&metadata.file_id, SeekBias::Left);
-            let newest_parent_ref_value = parent_ref_cursor.item().unwrap();
-            parent_ref_cursor.seek(&metadata.file_id, SeekBias::Right);
-            parent_ref_cursor.prev();
-            let oldest_parent_ref_value = parent_ref_cursor.item().unwrap();
-            match metadata.file_id {
-                FileId::Base(_) => {
-                    if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
-                        FileStatus::Unchanged
-                    } else if newest_parent_ref_value.parent.is_some() {
-                        FileStatus::Renamed
-                    } else {
-                        FileStatus::Removed
-                    }
+
+        let mut parent_ref_cursor = self.parent_ref_cursor.clone();
+        parent_ref_cursor.seek(&metadata.file_id, SeekBias::Left);
+        let newest_parent_ref_value = parent_ref_cursor.item().unwrap();
+        parent_ref_cursor.seek(&metadata.file_id, SeekBias::Right);
+        parent_ref_cursor.prev();
+        let oldest_parent_ref_value = parent_ref_cursor.item().unwrap();
+        let status = match metadata.file_id {
+            FileId::Base(_) => {
+                if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
+                    FileStatus::Unchanged
+                } else if newest_parent_ref_value.parent.is_some() {
+                    FileStatus::Renamed
+                } else {
+                    FileStatus::Removed
                 }
-                FileId::New(_) => {
-                    if newest_parent_ref_value.parent.is_some() {
-                        FileStatus::New
-                    } else {
-                        FileStatus::Removed
-                    }
+            }
+            FileId::New(_) => {
+                if newest_parent_ref_value.parent.is_some() {
+                    FileStatus::New
+                } else {
+                    FileStatus::Removed
                 }
             }
         };
+        let visible = *parent_visible && status != FileStatus::Removed;
 
         Ok(CursorEntry {
             file_id: metadata.file_id,
@@ -977,6 +984,7 @@ impl Cursor {
             name: child_ref.name,
             depth: self.stack.len(),
             status,
+            visible,
         })
     }
 
@@ -988,12 +996,15 @@ impl Cursor {
         }
     }
 
-    fn descend_into(&mut self, parent_status: FileStatus, dir_id: FileId) -> bool {
+    fn descend_into(&mut self, parent_visible: bool, dir_id: FileId) -> bool {
         let mut child_ref_cursor = self.child_ref_cursor.clone();
         child_ref_cursor.seek(&dir_id, SeekBias::Left);
         if let Some(child_ref) = child_ref_cursor.item() {
             if child_ref.parent_id == dir_id {
-                self.stack.push((child_ref_cursor, parent_status));
+                self.stack.push(CursorStackEntry {
+                    cursor: child_ref_cursor,
+                    visible: parent_visible,
+                });
                 self.path.push(child_ref.name.as_ref());
                 self.metadata_cursor
                     .seek(&child_ref.child_id, SeekBias::Left);
@@ -1007,7 +1018,7 @@ impl Cursor {
     }
 
     pub fn next_sibling(&mut self) -> bool {
-        let (cursor, _) = self.stack.last_mut().unwrap();
+        let CursorStackEntry { cursor, .. } = self.stack.last_mut().unwrap();
         let parent_id = cursor.item().unwrap().parent_id;
         cursor.next();
         if let Some(child_ref) = cursor.item() {
@@ -1467,7 +1478,8 @@ mod tests {
                 file_type: FileType::Directory,
                 depth: 1,
                 name: Arc::new(OsString::from("a")),
-                status: FileStatus::Unchanged
+                status: FileStatus::Unchanged,
+                visible: true,
             }
         );
 
@@ -1479,7 +1491,8 @@ mod tests {
                 file_type: FileType::Directory,
                 depth: 2,
                 name: Arc::new(OsString::from("b")),
-                status: FileStatus::Removed
+                status: FileStatus::Removed,
+                visible: false,
             }
         );
 
@@ -1491,7 +1504,8 @@ mod tests {
                 file_type: FileType::Text,
                 depth: 3,
                 name: Arc::new(OsString::from("c")),
-                status: FileStatus::Removed
+                status: FileStatus::Unchanged,
+                visible: false,
             }
         );
 
@@ -1503,7 +1517,8 @@ mod tests {
                 file_type: FileType::Directory,
                 depth: 2,
                 name: Arc::new(OsString::from("d")),
-                status: FileStatus::Unchanged
+                status: FileStatus::Unchanged,
+                visible: true,
             }
         );
 
@@ -1515,7 +1530,8 @@ mod tests {
                 file_type: FileType::Text,
                 depth: 2,
                 name: Arc::new(OsString::from("x")),
-                status: FileStatus::New
+                status: FileStatus::New,
+                visible: true,
             }
         );
 
@@ -1527,7 +1543,8 @@ mod tests {
                 file_type: FileType::Directory,
                 depth: 2,
                 name: Arc::new(OsString::from("z")),
-                status: FileStatus::Renamed
+                status: FileStatus::Renamed,
+                visible: true,
             }
         );
 
@@ -1540,6 +1557,7 @@ mod tests {
                 depth: 3,
                 name: Arc::new(OsString::from("y")),
                 status: FileStatus::Removed,
+                visible: false,
             }
         );
 
@@ -1552,6 +1570,7 @@ mod tests {
                 depth: 1,
                 name: Arc::new(OsString::from("f")),
                 status: FileStatus::Unchanged,
+                visible: true,
             }
         );
 
@@ -1629,7 +1648,7 @@ mod tests {
             let base_entries = base_tree.entries();
             let base_entries = base_entries
                 .iter()
-                .filter(|entry| entry.status != FileStatus::Removed)
+                .filter(|entry| entry.visible)
                 .map(|entry| DirEntry {
                     depth: entry.depth,
                     name: entry.name.as_ref().clone(),
