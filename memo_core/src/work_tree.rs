@@ -597,14 +597,14 @@ impl WorkTree {
         Ok(operation)
     }
 
-    pub fn edit<'a, I, T>(
+    pub fn edit<I, T>(
         &mut self,
         buffer_id: BufferId,
         old_ranges: I,
         new_text: T,
     ) -> Result<Operation, Error>
     where
-        I: IntoIterator<Item = &'a Range<usize>>,
+        I: IntoIterator<Item = Range<usize>>,
         T: Into<Text>,
     {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
@@ -1581,7 +1581,7 @@ mod tests {
 
         let file_id = tree_1.file_id("file").unwrap();
         let buffer_id = tree_2.open_text_file(file_id, base_text.clone()).unwrap();
-        let ops = tree_2.edit(buffer_id, &[1..2, 3..3], "x");
+        let ops = tree_2.edit(buffer_id, vec![1..2, 3..3], "x");
         tree_1.apply_ops(ops).unwrap();
 
         // Must call open_text_file on any given replica first before interacting with a buffer.
@@ -1590,7 +1590,7 @@ mod tests {
         assert_eq!(tree_1.text(buffer_id).unwrap().into_string(), "axcx");
         assert_eq!(tree_2.text(buffer_id).unwrap().into_string(), "axcx");
 
-        let ops = tree_1.edit(buffer_id, &[1..2, 4..4], "y");
+        let ops = tree_1.edit(buffer_id, vec![1..2, 4..4], "y");
         let base_version = tree_2.version();
 
         tree_2.apply_ops(ops).unwrap();
