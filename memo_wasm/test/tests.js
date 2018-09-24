@@ -19,7 +19,6 @@ suite("WorkTree", () => {
     const tree1 = new WorkTree(1);
     tree1.appendBaseEntries(baseEntries);
     const file1 = tree1.newTextFile();
-    const dir1 = tree1.createDirectory(rootFileId, "x");
 
     const tree2 = new WorkTree(2);
     tree2.appendBaseEntries(baseEntries);
@@ -46,5 +45,18 @@ suite("WorkTree", () => {
       { start: 4, end: 5, text: "123" },
       { start: 8, end: 8, text: "123" }
     ]);
+
+    const dir1 = tree1.createDirectory(rootFileId, "x");
+    const dir2 = tree1.createDirectory(dir1.fileId, "y");
+    assert.equal(tree1.pathForFileId(dir2.fileId), "x/y");
+    assert.equal(tree1.fileIdForPath("x/y"), dir2.fileId);
+
+    tree1.rename(dir1.fileId, tree1.fileIdForPath("a/b"), "y");
+    assert.equal(tree1.fileIdForPath("a/b/y"), dir1.fileId);
+
+    const c = tree1.fileIdForPath("a/b/c");
+    tree1.remove(c);
+    assert.equal(tree1.fileIdForPath("a/b/c"), null);
+    assert.equal(tree1.pathForFileId(c), null);
   });
 });

@@ -10,6 +10,7 @@ extern crate wasm_bindgen;
 use memo_core::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+use std::path::Path;
 use wasm_bindgen::prelude::*;
 
 pub type WorkTreeId = u32;
@@ -20,7 +21,7 @@ pub struct Server {
     next_work_tree_id: WorkTreeId,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Request {
     GetRootFileId,
@@ -72,9 +73,17 @@ enum Request {
         buffer_id: Base64<BufferId>,
         version: Base64<time::Global>,
     },
+    FileIdForPath {
+        tree_id: WorkTreeId,
+        path: String,
+    },
+    PathForFileId {
+        tree_id: WorkTreeId,
+        file_id: Base64<FileId>,
+    },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 #[serde(tag = "type")]
 enum Response {
     Error {
@@ -117,6 +126,12 @@ enum Response {
     },
     ChangesSince {
         changes: Vec<Change>,
+    },
+    FileIdForPath {
+        file_id: Option<Base64<FileId>>,
+    },
+    PathForFileId {
+        path: Option<String>,
     },
 }
 
@@ -283,9 +298,26 @@ impl Server {
                     .map(|change| Change {
                         start: change.range.start,
                         end: change.range.end,
-                        text: change.code_units,
+                        text: String::from_utf16_lossy(&change.code_units),
                     }).collect();
                 Ok(Response::ChangesSince { changes })
+            }
+            Request::FileIdForPath { tree_id, path } => {
+                let tree = self.get_work_tree(tree_id)?;
+                let path = Path::new(&path);
+                Ok(Response::FileIdForPath {
+                    file_id: tree.file_id(path).ok().map(|id| Base64(id)),
+                })
+            }
+            Request::PathForFileId {
+                tree_id,
+                file_id: Base64(file_id),
+            } => {
+                let tree = self.get_work_tree(tree_id)?;
+                let path = tree.path(file_id).ok();
+                Ok(Response::PathForFileId {
+                    path: path.map(|p| p.to_string_lossy().into_owned()),
+                })
             }
         }
     }

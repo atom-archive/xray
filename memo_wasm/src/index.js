@@ -84,6 +84,24 @@ class WorkTree {
     return response.buffer_id;
   }
 
+  rename(fileId, newParentId, newName) {
+    return request({
+      type: "Rename",
+      tree_id: this.id,
+      file_id: fileId,
+      new_parent_id: newParentId,
+      new_name: newName
+    }).operation;
+  }
+
+  remove(fileId) {
+    return request({
+      type: "Remove",
+      tree_id: this.id,
+      file_id: fileId
+    }).operation;
+  }
+
   edit(bufferId, ranges, newText) {
     const response = request({
       type: "Edit",
@@ -104,5 +122,19 @@ class WorkTree {
     }).changes;
   }
 
+  fileIdForPath(path) {
+    return request({
+      type: "FileIdForPath",
+      tree_id: this.id,
+      path
+    }).file_id;
+  }
+
+  pathForFileId(id) {
+    return request({
+      type: "PathForFileId",
+      tree_id: this.id,
+      file_id: id
+    }).path;
   }
 }
