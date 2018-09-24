@@ -5,7 +5,7 @@ suite("WorkTree", () => {
   let WorkTree;
 
   suiteSetup(async () => {
-    ({ WorkTree } = await memo.initialize());
+    ({ WorkTree } = await memo.init());
   });
 
   test("basic API interaction", () => {

@@ -2,6 +2,7 @@
   "name": "memo_wasm",
   "version": "0.1.0",
   "main": "dist/index.js",
+  "browser": "src/index.js",
   "scripts": {
     "install": "script/build",
     "test": "mocha --ui=tdd test"

@@ -2,7 +2,7 @@ let server;
 
 const memoImportPromise = import("../dist/memo_wasm");
 
-export async function initialize() {
+export async function init() {
   const memo = await memoImportPromise;
   if (!server) {
     server = memo.Server.new();
