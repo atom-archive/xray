@@ -62,6 +62,10 @@ class WorkTree {
   }
 
   constructor(replicaId: number) {
+    if (replicaId <= 0) {
+      throw new Error("Replica id must be positive");
+    }
+
     this.id = request({
       type: "CreateWorkTree",
       replica_id: replicaId
