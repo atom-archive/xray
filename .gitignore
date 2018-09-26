@@ -7,4 +7,4 @@ Icon*
 .tags*
 xray_wasm/dist
 xray_browser/dist
-memo_wasm/dist
+memo_js/dist

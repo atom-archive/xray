@@ -1,7 +1,7 @@
 let server: any;
 
 export async function init() {
-  const memo = await import("../dist/memo_wasm");
+  const memo = await import("../dist/memo_js");
   if (!server) {
     server = memo.Server.new();
   }
