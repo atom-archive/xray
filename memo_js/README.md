@@ -37,15 +37,20 @@ a/b
 c
 ```
 
-For now, Memo has no internal concept of commits. Application code will need to arrange for all replicas to build on top of the same commit state. When a participant wishes to commit, you'll need to coordinate building up a new work tree on top of the new state. We plan to handle more commit-related logic directly within the library in the future.
+Since the application may need to perform I/O in order to fetch the base entries, you are free to start using the work tree before they are fully populated. You can also populate the base entries in a streaming fashion by calling `appendBaseEntries` multiple times and ensuring that the entries passed to each call pick up from the last entry passed in the previous call. If
+
+For now, Memo has no internal concept of commits. Application code will need to arrange for all replicas to build on top of the same commit state and see the exact same base entries. When a participant wishes to commit, you'll need to coordinate building up a new work tree on top of the new state. We plan to handle more commit-related logic directly within the library in the future.
 
 ## Apply outstanding operations
 
-If collaboration is already in progress, you can apply any outstanding operations with `applyOps`. We'll cover how these operations are generated below.
+If collaboration is already in progress, you can apply any outstanding operations with `applyOps`. We'll cover the details of generating and applying operations later.
 
 ```js
-tree.applyOps(operations)
+const fixupOps = tree.applyOps(operations)
+// broadcast fixupOps to peers
 ```
+
+If you have not finished populating the base entries via `appendBaseEntries`, some of these operations may be deferred until the entries that they reference are available.
 
 ## List the work tree's current entries
 
@@ -123,13 +128,13 @@ console.log(tree.pathForFileId(fileId1)); // => "d/e/b.txt"
 
 ## Working with text files
 
-Just like you had to supply the base entries from the work tree's underlying Git commit, you'll also need to supply the base content of any text file you want to work with. To do this, you'll call `openTextFile`.
+As a prerequisite to interacting with the contents of any text file in the work tree, you'll need to call `openTextFile` and supply the text file's id along with its *base content*, representing the state of the file in the work tree's underlying Git commit.
 
 ```js
 const bufferId = tree.openTextFile(fileId1, "Hello, world!");
 ```
 
-In the example above, the string `"Hello, world!"` represents the contents of the file as it existed in the base commit. If the file did not exist or was empty, you can pass an empty string.
+In the example above, the string `"Hello, world!"` represents the contents of the file as it existed in the tree's base commit. If the file did not exist or was empty, you can pass an empty string. Again, just like with base entries, it's imperative that you supply the same content for all files on all replicas by ensuring that all work tree's build on the same commit in application code.
 
 Once you have obtained a buffer id, you can get the text of the file, which might be different than the base text you supplied due to the application of remote operations. Remember to pass a *buffer id* obtained via `openTextFile` rather than a raw file id.
 
@@ -166,6 +171,22 @@ const fixupOps = tree.applyOps(remoteOps);
 broadcastOps(fixupOps);
 ```
 
-Whenever you call `applyOps`, there is a chance that additional "fixup" operations could be generated to deal with cycles and name conflicts. Be sure to broadcast these operations to peers to ensure convergence.
+Whenever you call `applyOps`, there is a chance that additional "fixup" operations could be generated to deal with cycles and name conflicts in the tree. Be sure to broadcast these operations to peers to ensure convergence.
 
-If you're integrating with a text editor, you should capture the work tree's version vector before applying remote operations, then obtain and apply any changes to open buffers via `changesSince` method, as discussed above. For now, it's important that you don't allow any local changes to be performed in between applying remote operations and updating the state of local editors via `changesSince`, since local changes could invalidate the coordinates of any reported changes. All methods on this library are synchronous, so that should be simple to ensure.
+If you're integrating with a text editor, you should capture the work tree's version vector before applying remote operations, then obtain and apply any changes to open buffers via `changesSince` method. Here is a sketch of how this would work.
+
+```js
+function applyOps(tree, ops, openEditors) {
+  // Perform these steps synchronously:
+  const baseVersion = tree.getVersion();
+  const fixupOps = tree.applyOps(ops);
+  for editor of openEditors {
+    applyChanges(editor, tree.changesSince(editor.bufferId, baseVersion));
+  }
+
+  // Broadcasting fixup ops can happen at any time:
+  broadcastOps(fixupOps);
+}
+```
+
+It's important that you don't allow any local edits to be performed in between applying remote operations and updating the state of local editors, since local edits could cause the results of `changesSince` to be invalid for the current local editor state.
