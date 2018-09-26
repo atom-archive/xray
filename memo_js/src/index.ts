@@ -115,16 +115,6 @@ class WorkTree {
     return { fileId: file_id, operation };
   }
 
-  openTextFile(fileId: FileId, baseText: string): BufferId {
-    const response = request({
-      type: "OpenTextFile",
-      tree_id: this.id,
-      file_id: fileId,
-      base_text: baseText
-    });
-    return response.buffer_id;
-  }
-
   rename(fileId: FileId, newParentId: FileId, newName: string): Operation {
     return request({
       type: "Rename",
@@ -141,41 +131,6 @@ class WorkTree {
       tree_id: this.id,
       file_id: fileId
     }).operation;
-  }
-
-  edit(
-    bufferId: BufferId,
-    ranges: [{ start: number; end: number }],
-    newText: string
-  ): Operation {
-    const response = request({
-      type: "Edit",
-      tree_id: this.id,
-      buffer_id: bufferId,
-      ranges,
-      new_text: newText
-    });
-    return response.operation;
-  }
-
-  changesSince(
-    bufferId: BufferId,
-    version: Version
-  ): [{ start: number; end: number; text: string }] {
-    return request({
-      type: "ChangesSince",
-      tree_id: this.id,
-      buffer_id: bufferId,
-      version
-    }).changes;
-  }
-
-  getText(bufferId: BufferId): string {
-    return request({
-      type: "GetText",
-      tree_id: this.id,
-      buffer_id: bufferId
-    }).text;
   }
 
   fileIdForPath(path: string): FileId {
@@ -210,5 +165,50 @@ class WorkTree {
       show_deleted: showDeleted,
       descend_into: descendInto
     }).entries;
+  }
+
+  openTextFile(fileId: FileId, baseText: string): BufferId {
+    const response = request({
+      type: "OpenTextFile",
+      tree_id: this.id,
+      file_id: fileId,
+      base_text: baseText
+    });
+    return response.buffer_id;
+  }
+
+  getText(bufferId: BufferId): string {
+    return request({
+      type: "GetText",
+      tree_id: this.id,
+      buffer_id: bufferId
+    }).text;
+  }
+
+  edit(
+    bufferId: BufferId,
+    ranges: [{ start: number; end: number }],
+    newText: string
+  ): Operation {
+    const response = request({
+      type: "Edit",
+      tree_id: this.id,
+      buffer_id: bufferId,
+      ranges,
+      new_text: newText
+    });
+    return response.operation;
+  }
+
+  changesSince(
+    bufferId: BufferId,
+    version: Version
+  ): [{ start: number; end: number; text: string }] {
+    return request({
+      type: "ChangesSince",
+      tree_id: this.id,
+      buffer_id: bufferId,
+      version
+    }).changes;
   }
 }
