@@ -71,7 +71,101 @@ Each returned entry has the following fields:
 * `status`: How this path has changed since the base commit (`"New"`, `"Renamed"`, `"Removed"`, `"Modified"`, or `"Unchanged"`)
 * `visible`: Whether or not this file is currently visible (not deleted).
 
-The `entries` method accepts two options.
+The `entries` method accepts two options as fields in an optional object passed to the method.
 
 * `showDeleted`: If `true`, returns entries for deleted files and directories, but marks them as `visible: false`.
 * `descendInto`: An optional array of `FileId`s. If provided, the traversal will skip descending into any directory not present in this whitelist. You can use this option to limit the number of entries you need to process if you are rendering a UI with collapsed directories.
+
+## Create new files and directories
+
+File system operations on the work tree all function in terms of *file ids*, which are base64 encoded strings that can be obtained in various ways from the work tree. One way to access a file id is to create a new text file:
+
+```js
+const { fileId, operation } = tree.newTextFile();
+// Send the operation to peers...
+```
+
+This returns a `fileId` and an `operation`, both of which are base64 encoded strings. The `operation` should be transmitted to all other collaborators and applied via `applyOps`, discussed in more detail later. After calling `newTextFile`, the created file exists in an "unsaved" form. To give it a name, pass the returned file id to the `rename` method.
+
+```js
+const operation = tree.rename(fileId, tree.getRootFileId(), "foo.txt");
+// Send the operation to peers...
+```
+
+The `rename` method takes a file id to rename, the id of a parent directory, and the file's new name. In the example above, we access the id of the root directory via `getRootFileId()`. If you attempt to rename the file to a name that conflicts with an existing entry in the specified parent directory, an exception will be thrown.
+
+Unlike files, directories cannot be created in a detached state. You'll need to specify a parent id and name at the time of creation.
+
+```js
+const { fileId, operation } = tree.createDirectory(tree.getRootFileId(), "a");
+// Send the operation to peers...
+```
+
+## Renaming or deleting existing files
+
+To rename or delete a file, you need access to its file id. You saw how to obtain the file id for a new file or directory above. There are a couple ways to obtain the id of an existing file. First, it's available in the `fileId` field in each of the objects returned by the `entries` method, described above. If you're rendering a UI based on this information, you could potentially associated this file id with a rendered UI element in some way. If you want to get the file id for a path, you can call `fileIdForPath`.
+
+```js
+const ops = []
+const fileId1 = tree.fileIdForPath("a/b.txt");
+const newParentId = tree.fileIdForPath("d/e");
+ops.push(tree.rename(fileId1, newParentId, "b.txt"));
+const fileId2 = tree.fileIdForPath("a/c.txt");
+ops.push(tree.remove(fileId2));
+// Send ops to peers...
+```
+
+You can also get the path for any file id by calling `pathForFileId`.
+
+```js
+console.log(tree.pathForFileId(fileId1)); // => "d/e/b.txt"
+```
+
+## Working with text files
+
+Just like you had to supply the base entries from the work tree's underlying Git commit, you'll also need to supply the base content of any text file you want to work with. To do this, you'll call `openTextFile`.
+
+```js
+const bufferId = tree.openTextFile(fileId1, "Hello, world!");
+```
+
+In the example above, the string `"Hello, world!"` represents the contents of the file as it existed in the base commit. If the file did not exist or was empty, you can pass an empty string.
+
+Once you have obtained a buffer id, you can get the text of the file, which might be different than the base text you supplied due to the application of remote operations. Remember to pass a *buffer id* obtained via `openTextFile` rather than a raw file id.
+
+```js
+console.log(tree.getText(bufferId)); // ==> "Hello, wonderful world!"
+```
+
+To edit a text file, call `edit` with the buffer id, an array of ranges to replace, and the new text.
+
+```js
+const operation = tree.edit(bufferId, [{start: 7, end: 16}], "cruel");
+console.log(tree.getText(bufferId)); // ==> "Hello, cruel world!"
+// Send the operation to peers...
+```
+
+To obtain a diff containing just the changes that occurred since a specific point in time, use the `getVersion` and `changesSince` methods.
+
+```js
+const startVersion = tree.getVersion();
+tree.applyOps(remoteOperations);
+console.log(tree.changesSince(bufferId, startVersion));
+// => [{start: 7; end: 12; text: "happy"}]
+```
+
+Each change in the returned diff has a `start` and `end` based on the current state of the document along with the text that was inserted. You can iterate these changes in order and use the supplied coordinates to apply them to another document.
+
+## Working with operations
+
+All methods that update the state of the tree return *operations*, and you'll need to transmit and apply these operations in order to synchronize with other replicas. To apply remote operations, use the `applyOps` method.
+
+```js
+const remoteOps = await receiveOps();
+const fixupOps = tree.applyOps(remoteOps);
+broadcastOps(fixupOps);
+```
+
+Whenever you call `applyOps`, there is a chance that additional "fixup" operations could be generated to deal with cycles and name conflicts. Be sure to broadcast these operations to peers to ensure convergence.
+
+If you're integrating with a text editor, you should capture the work tree's version vector before applying remote operations, then obtain and apply any changes to open buffers via `changesSince` method, as discussed above. For now, it's important that you don't allow any local changes to be performed in between applying remote operations and updating the state of local editors via `changesSince`, since local changes could invalidate the coordinates of any reported changes. All methods on this library are synchronous, so that should be simple to ensure.
