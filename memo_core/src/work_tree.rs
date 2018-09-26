@@ -958,25 +958,20 @@ impl Cursor {
         parent_ref_cursor.seek(&metadata.file_id, SeekBias::Right);
         parent_ref_cursor.prev();
         let oldest_parent_ref_value = parent_ref_cursor.item().unwrap();
-        let status = match metadata.file_id {
+        let (status, visible) = match metadata.file_id {
             FileId::Base(_) => {
                 if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
-                    FileStatus::Unchanged
+                    (FileStatus::Unchanged, true)
                 } else if newest_parent_ref_value.parent.is_some() {
-                    FileStatus::Renamed
+                    (FileStatus::Renamed, true)
                 } else {
-                    FileStatus::Removed
+                    (FileStatus::Removed, false)
                 }
             }
             FileId::New(_) => {
-                if newest_parent_ref_value.parent.is_some() {
-                    FileStatus::New
-                } else {
-                    FileStatus::Removed
-                }
+                (FileStatus::New, newest_parent_ref_value.parent.is_some())
             }
         };
-        let visible = *parent_visible && status != FileStatus::Removed;
 
         Ok(CursorEntry {
             file_id: metadata.file_id,
