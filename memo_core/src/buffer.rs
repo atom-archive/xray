@@ -1902,15 +1902,9 @@ impl btree::Item for Fragment {
                 .unwrap();
 
             let first_row_len = if fragment_2d_start.row == fragment_2d_end.row {
-                (self.end_offset - self.start_offset) as u32
+                self.extent() as u32
             } else {
-                let first_row_end = self
-                    .insertion
-                    .text
-                    .offset_for_point(Point::new(fragment_2d_start.row + 1, 0))
-                    .unwrap()
-                    - 1;
-                (first_row_end - self.start_offset) as u32
+                self.offset_for_point(Point::new(1, 0)).unwrap() as u32 - 1
             };
             let (longest_row, longest_row_len) = self
                 .insertion
@@ -1950,6 +1944,9 @@ impl<'a> AddAssign<&'a FragmentSummary> for FragmentSummary {
         if other.longest_row_len > self.longest_row_len {
             self.longest_row = self.extent_2d.row + other.longest_row;
             self.longest_row_len = other.longest_row_len;
+        }
+        if self.extent_2d.row == 0 {
+            self.first_row_len += other.first_row_len;
         }
 
         self.extent += other.extent;
