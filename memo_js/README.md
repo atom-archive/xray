@@ -1,6 +1,6 @@
 # Memo JS
 
-This library enabling real-time collaborative coding by providing a conflict-free replicated state machine that models the state of a Git working tree. The core of the library is written in Rust for efficiency and reusability in other contexts. This library exposes the capabilities of the Rust core via WebAssembly and wraps them in an idiomatic JavaScript API.
+This library enables real-time collaborative coding by providing a conflict-free replicated state machine that models the state of a Git working tree. The core of the library is written in Rust for efficiency and reusability in other contexts. This library exposes the capabilities of the Rust core via WebAssembly and wraps them in an idiomatic JavaScript API.
 
 ## Initialize
 
