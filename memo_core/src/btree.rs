@@ -4,6 +4,9 @@ use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 
+#[cfg(test)]
+const TREE_BASE: usize = 2;
+#[cfg(not(test))]
 const TREE_BASE: usize = 16;
 
 pub trait Item: Clone + Eq + fmt::Debug {
