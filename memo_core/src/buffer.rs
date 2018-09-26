@@ -1805,15 +1805,15 @@ impl<'a> Add<&'a Self> for FragmentId {
     type Output = FragmentId;
 
     fn add(self, other: &'a Self) -> Self::Output {
-        cmp::max(&self, other).clone()
+        debug_assert!(self <= *other);
+        other.clone()
     }
 }
 
 impl<'a> AddAssign<&'a Self> for FragmentId {
     fn add_assign(&mut self, other: &'a Self) {
-        if *self < *other {
-            *self = other.clone();
-        }
+        debug_assert!(*self <= *other);
+        *self = other.clone();
     }
 }
 
@@ -1954,9 +1954,8 @@ impl<'a> AddAssign<&'a FragmentSummary> for FragmentSummary {
 
         self.extent += other.extent;
         self.extent_2d += &other.extent_2d;
-        if self.max_fragment_id < other.max_fragment_id {
-            self.max_fragment_id = other.max_fragment_id.clone();
-        }
+        debug_assert!(self.max_fragment_id <= other.max_fragment_id);
+        self.max_fragment_id = other.max_fragment_id.clone();
         self.max_version.observe_all(&other.max_version);
     }
 }
