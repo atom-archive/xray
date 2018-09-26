@@ -984,7 +984,13 @@ impl<T: Item> Iterator for Cursor<T> {
 impl<F: Fn(&T::Summary) -> bool, T: Item> FilterCursor<F, T> {
     fn new(tree: &Tree<T>, filter_node: F) -> Self {
         let mut cursor = tree.cursor();
-        cursor.descend_to_first_item(tree.clone(), &filter_node);
+        if filter_node(&tree.summary()) {
+            cursor.descend_to_first_item(tree.clone(), &filter_node);
+        } else {
+            cursor.did_seek = true;
+            cursor.at_end = true;
+        }
+
         Self {
             cursor,
             filter_node,
