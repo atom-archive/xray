@@ -2,7 +2,7 @@
 
 LOCAL_CRATE_PATH=./.cargo
 PATH=$LOCAL_CRATE_PATH/bin:$PATH
-WASM_BINDGEN_VERSION=0.2.17
+WASM_BINDGEN_VERSION=0.2.21
 
 setup_wasm_bindgen() {
   if (command -v wasm-bindgen) && $(wasm-bindgen --version | grep --silent $WASM_BINDGEN_VERSION); then
