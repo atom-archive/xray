@@ -629,6 +629,8 @@ impl<T: Item> Cursor<T> {
                                 if let Some(next_summary) = child_summaries.get(*index) {
                                     if filter_node(next_summary) {
                                         break;
+                                    } else {
+                                        self.summary += next_summary;
                                     }
                                 }
                             }
@@ -1091,14 +1093,20 @@ mod tests {
                 tree.push_tree(cursor.slice(&tree_end, SeekBias::Right));
 
                 assert_eq!(tree.items(), reference_items);
-                assert_eq!(
-                    tree.filter(|summary| summary.contains_even)
-                        .collect::<Vec<_>>(),
-                    tree.items()
-                        .into_iter()
-                        .filter(|i| (i & 1) == 0)
-                        .collect::<Vec<_>>()
-                );
+
+                let mut filter_cursor = tree.filter(|summary| summary.contains_even);
+                let mut reference_filter = tree
+                    .items()
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, item)| (item & 1) == 0);
+                while let Some(actual_item) = filter_cursor.item() {
+                    let (reference_index, reference_item) = reference_filter.next().unwrap();
+                    assert_eq!(actual_item, reference_item);
+                    assert_eq!(filter_cursor.start::<Count>().0, reference_index);
+                    filter_cursor.next();
+                }
+                assert!(reference_filter.next().is_none());
 
                 let mut pos = rng.gen_range(0, tree.extent::<Count>().0 + 1);
                 let mut before_start = false;
