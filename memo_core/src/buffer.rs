@@ -82,8 +82,8 @@ pub struct Iter {
     reversed: bool,
 }
 
-struct ChangesIter {
-    cursor: btree::Cursor<Fragment>,
+struct ChangesIter<F: Fn(&FragmentSummary) -> bool> {
+    cursor: btree::FilterCursor<F, Fragment>,
     since: time::Global,
 }
 
@@ -148,6 +148,7 @@ pub struct FragmentSummary {
     first_row_len: u32,
     longest_row: u32,
     longest_row_len: u32,
+    max_version: time::Global,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -289,8 +290,12 @@ impl Buffer {
         Iter::at_point(self, point)
     }
 
-    pub fn changes_since(&self, version: time::Global) -> impl Iterator<Item = Change> {
-        ChangesIter::new(self, version)
+    pub fn changes_since(&self, since: time::Global) -> impl Iterator<Item = Change> {
+        let since_2 = since.clone();
+        let cursor = self
+            .fragments
+            .filter(move |summary| summary.max_version.changed_since(&since_2));
+        ChangesIter { cursor, since }
     }
 
     pub fn edit<I, T>(
@@ -1404,15 +1409,7 @@ impl Iterator for Iter {
     }
 }
 
-impl ChangesIter {
-    fn new(buffer: &Buffer, since: time::Global) -> Self {
-        let mut cursor = buffer.fragments.cursor();
-        cursor.seek(&0, SeekBias::Left);
-        ChangesIter { cursor, since }
-    }
-}
-
-impl Iterator for ChangesIter {
+impl<F: Fn(&FragmentSummary) -> bool> Iterator for ChangesIter<F> {
     type Item = Change;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1886,6 +1883,12 @@ impl btree::Item for Fragment {
     type Summary = FragmentSummary;
 
     fn summarize(&self) -> Self::Summary {
+        let mut max_version = time::Global::new();
+        max_version.observe(self.insertion.id);
+        for deletion in &self.deletions {
+            max_version.observe(*deletion);
+        }
+
         if self.is_visible() {
             let fragment_2d_start = self
                 .insertion
@@ -1921,6 +1924,7 @@ impl btree::Item for Fragment {
                 first_row_len,
                 longest_row: longest_row - fragment_2d_start.row,
                 longest_row_len,
+                max_version,
             }
         } else {
             FragmentSummary {
@@ -1930,6 +1934,7 @@ impl btree::Item for Fragment {
                 first_row_len: 0,
                 longest_row: 0,
                 longest_row_len: 0,
+                max_version,
             }
         }
     }
@@ -1952,6 +1957,7 @@ impl<'a> AddAssign<&'a FragmentSummary> for FragmentSummary {
         if self.max_fragment_id < other.max_fragment_id {
             self.max_fragment_id = other.max_fragment_id.clone();
         }
+        self.max_version.observe_all(&other.max_version);
     }
 }
 
@@ -1964,6 +1970,7 @@ impl Default for FragmentSummary {
             first_row_len: 0,
             longest_row: 0,
             longest_row_len: 0,
+            max_version: time::Global::new(),
         }
     }
 }

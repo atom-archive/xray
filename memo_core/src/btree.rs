@@ -54,9 +54,9 @@ pub struct Cursor<T: Item> {
     at_end: bool,
 }
 
-pub struct FilterIter<T: Item> {
+pub struct FilterCursor<F: Fn(&T::Summary) -> bool, T: Item> {
     cursor: Cursor<T>,
-    filter_node: fn(&T::Summary) -> bool,
+    filter_node: F,
 }
 
 #[derive(Eq, PartialEq)]
@@ -105,11 +105,11 @@ impl<T: Item> Tree<T> {
         Cursor::new(self.clone())
     }
 
-    pub fn filter(&self, filter_node: fn(&T::Summary) -> bool) -> FilterIter<T> {
-        FilterIter {
-            cursor: self.cursor(),
-            filter_node,
-        }
+    pub fn filter<F>(&self, filter_node: F) -> FilterCursor<F, T>
+    where
+        F: Fn(&T::Summary) -> bool,
+    {
+        FilterCursor::new(self, filter_node)
     }
 
     #[allow(dead_code)]
@@ -599,7 +599,10 @@ impl<T: Item> Cursor<T> {
         self.next_internal(|_| true)
     }
 
-    fn next_internal(&mut self, filter_node: fn(&T::Summary) -> bool) {
+    fn next_internal<F>(&mut self, filter_node: F)
+    where
+        F: Fn(&T::Summary) -> bool,
+    {
         assert!(self.did_seek, "Must seek before calling this method");
 
         if self.stack.is_empty() {
@@ -657,11 +660,10 @@ impl<T: Item> Cursor<T> {
         self.at_end = self.stack.is_empty();
     }
 
-    fn descend_to_first_item(
-        &mut self,
-        mut subtree: Tree<T>,
-        filter_node: fn(&T::Summary) -> bool,
-    ) {
+    fn descend_to_first_item<F>(&mut self, mut subtree: Tree<T>, filter_node: F)
+    where
+        F: Fn(&T::Summary) -> bool,
+    {
         self.did_seek = true;
         loop {
             subtree = match *subtree.0 {
@@ -974,17 +976,35 @@ impl<T: Item> Iterator for Cursor<T> {
     }
 }
 
-impl<T: Item> Iterator for FilterIter<T> {
+impl<F: Fn(&T::Summary) -> bool, T: Item> FilterCursor<F, T> {
+    fn new(tree: &Tree<T>, filter_node: F) -> Self {
+        let mut cursor = tree.cursor();
+        cursor.descend_to_first_item(tree.clone(), &filter_node);
+        Self {
+            cursor,
+            filter_node,
+        }
+    }
+
+    pub fn start<D: Dimension<T::Summary>>(&self) -> D {
+        self.cursor.start()
+    }
+
+    pub fn item(&self) -> Option<T> {
+        self.cursor.item()
+    }
+
+    pub fn next(&mut self) {
+        self.cursor.next_internal(&self.filter_node);
+    }
+}
+
+impl<F: Fn(&T::Summary) -> bool, T: Item> Iterator for FilterCursor<F, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.cursor.did_seek {
-            let root = self.cursor.tree.clone();
-            self.cursor.descend_to_first_item(root, self.filter_node);
-        }
-
-        if let Some(item) = self.cursor.item() {
-            self.cursor.next_internal(self.filter_node);
+        if let Some(item) = self.item() {
+            self.cursor.next_internal(&self.filter_node);
             Some(item)
         } else {
             None
