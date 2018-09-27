@@ -78,8 +78,23 @@ impl Global {
         *seq = cmp::max(*seq, timestamp.seq);
     }
 
+    pub fn observe_all(&mut self, other: &Self) {
+        for (replica_id, seq) in other.0.as_ref() {
+            self.observe(Local {
+                replica_id: *replica_id,
+                seq: *seq,
+            });
+        }
+    }
+
     pub fn observed(&self, timestamp: Local) -> bool {
         self.get(timestamp.replica_id) >= timestamp.seq
+    }
+
+    pub fn changed_since(&self, other: &Self) -> bool {
+        self.0
+            .iter()
+            .any(|(replica_id, seq)| *seq > other.get(*replica_id))
     }
 
     fn serialize_inner<S>(

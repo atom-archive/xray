@@ -4,6 +4,9 @@ use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 
+#[cfg(test)]
+const TREE_BASE: usize = 2;
+#[cfg(not(test))]
 const TREE_BASE: usize = 16;
 
 pub trait Item: Clone + Eq + fmt::Debug {
@@ -54,6 +57,11 @@ pub struct Cursor<T: Item> {
     at_end: bool,
 }
 
+pub struct FilterCursor<F: Fn(&T::Summary) -> bool, T: Item> {
+    cursor: Cursor<T>,
+    filter_node: F,
+}
+
 #[derive(Eq, PartialEq)]
 pub enum SeekBias {
     Left,
@@ -84,7 +92,7 @@ impl<T: Item> Tree<T> {
     pub fn items(&self) -> Vec<T> {
         let mut items = Vec::new();
         let mut cursor = self.cursor();
-        cursor.descend_to_first_item(self.clone());
+        cursor.descend_to_first_item(self.clone(), |_| true);
         loop {
             if let Some(item) = cursor.item() {
                 items.push(item);
@@ -98,6 +106,13 @@ impl<T: Item> Tree<T> {
 
     pub fn cursor(&self) -> Cursor<T> {
         Cursor::new(self.clone())
+    }
+
+    pub fn filter<F>(&self, filter_node: F) -> FilterCursor<F, T>
+    where
+        F: Fn(&T::Summary) -> bool,
+    {
+        FilterCursor::new(self, filter_node)
     }
 
     #[allow(dead_code)]
@@ -584,12 +599,19 @@ impl<T: Item> Cursor<T> {
     }
 
     pub fn next(&mut self) {
+        self.next_internal(|_| true)
+    }
+
+    fn next_internal<F>(&mut self, filter_node: F)
+    where
+        F: Fn(&T::Summary) -> bool,
+    {
         assert!(self.did_seek, "Must seek before calling this method");
 
         if self.stack.is_empty() {
             if !self.at_end {
                 let root = self.tree.clone();
-                self.descend_to_first_item(root);
+                self.descend_to_first_item(root, filter_node);
             }
         } else {
             while self.stack.len() > 0 {
@@ -601,26 +623,38 @@ impl<T: Item> Cursor<T> {
                             child_summaries,
                             ..
                         } => {
-                            *summary += &child_summaries[*index];
-                            *index += 1;
+                            while *index < child_summaries.len() {
+                                *summary += &child_summaries[*index];
+                                *index += 1;
+                                if let Some(next_summary) = child_summaries.get(*index) {
+                                    if filter_node(next_summary) {
+                                        break;
+                                    } else {
+                                        self.summary += next_summary;
+                                    }
+                                }
+                            }
+
                             child_trees.get(*index).cloned()
                         }
-                        Node::Leaf { items, .. } => {
+                        Node::Leaf { items, .. } => loop {
                             let item_summary = items[*index].summarize();
                             self.summary += &item_summary;
                             *summary += &item_summary;
                             *index += 1;
-                            if *index < items.len() {
-                                return;
+                            if let Some(next_item) = items.get(*index) {
+                                if filter_node(&next_item.summarize()) {
+                                    return;
+                                }
                             } else {
-                                None
+                                break None;
                             }
-                        }
+                        },
                     }
                 };
 
                 if let Some(subtree) = new_subtree {
-                    self.descend_to_first_item(subtree);
+                    self.descend_to_first_item(subtree, filter_node);
                     break;
                 } else {
                     self.stack.pop();
@@ -631,15 +665,50 @@ impl<T: Item> Cursor<T> {
         self.at_end = self.stack.is_empty();
     }
 
-    fn descend_to_first_item(&mut self, mut subtree: Tree<T>) {
+    fn descend_to_first_item<F>(&mut self, mut subtree: Tree<T>, filter_node: F)
+    where
+        F: Fn(&T::Summary) -> bool,
+    {
         self.did_seek = true;
         loop {
-            self.stack.push((subtree.clone(), 0, self.summary.clone()));
             subtree = match *subtree.0 {
                 Node::Internal {
-                    ref child_trees, ..
-                } => child_trees[0].clone(),
-                Node::Leaf { .. } => {
+                    ref child_trees,
+                    ref child_summaries,
+                    ..
+                } => {
+                    let mut new_index = None;
+                    for (index, summary) in child_summaries.iter().enumerate() {
+                        if filter_node(summary) {
+                            new_index = Some(index);
+                            break;
+                        }
+                        self.summary += summary;
+                    }
+
+                    if let Some(new_index) = new_index {
+                        self.stack
+                            .push((subtree.clone(), new_index, self.summary.clone()));
+                        child_trees[new_index].clone()
+                    } else {
+                        break;
+                    }
+                }
+                Node::Leaf { ref items, .. } => {
+                    let mut new_index = None;
+                    for (index, item) in items.iter().enumerate() {
+                        let summary = item.summarize();
+                        if filter_node(&summary) {
+                            new_index = Some(index);
+                            break;
+                        }
+                        self.summary += &summary;
+                    }
+
+                    if let Some(new_index) = new_index {
+                        self.stack
+                            .push((subtree.clone(), new_index, self.summary.clone()));
+                    }
                     break;
                 }
             }
@@ -900,11 +969,53 @@ impl<T: Item> Iterator for Cursor<T> {
     fn next(&mut self) -> Option<Self::Item> {
         if !self.did_seek {
             let root = self.tree.clone();
-            self.descend_to_first_item(root);
+            self.descend_to_first_item(root, |_| true);
         }
 
         if let Some(item) = self.item() {
             self.next();
+            Some(item)
+        } else {
+            None
+        }
+    }
+}
+
+impl<F: Fn(&T::Summary) -> bool, T: Item> FilterCursor<F, T> {
+    fn new(tree: &Tree<T>, filter_node: F) -> Self {
+        let mut cursor = tree.cursor();
+        if filter_node(&tree.summary()) {
+            cursor.descend_to_first_item(tree.clone(), &filter_node);
+        } else {
+            cursor.did_seek = true;
+            cursor.at_end = true;
+        }
+
+        Self {
+            cursor,
+            filter_node,
+        }
+    }
+
+    pub fn start<D: Dimension<T::Summary>>(&self) -> D {
+        self.cursor.start()
+    }
+
+    pub fn item(&self) -> Option<T> {
+        self.cursor.item()
+    }
+
+    pub fn next(&mut self) {
+        self.cursor.next_internal(&self.filter_node);
+    }
+}
+
+impl<F: Fn(&T::Summary) -> bool, T: Item> Iterator for FilterCursor<F, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(item) = self.item() {
+            self.cursor.next_internal(&self.filter_node);
             Some(item)
         } else {
             None
@@ -989,6 +1100,20 @@ mod tests {
 
                 assert_eq!(tree.items(), reference_items);
 
+                let mut filter_cursor = tree.filter(|summary| summary.contains_even);
+                let mut reference_filter = tree
+                    .items()
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, item)| (item & 1) == 0);
+                while let Some(actual_item) = filter_cursor.item() {
+                    let (reference_index, reference_item) = reference_filter.next().unwrap();
+                    assert_eq!(actual_item, reference_item);
+                    assert_eq!(filter_cursor.start::<Count>().0, reference_index);
+                    filter_cursor.next();
+                }
+                assert!(reference_filter.next().is_none());
+
                 let mut pos = rng.gen_range(0, tree.extent::<Count>().0 + 1);
                 let mut before_start = false;
                 let mut cursor = tree.cursor();
@@ -1021,7 +1146,6 @@ mod tests {
                             before_start = true;
                         }
                         pos = pos.saturating_sub(1);
-
                     }
                 }
             }
@@ -1205,6 +1329,7 @@ mod tests {
     pub struct IntegersSummary {
         count: Count,
         sum: Sum,
+        contains_even: bool,
     }
 
     #[derive(Ord, PartialOrd, Default, Eq, PartialEq, Clone, Debug)]
@@ -1220,6 +1345,7 @@ mod tests {
             IntegersSummary {
                 count: Count(1),
                 sum: Sum(*self as usize),
+                contains_even: (*self & 1) == 0,
             }
         }
     }
@@ -1228,6 +1354,7 @@ mod tests {
         fn add_assign(&mut self, other: &Self) {
             self.count += &other.count;
             self.sum += &other.sum;
+            self.contains_even |= other.contains_even;
         }
     }
 
