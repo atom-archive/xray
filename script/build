@@ -7,3 +7,4 @@ cd xray_ui; yarn install; cd -
 cd xray_cli; cargo build "$@"; cd -
 cd xray_server; cargo build "$@"; cd -
 cd xray_browser; script/build; cd -
+cd memo_js; yarn install && script/build; cd -
