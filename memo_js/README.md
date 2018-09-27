@@ -145,7 +145,11 @@ console.log(tree.getText(bufferId)); // ==> "Hello, wonderful world!"
 To edit a text file, call `edit` with the buffer id, an array of ranges to replace, and the new text.
 
 ```js
-const operation = tree.edit(bufferId, [{start: 7, end: 16}], "cruel");
+const operation = tree.edit(
+  bufferId,
+  [{ start: { row: 0, column: 0 }, end: { row: 0, column: 16 } }],
+  "cruel"
+);
 console.log(tree.getText(bufferId)); // ==> "Hello, cruel world!"
 // Send the operation to peers...
 ```
@@ -156,7 +160,7 @@ To obtain a diff containing just the changes that occurred since a specific poin
 const startVersion = tree.getVersion();
 tree.applyOps(remoteOperations);
 console.log(tree.changesSince(bufferId, startVersion));
-// => [{start: 7; end: 12; text: "happy"}]
+// => [{ start: { row: 0, column: 7 }, end: { row: 0, column: 12 }, text: "happy"}]
 ```
 
 Each change in the returned diff has a `start` and `end` based on the current state of the document along with the text that was inserted. You can iterate these changes in order and use the supplied coordinates to apply them to another document.

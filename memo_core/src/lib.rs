@@ -13,7 +13,7 @@ mod operation_queue;
 pub mod time;
 mod work_tree;
 
-pub use buffer::Buffer;
+pub use buffer::{Buffer, Point};
 pub use work_tree::{
     BufferId, Cursor, DirEntry, Error, FileId, FileStatus, FileType, Operation, WorkTree,
     ROOT_FILE_ID,

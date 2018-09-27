@@ -33,7 +33,11 @@ suite("WorkTree", () => {
     const buffer1 = tree1.openTextFile(file2.fileId, "abc");
     const editOperation = tree1.edit(
       buffer1,
-      [{ start: 0, end: 0 }, { start: 1, end: 2 }, { start: 3, end: 3 }],
+      [
+        { start: point(0, 0), end: point(0, 0) },
+        { start: point(0, 1), end: point(0, 2) },
+        { start: point(0, 3), end: point(0, 3) }
+      ],
       "123"
     );
 
@@ -42,9 +46,9 @@ suite("WorkTree", () => {
     tree2.openTextFile(file2.fileId, "abc");
     assert.deepEqual(tree2.getText(buffer1), "123a123c123");
     assert.deepEqual(tree2.changesSince(buffer1, tree2VersionBeforeEdit), [
-      { start: 0, end: 0, text: "123" },
-      { start: 4, end: 5, text: "123" },
-      { start: 8, end: 8, text: "123" }
+      { start: point(0, 0), end: point(0, 0), text: "123" },
+      { start: point(0, 4), end: point(0, 5), text: "123" },
+      { start: point(0, 8), end: point(0, 8), text: "123" }
     ]);
 
     const dir1 = tree1.createDirectory(rootFileId, "x");
@@ -60,7 +64,7 @@ suite("WorkTree", () => {
     assert.equal(tree1.fileIdForPath("a/b/c"), null);
     assert.equal(tree1.pathForFileId(c), null);
 
-    assert.deepEqual(tree1.entries({descendInto: []}), [
+    assert.deepEqual(tree1.entries({ descendInto: [] }), [
       {
         depth: 1,
         fileId: tree1.fileIdForPath("a"),
@@ -112,3 +116,7 @@ suite("WorkTree", () => {
     );
   });
 });
+
+function point(row, column) {
+  return { row, column };
+}

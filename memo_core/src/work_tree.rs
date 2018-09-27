@@ -1,5 +1,5 @@
 use btree::{self, SeekBias};
-use buffer::{self, Buffer, Text};
+use buffer::{self, Buffer, Point, Text};
 use operation_queue::{self, OperationQueue};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -634,6 +634,36 @@ impl WorkTree {
         }
     }
 
+    pub fn edit_2d<I, T>(
+        &mut self,
+        buffer_id: BufferId,
+        old_ranges: I,
+        new_text: T,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+        T: Into<Text>,
+    {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
+            let edits = buffer.edit_2d(
+                old_ranges,
+                new_text,
+                &mut self.local_clock,
+                &mut self.lamport_clock,
+            );
+            let local_timestamp = self.local_clock.tick();
+            self.version.observe(local_timestamp);
+            Ok(Operation::EditText {
+                file_id: buffer_id.0,
+                edits,
+                local_timestamp,
+                lamport_timestamp: self.lamport_clock.tick(),
+            })
+        } else {
+            Err(Error::InvalidBufferId)
+        }
+    }
+
     pub fn file_id<P>(&self, path: P) -> Result<FileId, Error>
     where
         P: AsRef<Path>,
@@ -968,9 +998,7 @@ impl Cursor {
                     (FileStatus::Removed, false)
                 }
             }
-            FileId::New(_) => {
-                (FileStatus::New, newest_parent_ref_value.parent.is_some())
-            }
+            FileId::New(_) => (FileStatus::New, newest_parent_ref_value.parent.is_some()),
         };
 
         Ok(CursorEntry {
@@ -1352,6 +1380,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buffer::Point;
     use rand::{Rng, SeedableRng, StdRng};
     use std::iter::FromIterator;
 
@@ -1618,9 +1647,9 @@ mod tests {
             .unwrap()
             .collect::<Vec<_>>();
         assert_eq!(changes.len(), 2);
-        assert_eq!(changes[0].range, 1..2);
+        assert_eq!(changes[0].range, Point::new(0, 1)..Point::new(0, 2));
         assert_eq!(changes[0].code_units, [b'y' as u16]);
-        assert_eq!(changes[1].range, 4..4);
+        assert_eq!(changes[1].range, Point::new(0, 4)..Point::new(0, 4));
         assert_eq!(changes[1].code_units, [b'y' as u16]);
 
         let dir_id = tree_1.file_id("dir").unwrap();

@@ -1,6 +1,7 @@
 use btree::{self, SeekBias};
 use operation_queue::{self, OperationQueue};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
@@ -34,7 +35,7 @@ pub struct Buffer {
     deferred_replicas: HashSet<ReplicaId>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Debug, Hash, Serialize)]
 pub struct Point {
     pub row: u32,
     pub column: u32,
@@ -88,8 +89,9 @@ struct ChangesIter {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Change {
-    pub range: Range<usize>,
+    pub range: Range<Point>,
     pub code_units: Vec<u16>,
+    new_extent: Point,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -323,6 +325,28 @@ impl Buffer {
             self.version.observe(op.id);
         }
         ops
+    }
+
+    pub fn edit_2d<I, T>(
+        &mut self,
+        old_2d_ranges: I,
+        new_text: T,
+        local_clock: &mut time::Local,
+        lamport_clock: &mut time::Lamport,
+    ) -> Vec<Operation>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+        T: Into<Text>,
+    {
+        let mut old_1d_ranges = SmallVec::<[_; 1]>::new();
+        for old_2d_range in old_2d_ranges {
+            let start = self.offset_for_point(old_2d_range.start);
+            let end = self.offset_for_point(old_2d_range.end);
+            if start.is_ok() && end.is_ok() {
+                old_1d_ranges.push(start.unwrap()..end.unwrap());
+            }
+        }
+        self.edit(old_1d_ranges, new_text, local_clock, lamport_clock)
     }
 
     pub fn add_selection_set(
@@ -1214,7 +1238,6 @@ impl Point {
         Point { row, column }
     }
 
-    #[cfg(test)]
     pub fn zero() -> Self {
         Point::new(0, 0)
     }
@@ -1396,11 +1419,12 @@ impl Iterator for ChangesIter {
         let mut change: Option<Change> = None;
 
         while let Some(fragment) = self.cursor.item() {
-            let position = self.cursor.start::<usize>();
+            let position = self.cursor.start();
             if !fragment.was_visible(&self.since) && fragment.is_visible() {
                 if let Some(ref mut change) = change {
-                    if change.range.start + change.code_units.len() == position {
+                    if change.range.start + &change.new_extent == position {
                         change.code_units.extend(fragment.code_units());
+                        change.new_extent += &fragment.extent_2d();
                     } else {
                         break;
                     }
@@ -1408,19 +1432,21 @@ impl Iterator for ChangesIter {
                     change = Some(Change {
                         range: position..position,
                         code_units: Vec::from(fragment.code_units()),
+                        new_extent: fragment.extent_2d(),
                     });
                 }
             } else if fragment.was_visible(&self.since) && !fragment.is_visible() {
                 if let Some(ref mut change) = change {
-                    if change.range.start + change.code_units.len() == position {
-                        change.range.end += &fragment.extent();
+                    if change.range.start + &change.new_extent == position {
+                        change.range.end += &fragment.extent_2d();
                     } else {
                         break;
                     }
                 } else {
                     change = Some(Change {
-                        range: position..position + &fragment.extent(),
+                        range: position..position + &fragment.extent_2d(),
                         code_units: Vec::new(),
+                        new_extent: Point::zero(),
                     });
                 }
             }
@@ -1830,6 +1856,10 @@ impl Fragment {
         self.end_offset - self.start_offset
     }
 
+    fn extent_2d(&self) -> Point {
+        self.point_for_offset(self.extent()).unwrap()
+    }
+
     fn is_visible(&self) -> bool {
         self.deletions.is_empty()
     }
@@ -2073,7 +2103,7 @@ mod tests {
 
             for mut old_buffer in buffer_versions {
                 for change in buffer.changes_since(old_buffer.version.clone()) {
-                    old_buffer.edit(
+                    old_buffer.edit_2d(
                         Some(change.range),
                         Text::new(change.code_units),
                         &mut local_clock,

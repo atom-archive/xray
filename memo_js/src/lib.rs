@@ -154,14 +154,14 @@ enum Response {
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 struct EditRange {
-    start: usize,
-    end: usize,
+    start: Point,
+    end: Point,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Change {
-    start: usize,
-    end: usize,
+    start: Point,
+    end: Point,
     text: String,
 }
 
@@ -307,7 +307,7 @@ impl Server {
             } => {
                 let tree = self.get_work_tree(tree_id)?;
                 let op = tree
-                    .edit(
+                    .edit_2d(
                         buffer_id,
                         ranges.into_iter().map(|range| range.start..range.end),
                         new_text.as_str(),
