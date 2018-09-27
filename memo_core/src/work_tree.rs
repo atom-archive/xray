@@ -1,17 +1,19 @@
 use btree::{self, SeekBias};
-use buffer::{self, Buffer, Text};
+use buffer::{self, Buffer, Point, Text};
 use operation_queue::{self, OperationQueue};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::ops::{Add, AddAssign, Range};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use time;
 use ReplicaId;
 
-const ROOT_FILE_ID: FileId = FileId::Base(0);
+pub const ROOT_FILE_ID: FileId = FileId::Base(0);
 
 #[derive(Clone)]
 pub struct WorkTree {
@@ -31,37 +33,56 @@ pub struct Cursor {
     metadata_cursor: btree::Cursor<Metadata>,
     parent_ref_cursor: btree::Cursor<ParentRefValue>,
     child_ref_cursor: btree::Cursor<ChildRefValue>,
-    stack: Vec<(btree::Cursor<ChildRefValue>, FileStatus)>,
+    stack: Vec<CursorStackEntry>,
     path: PathBuf,
+}
+
+struct CursorStackEntry {
+    cursor: btree::Cursor<ChildRefValue>,
+    visible: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct CursorEntry {
-    file_id: FileId,
-    file_type: FileType,
-    depth: usize,
-    name: Arc<OsString>,
-    status: FileStatus,
+    pub file_id: FileId,
+    pub file_type: FileType,
+    pub depth: usize,
+    pub name: Arc<OsString>,
+    pub status: FileStatus,
+    pub visible: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DirEntry {
-    depth: usize,
-    name: OsString,
-    file_type: FileType,
+    pub depth: usize,
+    #[serde(
+        serialize_with = "serialize_os_string",
+        deserialize_with = "deserialize_os_string"
+    )]
+    pub name: OsString,
+    #[serde(rename = "type")]
+    pub file_type: FileType,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Operation {
     InsertMetadata {
         file_id: FileId,
         file_type: FileType,
+        #[serde(
+            serialize_with = "serialize_parent",
+            deserialize_with = "deserialize_parent"
+        )]
         parent: Option<(FileId, Arc<OsString>)>,
         local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
     },
     UpdateParent {
         child_id: FileId,
+        #[serde(
+            serialize_with = "serialize_parent",
+            deserialize_with = "deserialize_parent"
+        )]
         new_parent: Option<(FileId, Arc<OsString>)>,
         local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
@@ -74,7 +95,7 @@ pub enum Operation {
     },
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidPath,
     InvalidFileId,
@@ -84,16 +105,16 @@ pub enum Error {
     CursorExhausted,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum FileId {
     Base(u64),
     New(time::Local),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BufferId(FileId);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum FileStatus {
     New,
     Renamed,
@@ -102,7 +123,7 @@ pub enum FileStatus {
     Unchanged,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FileType {
     Directory,
     Text,
@@ -196,7 +217,7 @@ impl WorkTree {
             stack: Vec::new(),
             path: PathBuf::new(),
         };
-        if cursor.descend_into(FileStatus::Unchanged, ROOT_FILE_ID) {
+        if cursor.descend_into(true, ROOT_FILE_ID) {
             Some(cursor)
         } else {
             None
@@ -484,7 +505,11 @@ impl WorkTree {
         (file_id, operation)
     }
 
-    pub fn new_dir<N>(&mut self, parent_id: FileId, name: N) -> Result<(FileId, Operation), Error>
+    pub fn create_dir<N>(
+        &mut self,
+        parent_id: FileId,
+        name: N,
+    ) -> Result<(FileId, Operation), Error>
     where
         N: AsRef<OsStr>,
     {
@@ -510,7 +535,10 @@ impl WorkTree {
         }
     }
 
-    pub fn open_text_file(&mut self, file_id: FileId, base_text: Text) -> Result<BufferId, Error> {
+    pub fn open_text_file<T>(&mut self, file_id: FileId, base_text: T) -> Result<BufferId, Error>
+    where
+        T: Into<Text>,
+    {
         self.check_file_id(file_id, Some(FileType::Text))?;
 
         match self.text_files.remove(&file_id) {
@@ -576,18 +604,48 @@ impl WorkTree {
         Ok(operation)
     }
 
-    pub fn edit<'a, I, T>(
+    pub fn edit<I, T>(
         &mut self,
         buffer_id: BufferId,
         old_ranges: I,
         new_text: T,
     ) -> Result<Operation, Error>
     where
-        I: IntoIterator<Item = &'a Range<usize>>,
+        I: IntoIterator<Item = Range<usize>>,
         T: Into<Text>,
     {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
             let edits = buffer.edit(
+                old_ranges,
+                new_text,
+                &mut self.local_clock,
+                &mut self.lamport_clock,
+            );
+            let local_timestamp = self.local_clock.tick();
+            self.version.observe(local_timestamp);
+            Ok(Operation::EditText {
+                file_id: buffer_id.0,
+                edits,
+                local_timestamp,
+                lamport_timestamp: self.lamport_clock.tick(),
+            })
+        } else {
+            Err(Error::InvalidBufferId)
+        }
+    }
+
+    pub fn edit_2d<I, T>(
+        &mut self,
+        buffer_id: BufferId,
+        old_ranges: I,
+        new_text: T,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+        T: Into<Text>,
+    {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
+            let edits = buffer.edit_2d(
                 old_ranges,
                 new_text,
                 &mut self.local_clock,
@@ -904,7 +962,7 @@ impl Cursor {
             let entry = self.entry().unwrap();
             if !can_descend
                 || entry.file_type != FileType::Directory
-                || !self.descend_into(entry.status, entry.file_id)
+                || !self.descend_into(entry.visible, entry.file_id)
             {
                 while !self.stack.is_empty() && !self.next_sibling() {
                     self.stack.pop();
@@ -917,36 +975,30 @@ impl Cursor {
     }
 
     pub fn entry(&self) -> Result<CursorEntry, Error> {
-        let (child_ref_cursor, parent_status) = self.stack.last().ok_or(Error::CursorExhausted)?;
+        let CursorStackEntry {
+            cursor: child_ref_cursor,
+            visible: parent_visible,
+        } = self.stack.last().ok_or(Error::CursorExhausted)?;
         let metadata = self.metadata_cursor.item().unwrap();
         let child_ref = child_ref_cursor.item().unwrap();
-        let status = if *parent_status == FileStatus::Removed {
-            FileStatus::Removed
-        } else {
-            let mut parent_ref_cursor = self.parent_ref_cursor.clone();
-            parent_ref_cursor.seek(&metadata.file_id, SeekBias::Left);
-            let newest_parent_ref_value = parent_ref_cursor.item().unwrap();
-            parent_ref_cursor.seek(&metadata.file_id, SeekBias::Right);
-            parent_ref_cursor.prev();
-            let oldest_parent_ref_value = parent_ref_cursor.item().unwrap();
-            match metadata.file_id {
-                FileId::Base(_) => {
-                    if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
-                        FileStatus::Unchanged
-                    } else if newest_parent_ref_value.parent.is_some() {
-                        FileStatus::Renamed
-                    } else {
-                        FileStatus::Removed
-                    }
-                }
-                FileId::New(_) => {
-                    if newest_parent_ref_value.parent.is_some() {
-                        FileStatus::New
-                    } else {
-                        FileStatus::Removed
-                    }
+
+        let mut parent_ref_cursor = self.parent_ref_cursor.clone();
+        parent_ref_cursor.seek(&metadata.file_id, SeekBias::Left);
+        let newest_parent_ref_value = parent_ref_cursor.item().unwrap();
+        parent_ref_cursor.seek(&metadata.file_id, SeekBias::Right);
+        parent_ref_cursor.prev();
+        let oldest_parent_ref_value = parent_ref_cursor.item().unwrap();
+        let (status, visible) = match metadata.file_id {
+            FileId::Base(_) => {
+                if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
+                    (FileStatus::Unchanged, true)
+                } else if newest_parent_ref_value.parent.is_some() {
+                    (FileStatus::Renamed, true)
+                } else {
+                    (FileStatus::Removed, false)
                 }
             }
+            FileId::New(_) => (FileStatus::New, newest_parent_ref_value.parent.is_some()),
         };
 
         Ok(CursorEntry {
@@ -955,6 +1007,7 @@ impl Cursor {
             name: child_ref.name,
             depth: self.stack.len(),
             status,
+            visible,
         })
     }
 
@@ -966,12 +1019,15 @@ impl Cursor {
         }
     }
 
-    fn descend_into(&mut self, parent_status: FileStatus, dir_id: FileId) -> bool {
+    fn descend_into(&mut self, parent_visible: bool, dir_id: FileId) -> bool {
         let mut child_ref_cursor = self.child_ref_cursor.clone();
         child_ref_cursor.seek(&dir_id, SeekBias::Left);
         if let Some(child_ref) = child_ref_cursor.item() {
             if child_ref.parent_id == dir_id {
-                self.stack.push((child_ref_cursor, parent_status));
+                self.stack.push(CursorStackEntry {
+                    cursor: child_ref_cursor,
+                    visible: parent_visible,
+                });
                 self.path.push(child_ref.name.as_ref());
                 self.metadata_cursor
                     .seek(&child_ref.child_id, SeekBias::Left);
@@ -985,7 +1041,7 @@ impl Cursor {
     }
 
     pub fn next_sibling(&mut self) -> bool {
-        let (cursor, _) = self.stack.last_mut().unwrap();
+        let CursorStackEntry { cursor, .. } = self.stack.last_mut().unwrap();
         let parent_id = cursor.item().unwrap().parent_id;
         cursor.next();
         if let Some(child_ref) = cursor.item() {
@@ -1035,6 +1091,12 @@ impl Operation {
 impl operation_queue::Operation for Operation {
     fn timestamp(&self) -> time::Lamport {
         self.lamport_timestamp()
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
     }
 }
 
@@ -1280,9 +1342,45 @@ impl btree::Dimension<ChildRefValueSummary> for usize {
     }
 }
 
+fn serialize_os_string<S>(os_string: &OsString, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    os_string.to_string_lossy().serialize(serializer)
+}
+
+fn deserialize_os_string<'de, D>(deserializer: D) -> Result<OsString, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(OsString::from(String::deserialize(deserializer)?))
+}
+
+fn serialize_parent<S>(
+    parent: &Option<(FileId, Arc<OsString>)>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    parent
+        .as_ref()
+        .map(|(parent_id, name)| (parent_id, name.to_string_lossy()))
+        .serialize(serializer)
+}
+
+fn deserialize_parent<'de, D>(deserializer: D) -> Result<Option<(FileId, Arc<OsString>)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let parent = <Option<(FileId, String)>>::deserialize(deserializer)?;
+    Ok(parent.map(|(parent_id, name)| (parent_id, Arc::new(OsString::from(name)))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buffer::Point;
     use rand::{Rng, SeedableRng, StdRng};
     use std::iter::FromIterator;
 
@@ -1320,7 +1418,7 @@ mod tests {
         let a = tree.file_id("a").unwrap();
         let (file_1, _) = tree.new_text_file();
         tree.rename(file_1, a, "e").unwrap();
-        tree.new_dir(a, "z").unwrap();
+        tree.create_dir(a, "z").unwrap();
 
         let fixup_ops = tree
             .append_base_entries(vec![
@@ -1404,7 +1502,8 @@ mod tests {
                 file_type: FileType::Directory,
                 depth: 1,
                 name: Arc::new(OsString::from("a")),
-                status: FileStatus::Unchanged
+                status: FileStatus::Unchanged,
+                visible: true,
             }
         );
 
@@ -1416,7 +1515,8 @@ mod tests {
                 file_type: FileType::Directory,
                 depth: 2,
                 name: Arc::new(OsString::from("b")),
-                status: FileStatus::Removed
+                status: FileStatus::Removed,
+                visible: false,
             }
         );
 
@@ -1428,7 +1528,8 @@ mod tests {
                 file_type: FileType::Text,
                 depth: 3,
                 name: Arc::new(OsString::from("c")),
-                status: FileStatus::Removed
+                status: FileStatus::Unchanged,
+                visible: false,
             }
         );
 
@@ -1440,7 +1541,8 @@ mod tests {
                 file_type: FileType::Directory,
                 depth: 2,
                 name: Arc::new(OsString::from("d")),
-                status: FileStatus::Unchanged
+                status: FileStatus::Unchanged,
+                visible: true,
             }
         );
 
@@ -1452,7 +1554,8 @@ mod tests {
                 file_type: FileType::Text,
                 depth: 2,
                 name: Arc::new(OsString::from("x")),
-                status: FileStatus::New
+                status: FileStatus::New,
+                visible: true,
             }
         );
 
@@ -1464,7 +1567,8 @@ mod tests {
                 file_type: FileType::Directory,
                 depth: 2,
                 name: Arc::new(OsString::from("z")),
-                status: FileStatus::Renamed
+                status: FileStatus::Renamed,
+                visible: true,
             }
         );
 
@@ -1477,6 +1581,7 @@ mod tests {
                 depth: 3,
                 name: Arc::new(OsString::from("y")),
                 status: FileStatus::Removed,
+                visible: false,
             }
         );
 
@@ -1489,6 +1594,7 @@ mod tests {
                 depth: 1,
                 name: Arc::new(OsString::from("f")),
                 status: FileStatus::Unchanged,
+                visible: true,
             }
         );
 
@@ -1519,7 +1625,7 @@ mod tests {
 
         let file_id = tree_1.file_id("file").unwrap();
         let buffer_id = tree_2.open_text_file(file_id, base_text.clone()).unwrap();
-        let ops = tree_2.edit(buffer_id, &[1..2, 3..3], "x");
+        let ops = tree_2.edit(buffer_id, vec![1..2, 3..3], "x");
         tree_1.apply_ops(ops).unwrap();
 
         // Must call open_text_file on any given replica first before interacting with a buffer.
@@ -1528,7 +1634,7 @@ mod tests {
         assert_eq!(tree_1.text(buffer_id).unwrap().into_string(), "axcx");
         assert_eq!(tree_2.text(buffer_id).unwrap().into_string(), "axcx");
 
-        let ops = tree_1.edit(buffer_id, &[1..2, 4..4], "y");
+        let ops = tree_1.edit(buffer_id, vec![1..2, 4..4], "y");
         let base_version = tree_2.version();
 
         tree_2.apply_ops(ops).unwrap();
@@ -1541,9 +1647,9 @@ mod tests {
             .unwrap()
             .collect::<Vec<_>>();
         assert_eq!(changes.len(), 2);
-        assert_eq!(changes[0].range, 1..2);
+        assert_eq!(changes[0].range, Point::new(0, 1)..Point::new(0, 2));
         assert_eq!(changes[0].code_units, [b'y' as u16]);
-        assert_eq!(changes[1].range, 4..4);
+        assert_eq!(changes[1].range, Point::new(0, 4)..Point::new(0, 4));
         assert_eq!(changes[1].code_units, [b'y' as u16]);
 
         let dir_id = tree_1.file_id("dir").unwrap();
@@ -1566,7 +1672,7 @@ mod tests {
             let base_entries = base_tree.entries();
             let base_entries = base_entries
                 .iter()
-                .filter(|entry| entry.status != FileStatus::Removed)
+                .filter(|entry| entry.visible)
                 .map(|entry| DirEntry {
                     depth: entry.depth,
                     name: entry.name.as_ref().clone(),
@@ -1705,7 +1811,7 @@ mod tests {
 
                     if rng.gen() {
                         loop {
-                            match self.new_dir(parent_id, gen_name(rng)) {
+                            match self.create_dir(parent_id, gen_name(rng)) {
                                 Ok((_, op)) => {
                                     ops.push(op);
                                     break;

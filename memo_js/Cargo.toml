@@ -1,0 +1,19 @@
+[package]
+name = "memo_js"
+version = "0.1.0"
+authors = ["Antonio Scandurra <as-cii@github.com>", "Nathan Sobo <nathan@github.com>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.9"
+bincode = "1.0"
+js-sys = "0.2"
+memo_core = { path = "../memo_core" }
+serde = "1.0"
+serde_derive = "1.0"
+
+[dependencies.wasm-bindgen]
+version = "0.2.21"
+features = ["serde-serialize"]

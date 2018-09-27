@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "outDir": "./dist/",
+    "noImplicitAny": true,
+    "module": "esnext",
+    "lib": ["es2015"]
+  }
+}

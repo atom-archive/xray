@@ -1,14 +1,13 @@
 [package]
-name = "memo"
+name = "memo_core"
 version = "0.1.0"
 authors = ["Antonio Scandurra <as-cii@github.com>", "Nathan Sobo <nathan@github.com>"]
 
 [dependencies]
-futures = "0.1"
 lazy_static = "1.0"
-parking_lot = "0.6"
+serde = "1.0"
+serde_derive = "1.0"
 smallvec = "0.6.1"
-uuid = { version = "0.6", features = ["v4"] }
 
 [dev-dependencies]
 futures-cpupool = "0.1"
