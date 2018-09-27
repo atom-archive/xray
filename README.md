@@ -6,7 +6,7 @@ Xray is an experimental Electron-based text editor informed by what we've learne
 
 ## Q3 2018 Focus
 
-We're currently focused on a sub-project of Xray called [Memo](./memo), which will serve as the foundation of Xray but also be available as a standalone tool. Memo is an operation-based version control system that tracks changes at the level of individual keystrokes and synchronizes branches in real time.
+We're currently focused on a sub-project of Xray called [Memo](./memo_core), which will serve as the foundation of Xray but also be available as a standalone tool. Memo is an operation-based version control system that tracks changes at the level of individual keystrokes and synchronizes branches in real time.
 
 ## Updates
 
