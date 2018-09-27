@@ -1007,7 +1007,7 @@ impl Cursor {
             name: child_ref.name,
             depth: self.stack.len(),
             status,
-            visible,
+            visible: *parent_visible && visible,
         })
     }
 
@@ -1580,7 +1580,7 @@ mod tests {
                 file_type: FileType::Text,
                 depth: 3,
                 name: Arc::new(OsString::from("y")),
-                status: FileStatus::Removed,
+                status: FileStatus::New,
                 visible: false,
             }
         );
