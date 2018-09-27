@@ -7,7 +7,7 @@ This library enables real-time collaborative coding by providing a conflict-free
 Because WebAssembly compilation is asynchronous, to use this library, you must call the `init` function, which returns a promise. This function returns all remaining exports in an object.
 
 ```js
-const memo = require("memo"); // alternatively: `import * as memo from "memo";`
+const memo = require("@atom/memo"); // alternatively: `import * as memo from "@atom/memo";`
 
 async function main() {
   const { WorkTree } = await memo.init();
