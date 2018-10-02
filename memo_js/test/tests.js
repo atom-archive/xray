@@ -1,4 +1,4 @@
-const memo = require("../dist/index.node.js");
+const memo = require("../dist/index.js");
 const assert = require("assert");
 
 suite("WorkTree", () => {

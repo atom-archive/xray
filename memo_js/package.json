@@ -1,19 +1,17 @@
 {
   "name": "@atom/memo",
   "version": "0.1.3",
-  "main": "dist/index.node.js",
-  "browser": "dist/index.web.js",
+  "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "prepublishOnly": "script/build",
-    "test": "mocha --ui=tdd test"
+    "test": "mocha --ui=tdd test",
+    "tsc": "tsc"
   },
   "license": "MIT",
   "devDependencies": {
     "mocha": "^5.2.0",
     "ts-loader": "^5.2.0",
-    "typescript": "^3.0.3",
-    "webpack": "^4.20.2",
-    "webpack-cli": "^3.1.1"
+    "typescript": "^3.0.3"
   }
 }
