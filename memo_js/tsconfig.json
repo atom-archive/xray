@@ -3,6 +3,8 @@
     "outDir": "./dist/",
     "noImplicitAny": true,
     "module": "esnext",
+    "declarationMap": true,
+    "declaration": true,
     "lib": ["es2015"]
   }
 }

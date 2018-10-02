@@ -1,8 +1,9 @@
 {
   "name": "@atom/memo",
   "version": "0.1.2",
-  "main": "dist/index.js",
-  "browser": "src/index.js",
+  "main": "dist/index.node.js",
+  "browser": "dist/index.web.js",
+  "types": "dist/index.d.ts",
   "scripts": {
     "prepublishOnly": "script/build",
     "test": "mocha --ui=tdd test"

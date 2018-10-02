@@ -3,3 +3,4 @@ test
 Cargo.toml
 README.md
 node_modules
+webpack.config.js
