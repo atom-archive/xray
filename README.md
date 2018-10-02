@@ -10,6 +10,7 @@ We're currently focused on a sub-project of Xray called [Memo](./memo_core), whi
 
 ## Updates
 
+* [October 2, 2018](./docs/updates/2018_10_02.md)
 * [September 14, 2018](./docs/updates/2018_09_14.md)
 * [August 28, 2018](./docs/updates/2018_08_28.md)
 * [August 21, 2018](./docs/updates/2018_08_21.md)
