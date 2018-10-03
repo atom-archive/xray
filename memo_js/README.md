@@ -24,8 +24,8 @@ const replicaId = 1;
 const tree = new WorkTree(replicaId);
 tree.appendBaseEntries([
   { depth: 1, name: "a", type: "Directory" },
-  { depth: 2, name: "b", type: "File" },
-  { depth: 1, name: "c", type: "File" },
+  { depth: 2, name: "b", type: "Text" },
+  { depth: 1, name: "c", type: "Text" }
 ])
 ```
 
@@ -37,7 +37,7 @@ a/b
 c
 ```
 
-Since the application may need to perform I/O in order to fetch the base entries, you are free to start using the work tree before they are fully populated. You can also populate the base entries in a streaming fashion by calling `appendBaseEntries` multiple times and ensuring that the entries passed to each call pick up from the last entry passed in the previous call. If
+Since the application may need to perform I/O in order to fetch the base entries, you are free to start using the work tree before they are fully populated. You can also populate the base entries in a streaming fashion by calling `appendBaseEntries` multiple times and ensuring that the entries passed to each call pick up from the last entry passed in the previous call.
 
 For now, Memo has no internal concept of commits. Application code will need to arrange for all replicas to build on top of the same commit state and see the exact same base entries. When a participant wishes to commit, you'll need to coordinate building up a new work tree on top of the new state. We plan to handle more commit-related logic directly within the library in the future.
 
@@ -57,7 +57,7 @@ If you have not finished populating the base entries via `appendBaseEntries`, so
 To list the work tree's current paths, call `entries`. This will return an array of entries arranged in a depth-first order, similar to the argument to `appendBaseEntries`. For example, the base entries populated above could be retrieved as follows:
 
 ```js
-for entry of tree.entries() {
+for (entry of tree.entries()) {
   console.log(entry.depth, entry.name, entry.type);
 }
 
@@ -184,7 +184,7 @@ function applyOps(tree, ops, openEditors) {
   // Perform these steps synchronously:
   const baseVersion = tree.getVersion();
   const fixupOps = tree.applyOps(ops);
-  for editor of openEditors {
+  for (editor of openEditors) {
     applyChanges(editor, tree.changesSince(editor.bufferId, baseVersion));
   }
 

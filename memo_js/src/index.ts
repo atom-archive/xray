@@ -17,17 +17,17 @@ function request(req: any) {
   }
 }
 
-type FileId = string;
-type BufferId = string;
-type Version = object;
-type Operation = string;
+export type FileId = string;
+export type BufferId = string;
+export type Version = object;
+export type Operation = string;
 
-enum FileType {
+export enum FileType {
   Directory = "Directory",
-  File = "File"
+  Text = "Text"
 }
 
-enum FileStatus {
+export enum FileStatus {
   New = "New",
   Renamed = "Renamed",
   Removed = "Removed",
@@ -35,22 +35,22 @@ enum FileStatus {
   Unchanged = "Unchanged"
 }
 
-interface BaseEntry {
-  depth: number;
-  name: string;
-  type: FileType;
+export interface BaseEntry {
+  readonly depth: number;
+  readonly name: string;
+  readonly type: FileType;
 }
 
-interface Entry {
-  depth: number;
-  fileId: FileId;
-  type: FileType;
-  name: string;
-  status: FileStatus;
-  visible: boolean;
+export interface Entry {
+  readonly depth: number;
+  readonly fileId: FileId;
+  readonly type: FileType;
+  readonly name: string;
+  readonly status: FileStatus;
+  readonly visible: boolean;
 }
 
-class WorkTree {
+export class WorkTree {
   private static rootFileId: FileId;
   private id: number;
 
