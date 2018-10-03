@@ -57,7 +57,7 @@ If you have not finished populating the base entries via `appendBaseEntries`, so
 To list the work tree's current paths, call `entries`. This will return an array of entries arranged in a depth-first order, similar to the argument to `appendBaseEntries`. For example, the base entries populated above could be retrieved as follows:
 
 ```js
-for entry of tree.entries() {
+for (entry of tree.entries()) {
   console.log(entry.depth, entry.name, entry.type);
 }
 
@@ -184,7 +184,7 @@ function applyOps(tree, ops, openEditors) {
   // Perform these steps synchronously:
   const baseVersion = tree.getVersion();
   const fixupOps = tree.applyOps(ops);
-  for editor of openEditors {
+  for (editor of openEditors) {
     applyChanges(editor, tree.changesSince(editor.bufferId, baseVersion));
   }
 
