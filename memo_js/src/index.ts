@@ -35,19 +35,19 @@ export enum FileStatus {
   Unchanged = "Unchanged"
 }
 
-  depth: number;
-  name: string;
-  type: FileType;
 export interface BaseEntry {
+  readonly depth: number;
+  readonly name: string;
+  readonly type: FileType;
 }
 
-  depth: number;
-  fileId: FileId;
-  type: FileType;
-  name: string;
-  status: FileStatus;
-  visible: boolean;
 export interface Entry {
+  readonly depth: number;
+  readonly fileId: FileId;
+  readonly type: FileType;
+  readonly name: string;
+  readonly status: FileStatus;
+  readonly visible: boolean;
 }
 
 export class WorkTree {
