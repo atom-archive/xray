@@ -1,7 +1,8 @@
 var path = require("path");
 
-const baseConfig = {
+module.exports = {
   entry: "./src/index.ts",
+  target: "node",
   module: {
     rules: [
       {
@@ -16,27 +17,8 @@ const baseConfig = {
   },
   output: {
     path: path.resolve(__dirname, "dist"),
+    filename: "index.node.js",
     library: "memo",
     libraryTarget: "umd"
   }
 };
-
-const nodeConfig = {
-  ...baseConfig,
-  target: "node",
-  output: {
-    ...baseConfig.output,
-    filename: "index.node.js"
-  }
-};
-
-const webConfig = {
-  ...baseConfig,
-  target: "web",
-  output: {
-    ...baseConfig.output,
-    filename: "index.web.js"
-  }
-};
-
-module.exports = [nodeConfig, webConfig];
