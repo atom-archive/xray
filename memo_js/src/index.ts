@@ -24,7 +24,7 @@ export type Operation = string;
 
 export enum FileType {
   Directory = "Directory",
-  File = "File"
+  Text = "Text"
 }
 
 export enum FileStatus {
