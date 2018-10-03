@@ -24,8 +24,8 @@ const replicaId = 1;
 const tree = new WorkTree(replicaId);
 tree.appendBaseEntries([
   { depth: 1, name: "a", type: "Directory" },
-  { depth: 2, name: "b", type: "File" },
-  { depth: 1, name: "c", type: "File" },
+  { depth: 2, name: "b", type: "Text" },
+  { depth: 1, name: "c", type: "Text" }
 ])
 ```
 
