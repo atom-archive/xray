@@ -149,7 +149,10 @@ export class WorkTree {
     }).path;
   }
 
-  entries(options?: {showDeleted?: boolean,  descendInto?: [FileId]}): Entry {
+  entries(options?: {
+    showDeleted?: boolean;
+    descendInto?: [FileId];
+  }): ReadonlyArray<Entry> {
     let showDeleted, descendInto;
     if (options) {
       showDeleted = options.showDeleted || false;
