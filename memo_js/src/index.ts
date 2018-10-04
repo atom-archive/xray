@@ -76,7 +76,9 @@ export class WorkTree {
     return request({ tree_id: this.id, type: "GetVersion" }).version;
   }
 
-  appendBaseEntries(baseEntries: [BaseEntry]): [Operation] {
+  appendBaseEntries(
+    baseEntries: ReadonlyArray<BaseEntry>
+  ): ReadonlyArray<Operation> {
     return request({
       type: "AppendBaseEntries",
       tree_id: this.id,
@@ -84,7 +86,7 @@ export class WorkTree {
     }).operations;
   }
 
-  applyOps(operations: [Operation]): [Operation] {
+  applyOps(operations: ReadonlyArray<Operation>): ReadonlyArray<Operation> {
     const response = request({
       type: "ApplyOperations",
       tree_id: this.id,
@@ -190,7 +192,7 @@ export class WorkTree {
 
   edit(
     bufferId: BufferId,
-    ranges: [{ start: number; end: number }],
+    ranges: ReadonlyArray<{ start: number; end: number }>,
     newText: string
   ): Operation {
     const response = request({
@@ -206,7 +208,7 @@ export class WorkTree {
   changesSince(
     bufferId: BufferId,
     version: Version
-  ): [{ start: number; end: number; text: string }] {
+  ): ReadonlyArray<{ start: number; end: number; text: string }> {
     return request({
       type: "ChangesSince",
       tree_id: this.id,
