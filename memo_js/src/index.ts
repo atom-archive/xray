@@ -50,6 +50,20 @@ export interface Entry {
   readonly visible: boolean;
 }
 
+export interface Point {
+  readonly row: number;
+  readonly column: number;
+}
+
+export interface Range {
+  readonly start: Point;
+  readonly end: Point;
+}
+
+export interface RangeWithText extends Range {
+  readonly text: string;
+}
+
 export class WorkTree {
   private static rootFileId: FileId;
   private id: number;
@@ -76,7 +90,9 @@ export class WorkTree {
     return request({ tree_id: this.id, type: "GetVersion" }).version;
   }
 
-  appendBaseEntries(baseEntries: [BaseEntry]): [Operation] {
+  appendBaseEntries(
+    baseEntries: ReadonlyArray<BaseEntry>
+  ): ReadonlyArray<Operation> {
     return request({
       type: "AppendBaseEntries",
       tree_id: this.id,
@@ -84,7 +100,7 @@ export class WorkTree {
     }).operations;
   }
 
-  applyOps(operations: [Operation]): [Operation] {
+  applyOps(operations: ReadonlyArray<Operation>): ReadonlyArray<Operation> {
     const response = request({
       type: "ApplyOperations",
       tree_id: this.id,
@@ -149,7 +165,10 @@ export class WorkTree {
     }).path;
   }
 
-  entries(options?: {showDeleted?: boolean,  descendInto?: [FileId]}): Entry {
+  entries(options?: {
+    showDeleted?: boolean;
+    descendInto?: [FileId];
+  }): ReadonlyArray<Entry> {
     let showDeleted, descendInto;
     if (options) {
       showDeleted = options.showDeleted || false;
@@ -187,7 +206,7 @@ export class WorkTree {
 
   edit(
     bufferId: BufferId,
-    ranges: [{ start: number; end: number }],
+    ranges: ReadonlyArray<Range>,
     newText: string
   ): Operation {
     const response = request({
@@ -203,7 +222,7 @@ export class WorkTree {
   changesSince(
     bufferId: BufferId,
     version: Version
-  ): [{ start: number; end: number; text: string }] {
+  ): ReadonlyArray<RangeWithText> {
     return request({
       type: "ChangesSince",
       tree_id: this.id,
