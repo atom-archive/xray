@@ -50,6 +50,20 @@ export interface Entry {
   readonly visible: boolean;
 }
 
+export interface Point {
+  readonly row: number;
+  readonly column: number;
+}
+
+export interface Range {
+  readonly start: Point;
+  readonly end: Point;
+}
+
+export interface RangeWithText extends Range {
+  readonly text: string;
+}
+
 export class WorkTree {
   private static rootFileId: FileId;
   private id: number;
@@ -192,7 +206,7 @@ export class WorkTree {
 
   edit(
     bufferId: BufferId,
-    ranges: ReadonlyArray<{ start: number; end: number }>,
+    ranges: ReadonlyArray<Range>,
     newText: string
   ): Operation {
     const response = request({
@@ -208,7 +222,7 @@ export class WorkTree {
   changesSince(
     bufferId: BufferId,
     version: Version
-  ): ReadonlyArray<{ start: number; end: number; text: string }> {
+  ): ReadonlyArray<RangeWithText> {
     return request({
       type: "ChangesSince",
       tree_id: this.id,
