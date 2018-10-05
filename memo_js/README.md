@@ -93,7 +93,7 @@ const { fileId, operation } = tree.newTextFile();
 This returns a `fileId` and an `operation`, both of which are base64 encoded strings. The `operation` should be transmitted to all other collaborators and applied via `applyOps`, discussed in more detail later. After calling `newTextFile`, the created file exists in an "unsaved" form. To give it a name, pass the returned file id to the `rename` method.
 
 ```js
-const operation = tree.rename(fileId, tree.getRootFileId(), "foo.txt");
+const operation = tree.rename(fileId, WorkTree.getRootFileId(), "foo.txt");
 // Send the operation to peers...
 ```
 

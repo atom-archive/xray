@@ -17,10 +17,12 @@ function request(req: any) {
   }
 }
 
-export type FileId = string;
-export type BufferId = string;
-export type Version = object;
-export type Operation = string;
+type Tagged<BaseType, TagName> = BaseType & { __tag: TagName };
+
+export type FileId = Tagged<string, "FileId">;
+export type BufferId = Tagged<string, "BufferId">;
+export type Version = Tagged<object, "Version">;
+export type Operation = Tagged<string, "Operation">;
 
 export enum FileType {
   Directory = "Directory",
@@ -167,7 +169,7 @@ export class WorkTree {
 
   entries(options?: {
     showDeleted?: boolean;
-    descendInto?: [FileId];
+    descendInto?: ReadonlyArray<FileId>;
   }): ReadonlyArray<Entry> {
     let showDeleted, descendInto;
     if (options) {
