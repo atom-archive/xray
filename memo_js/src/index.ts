@@ -167,7 +167,7 @@ export class WorkTree {
 
   entries(options?: {
     showDeleted?: boolean;
-    descendInto?: [FileId];
+    descendInto?: ReadonlyArray<FileId>;
   }): ReadonlyArray<Entry> {
     let showDeleted, descendInto;
     if (options) {
