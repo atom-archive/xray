@@ -17,10 +17,12 @@ function request(req: any) {
   }
 }
 
-export type FileId = string & { __kind: "FileId" };
-export type BufferId = string & { __kind: "BufferId" };
-export type Version = object & { __kind: "Version" };
-export type Operation = string & { __kind: "Operation" };
+type Tagged<BaseType, TagName> = BaseType & { __tag: TagName };
+
+export type FileId = Tagged<string, "FileId">;
+export type BufferId = Tagged<string, "BufferId">;
+export type Version = Tagged<object, "Version">;
+export type Operation = Tagged<string, "Operation">;
 
 export enum FileType {
   Directory = "Directory",
