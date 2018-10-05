@@ -17,10 +17,10 @@ function request(req: any) {
   }
 }
 
-export type FileId = string;
-export type BufferId = string;
-export type Version = object;
-export type Operation = string;
+export type FileId = string & { __kind: "FileId" };
+export type BufferId = string & { __kind: "BufferId" };
+export type Version = object & { __kind: "Version" };
+export type Operation = string & { __kind: "Operation" };
 
 export enum FileType {
   Directory = "Directory",
