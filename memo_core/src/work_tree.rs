@@ -1688,29 +1688,54 @@ mod tests {
             let mut base_entries_to_append =
                 Vec::from_iter((0..PEERS).map(|_| base_entries.clone()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
+            let mut all_ops = Vec::new();
 
             // Generate and deliver random mutations
             for _ in 0..10 {
-                let k = rng.gen_range(0, 3);
+                let k = rng.gen_range(0, 10);
                 let replica_index = rng.gen_range(0, PEERS);
                 let tree = &mut trees[replica_index];
                 let base_entries_to_append = &mut base_entries_to_append[replica_index];
 
-                if k == 0 && !base_entries_to_append.is_empty() {
+                if k < 3 && !base_entries_to_append.is_empty() {
                     let count = rng.gen_range(0, base_entries_to_append.len());
                     let fixup_ops = tree
                         .append_base_entries(base_entries_to_append.drain(0..count))
                         .unwrap();
-                    deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
-                } else if k == 1 && !inboxes[replica_index].is_empty() {
+                    deliver_ops(
+                        &mut rng,
+                        replica_index,
+                        &mut inboxes,
+                        &mut all_ops,
+                        fixup_ops,
+                    );
+                } else if k < 6 && !inboxes[replica_index].is_empty() {
                     let count = rng.gen_range(1, inboxes[replica_index].len() + 1);
                     let fixup_ops = tree
                         .apply_ops(inboxes[replica_index].drain(0..count))
                         .unwrap();
-                    deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
+                    deliver_ops(
+                        &mut rng,
+                        replica_index,
+                        &mut inboxes,
+                        &mut all_ops,
+                        fixup_ops,
+                    );
+                } else if k < 7 && !all_ops.is_empty() {
+                    inboxes[replica_index].clear();
+                    *base_entries_to_append = base_entries.clone();
+                    *tree = WorkTree::new(tree.local_clock.replica_id);
+                    let fixup_ops = tree.apply_ops(all_ops.iter().cloned()).unwrap();
+                    deliver_ops(
+                        &mut rng,
+                        replica_index,
+                        &mut inboxes,
+                        &mut all_ops,
+                        fixup_ops,
+                    );
                 } else {
                     let ops = tree.mutate(&mut rng, 5);
-                    deliver_ops(&mut rng, replica_index, &mut inboxes, ops);
+                    deliver_ops(&mut rng, replica_index, &mut inboxes, &mut all_ops, ops);
                 }
             }
 
@@ -1724,7 +1749,13 @@ mod tests {
                         let fixup_ops = tree
                             .append_base_entries(base_entries_to_append.drain(..))
                             .unwrap();
-                        deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
+                        deliver_ops(
+                            &mut rng,
+                            replica_index,
+                            &mut inboxes,
+                            &mut all_ops,
+                            fixup_ops,
+                        );
                     }
 
                     if !inboxes[replica_index].is_empty() {
@@ -1732,7 +1763,13 @@ mod tests {
                         let fixup_ops = tree
                             .apply_ops(inboxes[replica_index].drain(0..count))
                             .unwrap();
-                        deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
+                        deliver_ops(
+                            &mut rng,
+                            replica_index,
+                            &mut inboxes,
+                            &mut all_ops,
+                            fixup_ops,
+                        );
                         done = false;
                     }
                 }
@@ -1750,6 +1787,7 @@ mod tests {
                 rng: &mut T,
                 sender: usize,
                 inboxes: &mut Vec<Vec<Operation>>,
+                all_ops: &mut Vec<Operation>,
                 ops: Vec<Operation>,
             ) {
                 for (i, inbox) in inboxes.iter_mut().enumerate() {
@@ -1774,6 +1812,7 @@ mod tests {
                         }
                     }
                 }
+                all_ops.extend(ops);
             }
         }
     }
