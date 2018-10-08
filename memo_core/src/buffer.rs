@@ -405,7 +405,8 @@ impl Buffer {
                                 .cmp_anchors(
                                     &old_selections.peek().unwrap().start,
                                     &new_selections.peek().unwrap().start,
-                                ).unwrap()
+                                )
+                                .unwrap()
                             {
                                 Ordering::Less => {
                                     selections.push(old_selections.next().unwrap());
@@ -478,23 +479,29 @@ impl Buffer {
     pub fn apply_ops<I: IntoIterator<Item = Operation>>(
         &mut self,
         ops: I,
+        local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
         let mut deferred_ops = Vec::new();
         for op in ops {
             if self.can_apply_op(&op) {
-                self.apply_op(op, lamport_clock)?;
+                self.apply_op(op, local_clock, lamport_clock)?;
             } else {
                 self.deferred_replicas.insert(op.id.replica_id);
                 deferred_ops.push(op);
             }
         }
         self.deferred_ops.insert(deferred_ops);
-        self.flush_deferred_ops(lamport_clock)?;
+        self.flush_deferred_ops(local_clock, lamport_clock)?;
         Ok(())
     }
 
-    fn apply_op(&mut self, op: Operation, lamport_clock: &mut time::Lamport) -> Result<(), Error> {
+    fn apply_op(
+        &mut self,
+        op: Operation,
+        local_clock: &mut time::Local,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<(), Error> {
         self.apply_edit(
             op.id,
             op.start_id,
@@ -504,6 +511,7 @@ impl Buffer {
             op.new_text.as_ref().cloned(),
             &op.version_in_range,
             op.timestamp,
+            local_clock,
             lamport_clock,
         )?;
         self.anchor_cache.borrow_mut().clear();
@@ -521,6 +529,7 @@ impl Buffer {
         new_text: Option<Arc<Text>>,
         version_in_range: &time::Global,
         timestamp: time::Lamport,
+        local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
         if id.seq <= self.version.get(id.replica_id) {
@@ -626,16 +635,21 @@ impl Buffer {
         new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
         self.version.observe(id);
+        local_clock.observe(id);
         lamport_clock.observe(timestamp);
         Ok(())
     }
 
-    fn flush_deferred_ops(&mut self, lamport_clock: &mut time::Lamport) -> Result<(), Error> {
+    fn flush_deferred_ops(
+        &mut self,
+        local_clock: &mut time::Local,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<(), Error> {
         self.deferred_replicas.clear();
         let mut deferred_ops = Vec::new();
         for op in self.deferred_ops.drain() {
             if self.can_apply_op(&op) {
-                self.apply_op(op, lamport_clock)?;
+                self.apply_op(op, local_clock, lamport_clock)?;
             } else {
                 self.deferred_replicas.insert(op.id.replica_id);
                 deferred_ops.push(op);
@@ -1631,7 +1645,8 @@ impl Text {
                 }
                 Ordering::Equal
             }
-        }).ok_or(Error::OffsetOutOfRange)?;
+        })
+        .ok_or(Error::OffsetOutOfRange)?;
 
         self.search(|probe| {
             if target_range.end >= probe.offset_range.start
@@ -1665,7 +1680,8 @@ impl Text {
                 }
                 Ordering::Equal
             }
-        }).ok_or(Error::OffsetOutOfRange)?;
+        })
+        .ok_or(Error::OffsetOutOfRange)?;
 
         Ok((longest_row, longest_row_len))
     }
@@ -2597,7 +2613,8 @@ mod tests {
                                         } else {
                                             None
                                         }
-                                    }).unwrap_or(0);
+                                    })
+                                    .unwrap_or(0);
 
                                 let insertion_index = rng.gen_range(min_index, queue.len() + 1);
                                 queue.insert(insertion_index, op.clone());
@@ -2609,7 +2626,11 @@ mod tests {
                 } else if !queues[replica_index].is_empty() {
                     let count = rng.gen_range(1, queues[replica_index].len() + 1);
                     buffer
-                        .apply_ops(queues[replica_index].drain(0..count), lamport_clock)
+                        .apply_ops(
+                            queues[replica_index].drain(0..count),
+                            local_clock,
+                            lamport_clock,
+                        )
                         .unwrap();
                 }
 

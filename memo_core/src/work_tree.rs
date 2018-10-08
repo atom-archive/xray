@@ -349,6 +349,7 @@ impl WorkTree {
 
     pub fn apply_op(&mut self, op: Operation) -> Result<(), Error> {
         self.version.observe(op.local_timestamp());
+        self.local_clock.observe(op.local_timestamp());
         self.lamport_clock.observe(op.lamport_timestamp());
 
         match op {
@@ -475,7 +476,7 @@ impl WorkTree {
                 }
                 TextFile::Buffered(buffer) => {
                     buffer
-                        .apply_ops(edits, &mut self.lamport_clock)
+                        .apply_ops(edits, &mut self.local_clock, &mut self.lamport_clock)
                         .map_err(|_| Error::InvalidOperation)?;
                 }
             },
@@ -545,7 +546,7 @@ impl WorkTree {
             Some(TextFile::Deferred(operations)) => {
                 let mut buffer = Buffer::new(base_text);
                 buffer
-                    .apply_ops(operations, &mut self.lamport_clock)
+                    .apply_ops(operations, &mut self.local_clock, &mut self.lamport_clock)
                     .map_err(|_| Error::InvalidOperation)?;
                 self.text_files.insert(file_id, TextFile::Buffered(buffer));
             }
@@ -1411,7 +1412,8 @@ mod tests {
                     name: OsString::from("d"),
                     file_type: FileType::Directory,
                 },
-            ]).unwrap();
+            ])
+            .unwrap();
         assert_eq!(tree.paths(), vec!["a", "a/b", "a/b/c", "a/d"]);
         assert_eq!(fixup_ops.len(), 0);
 
@@ -1432,7 +1434,8 @@ mod tests {
                     name: OsString::from("f"),
                     file_type: FileType::Text,
                 },
-            ]).unwrap();
+            ])
+            .unwrap();
         assert_eq!(
             tree.paths(),
             vec!["a", "a/b", "a/b/c", "a/d", "a/e", "a/e~", "a/z", "f"]
@@ -1474,7 +1477,8 @@ mod tests {
                 name: OsString::from("f"),
                 file_type: FileType::Directory,
             },
-        ]).unwrap();
+        ])
+        .unwrap();
 
         let a = tree.file_id("a").unwrap();
         let b = tree.file_id("a/b").unwrap();
@@ -1677,7 +1681,8 @@ mod tests {
                     depth: entry.depth,
                     name: entry.name.as_ref().clone(),
                     file_type: entry.file_type,
-                }).collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
 
             let mut trees = Vec::from_iter((0..PEERS).map(|i| WorkTree::new(i as u64 + 1)));
             let mut base_entries_to_append =
@@ -1762,7 +1767,8 @@ mod tests {
                                     } else {
                                         None
                                     }
-                                }).unwrap_or(0);
+                                })
+                                .unwrap_or(0);
                             let insertion_index = rng.gen_range(min_index, inbox.len() + 1);
                             inbox.insert(insertion_index, op.clone());
                         }

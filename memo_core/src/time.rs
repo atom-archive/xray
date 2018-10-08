@@ -36,6 +36,12 @@ impl Local {
         self.seq += 1;
         timestamp
     }
+
+    pub fn observe(&mut self, timestamp: Self) {
+        if timestamp.replica_id == self.replica_id {
+            self.seq = cmp::max(self.seq, timestamp.seq + 1);
+        }
+    }
 }
 
 impl Default for Local {
@@ -163,8 +169,6 @@ impl Lamport {
     }
 
     pub fn observe(&mut self, timestamp: Self) {
-        if timestamp.replica_id != self.replica_id {
-            self.value = cmp::max(self.value, timestamp.value) + 1;
-        }
+        self.value = cmp::max(self.value, timestamp.value) + 1;
     }
 }
