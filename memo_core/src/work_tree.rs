@@ -360,20 +360,22 @@ impl WorkTree {
                 lamport_timestamp,
                 ..
             } => {
-                self.metadata.insert(Metadata { file_id, file_type });
-                if let Some((parent_id, name)) = parent {
-                    self.parent_refs.insert(ParentRefValue {
-                        child_id: file_id,
-                        parent: Some((parent_id, name.clone())),
-                        timestamp: lamport_timestamp,
-                    });
-                    self.child_refs.insert(ChildRefValue {
-                        parent_id,
-                        name,
-                        timestamp: lamport_timestamp,
-                        child_id: file_id,
-                        visible: true,
-                    });
+                if !self.metadata.cursor().seek(&file_id, SeekBias::Left) {
+                    self.metadata.insert(Metadata { file_id, file_type });
+                    if let Some((parent_id, name)) = parent {
+                        self.parent_refs.insert(ParentRefValue {
+                            child_id: file_id,
+                            parent: Some((parent_id, name.clone())),
+                            timestamp: lamport_timestamp,
+                        });
+                        self.child_refs.insert(ChildRefValue {
+                            parent_id,
+                            name,
+                            timestamp: lamport_timestamp,
+                            child_id: file_id,
+                            visible: true,
+                        });
+                    }
                 }
             }
             Operation::UpdateParent {
@@ -459,11 +461,12 @@ impl WorkTree {
                     }));
                 }
 
-                self.parent_refs.insert(ParentRefValue {
-                    child_id,
-                    timestamp: lamport_timestamp,
-                    parent: new_parent,
-                });
+                self.parent_refs
+                    .edit(&mut [btree::Edit::Insert(ParentRefValue {
+                        child_id,
+                        timestamp: lamport_timestamp,
+                        parent: new_parent,
+                    })]);
                 self.child_refs.edit(&mut child_ref_edits);
             }
             Operation::EditText { file_id, edits, .. } => match self
@@ -1779,6 +1782,10 @@ mod tests {
                 }
             }
 
+            for i in 0..PEERS {
+                assert!(trees[i].deferred_ops.is_empty());
+            }
+
             for i in 0..PEERS - 1 {
                 assert_eq!(trees[i].entries(), trees[i + 1].entries());
             }
@@ -1807,8 +1814,13 @@ mod tests {
                                     }
                                 })
                                 .unwrap_or(0);
-                            let insertion_index = rng.gen_range(min_index, inbox.len() + 1);
-                            inbox.insert(insertion_index, op.clone());
+
+                            // Insert one or more duplicates of this operation *after* the previous
+                            // operation delivered by this replica.
+                            for _ in 0..rng.gen_range(1, 4) {
+                                let insertion_index = rng.gen_range(min_index, inbox.len() + 1);
+                                inbox.insert(insertion_index, op.clone());
+                            }
                         }
                     }
                 }

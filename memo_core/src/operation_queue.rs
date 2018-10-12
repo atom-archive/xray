@@ -18,10 +18,14 @@ impl<T: Operation> OperationQueue<T> {
         OperationQueue(Tree::new())
     }
 
-    pub fn insert<I>(&mut self, ops: I)
-    where
-        I: IntoIterator<Item = T>,
-    {
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn insert(&mut self, mut ops: Vec<T>) {
+        ops.sort_by_key(|op| op.timestamp());
+        ops.dedup_by_key(|op| op.timestamp());
         let mut edits = ops
             .into_iter()
             .map(|op| Edit::Insert(op))
