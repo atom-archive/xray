@@ -349,6 +349,7 @@ impl WorkTree {
 
     pub fn apply_op(&mut self, op: Operation) -> Result<(), Error> {
         self.version.observe(op.local_timestamp());
+        self.local_clock.observe(op.local_timestamp());
         self.lamport_clock.observe(op.lamport_timestamp());
 
         match op {
@@ -359,20 +360,22 @@ impl WorkTree {
                 lamport_timestamp,
                 ..
             } => {
-                self.metadata.insert(Metadata { file_id, file_type });
-                if let Some((parent_id, name)) = parent {
-                    self.parent_refs.insert(ParentRefValue {
-                        child_id: file_id,
-                        parent: Some((parent_id, name.clone())),
-                        timestamp: lamport_timestamp,
-                    });
-                    self.child_refs.insert(ChildRefValue {
-                        parent_id,
-                        name,
-                        timestamp: lamport_timestamp,
-                        child_id: file_id,
-                        visible: true,
-                    });
+                if !self.metadata.cursor().seek(&file_id, SeekBias::Left) {
+                    self.metadata.insert(Metadata { file_id, file_type });
+                    if let Some((parent_id, name)) = parent {
+                        self.parent_refs.insert(ParentRefValue {
+                            child_id: file_id,
+                            parent: Some((parent_id, name.clone())),
+                            timestamp: lamport_timestamp,
+                        });
+                        self.child_refs.insert(ChildRefValue {
+                            parent_id,
+                            name,
+                            timestamp: lamport_timestamp,
+                            child_id: file_id,
+                            visible: true,
+                        });
+                    }
                 }
             }
             Operation::UpdateParent {
@@ -458,11 +461,12 @@ impl WorkTree {
                     }));
                 }
 
-                self.parent_refs.insert(ParentRefValue {
-                    child_id,
-                    timestamp: lamport_timestamp,
-                    parent: new_parent,
-                });
+                self.parent_refs
+                    .edit(&mut [btree::Edit::Insert(ParentRefValue {
+                        child_id,
+                        timestamp: lamport_timestamp,
+                        parent: new_parent,
+                    })]);
                 self.child_refs.edit(&mut child_ref_edits);
             }
             Operation::EditText { file_id, edits, .. } => match self
@@ -475,7 +479,7 @@ impl WorkTree {
                 }
                 TextFile::Buffered(buffer) => {
                     buffer
-                        .apply_ops(edits, &mut self.lamport_clock)
+                        .apply_ops(edits, &mut self.local_clock, &mut self.lamport_clock)
                         .map_err(|_| Error::InvalidOperation)?;
                 }
             },
@@ -545,7 +549,7 @@ impl WorkTree {
             Some(TextFile::Deferred(operations)) => {
                 let mut buffer = Buffer::new(base_text);
                 buffer
-                    .apply_ops(operations, &mut self.lamport_clock)
+                    .apply_ops(operations, &mut self.local_clock, &mut self.lamport_clock)
                     .map_err(|_| Error::InvalidOperation)?;
                 self.text_files.insert(file_id, TextFile::Buffered(buffer));
             }
@@ -1411,7 +1415,8 @@ mod tests {
                     name: OsString::from("d"),
                     file_type: FileType::Directory,
                 },
-            ]).unwrap();
+            ])
+            .unwrap();
         assert_eq!(tree.paths(), vec!["a", "a/b", "a/b/c", "a/d"]);
         assert_eq!(fixup_ops.len(), 0);
 
@@ -1432,7 +1437,8 @@ mod tests {
                     name: OsString::from("f"),
                     file_type: FileType::Text,
                 },
-            ]).unwrap();
+            ])
+            .unwrap();
         assert_eq!(
             tree.paths(),
             vec!["a", "a/b", "a/b/c", "a/d", "a/e", "a/e~", "a/z", "f"]
@@ -1474,7 +1480,8 @@ mod tests {
                 name: OsString::from("f"),
                 file_type: FileType::Directory,
             },
-        ]).unwrap();
+        ])
+        .unwrap();
 
         let a = tree.file_id("a").unwrap();
         let b = tree.file_id("a/b").unwrap();
@@ -1677,35 +1684,61 @@ mod tests {
                     depth: entry.depth,
                     name: entry.name.as_ref().clone(),
                     file_type: entry.file_type,
-                }).collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
 
             let mut trees = Vec::from_iter((0..PEERS).map(|i| WorkTree::new(i as u64 + 1)));
             let mut base_entries_to_append =
                 Vec::from_iter((0..PEERS).map(|_| base_entries.clone()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
+            let mut all_ops = Vec::new();
 
             // Generate and deliver random mutations
             for _ in 0..10 {
-                let k = rng.gen_range(0, 3);
+                let k = rng.gen_range(0, 10);
                 let replica_index = rng.gen_range(0, PEERS);
                 let tree = &mut trees[replica_index];
                 let base_entries_to_append = &mut base_entries_to_append[replica_index];
 
-                if k == 0 && !base_entries_to_append.is_empty() {
+                if k < 3 && !base_entries_to_append.is_empty() {
                     let count = rng.gen_range(0, base_entries_to_append.len());
                     let fixup_ops = tree
                         .append_base_entries(base_entries_to_append.drain(0..count))
                         .unwrap();
-                    deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
-                } else if k == 1 && !inboxes[replica_index].is_empty() {
+                    deliver_ops(
+                        &mut rng,
+                        replica_index,
+                        &mut inboxes,
+                        &mut all_ops,
+                        fixup_ops,
+                    );
+                } else if k < 6 && !inboxes[replica_index].is_empty() {
                     let count = rng.gen_range(1, inboxes[replica_index].len() + 1);
                     let fixup_ops = tree
                         .apply_ops(inboxes[replica_index].drain(0..count))
                         .unwrap();
-                    deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
+                    deliver_ops(
+                        &mut rng,
+                        replica_index,
+                        &mut inboxes,
+                        &mut all_ops,
+                        fixup_ops,
+                    );
+                } else if k < 7 && !all_ops.is_empty() {
+                    inboxes[replica_index].clear();
+                    *base_entries_to_append = base_entries.clone();
+                    *tree = WorkTree::new(tree.local_clock.replica_id);
+                    let fixup_ops = tree.apply_ops(all_ops.iter().cloned()).unwrap();
+                    deliver_ops(
+                        &mut rng,
+                        replica_index,
+                        &mut inboxes,
+                        &mut all_ops,
+                        fixup_ops,
+                    );
                 } else {
                     let ops = tree.mutate(&mut rng, 5);
-                    deliver_ops(&mut rng, replica_index, &mut inboxes, ops);
+                    deliver_ops(&mut rng, replica_index, &mut inboxes, &mut all_ops, ops);
                 }
             }
 
@@ -1719,7 +1752,13 @@ mod tests {
                         let fixup_ops = tree
                             .append_base_entries(base_entries_to_append.drain(..))
                             .unwrap();
-                        deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
+                        deliver_ops(
+                            &mut rng,
+                            replica_index,
+                            &mut inboxes,
+                            &mut all_ops,
+                            fixup_ops,
+                        );
                     }
 
                     if !inboxes[replica_index].is_empty() {
@@ -1727,7 +1766,13 @@ mod tests {
                         let fixup_ops = tree
                             .apply_ops(inboxes[replica_index].drain(0..count))
                             .unwrap();
-                        deliver_ops(&mut rng, replica_index, &mut inboxes, fixup_ops);
+                        deliver_ops(
+                            &mut rng,
+                            replica_index,
+                            &mut inboxes,
+                            &mut all_ops,
+                            fixup_ops,
+                        );
                         done = false;
                     }
                 }
@@ -1735,6 +1780,10 @@ mod tests {
                 if done {
                     break;
                 }
+            }
+
+            for i in 0..PEERS {
+                assert!(trees[i].deferred_ops.is_empty());
             }
 
             for i in 0..PEERS - 1 {
@@ -1745,6 +1794,7 @@ mod tests {
                 rng: &mut T,
                 sender: usize,
                 inboxes: &mut Vec<Vec<Operation>>,
+                all_ops: &mut Vec<Operation>,
                 ops: Vec<Operation>,
             ) {
                 for (i, inbox) in inboxes.iter_mut().enumerate() {
@@ -1762,12 +1812,19 @@ mod tests {
                                     } else {
                                         None
                                     }
-                                }).unwrap_or(0);
-                            let insertion_index = rng.gen_range(min_index, inbox.len() + 1);
-                            inbox.insert(insertion_index, op.clone());
+                                })
+                                .unwrap_or(0);
+
+                            // Insert one or more duplicates of this operation *after* the previous
+                            // operation delivered by this replica.
+                            for _ in 0..rng.gen_range(1, 4) {
+                                let insertion_index = rng.gen_range(min_index, inbox.len() + 1);
+                                inbox.insert(insertion_index, op.clone());
+                            }
                         }
                     }
                 }
+                all_ops.extend(ops);
             }
         }
     }
