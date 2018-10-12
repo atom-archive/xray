@@ -533,7 +533,7 @@ impl Buffer {
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
         if id.seq <= self.version.get(id.replica_id) {
-            return Err(Error::InvalidOperation);
+            return Ok(());
         }
 
         let mut new_text = new_text.as_ref().cloned();
@@ -2616,8 +2616,10 @@ mod tests {
                                     })
                                     .unwrap_or(0);
 
-                                let insertion_index = rng.gen_range(min_index, queue.len() + 1);
-                                queue.insert(insertion_index, op.clone());
+                                for _ in 0..rng.gen_range(1, 4) {
+                                    let insertion_index = rng.gen_range(min_index, queue.len() + 1);
+                                    queue.insert(insertion_index, op.clone());
+                                }
                             }
                         }
                     }
