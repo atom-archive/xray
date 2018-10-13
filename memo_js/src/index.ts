@@ -48,6 +48,7 @@ export interface Entry {
   readonly fileId: FileId;
   readonly type: FileType;
   readonly name: string;
+  readonly path: string;
   readonly status: FileStatus;
   readonly visible: boolean;
 }

@@ -173,6 +173,7 @@ struct Entry {
     file_type: FileType,
     depth: usize,
     name: String,
+    path: String,
     status: FileStatus,
     visible: bool,
 }
@@ -311,7 +312,8 @@ impl Server {
                         buffer_id,
                         ranges.into_iter().map(|range| range.start..range.end),
                         new_text.as_str(),
-                    ).map_err(|e| e.to_string())?;
+                    )
+                    .map_err(|e| e.to_string())?;
                 Ok(Response::Edit {
                     operation: Base64(op),
                 })
@@ -329,7 +331,8 @@ impl Server {
                         start: change.range.start,
                         end: change.range.end,
                         text: String::from_utf16_lossy(&change.code_units),
-                    }).collect();
+                    })
+                    .collect();
                 Ok(Response::ChangesSince { changes })
             }
             Request::GetText {
@@ -378,6 +381,7 @@ impl Server {
                                 file_type: entry.file_type,
                                 depth: entry.depth,
                                 name: entry.name.to_string_lossy().into_owned(),
+                                path: cursor.path().unwrap().to_string_lossy().into_owned(),
                                 status: entry.status,
                                 visible: entry.visible,
                             });
