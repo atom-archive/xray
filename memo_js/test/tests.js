@@ -70,6 +70,7 @@ suite("WorkTree", () => {
         fileId: tree1.fileIdForPath("a"),
         type: "Directory",
         name: "a",
+        path: "a",
         status: "Unchanged",
         visible: true
       }
@@ -85,6 +86,7 @@ suite("WorkTree", () => {
           fileId: tree1.fileIdForPath("a"),
           type: "Directory",
           name: "a",
+          path: "a",
           status: "Unchanged",
           visible: true
         },
@@ -93,6 +95,7 @@ suite("WorkTree", () => {
           fileId: tree1.fileIdForPath("a/b"),
           type: "Directory",
           name: "b",
+          path: "a/b",
           status: "Unchanged",
           visible: true
         },
@@ -101,6 +104,7 @@ suite("WorkTree", () => {
           fileId: c,
           type: "Text",
           name: "c",
+          path: "a/b/c",
           status: "Removed",
           visible: false
         },
@@ -109,6 +113,7 @@ suite("WorkTree", () => {
           fileId: dir1.fileId,
           type: "Directory",
           name: "x",
+          path: "a/b/x",
           status: "New",
           visible: true
         }
