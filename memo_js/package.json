@@ -6,13 +6,16 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "prepublishOnly": "script/build",
-    "test": "mocha --ui=tdd test",
+    "test": "webpack --env.test && mocha --ui=tdd --require=source-map-support/register test/dist/tests.js",
     "tsc": "tsc",
     "webpack": "webpack"
   },
   "license": "MIT",
   "devDependencies": {
+    "@types/mocha": "^5.2.5",
+    "@types/node": "^10.11.4",
     "mocha": "^5.2.0",
+    "source-map-support": "^0.5.9",
     "ts-loader": "^5.2.0",
     "typescript": "^3.0.3",
     "webpack": "^4.20.2",

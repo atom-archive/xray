@@ -21,4 +21,4 @@ mkdir -p dist
 CARGO_INCREMENTAL=0 RUSTFLAGS="-C debuginfo=0 -C opt-level=s -C lto -C panic=abort" cargo build --release --target wasm32-unknown-unknown
 wasm-bindgen ../target/wasm32-unknown-unknown/release/memo_js.wasm --out-dir dist
 yarn tsc
-yarn webpack --mode=development
+yarn webpack --mode=production
