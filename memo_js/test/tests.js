@@ -1,8 +1,8 @@
-import * as memo from "../src/index";
-import * as assert from 'assert';
+const memo = require("../dist/index.node.js");
+const assert = require("assert");
 
 suite("WorkTree", () => {
-  let WorkTree: typeof memo.WorkTree;
+  let WorkTree;
 
   suiteSetup(async () => {
     ({ WorkTree } = await memo.init());
@@ -11,9 +11,9 @@ suite("WorkTree", () => {
   test("basic API interaction", () => {
     const rootFileId = WorkTree.getRootFileId();
     const baseEntries = [
-      { depth: 1, name: "a", type: memo.FileType.Directory },
-      { depth: 2, name: "b", type: memo.FileType.Directory },
-      { depth: 3, name: "c", type: memo.FileType.Text }
+      { depth: 1, name: "a", type: "Directory" },
+      { depth: 2, name: "b", type: "Directory" },
+      { depth: 3, name: "c", type: "Text" }
     ];
 
     const tree1 = new WorkTree(1);
@@ -122,6 +122,6 @@ suite("WorkTree", () => {
   });
 });
 
-function point(row: number, column: number): memo.Point {
+function point(row, column) {
   return { row, column };
 }
