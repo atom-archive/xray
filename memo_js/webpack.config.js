@@ -25,7 +25,7 @@ const libConfig = {
     path: path.resolve(__dirname, "dist"),
     filename: "index.node.js",
     library: "memo",
-    libraryTarget: "commonjs"
+    libraryTarget: "umd"
   }
 };
 
