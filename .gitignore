@@ -8,3 +8,4 @@ Icon*
 xray_wasm/dist
 xray_browser/dist
 memo_js/dist
+memo_js/test/dist
