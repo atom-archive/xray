@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -e
+
+script/bootstrap
+mkdir -p dist
+CARGO_INCREMENTAL=0 RUSTFLAGS="-C debuginfo=0 -C opt-level=s -C lto -C panic=abort" cargo build --target wasm32-unknown-unknown
+wasm-bindgen ../target/wasm32-unknown-unknown/debug/memo_js.wasm --out-dir dist
+yarn webpack --env.test
+yarn mocha --ui=tdd --require=source-map-support/register test/dist/tests.js
