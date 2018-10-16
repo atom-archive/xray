@@ -1,5 +1,4 @@
 extern crate bincode;
-extern crate js_sys;
 extern crate memo_core;
 #[macro_use]
 extern crate serde_derive;
