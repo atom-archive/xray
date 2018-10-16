@@ -34,6 +34,7 @@ export enum FileStatus {
   Renamed = "Renamed",
   Removed = "Removed",
   Modified = "Modified",
+  RenamedAndModified = "RenamedAndModified",
   Unchanged = "Unchanged"
 }
 

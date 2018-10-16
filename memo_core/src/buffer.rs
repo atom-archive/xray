@@ -241,6 +241,10 @@ impl Buffer {
         }
     }
 
+    pub fn is_modified(&self) -> bool {
+        self.version > time::Global::new()
+    }
+
     pub fn len(&self) -> usize {
         self.fragments.extent::<usize>()
     }

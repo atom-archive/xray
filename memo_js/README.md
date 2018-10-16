@@ -73,7 +73,7 @@ Each returned entry has the following fields:
 * `name`: The entry's name.
 * `fileId`: An opaque, base64 encoded binary value that can be passed to other methods on `WorkTree` to interact with this file.
 * `type`: The type of this file (`"File"` or `"Directory"`)
-* `status`: How this path has changed since the base commit (`"New"`, `"Renamed"`, `"Removed"`, `"Modified"`, or `"Unchanged"`)
+* `status`: How this path has changed since the base commit (`"New"`, `"Renamed"`, `"Removed"`, `"Modified"`, `"RenamedAndModified"`, or `"Unchanged"`)
 * `visible`: Whether or not this file is currently visible (not deleted).
 
 The `entries` method accepts two options as fields in an optional object passed to the method.
