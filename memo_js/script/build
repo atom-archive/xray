@@ -2,7 +2,20 @@
 
 set -e
 
-script/bootstrap
+LOCAL_CRATE_PATH=./.cargo
+PATH=$LOCAL_CRATE_PATH/bin:$PATH
+WASM_BINDGEN_VERSION=0.2.21
+
+setup_wasm_bindgen() {
+  if (command -v wasm-bindgen) && $(wasm-bindgen --version | grep --silent $WASM_BINDGEN_VERSION); then
+    echo 'Using existing installation of wasm-bindgen'
+  else
+    cargo install --force wasm-bindgen-cli --version $WASM_BINDGEN_VERSION --root $LOCAL_CRATE_PATH
+  fi
+}
+
+rustup target add wasm32-unknown-unknown
+setup_wasm_bindgen
 rm -rf dist
 mkdir -p dist
 CARGO_INCREMENTAL=0 RUSTFLAGS="-C debuginfo=0 -C opt-level=s -C lto -C panic=abort" cargo build --release --target wasm32-unknown-unknown
