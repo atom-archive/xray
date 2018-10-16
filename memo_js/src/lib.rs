@@ -86,6 +86,10 @@ enum Request {
         tree_id: WorkTreeId,
         file_id: Base64<FileId>,
     },
+    BasePathForFileId {
+        tree_id: WorkTreeId,
+        file_id: Base64<FileId>,
+    },
     Entries {
         tree_id: WorkTreeId,
         show_deleted: bool,
@@ -144,6 +148,9 @@ enum Response {
         file_id: Option<Base64<FileId>>,
     },
     PathForFileId {
+        path: Option<String>,
+    },
+    BasePathForFileId {
         path: Option<String>,
     },
     Entries {
@@ -358,8 +365,18 @@ impl Server {
                 file_id: Base64(file_id),
             } => {
                 let tree = self.get_work_tree(tree_id)?;
-                let path = tree.path(file_id).ok();
+                let path = tree.path(file_id);
                 Ok(Response::PathForFileId {
+                    path: path.map(|p| p.to_string_lossy().into_owned()),
+                })
+            }
+            Request::BasePathForFileId {
+                tree_id,
+                file_id: Base64(file_id),
+            } => {
+                let tree = self.get_work_tree(tree_id)?;
+                let path = tree.base_path(file_id);
+                Ok(Response::BasePathForFileId {
                     path: path.map(|p| p.to_string_lossy().into_owned()),
                 })
             }

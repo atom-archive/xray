@@ -63,6 +63,7 @@ suite("WorkTree", () => {
     tree1.remove(c);
     assert.equal(tree1.fileIdForPath("a/b/c"), null);
     assert.equal(tree1.pathForFileId(c), null);
+    assert.equal(tree1.basePathForFileId(c), "a/b/c");
 
     assert.deepEqual(tree1.entries({ descendInto: [] }), [
       {

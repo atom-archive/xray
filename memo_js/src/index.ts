@@ -168,6 +168,14 @@ export class WorkTree {
     }).path;
   }
 
+  basePathForFileId(id: FileId): string {
+    return request({
+      type: "BasePathForFileId",
+      tree_id: this.id,
+      file_id: id
+    }).path;
+  }
+
   entries(options?: {
     showDeleted?: boolean;
     descendInto?: ReadonlyArray<FileId>;
