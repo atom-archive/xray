@@ -55,6 +55,7 @@ suite("WorkTree", () => {
     const dir2 = tree1.createDirectory(dir1.fileId, "y");
     assert.equal(tree1.pathForFileId(dir2.fileId), "x/y");
     assert.equal(tree1.fileIdForPath("x/y"), dir2.fileId);
+    assert.equal(tree1.basePathForFileId(dir2.fileId), null);
 
     tree1.rename(dir1.fileId, tree1.fileIdForPath("a/b"), "x");
     assert.equal(tree1.fileIdForPath("a/b/x"), dir1.fileId);

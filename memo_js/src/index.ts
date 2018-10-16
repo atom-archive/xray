@@ -160,7 +160,7 @@ export class WorkTree {
     }).file_id;
   }
 
-  pathForFileId(id: FileId): string {
+  pathForFileId(id: FileId): null | string {
     return request({
       type: "PathForFileId",
       tree_id: this.id,
@@ -168,7 +168,7 @@ export class WorkTree {
     }).path;
   }
 
-  basePathForFileId(id: FileId): string {
+  basePathForFileId(id: FileId): null | string {
     return request({
       type: "BasePathForFileId",
       tree_id: this.id,
