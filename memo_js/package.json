@@ -1,6 +1,6 @@
 {
   "name": "@atom/memo",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "main": "dist/index.node.js",
   "browser": "dist/index.js",
   "types": "dist/index.d.ts",
