@@ -2557,6 +2557,17 @@ mod tests {
     }
 
     #[test]
+    fn test_is_modified() {
+        let mut buffer = Buffer::new("abc");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+
+        assert!(!buffer.is_modified());
+        buffer.edit(vec![1..2], "", &mut local_clock, &mut lamport_clock);
+        assert!(buffer.is_modified());
+    }
+
+    #[test]
     fn test_random_concurrent_edits() {
         for seed in 0..100 {
             println!("{:?}", seed);
