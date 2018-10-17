@@ -29,7 +29,8 @@ pub struct WorkTree {
     deferred_ops: OperationQueue<Operation>,
 }
 
-pub struct Cursor {
+pub struct Cursor<'a> {
+    text_files: &'a HashMap<FileId, TextFile>,
     metadata_cursor: btree::Cursor<Metadata>,
     parent_ref_cursor: btree::Cursor<ParentRefValue>,
     child_ref_cursor: btree::Cursor<ChildRefValue>,
@@ -120,6 +121,7 @@ pub enum FileStatus {
     Renamed,
     Removed,
     Modified,
+    RenamedAndModified,
     Unchanged,
 }
 
@@ -211,6 +213,7 @@ impl WorkTree {
         let parent_ref_cursor = self.parent_refs.cursor();
         let child_ref_cursor = self.child_refs.cursor();
         let mut cursor = Cursor {
+            text_files: &self.text_files,
             metadata_cursor,
             parent_ref_cursor,
             child_ref_cursor,
@@ -960,7 +963,7 @@ impl WorkTree {
     }
 }
 
-impl Cursor {
+impl<'a> Cursor<'a> {
     pub fn next(&mut self, can_descend: bool) -> bool {
         if !self.stack.is_empty() {
             let entry = self.entry().unwrap();
@@ -995,9 +998,17 @@ impl Cursor {
         let (status, visible) = match metadata.file_id {
             FileId::Base(_) => {
                 if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
-                    (FileStatus::Unchanged, true)
+                    if self.is_modified_file(metadata.file_id) {
+                        (FileStatus::Modified, true)
+                    } else {
+                        (FileStatus::Unchanged, true)
+                    }
                 } else if newest_parent_ref_value.parent.is_some() {
-                    (FileStatus::Renamed, true)
+                    if self.is_modified_file(metadata.file_id) {
+                        (FileStatus::RenamedAndModified, true)
+                    } else {
+                        (FileStatus::Renamed, true)
+                    }
                 } else {
                     (FileStatus::Removed, false)
                 }
@@ -1059,6 +1070,12 @@ impl Cursor {
         }
 
         false
+    }
+
+    fn is_modified_file(&self, file_id: FileId) -> bool {
+        self.text_files
+            .get(&file_id)
+            .map_or(false, |f| f.is_modified())
     }
 }
 
@@ -1346,6 +1363,15 @@ impl btree::Dimension<ChildRefValueSummary> for usize {
     }
 }
 
+impl TextFile {
+    fn is_modified(&self) -> bool {
+        match self {
+            TextFile::Deferred(ops) => !ops.is_empty(),
+            TextFile::Buffered(buffer) => buffer.is_modified(),
+        }
+    }
+}
+
 fn serialize_os_string<S>(os_string: &OsString, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -1480,6 +1506,11 @@ mod tests {
                 name: OsString::from("f"),
                 file_type: FileType::Directory,
             },
+            DirEntry {
+                depth: 2,
+                name: OsString::from("g"),
+                file_type: FileType::Text,
+            },
         ])
         .unwrap();
 
@@ -1489,6 +1520,7 @@ mod tests {
         let d = tree.file_id("a/d").unwrap();
         let e = tree.file_id("a/e").unwrap();
         let f = tree.file_id("f").unwrap();
+        let g = tree.file_id("f/g").unwrap();
 
         tree.remove(b).unwrap();
 
@@ -1500,6 +1532,13 @@ mod tests {
         tree.remove(new_file_that_got_removed).unwrap();
 
         tree.rename(e, a, "z").unwrap();
+
+        let c_buffer = tree.open_text_file(c, "123").unwrap();
+        tree.edit(c_buffer, Some(0..0), "x").unwrap();
+
+        tree.rename(g, ROOT_FILE_ID, "g").unwrap();
+        let g_buffer = tree.open_text_file(g, "456").unwrap();
+        tree.edit(g_buffer, Some(0..0), "y").unwrap();
 
         let mut cursor = tree.cursor().unwrap();
         assert_eq!(
@@ -1535,7 +1574,7 @@ mod tests {
                 file_type: FileType::Text,
                 depth: 3,
                 name: Arc::new(OsString::from("c")),
-                status: FileStatus::Unchanged,
+                status: FileStatus::Modified,
                 visible: false,
             }
         );
@@ -1601,6 +1640,19 @@ mod tests {
                 depth: 1,
                 name: Arc::new(OsString::from("f")),
                 status: FileStatus::Unchanged,
+                visible: true,
+            }
+        );
+
+        assert!(cursor.next(true));
+        assert_eq!(
+            cursor.entry().unwrap(),
+            CursorEntry {
+                file_id: g,
+                file_type: FileType::Text,
+                depth: 1,
+                name: Arc::new(OsString::from("g")),
+                status: FileStatus::RenamedAndModified,
                 visible: true,
             }
         );

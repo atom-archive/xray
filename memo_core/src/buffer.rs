@@ -241,6 +241,10 @@ impl Buffer {
         }
     }
 
+    pub fn is_modified(&self) -> bool {
+        self.version > time::Global::new()
+    }
+
     pub fn len(&self) -> usize {
         self.fragments.extent::<usize>()
     }
@@ -2550,6 +2554,17 @@ mod tests {
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
         assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_is_modified() {
+        let mut buffer = Buffer::new("abc");
+        let mut local_clock = time::Local::new(1);
+        let mut lamport_clock = time::Lamport::new(1);
+
+        assert!(!buffer.is_modified());
+        buffer.edit(vec![1..2], "", &mut local_clock, &mut lamport_clock);
+        assert!(buffer.is_modified());
     }
 
     #[test]
