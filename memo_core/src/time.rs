@@ -20,7 +20,9 @@ pub struct Global(
     Arc<HashMap<ReplicaId, u64>>,
 );
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
 pub struct Lamport {
     pub value: u64,
     pub replica_id: ReplicaId,

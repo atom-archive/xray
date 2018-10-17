@@ -1,3 +1,4 @@
+extern crate futures;
 #[macro_use]
 extern crate lazy_static;
 #[cfg(test)]
@@ -9,14 +10,16 @@ extern crate smallvec;
 
 mod btree;
 mod buffer;
+mod epoch;
+mod notify_cell;
 mod operation_queue;
 pub mod time;
-mod work_tree;
+pub mod work_tree;
 
 pub use buffer::{Buffer, Point};
-pub use work_tree::{
-    BufferId, Cursor, DirEntry, Error, FileId, FileStatus, FileType, Operation, WorkTree,
-    ROOT_FILE_ID,
+pub use epoch::{
+    BufferId, Cursor, DirEntry, Epoch, Error, FileId, FileStatus, FileType, Operation, ROOT_FILE_ID,
 };
 pub type ReplicaId = u64;
 pub type UserId = u64;
+pub type Oid = [u8; 20];
