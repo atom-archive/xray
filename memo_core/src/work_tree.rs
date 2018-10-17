@@ -1,11 +1,14 @@
-use epoch::{self, DirEntry, Epoch};
+use buffer::{self, Point, Text};
+use epoch::{self, BufferId, Cursor, DirEntry, Epoch, FileId};
 use futures::{future, stream, Future, Stream};
 use notify_cell::NotifyCell;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io;
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use time;
 use Oid;
@@ -16,7 +19,7 @@ pub trait GitProvider {
     fn base_text(&self, oid: Oid, path: &Path) -> Box<Future<Item = String, Error = io::Error>>;
 }
 
-struct WorkTree {
+pub struct WorkTree {
     epoch: Option<Rc<RefCell<Epoch>>>,
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
@@ -25,7 +28,7 @@ struct WorkTree {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum Operation {
+pub enum Operation {
     StartEpoch {
         epoch_id: epoch::Id,
         head: Oid,
@@ -37,7 +40,7 @@ enum Operation {
 }
 
 #[derive(Debug)]
-enum Error {
+pub enum Error {
     InvalidOperations,
     EpochError(epoch::Error),
     IoError(io::Error),
@@ -171,6 +174,170 @@ impl WorkTree {
         } else {
             Box::new(stream::empty())
         }
+    }
+
+    pub fn version(&self) -> time::Global {
+        self.cur_epoch().version()
+    }
+
+    pub fn with_cursor<F>(&self, mut f: F)
+    where
+        F: FnMut(&mut Cursor),
+    {
+        if let Some(mut cursor) = self.cur_epoch().cursor() {
+            f(&mut cursor);
+        }
+    }
+
+    pub fn new_text_file(&mut self) -> (FileId, Operation) {
+        let mut cur_epoch = self.cur_epoch_mut();
+        let (file_id, operation) = cur_epoch.new_text_file(&mut self.lamport_clock.borrow_mut());
+        (
+            file_id,
+            Operation::EpochOperation {
+                epoch_id: cur_epoch.id,
+                operation,
+            },
+        )
+    }
+
+    pub fn create_dir<N>(
+        &mut self,
+        parent_id: FileId,
+        name: N,
+    ) -> Result<(FileId, Operation), Error>
+    where
+        N: AsRef<OsStr>,
+    {
+        let mut cur_epoch = self.cur_epoch_mut();
+        let (file_id, operation) =
+            cur_epoch.create_dir(parent_id, name, &mut self.lamport_clock.borrow_mut())?;
+        Ok((
+            file_id,
+            Operation::EpochOperation {
+                epoch_id: cur_epoch.id,
+                operation,
+            },
+        ))
+    }
+
+    pub fn open_text_file<T>(&self, file_id: FileId, base_text: T) -> Result<BufferId, Error>
+    where
+        T: Into<Text>,
+    {
+        Ok(self.cur_epoch_mut().open_text_file(
+            file_id,
+            base_text,
+            &mut self.lamport_clock.borrow_mut(),
+        )?)
+    }
+
+    pub fn rename<N>(
+        &self,
+        file_id: FileId,
+        new_parent_id: FileId,
+        new_name: N,
+    ) -> Result<Operation, Error>
+    where
+        N: AsRef<OsStr>,
+    {
+        let mut cur_epoch = self.cur_epoch_mut();
+        Ok(Operation::EpochOperation {
+            epoch_id: cur_epoch.id,
+            operation: cur_epoch.rename(
+                file_id,
+                new_parent_id,
+                new_name,
+                &mut self.lamport_clock.borrow_mut(),
+            )?,
+        })
+    }
+
+    pub fn remove(&self, file_id: FileId) -> Result<Operation, Error> {
+        let mut cur_epoch = self.cur_epoch_mut();
+        Ok(Operation::EpochOperation {
+            epoch_id: cur_epoch.id,
+            operation: cur_epoch.remove(file_id, &mut self.lamport_clock.borrow_mut())?,
+        })
+    }
+
+    pub fn edit<I, T>(
+        &self,
+        buffer_id: BufferId,
+        old_ranges: I,
+        new_text: T,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = Range<usize>>,
+        T: Into<Text>,
+    {
+        let mut cur_epoch = self.cur_epoch_mut();
+        Ok(Operation::EpochOperation {
+            epoch_id: cur_epoch.id,
+            operation: cur_epoch.edit(
+                buffer_id,
+                old_ranges,
+                new_text,
+                &mut self.lamport_clock.borrow_mut(),
+            )?,
+        })
+    }
+
+    pub fn edit_2d<I, T>(
+        &self,
+        buffer_id: BufferId,
+        old_ranges: I,
+        new_text: T,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+        T: Into<Text>,
+    {
+        let mut cur_epoch = self.cur_epoch_mut();
+        Ok(Operation::EpochOperation {
+            epoch_id: cur_epoch.id,
+            operation: cur_epoch.edit_2d(
+                buffer_id,
+                old_ranges,
+                new_text,
+                &mut self.lamport_clock.borrow_mut(),
+            )?,
+        })
+    }
+
+    pub fn file_id<P>(&self, path: P) -> Result<FileId, Error>
+    where
+        P: AsRef<Path>,
+    {
+        Ok(self.cur_epoch().file_id(path)?)
+    }
+
+    pub fn base_path(&self, file_id: FileId) -> Option<PathBuf> {
+        self.cur_epoch().base_path(file_id)
+    }
+
+    pub fn path(&self, file_id: FileId) -> Option<PathBuf> {
+        self.cur_epoch().path(file_id)
+    }
+
+    pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
+        Ok(self.cur_epoch().text(buffer_id)?)
+    }
+
+    pub fn changes_since(
+        &self,
+        buffer_id: BufferId,
+        version: time::Global,
+    ) -> Result<impl Iterator<Item = buffer::Change>, Error> {
+        Ok(self.cur_epoch().changes_since(buffer_id, version)?)
+    }
+
+    pub fn cur_epoch(&self) -> Ref<Epoch> {
+        self.epoch.as_ref().unwrap().borrow()
+    }
+
+    pub fn cur_epoch_mut(&self) -> RefMut<Epoch> {
+        self.epoch.as_ref().unwrap().borrow_mut()
     }
 
     fn defer_epoch_op(&self, epoch_id: epoch::Id, operation: epoch::Operation) {
