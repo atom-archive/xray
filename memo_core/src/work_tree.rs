@@ -699,16 +699,46 @@ impl WorkTree {
         Ok(parent_id)
     }
 
-    pub fn path(&self, file_id: FileId) -> Result<PathBuf, Error> {
+    pub fn base_path(&self, mut file_id: FileId) -> Option<PathBuf> {
+        let mut cursor = self.parent_refs.cursor();
+        let mut path_components = Vec::new();
+
+        loop {
+            if file_id == ROOT_FILE_ID {
+                break;
+            } else if file_id.is_base() {
+                cursor.seek(
+                    &ParentRefValueKey {
+                        child_id: file_id,
+                        timestamp: time::Lamport::min_value(),
+                    },
+                    SeekBias::Left,
+                );
+                let (parent_id, name) = cursor.item().unwrap().parent.unwrap();
+                file_id = parent_id;
+                path_components.push(name);
+            } else {
+                return None;
+            }
+        }
+
+        let mut path = PathBuf::new();
+        for component in path_components.into_iter().rev() {
+            path.push(component.as_ref());
+        }
+        Some(path)
+    }
+
+    pub fn path(&self, file_id: FileId) -> Option<PathBuf> {
         let mut path_components = Vec::new();
         if self.visit_ancestors(file_id, |name| path_components.push(name)) {
             let mut path = PathBuf::new();
             for component in path_components.into_iter().rev() {
                 path.push(component.as_ref());
             }
-            Ok(path)
+            Some(path)
         } else {
-            Err(Error::InvalidPath)
+            None
         }
     }
 
@@ -1118,6 +1148,16 @@ impl operation_queue::Operation for Operation {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self, f)
+    }
+}
+
+impl FileId {
+    fn is_base(&self) -> bool {
+        if let FileId::Base(_) = self {
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -1739,6 +1779,9 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
 
+            let mut base_tree = WorkTree::new(999);
+            base_tree.append_base_entries(base_entries.clone()).unwrap();
+
             let mut trees = Vec::from_iter((0..PEERS).map(|i| WorkTree::new(i as u64 + 1)));
             let mut base_entries_to_append =
                 Vec::from_iter((0..PEERS).map(|_| base_entries.clone()));
@@ -1840,6 +1883,17 @@ mod tests {
 
             for i in 0..PEERS - 1 {
                 assert_eq!(trees[i].entries(), trees[i + 1].entries());
+            }
+
+            for i in 0..PEERS {
+                for _ in 0..rng.gen_range(0, 5) {
+                    let base_file_id =
+                        FileId::Base(rng.gen_range(0, base_entries.len() as u64 + 1));
+                    assert_eq!(
+                        trees[i].base_path(base_file_id).unwrap(),
+                        base_tree.path(base_file_id).unwrap()
+                    );
+                }
             }
 
             fn deliver_ops<T: Rng>(

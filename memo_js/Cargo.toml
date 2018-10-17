@@ -9,7 +9,6 @@ crate-type = ["cdylib"]
 [dependencies]
 base64 = "0.9"
 bincode = "1.0"
-js-sys = "0.2"
 memo_core = { path = "../memo_core" }
 serde = "1.0"
 serde_derive = "1.0"

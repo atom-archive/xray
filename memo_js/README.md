@@ -24,8 +24,8 @@ const replicaId = 1;
 const tree = new WorkTree(replicaId);
 tree.appendBaseEntries([
   { depth: 1, name: "a", type: "Directory" },
-  { depth: 2, name: "b", type: "Text" },
-  { depth: 1, name: "c", type: "Text" }
+  { depth: 2, name: "b.txt", type: "Text" },
+  { depth: 1, name: "c.txt", type: "Text" }
 ])
 ```
 
@@ -126,15 +126,23 @@ You can also get the path for any file id by calling `pathForFileId`.
 console.log(tree.pathForFileId(fileId1)); // => "d/e/b.txt"
 ```
 
+To retrieve a file's original path as it existed in the base commit before any rename operations were applied you can call `basePathForFileId`. This method returns `null` if the file did not exist in the base commit.
+
+```js
+console.log(tree.basePathForFileId(fileId1)); // => "a/b.txt"
+console.log(tree.basePathForFileId(newFileId)); // => null
+```
+
 ## Working with text files
 
 As a prerequisite to interacting with the contents of any text file in the work tree, you'll need to call `openTextFile` and supply the text file's id along with its *base content*, representing the state of the file in the work tree's underlying Git commit.
 
 ```js
-const bufferId = tree.openTextFile(fileId1, "Hello, world!");
+const baseText = await git.getText(head, tree.basePathForFileId(fileId1));
+const bufferId = tree.openTextFile(fileId1, baseText);
 ```
 
-In the example above, the string `"Hello, world!"` represents the contents of the file as it existed in the tree's base commit. If the file did not exist or was empty, you can pass an empty string. Again, just like with base entries, it's imperative that you supply the same content for all files on all replicas by ensuring that all work tree's build on the same commit in application code.
+In the example above, we retrieved the contents of the file as it existed in the tree's base commit. If the file did not exist or was empty, you can pass an empty string. Again, just like with base entries, it's imperative that you supply the same content for all files on all replicas by ensuring that all work tree's build on the same commit in application code.
 
 Once you have obtained a buffer id, you can get the text of the file, which might be different than the base text you supplied due to the application of remote operations. Remember to pass a *buffer id* obtained via `openTextFile` rather than a raw file id.
 
