@@ -1,3 +1,5 @@
+#![feature(macros_in_extern)]
+
 extern crate bincode;
 extern crate memo_core;
 #[macro_use]
@@ -14,7 +16,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use wasm_bindgen::prelude::*;
 
-pub type WorkTreeId = u32;
+type WorkTreeId = u32;
+type StreamId = usize;
 
 #[wasm_bindgen]
 pub struct Server {
@@ -31,10 +34,6 @@ enum Request {
     },
     GetVersion {
         tree_id: WorkTreeId,
-    },
-    AppendBaseEntries {
-        tree_id: WorkTreeId,
-        entries: Vec<DirEntry>,
     },
     ApplyOperations {
         tree_id: WorkTreeId,
@@ -108,12 +107,10 @@ enum Response {
     },
     CreateWorkTree {
         tree_id: WorkTreeId,
+        stream_id: StreamId,
     },
     GetVersion {
         version: Base64<time::Global>,
-    },
-    AppendBaseEntries {
-        operations: Vec<Base64<Operation>>,
     },
     NewTextFile {
         file_id: Base64<FileId>,
@@ -158,6 +155,29 @@ enum Response {
     },
 }
 
+#[wasm_bindgen(module = "./support")]
+extern "C" {
+    pub type StreamHandler;
+
+    #[wasm_bindgen(method)]
+    fn stream(this: &StreamHandler, stream_id: StreamId, message: Vec<u8>);
+
+    #[wasm_bindgen(method)]
+    fn close(this: &StreamHandler, stream_id: StreamId);
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum StreamedResponse {
+    Operations {
+        stream_id: StreamId,
+        operations: Vec<Base64<Operation>>,
+    },
+    StreamEnd {
+        stream_id: StreamId,
+    },
+}
+
 #[derive(Copy, Clone, Serialize, Deserialize)]
 struct EditRange {
     start: Point,
@@ -189,7 +209,7 @@ struct Base64<T>(T);
 
 #[wasm_bindgen]
 impl Server {
-    pub fn new() -> Self {
+    pub fn new(stream_handler: StreamHandler) -> Self {
         Self {
             work_trees: HashMap::new(),
             next_work_tree_id: 0,
@@ -227,15 +247,6 @@ impl Server {
             Request::GetVersion { tree_id } => Ok(Response::GetVersion {
                 version: Base64(self.get_work_tree(tree_id)?.version()),
             }),
-            Request::AppendBaseEntries { tree_id, entries } => {
-                let fixup_ops = self
-                    .get_work_tree(tree_id)?
-                    .append_base_entries(entries)
-                    .map_err(|e| e.to_string())?;
-                Ok(Response::AppendBaseEntries {
-                    operations: fixup_ops.into_iter().map(|op| Base64(op)).collect(),
-                })
-            }
             Request::ApplyOperations {
                 tree_id,
                 operations,
@@ -387,30 +398,28 @@ impl Server {
             } => {
                 let tree = self.get_work_tree(tree_id)?;
                 let mut entries = Vec::new();
-                if let Some(mut cursor) = tree.cursor() {
-                    loop {
-                        let entry = cursor.entry().unwrap();
-                        let mut descend = false;
-                        if show_deleted || entry.status != FileStatus::Removed {
-                            entries.push(Entry {
-                                file_id: Base64(entry.file_id),
-                                file_type: entry.file_type,
-                                depth: entry.depth,
-                                name: entry.name.to_string_lossy().into_owned(),
-                                path: cursor.path().unwrap().to_string_lossy().into_owned(),
-                                status: entry.status,
-                                visible: entry.visible,
-                            });
-                            descend = descend_into
-                                .as_ref()
-                                .map_or(true, |d| d.contains(&Base64(entry.file_id)));
-                        }
-
-                        if !cursor.next(descend) {
-                            break;
-                        }
+                tree.with_cursor(|cursor| loop {
+                    let entry = cursor.entry().unwrap();
+                    let mut descend = false;
+                    if show_deleted || entry.status != FileStatus::Removed {
+                        entries.push(Entry {
+                            file_id: Base64(entry.file_id),
+                            file_type: entry.file_type,
+                            depth: entry.depth,
+                            name: entry.name.to_string_lossy().into_owned(),
+                            path: cursor.path().unwrap().to_string_lossy().into_owned(),
+                            status: entry.status,
+                            visible: entry.visible,
+                        });
+                        descend = descend_into
+                            .as_ref()
+                            .map_or(true, |d| d.contains(&Base64(entry.file_id)));
                     }
-                }
+
+                    if !cursor.next(descend) {
+                        break;
+                    }
+                });
 
                 Ok(Response::Entries { entries })
             }

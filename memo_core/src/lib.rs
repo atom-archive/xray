@@ -18,9 +18,9 @@ mod work_tree;
 
 pub use buffer::{Buffer, Point};
 pub use epoch::{
-    BufferId, Cursor, DirEntry, Epoch, Error, FileId, FileStatus, FileType, Operation, ROOT_FILE_ID,
+    BufferId, Cursor, DirEntry, Epoch, Error, FileId, FileStatus, FileType, ROOT_FILE_ID,
 };
-pub use work_tree::WorkTree;
+pub use work_tree::{Operation, WorkTree};
 pub type ReplicaId = u64;
 pub type UserId = u64;
 pub type Oid = [u8; 20];

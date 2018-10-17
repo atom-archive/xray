@@ -6,6 +6,7 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fmt;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,7 @@ pub struct WorkTree {
     updates: NotifyCell<()>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Operation {
     StartEpoch {
         epoch_id: epoch::Id,
@@ -76,10 +77,13 @@ impl WorkTree {
             .chain(self.start_epoch(epoch_id, head))
     }
 
-    pub fn apply_ops(
+    pub fn apply_ops<I>(
         &mut self,
-        ops: Vec<Operation>,
-    ) -> Result<impl Stream<Item = Operation, Error = Error>, Error> {
+        ops: I,
+    ) -> Result<impl Stream<Item = Operation, Error = Error>, Error>
+    where
+        I: IntoIterator<Item = Operation>,
+    {
         let mut cur_epoch_ops = Vec::new();
         let mut epoch_streams = Vec::new();
 
@@ -370,6 +374,12 @@ impl Operation {
 impl From<epoch::Error> for Error {
     fn from(error: epoch::Error) -> Self {
         Error::EpochError(error)
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
     }
 }
 

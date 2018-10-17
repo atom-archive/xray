@@ -1181,12 +1181,6 @@ impl operation_queue::Operation for Operation {
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
-    }
-}
-
 impl FileId {
     fn is_base(&self) -> bool {
         if let FileId::Base(_) = self {
