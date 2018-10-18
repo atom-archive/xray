@@ -6,12 +6,12 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fmt;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use time;
+use Error;
 use Oid;
 use ReplicaId;
 
@@ -40,20 +40,17 @@ pub enum Operation {
     },
 }
 
-#[derive(Debug)]
-pub enum Error {
-    InvalidOperations,
-    EpochError(epoch::Error),
-    IoError(io::Error),
-}
-
 impl WorkTree {
-    pub fn new(
+    pub fn new<I>(
         replica_id: ReplicaId,
         base: Oid,
-        ops: Vec<Operation>,
+        ops: I,
         git: Rc<GitProvider>,
-    ) -> Result<(WorkTree, Box<Stream<Item = Operation, Error = Error>>), Error> {
+    ) -> Result<(WorkTree, Box<Stream<Item = Operation, Error = Error>>), Error>
+    where
+        I: 'static + IntoIterator<Item = Operation>,
+    {
+        let mut ops = ops.into_iter().peekable();
         let mut tree = WorkTree {
             epoch: None,
             deferred_ops: Rc::new(RefCell::new(HashMap::new())),
@@ -62,7 +59,7 @@ impl WorkTree {
             updates: NotifyCell::new(()),
         };
 
-        let ops = if ops.is_empty() {
+        let ops = if ops.peek().is_none() {
             Box::new(tree.reset(base)) as Box<Stream<Item = Operation, Error = Error>>
         } else {
             Box::new(tree.apply_ops(ops)?) as Box<Stream<Item = Operation, Error = Error>>
@@ -205,63 +202,93 @@ impl WorkTree {
         )
     }
 
-    pub fn create_dir<N>(
-        &mut self,
-        parent_id: FileId,
-        name: N,
-    ) -> Result<(FileId, Operation), Error>
+    pub fn create_dir<N>(&mut self, path: &Path) -> Result<(FileId, Operation), Error>
     where
         N: AsRef<OsStr>,
     {
+        let name = path
+            .file_name()
+            .ok_or(Error::InvalidPath("path has no file name".into()))?;
         let mut cur_epoch = self.cur_epoch_mut();
+        let parent_id = if let Some(parent_path) = path.parent() {
+            cur_epoch.file_id(parent_path)?
+        } else {
+            epoch::ROOT_FILE_ID
+        };
+        let epoch_id = cur_epoch.id;
         let (file_id, operation) =
             cur_epoch.create_dir(parent_id, name, &mut self.lamport_clock.borrow_mut())?;
         Ok((
             file_id,
             Operation::EpochOperation {
-                epoch_id: cur_epoch.id,
+                epoch_id,
                 operation,
             },
         ))
     }
 
-    pub fn open_text_file<T>(&self, file_id: FileId, base_text: T) -> Result<BufferId, Error>
+    pub fn open_text_file<T>(&self, path: &Path) -> Box<Future<Item = BufferId, Error = Error>>
     where
         T: Into<Text>,
     {
-        Ok(self.cur_epoch_mut().open_text_file(
-            file_id,
-            base_text,
-            &mut self.lamport_clock.borrow_mut(),
-        )?)
+        unimplemented!()
+        // if file_id.is_base() {
+        //     let cur_epoch = self.cur_epoch();
+        //     if let Some(base_path) = cur_epoch.base_path(file_id) {
+        //         Box::new(
+        //             self.git
+        //                 .base_text(cur_epoch.head, &base_path)
+        //                 .map_err(|err| err.into())
+        //                 .and_then(|base_text| {}),
+        //         )
+        //     } else {
+        //         Box::new(future::err(Error::EpochError(epoch::Error::InvalidFileId)))
+        //     }
+        // } else {
+        //     Box::new(future::result(
+        //         self.cur_epoch_mut()
+        //             .open_text_file(file_id, base_text, &mut self.lamport_clock.borrow_mut())
+        //             .map_err(|err| err.into()),
+        //     ))
+        // }
     }
 
-    pub fn rename<N>(
-        &self,
-        file_id: FileId,
-        new_parent_id: FileId,
-        new_name: N,
-    ) -> Result<Operation, Error>
+    pub fn rename<N>(&self, old_path: &Path, new_path: &Path) -> Result<Operation, Error>
     where
         N: AsRef<OsStr>,
     {
         let mut cur_epoch = self.cur_epoch_mut();
+        let file_id = cur_epoch.file_id(old_path)?;
+        let new_name = new_path
+            .file_name()
+            .ok_or(Error::InvalidPath("new path has no file name".into()))?;
+        let new_parent_id = if let Some(parent_path) = new_path.parent() {
+            cur_epoch.file_id(parent_path)?
+        } else {
+            epoch::ROOT_FILE_ID
+        };
+
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch.rename(
+            file_id,
+            new_parent_id,
+            new_name,
+            &mut self.lamport_clock.borrow_mut(),
+        )?;
         Ok(Operation::EpochOperation {
-            epoch_id: cur_epoch.id,
-            operation: cur_epoch.rename(
-                file_id,
-                new_parent_id,
-                new_name,
-                &mut self.lamport_clock.borrow_mut(),
-            )?,
+            epoch_id,
+            operation,
         })
     }
 
-    pub fn remove(&self, file_id: FileId) -> Result<Operation, Error> {
+    pub fn remove(&self, path: &Path) -> Result<Operation, Error> {
         let mut cur_epoch = self.cur_epoch_mut();
+        let file_id = cur_epoch.file_id(path)?;
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch.remove(file_id, &mut self.lamport_clock.borrow_mut())?;
         Ok(Operation::EpochOperation {
-            epoch_id: cur_epoch.id,
-            operation: cur_epoch.remove(file_id, &mut self.lamport_clock.borrow_mut())?,
+            epoch_id,
+            operation,
         })
     }
 
@@ -309,19 +336,8 @@ impl WorkTree {
         })
     }
 
-    pub fn file_id<P>(&self, path: P) -> Result<FileId, Error>
-    where
-        P: AsRef<Path>,
-    {
-        Ok(self.cur_epoch().file_id(path)?)
-    }
-
-    pub fn base_path(&self, file_id: FileId) -> Option<PathBuf> {
-        self.cur_epoch().base_path(file_id)
-    }
-
-    pub fn path(&self, file_id: FileId) -> Option<PathBuf> {
-        self.cur_epoch().path(file_id)
+    pub fn path(&self, buffer_id: BufferId) -> Option<PathBuf> {
+        unimplemented!()
     }
 
     pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
@@ -336,11 +352,11 @@ impl WorkTree {
         Ok(self.cur_epoch().changes_since(buffer_id, version)?)
     }
 
-    pub fn cur_epoch(&self) -> Ref<Epoch> {
+    fn cur_epoch(&self) -> Ref<Epoch> {
         self.epoch.as_ref().unwrap().borrow()
     }
 
-    pub fn cur_epoch_mut(&self) -> RefMut<Epoch> {
+    fn cur_epoch_mut(&self) -> RefMut<Epoch> {
         self.epoch.as_ref().unwrap().borrow_mut()
     }
 
@@ -355,6 +371,14 @@ impl WorkTree {
     fn replica_id(&self) -> ReplicaId {
         self.lamport_clock.borrow().replica_id
     }
+
+    fn parent_id<'a>(&self, epoch: &Epoch, path: &'a Path) -> Result<FileId, Error> {
+        if let Some(parent_path) = path.parent() {
+            epoch.file_id(parent_path)
+        } else {
+            Ok(epoch::ROOT_FILE_ID)
+        }
+    }
 }
 
 impl Operation {
@@ -368,24 +392,6 @@ impl Operation {
                 epoch_id,
                 operation,
             })
-    }
-}
-
-impl From<Error> for String {
-    fn from(error: Error) -> Self {
-        format!("{:?}", error)
-    }
-}
-
-impl From<epoch::Error> for Error {
-    fn from(error: epoch::Error) -> Self {
-        Error::EpochError(error)
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
     }
 }
 

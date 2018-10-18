@@ -11,6 +11,7 @@ use std::ops::{Add, AddAssign, Range};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use time;
+use Error;
 use Oid;
 use ReplicaId;
 
@@ -98,16 +99,6 @@ pub enum Operation {
         local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
     },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Error {
-    InvalidPath,
-    InvalidFileId,
-    InvalidBufferId,
-    InvalidDirEntry,
-    InvalidOperation,
-    CursorExhausted,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -701,7 +692,7 @@ impl Epoch {
 
     pub fn file_id<P>(&self, path: P) -> Result<FileId, Error>
     where
-        P: AsRef<Path>,
+        P: AsRef<Path> + fmt::Debug,
     {
         let mut cursor = self.child_refs.cursor();
         let mut parent_id = ROOT_FILE_ID;
@@ -714,13 +705,21 @@ impl Epoch {
                         if child_ref.visible {
                             parent_id = child_ref.child_id;
                         } else {
-                            return Err(Error::InvalidPath);
+                            return Err(Error::InvalidPath(
+                                format!("file not found for path {:?}", path).into(),
+                            ));
                         }
                     } else {
-                        return Err(Error::InvalidPath);
+                        return Err(Error::InvalidPath(
+                            format!("file not found for path {:?}", path).into(),
+                        ));
                     }
                 }
-                _ => return Err(Error::InvalidPath),
+                _ => {
+                    return Err(Error::InvalidPath(
+                        format!("path {:?} contains unrecognized components", path).into(),
+                    ))
+                }
             }
         }
 
@@ -1182,7 +1181,7 @@ impl operation_queue::Operation for Operation {
 }
 
 impl FileId {
-    fn is_base(&self) -> bool {
+    pub fn is_base(&self) -> bool {
         if let FileId::Base(_) = self {
             true
         } else {
@@ -1554,47 +1553,48 @@ mod tests {
         let mut epoch = Epoch::with_replica_id(1);
         let mut lamport_clock = time::Lamport::new(1);
 
-        epoch.append_base_entries(
-            vec![
-                DirEntry {
-                    depth: 1,
-                    name: OsString::from("a"),
-                    file_type: FileType::Directory,
-                },
-                DirEntry {
-                    depth: 2,
-                    name: OsString::from("b"),
-                    file_type: FileType::Directory,
-                },
-                DirEntry {
-                    depth: 3,
-                    name: OsString::from("c"),
-                    file_type: FileType::Text,
-                },
-                DirEntry {
-                    depth: 2,
-                    name: OsString::from("d"),
-                    file_type: FileType::Directory,
-                },
-                DirEntry {
-                    depth: 2,
-                    name: OsString::from("e"),
-                    file_type: FileType::Directory,
-                },
-                DirEntry {
-                    depth: 1,
-                    name: OsString::from("f"),
-                    file_type: FileType::Directory,
-                },
-                DirEntry {
-                    depth: 2,
-                    name: OsString::from("g"),
-                    file_type: FileType::Text,
-                },
-            ],
-            &mut lamport_clock,
-        )
-        .unwrap();
+        epoch
+            .append_base_entries(
+                vec![
+                    DirEntry {
+                        depth: 1,
+                        name: OsString::from("a"),
+                        file_type: FileType::Directory,
+                    },
+                    DirEntry {
+                        depth: 2,
+                        name: OsString::from("b"),
+                        file_type: FileType::Directory,
+                    },
+                    DirEntry {
+                        depth: 3,
+                        name: OsString::from("c"),
+                        file_type: FileType::Text,
+                    },
+                    DirEntry {
+                        depth: 2,
+                        name: OsString::from("d"),
+                        file_type: FileType::Directory,
+                    },
+                    DirEntry {
+                        depth: 2,
+                        name: OsString::from("e"),
+                        file_type: FileType::Directory,
+                    },
+                    DirEntry {
+                        depth: 1,
+                        name: OsString::from("f"),
+                        file_type: FileType::Directory,
+                    },
+                    DirEntry {
+                        depth: 2,
+                        name: OsString::from("g"),
+                        file_type: FileType::Text,
+                    },
+                ],
+                &mut lamport_clock,
+            )
+            .unwrap();
 
         let a = epoch.file_id("a").unwrap();
         let b = epoch.file_id("a/b").unwrap();
@@ -1610,19 +1610,27 @@ mod tests {
         epoch.rename(new_file, a, "x", &mut lamport_clock).unwrap();
 
         let (new_file_that_got_removed, _) = epoch.new_text_file(&mut lamport_clock);
-        epoch.rename(new_file_that_got_removed, e, "y", &mut lamport_clock)
+        epoch
+            .rename(new_file_that_got_removed, e, "y", &mut lamport_clock)
             .unwrap();
-        epoch.remove(new_file_that_got_removed, &mut lamport_clock)
+        epoch
+            .remove(new_file_that_got_removed, &mut lamport_clock)
             .unwrap();
 
         epoch.rename(e, a, "z", &mut lamport_clock).unwrap();
 
         let c_buffer = epoch.open_text_file(c, "123", &mut lamport_clock).unwrap();
-        epoch.edit(c_buffer, Some(0..0), "x", &mut lamport_clock).unwrap();
+        epoch
+            .edit(c_buffer, Some(0..0), "x", &mut lamport_clock)
+            .unwrap();
 
-        epoch.rename(g, ROOT_FILE_ID, "g", &mut lamport_clock).unwrap();
+        epoch
+            .rename(g, ROOT_FILE_ID, "g", &mut lamport_clock)
+            .unwrap();
         let g_buffer = epoch.open_text_file(g, "456", &mut lamport_clock).unwrap();
-        epoch.edit(g_buffer, Some(0..0), "y", &mut lamport_clock).unwrap();
+        epoch
+            .edit(g_buffer, Some(0..0), "y", &mut lamport_clock)
+            .unwrap();
 
         let mut cursor = epoch.cursor().unwrap();
         assert_eq!(
@@ -1742,7 +1750,7 @@ mod tests {
         );
 
         assert!(!cursor.next(true));
-        assert_eq!(cursor.entry(), Err(Error::CursorExhausted));
+        assert!(cursor.entry().is_err());
     }
 
     #[test]
@@ -1780,7 +1788,7 @@ mod tests {
         tree_1.apply_ops(ops, &mut lamport_clock_1).unwrap();
 
         // Must call open_text_file on any given replica first before interacting with a buffer.
-        assert_eq!(tree_1.text(buffer_id).err(), Some(Error::InvalidBufferId));
+        assert!(tree_1.text(buffer_id).is_err());
         tree_1
             .open_text_file(file_id, base_text, &mut lamport_clock_1)
             .unwrap();
@@ -1806,9 +1814,10 @@ mod tests {
         assert_eq!(changes[1].code_units, [b'y' as u16]);
 
         let dir_id = tree_1.file_id("dir").unwrap();
-        assert_eq!(
-            tree_1.open_text_file(dir_id, Text::from(""), &mut lamport_clock_1),
-            Err(Error::InvalidFileId)
+        assert!(
+            tree_1
+                .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
+                .is_err()
         );
     }
 
@@ -2055,7 +2064,7 @@ mod tests {
                                     ops.push(op);
                                     break;
                                 }
-                                Err(error) => assert_eq!(error, Error::InvalidOperation),
+                                Err(error) => {}
                             }
                         }
                     } else {
@@ -2067,7 +2076,7 @@ mod tests {
                                     ops.push(op);
                                     break;
                                 }
-                                Err(error) => assert_eq!(error, Error::InvalidOperation),
+                                Err(error) => {}
                             }
                         }
                     }
@@ -2091,7 +2100,7 @@ mod tests {
                                 ops.push(op);
                                 break;
                             }
-                            Err(error) => assert_eq!(error, Error::InvalidOperation),
+                            Err(error) => {}
                         }
                     }
                 }

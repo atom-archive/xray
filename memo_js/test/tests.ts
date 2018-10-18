@@ -9,13 +9,26 @@ suite("WorkTree", () => {
   });
 
   test("basic API interaction", async () => {
-    const [tree, operations] = WorkTree.create(1, "51cd0fb1469595bc0d1e9434b656ae72a3c31b5d", [], new TestGitProvider());
-    console.log(tree);
-    console.log(operations);
-    for await (const operation of operations) {
-      console.log(operation);
-    }
-    
+    const OID_0 = "0".repeat(40);
+
+    const git = new TestGitProvider();
+    git.commit(OID_0, [
+      { depth: 1, name: "a", type: memo.FileType.Directory },
+      { depth: 2, name: "b", type: memo.FileType.Directory },
+      { depth: 3, name: "c", type: memo.FileType.Text }
+    ]);
+
+    const [tree1, ops1] = WorkTree.create(1, OID_0, [], git);
+    const [tree2, ops2] = WorkTree.create(2, OID_0, await collect(ops1), git);
+    assert.strictEqual((await collect(ops2)).length, 0);
+
+    const file1 = tree1.newTextFile();
+    const file2 = tree2.newTextFile();
+
+    await assert.rejects(() => tree1.openTextFile(file2.fileId));
+
+    //   tree1.applyOps([file2.operation]);
+    //   tree2.applyOps([file1.operation]);
 
   })
 
@@ -135,15 +148,38 @@ suite("WorkTree", () => {
   // });
 });
 
+async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
+  const items = [];
+  for await (const item of iterable) {
+    items.push(item);
+  }
+  return items;
+}
+
 // function point(row: number, column: number): memo.Point {
 //   return { row, column };
 // }
 
 class TestGitProvider implements memo.GitProvider {
+  private commits: Map<memo.Oid, ReadonlyArray<memo.BaseEntry>>;
+
+  constructor() {
+    this.commits = new Map();
+  }
+
+  commit(oid: memo.Oid, entries: ReadonlyArray<memo.BaseEntry>) {
+    this.commits.set(oid, entries);
+  }
+
   async *baseEntries(oid: memo.Oid): AsyncIterable<memo.BaseEntry> {
-    yield { depth: 1, name: "a", type: memo.FileType.Directory };
-    yield { depth: 2, name: "b", type: memo.FileType.Directory };
-    yield { depth: 3, name: "c", type: memo.FileType.Text };
+    const entries = this.commits.get(oid);
+    if (entries) {
+      for (const entry of entries) {
+        yield entry;
+      }
+    } else {
+      throw new Error("yy");
+    }
   }
   // throw new Error("Method not implemented.");
 }
