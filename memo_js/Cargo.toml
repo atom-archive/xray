@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 base64 = "0.9"
 bincode = "1.0"
 futures = "0.1"
+hex = "0.3"
 js-sys = "0.3"
 memo_core = { path = "../memo_core" }
 serde = "1.0"

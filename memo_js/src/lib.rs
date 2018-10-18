@@ -2,6 +2,7 @@
 
 extern crate bincode;
 extern crate futures;
+extern crate hex;
 extern crate js_sys;
 extern crate memo_core;
 #[macro_use]
@@ -12,12 +13,13 @@ extern crate wasm_bindgen;
 extern crate wasm_bindgen_futures;
 
 use futures::{Async, Future, Poll, Stream};
-use memo_core::*;
+use memo_core as memo;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::Cell;
 use std::char;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::rc::Rc;
@@ -25,7 +27,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 #[wasm_bindgen]
-struct WorkTree {}
+pub struct WorkTree(memo::WorkTree);
 
 #[derive(Serialize, Deserialize)]
 struct AsyncResult<T> {
@@ -33,22 +35,86 @@ struct AsyncResult<T> {
     done: bool,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(module = "./support")]
 extern "C" {
-    type AsyncIterator;
+    pub type AsyncIteratorWrapper;
 
     #[wasm_bindgen(method)]
-    fn next(this: &AsyncIterator) -> js_sys::Promise;
+    fn next(this: &AsyncIteratorWrapper) -> js_sys::Promise;
+
+    pub type GitProviderWrapper;
+
+    #[wasm_bindgen(method, js_name = baseEntries)]
+    fn base_entries(this: &GitProviderWrapper, head: &str) -> AsyncIteratorWrapper;
 }
 
 struct AsyncIteratorToStream<T, E> {
     next_value: JsFuture,
-    iterator: AsyncIterator,
+    iterator: AsyncIteratorWrapper,
     _phantom: PhantomData<(T, E)>,
 }
 
 #[wasm_bindgen]
-struct StreamToAsyncIterator(Rc<Cell<Option<Box<Stream<Item = JsValue, Error = JsValue>>>>>);
+pub struct StreamToAsyncIterator(Rc<Cell<Option<Box<Stream<Item = JsValue, Error = JsValue>>>>>);
+
+struct HexOid(memo::Oid);
+
+struct Base64<T>(T);
+
+#[derive(Deserialize)]
+pub struct WorkTreeNewArgs {
+    replica_id: memo::ReplicaId,
+    base: HexOid,
+    start_ops: Vec<memo::Operation>,
+}
+
+#[wasm_bindgen]
+pub struct WorkTreeNewResult {
+    tree: Option<WorkTree>,
+    operations: Option<StreamToAsyncIterator>,
+}
+
+#[wasm_bindgen]
+impl WorkTree {
+    pub fn new(git: GitProviderWrapper, args: JsValue) -> Result<WorkTreeNewResult, JsValue> {
+        let WorkTreeNewArgs {
+            replica_id,
+            base: HexOid(base),
+            start_ops,
+        } = args.into_serde().unwrap();
+        let (tree, operations) = memo::WorkTree::new(replica_id, base, start_ops, Rc::new(git))
+            .map_err(|e| e.to_string())?;
+        Ok(WorkTreeNewResult {
+            tree: Some(WorkTree(tree)),
+            operations: Some(StreamToAsyncIterator::new(
+                operations
+                    .map(|op| Base64(op))
+                    .map_err(|err| err.to_string()),
+            )),
+        })
+    }
+}
+
+#[wasm_bindgen]
+impl WorkTreeNewResult {
+    pub fn tree(&mut self) -> WorkTree {
+        self.tree.take().unwrap()
+    }
+
+    pub fn operations(&mut self) -> StreamToAsyncIterator {
+        self.operations.take().unwrap()
+    }
+}
+
+impl<T, E> AsyncIteratorToStream<T, E> {
+    fn new(iterator: AsyncIteratorWrapper) -> Self {
+        AsyncIteratorToStream {
+            next_value: JsFuture::from(iterator.next()),
+            iterator,
+            _phantom: PhantomData,
+        }
+    }
+}
 
 impl<T, E> Stream for AsyncIteratorToStream<T, E>
 where
@@ -112,5 +178,70 @@ impl StreamToAsyncIterator {
                 Err((error, _)) => Err(error),
             }))
         })
+    }
+}
+
+impl memo::GitProvider for GitProviderWrapper {
+    fn base_entries(
+        &self,
+        oid: memo::Oid,
+    ) -> Box<Stream<Item = memo::DirEntry, Error = io::Error>> {
+        let iterator = GitProviderWrapper::base_entries(self, &hex::encode(oid));
+        Box::new(
+            AsyncIteratorToStream::new(iterator)
+                .map_err(|error: String| io::Error::new(io::ErrorKind::Other, error)),
+        )
+    }
+
+    fn base_text(
+        &self,
+        oid: memo::Oid,
+        path: &Path,
+    ) -> Box<Future<Item = String, Error = io::Error>> {
+        unimplemented!()
+    }
+}
+
+impl Serialize for HexOid {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        hex::encode(self.0).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HexOid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let bytes = hex::decode(&String::deserialize(deserializer)?).map_err(Error::custom)?;
+        let mut oid = memo::Oid::default();
+        oid.copy_from_slice(&bytes);
+        Ok(HexOid(oid))
+    }
+}
+
+impl<T: Serialize> Serialize for Base64<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::Error;
+        base64::encode(&bincode::serialize(&self.0).map_err(Error::custom)?).serialize(serializer)
+    }
+}
+
+impl<'de1, T: for<'de2> Deserialize<'de2>> Deserialize<'de1> for Base64<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de1>,
+    {
+        use serde::de::Error;
+        let bytes = base64::decode(&String::deserialize(deserializer)?).map_err(Error::custom)?;
+        let inner = bincode::deserialize::<T>(&bytes).map_err(D::Error::custom)?;
+        Ok(Base64(inner))
     }
 }

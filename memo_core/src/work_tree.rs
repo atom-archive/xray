@@ -371,6 +371,12 @@ impl Operation {
     }
 }
 
+impl From<Error> for String {
+    fn from(error: Error) -> Self {
+        format!("{:?}", error)
+    }
+}
+
 impl From<epoch::Error> for Error {
     fn from(error: epoch::Error) -> Self {
         Error::EpochError(error)
