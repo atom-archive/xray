@@ -14,11 +14,10 @@ mod epoch;
 mod notify_cell;
 mod operation_queue;
 pub mod time;
-mod tree_map;
 mod work_tree;
 
 pub use buffer::{Buffer, Point};
-pub use epoch::{BufferId, Cursor, DirEntry, Epoch, FileId, FileStatus, FileType, ROOT_FILE_ID};
+pub use epoch::{Cursor, DirEntry, Epoch, FileId, FileStatus, FileType, ROOT_FILE_ID};
 use std::borrow::Cow;
 use std::fmt;
 use std::io;
@@ -33,7 +32,7 @@ pub enum Error {
     IoError(io::Error),
     InvalidPath(Cow<'static, str>),
     InvalidOperations,
-    InvalidFileId,
+    InvalidFileId(Cow<'static, str>),
     InvalidBufferId,
     InvalidDirEntry,
     InvalidOperation,

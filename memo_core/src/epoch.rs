@@ -107,9 +107,6 @@ pub enum FileId {
     New(time::Local),
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BufferId(FileId);
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum FileStatus {
     New,
@@ -562,7 +559,7 @@ impl Epoch {
         file_id: FileId,
         base_text: T,
         lamport_clock: &mut time::Lamport,
-    ) -> Result<BufferId, Error>
+    ) -> Result<(), Error>
     where
         T: Into<Text>,
     {
@@ -585,7 +582,7 @@ impl Epoch {
             }
         }
 
-        Ok(BufferId(file_id))
+        Ok(())
     }
 
     pub fn rename<N>(
@@ -640,7 +637,7 @@ impl Epoch {
 
     pub fn edit<I, T>(
         &mut self,
-        buffer_id: BufferId,
+        file_id: FileId,
         old_ranges: I,
         new_text: T,
         lamport_clock: &mut time::Lamport,
@@ -649,24 +646,24 @@ impl Epoch {
         I: IntoIterator<Item = Range<usize>>,
         T: Into<Text>,
     {
-        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&file_id) {
             let edits = buffer.edit(old_ranges, new_text, &mut self.local_clock, lamport_clock);
             let local_timestamp = self.local_clock.tick();
             self.version.observe(local_timestamp);
             Ok(Operation::EditText {
-                file_id: buffer_id.0,
+                file_id,
                 edits,
                 local_timestamp,
                 lamport_timestamp: lamport_clock.tick(),
             })
         } else {
-            Err(Error::InvalidBufferId)
+            Err(Error::InvalidFileId("file has not been opened".into()))
         }
     }
 
     pub fn edit_2d<I, T>(
         &mut self,
-        buffer_id: BufferId,
+        file_id: FileId,
         old_ranges: I,
         new_text: T,
         lamport_clock: &mut time::Lamport,
@@ -675,18 +672,18 @@ impl Epoch {
         I: IntoIterator<Item = Range<Point>>,
         T: Into<Text>,
     {
-        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&file_id) {
             let edits = buffer.edit_2d(old_ranges, new_text, &mut self.local_clock, lamport_clock);
             let local_timestamp = self.local_clock.tick();
             self.version.observe(local_timestamp);
             Ok(Operation::EditText {
-                file_id: buffer_id.0,
+                file_id,
                 edits,
                 local_timestamp,
                 lamport_timestamp: lamport_clock.tick(),
             })
         } else {
-            Err(Error::InvalidBufferId)
+            Err(Error::InvalidFileId("file has not been opened".into()))
         }
     }
 
@@ -769,23 +766,23 @@ impl Epoch {
         }
     }
 
-    pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
-        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&buffer_id.0) {
+    pub fn text(&self, file_id: FileId) -> Result<buffer::Iter, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
             Ok(buffer.iter())
         } else {
-            Err(Error::InvalidBufferId)
+            Err(Error::InvalidFileId("file has not been opened".into()))
         }
     }
 
     pub fn changes_since(
         &self,
-        buffer_id: BufferId,
+        file_id: FileId,
         version: time::Global,
     ) -> Result<impl Iterator<Item = buffer::Change>, Error> {
-        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&buffer_id.0) {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
             Ok(buffer.changes_since(version))
         } else {
-            Err(Error::InvalidBufferId)
+            Err(Error::InvalidFileId("file has not been opened".into()))
         }
     }
 
@@ -800,7 +797,7 @@ impl Epoch {
             if cursor.seek(&file_id, SeekBias::Left) {
                 Ok(cursor.item().unwrap())
             } else {
-                Err(Error::InvalidFileId)
+                Err(Error::InvalidFileId("file does not exist".into()))
             }
         }
     }
@@ -810,7 +807,9 @@ impl Epoch {
         if expected_type.map_or(true, |expected_type| expected_type == metadata.file_type) {
             Ok(())
         } else {
-            Err(Error::InvalidFileId)
+            Err(Error::InvalidFileId(
+                format!("expected file to have type {:?}", expected_type).into(),
+            ))
         }
     }
 
@@ -1619,18 +1618,14 @@ mod tests {
 
         epoch.rename(e, a, "z", &mut lamport_clock).unwrap();
 
-        let c_buffer = epoch.open_text_file(c, "123", &mut lamport_clock).unwrap();
-        epoch
-            .edit(c_buffer, Some(0..0), "x", &mut lamport_clock)
-            .unwrap();
+        epoch.open_text_file(c, "123", &mut lamport_clock).unwrap();
+        epoch.edit(c, Some(0..0), "x", &mut lamport_clock).unwrap();
 
         epoch
             .rename(g, ROOT_FILE_ID, "g", &mut lamport_clock)
             .unwrap();
-        let g_buffer = epoch.open_text_file(g, "456", &mut lamport_clock).unwrap();
-        epoch
-            .edit(g_buffer, Some(0..0), "y", &mut lamport_clock)
-            .unwrap();
+        epoch.open_text_file(g, "456", &mut lamport_clock).unwrap();
+        epoch.edit(g, Some(0..0), "y", &mut lamport_clock).unwrap();
 
         let mut cursor = epoch.cursor().unwrap();
         assert_eq!(
@@ -1781,30 +1776,30 @@ mod tests {
             .unwrap();
 
         let file_id = tree_1.file_id("file").unwrap();
-        let buffer_id = tree_2
+        tree_2
             .open_text_file(file_id, base_text.clone(), &mut lamport_clock_2)
             .unwrap();
-        let ops = tree_2.edit(buffer_id, vec![1..2, 3..3], "x", &mut lamport_clock_2);
+        let ops = tree_2.edit(file_id, vec![1..2, 3..3], "x", &mut lamport_clock_2);
         tree_1.apply_ops(ops, &mut lamport_clock_1).unwrap();
 
         // Must call open_text_file on any given replica first before interacting with a buffer.
-        assert!(tree_1.text(buffer_id).is_err());
+        assert!(tree_1.text(file_id).is_err());
         tree_1
             .open_text_file(file_id, base_text, &mut lamport_clock_1)
             .unwrap();
-        assert_eq!(tree_1.text(buffer_id).unwrap().into_string(), "axcx");
-        assert_eq!(tree_2.text(buffer_id).unwrap().into_string(), "axcx");
+        assert_eq!(tree_1.text(file_id).unwrap().into_string(), "axcx");
+        assert_eq!(tree_2.text(file_id).unwrap().into_string(), "axcx");
 
-        let ops = tree_1.edit(buffer_id, vec![1..2, 4..4], "y", &mut lamport_clock_1);
+        let ops = tree_1.edit(file_id, vec![1..2, 4..4], "y", &mut lamport_clock_1);
         let base_version = tree_2.version();
 
         tree_2.apply_ops(ops, &mut lamport_clock_2).unwrap();
 
-        assert_eq!(tree_1.text(buffer_id).unwrap().into_string(), "aycxy");
-        assert_eq!(tree_2.text(buffer_id).unwrap().into_string(), "aycxy");
+        assert_eq!(tree_1.text(file_id).unwrap().into_string(), "aycxy");
+        assert_eq!(tree_2.text(file_id).unwrap().into_string(), "aycxy");
 
         let changes = tree_2
-            .changes_since(buffer_id, base_version.clone())
+            .changes_since(file_id, base_version.clone())
             .unwrap()
             .collect::<Vec<_>>();
         assert_eq!(changes.len(), 2);
