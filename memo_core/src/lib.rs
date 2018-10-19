@@ -14,6 +14,7 @@ mod epoch;
 mod notify_cell;
 mod operation_queue;
 pub mod time;
+mod tree_map;
 mod work_tree;
 
 pub use buffer::{Buffer, Point};
