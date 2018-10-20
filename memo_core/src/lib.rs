@@ -16,12 +16,12 @@ mod operation_queue;
 pub mod time;
 mod work_tree;
 
-pub use buffer::{Buffer, Point};
-pub use epoch::{Cursor, DirEntry, Epoch, FileId, FileStatus, FileType, ROOT_FILE_ID};
+pub use crate::buffer::{Buffer, Point};
+pub use crate::epoch::{Cursor, DirEntry, Epoch, FileId, FileStatus, FileType, ROOT_FILE_ID};
 use std::borrow::Cow;
 use std::fmt;
 use std::io;
-pub use work_tree::{GitProvider, Operation, WorkTree};
+pub use crate::work_tree::{GitProvider, Operation, WorkTree};
 
 pub type ReplicaId = u64;
 pub type UserId = u64;

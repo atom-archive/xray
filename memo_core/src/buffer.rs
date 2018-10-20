@@ -1,5 +1,5 @@
-use btree::{self, SeekBias};
-use operation_queue::{self, OperationQueue};
+use crate::btree::{self, SeekBias};
+use crate::operation_queue::{self, OperationQueue};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::cell::RefCell;
@@ -9,9 +9,9 @@ use std::iter;
 use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
 use std::sync::Arc;
-use time;
-use ReplicaId;
-use UserId;
+use crate::time;
+use crate::ReplicaId;
+use crate::UserId;
 
 type SelectionSetVersion = usize;
 

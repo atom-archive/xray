@@ -3,7 +3,7 @@ use std::cmp::{self, Ordering};
 use std::collections::HashMap;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
-use ReplicaId;
+use crate::ReplicaId;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize)]
 pub struct Local {

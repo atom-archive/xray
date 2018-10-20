@@ -1,7 +1,7 @@
-use buffer::{self, Point, Text};
-use epoch::{self, Cursor, DirEntry, Epoch, FileId};
+use crate::buffer::{self, Point, Text};
+use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId};
 use futures::{future, stream, Async, Future, Poll, Stream};
-use notify_cell::NotifyCell;
+use crate::notify_cell::NotifyCell;
 use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -10,10 +10,10 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use time;
-use Error;
-use Oid;
-use ReplicaId;
+use crate::time;
+use crate::Error;
+use crate::Oid;
+use crate::ReplicaId;
 
 pub trait GitProvider {
     fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>>;
@@ -586,7 +586,7 @@ impl Future for OpenTextFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use epoch::CursorEntry;
+    use crate::epoch::CursorEntry;
     use rand::{SeedableRng, StdRng};
 
     #[test]
@@ -672,8 +672,8 @@ mod tests {
 
         fn base_text(
             &self,
-            oid: Oid,
-            path: &Path,
+            _oid: Oid,
+            _path: &Path,
         ) -> Box<Future<Item = String, Error = io::Error>> {
             unimplemented!()
         }

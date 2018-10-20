@@ -1,6 +1,6 @@
-use btree::{self, SeekBias};
-use buffer::{self, Buffer, Point, Text};
-use operation_queue::{self, OperationQueue};
+use crate::btree::{self, SeekBias};
+use crate::buffer::{self, Buffer, Point, Text};
+use crate::operation_queue::{self, OperationQueue};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
@@ -10,10 +10,10 @@ use std::fmt;
 use std::ops::{Add, AddAssign, Range};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use time;
-use Error;
-use Oid;
-use ReplicaId;
+use crate::time;
+use crate::Error;
+use crate::Oid;
+use crate::ReplicaId;
 
 pub const ROOT_FILE_ID: FileId = FileId::Base(0);
 
@@ -853,7 +853,7 @@ impl Epoch {
         file_id: FileId,
         lamport_clock: &mut time::Lamport,
     ) -> Vec<Operation> {
-        use btree::KeyedItem;
+        use crate::btree::KeyedItem;
 
         let mut fixup_ops = Vec::new();
         let mut reverted_moves: HashMap<FileId, time::Lamport> = HashMap::new();
@@ -1221,7 +1221,7 @@ impl btree::Item for Metadata {
     type Summary = FileId;
 
     fn summarize(&self) -> Self::Summary {
-        use btree::KeyedItem;
+        use crate::btree::KeyedItem;
         self.key()
     }
 }
@@ -1238,7 +1238,7 @@ impl btree::Item for ParentRefValue {
     type Summary = ParentRefValueKey;
 
     fn summarize(&self) -> Self::Summary {
-        use btree::KeyedItem;
+        use crate::btree::KeyedItem;
         self.key()
     }
 }
@@ -1478,7 +1478,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buffer::Point;
+    use crate::buffer::Point;
     use rand::{Rng, SeedableRng, StdRng};
     use std::iter::FromIterator;
 
@@ -2059,7 +2059,7 @@ mod tests {
                                     ops.push(op);
                                     break;
                                 }
-                                Err(error) => {}
+                                Err(_error) => {}
                             }
                         }
                     } else {
@@ -2071,7 +2071,7 @@ mod tests {
                                     ops.push(op);
                                     break;
                                 }
-                                Err(error) => {}
+                                Err(_error) => {}
                             }
                         }
                     }
@@ -2095,7 +2095,7 @@ mod tests {
                                 ops.push(op);
                                 break;
                             }
-                            Err(error) => {}
+                            Err(_error) => {}
                         }
                     }
                 }
