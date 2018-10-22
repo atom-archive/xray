@@ -1,7 +1,10 @@
 use crate::buffer::{self, Point, Text};
 use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId};
-use futures::{future, stream, Async, Future, Poll, Stream};
-use crate::notify_cell::NotifyCell;
+use crate::time;
+use crate::Error;
+use crate::Oid;
+use crate::ReplicaId;
+use futures::{future::Future, stream::Stream};
 use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -10,14 +13,10 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use crate::time;
-use crate::Error;
-use crate::Oid;
-use crate::ReplicaId;
 
 pub trait GitProvider {
-    fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>>;
-    fn base_text(&self, oid: Oid, path: &Path) -> Box<Future<Item = String, Error = io::Error>>;
+    fn base_entries(&self, oid: Oid) -> Box<Stream<Item = Result<DirEntry, io::Error>>>;
+    fn base_text(&self, oid: Oid, path: &Path) -> Box<Future<Output = Result<String, io::Error>>>;
 }
 
 pub struct WorkTree {
@@ -27,7 +26,6 @@ pub struct WorkTree {
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
     git: Rc<GitProvider>,
-    updates: NotifyCell<()>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -55,22 +53,13 @@ struct OpenTextFile {
     state: OpenTextFileState,
 }
 
-enum OpenTextFileState {
-    Start,
-    Loading {
-        file_id: FileId,
-        epoch_id: epoch::Id,
-        base_text_future: Box<Future<Item = String, Error = io::Error>>,
-    },
-}
-
 impl WorkTree {
     pub fn new<I>(
         replica_id: ReplicaId,
         base: Oid,
         ops: I,
         git: Rc<GitProvider>,
-    ) -> Result<(WorkTree, Box<Stream<Item = Operation, Error = Error>>), Error>
+    ) -> Result<(WorkTree, Box<Stream<Item = Result<Operation, Error>>>), Error>
     where
         I: 'static + IntoIterator<Item = Operation>,
     {
@@ -82,13 +71,12 @@ impl WorkTree {
             deferred_ops: Rc::new(RefCell::new(HashMap::new())),
             lamport_clock: Rc::new(RefCell::new(time::Lamport::new(replica_id))),
             git,
-            updates: NotifyCell::new(()),
         };
 
         let ops = if ops.peek().is_none() {
-            Box::new(tree.reset(base)) as Box<Stream<Item = Operation, Error = Error>>
+            Box::new(tree.reset(base)) as Box<Stream<Item = Result<Operation, Error>>>
         } else {
-            Box::new(tree.apply_ops(ops)?) as Box<Stream<Item = Operation, Error = Error>>
+            Box::new(tree.apply_ops(ops)?) as Box<Stream<Item = Result<Operation, Error>>>
         };
 
         Ok((tree, ops))
