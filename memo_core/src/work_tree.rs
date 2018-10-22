@@ -46,7 +46,7 @@ pub enum Operation {
     },
 }
 
-#[derive(Copy, Clone, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Eq, Hash, PartialEq, Serialize)]
 pub struct BufferId(u32);
 
 impl<G: 'static + GitProvider> WorkTree<G> {
@@ -117,18 +117,20 @@ impl<G: 'static + GitProvider> WorkTree<G> {
                     epoch_id,
                     operation,
                 } => {
-                    if let Some(epoch) = self.0.borrow().epoch.as_ref() {
+                    let state = self.0.borrow();
+                    if let Some(epoch) = state.epoch.as_ref() {
                         match epoch_id.cmp(&epoch.id) {
-                            Ordering::Less => continue,
-                            Ordering::Equal => {
-                                cur_epoch_ops.push(operation);
-                                continue;
+                            Ordering::Less => {}
+                            Ordering::Equal => cur_epoch_ops.push(operation),
+                            Ordering::Greater => {
+                                drop(state);
+                                self.defer_epoch_op(epoch_id, operation);
                             }
-                            Ordering::Greater => {}
                         }
+                    } else {
+                        drop(state);
+                        self.defer_epoch_op(epoch_id, operation);
                     }
-
-                    self.defer_epoch_op(epoch_id, operation);
                 }
             }
         }
@@ -299,34 +301,31 @@ impl<G: 'static + GitProvider> WorkTree<G> {
                         base_path = cur_epoch.base_path(file_id);
                     }
 
-                    if let Some(base_path) = base_path {
-                        let base_text =
-                            await!(this.0.borrow().git.base_text(epoch_head, &base_path))?;
-
-                        if let Some(buffer_id) = this.existing_buffer(&path) {
-                            return Ok(buffer_id);
-                        } else if epoch_id == this.0.borrow().epoch.as_ref().unwrap().id {
-                            return this.assoc_buffer(file_id, base_text);
-                        } else {
-                            continue;
-                        }
+                    let base_text = if let Some(base_path) = base_path {
+                        await!(this.0.borrow().git.base_text(epoch_head, &base_path))?
                     } else {
-                        return this.assoc_buffer(file_id, String::new());
+                        String::new()
+                    };
+
+                    if let Some(buffer_id) = this.existing_buffer(&path) {
+                        return Ok(buffer_id);
+                    } else if epoch_id == this.0.borrow().epoch.as_ref().unwrap().id {
+                        let state = &mut *this.0.borrow_mut();
+                        let epoch = state.epoch.as_mut().unwrap();
+                        epoch.open_text_file(
+                            file_id,
+                            base_text.as_str(),
+                            &mut state.lamport_clock,
+                        )?;
+
+                        let buffer_id = state.next_buffer_id;
+                        state.next_buffer_id.0 += 1;
+                        state.buffers.insert(buffer_id, file_id);
+                        return Ok(buffer_id);
                     }
                 }
             }
         }
-    }
-
-    fn assoc_buffer(&self, file_id: FileId, base_text: String) -> Result<BufferId, Error> {
-        let state = &mut *self.0.borrow_mut();
-        let epoch = state.epoch.as_mut().unwrap();
-        epoch.open_text_file(file_id, base_text.as_str(), &mut state.lamport_clock)?;
-
-        let buffer_id = state.next_buffer_id;
-        state.next_buffer_id.0 += 1;
-        state.buffers.insert(buffer_id, file_id);
-        Ok(buffer_id)
     }
 
     fn existing_buffer(&self, path: &Path) -> Option<BufferId> {
