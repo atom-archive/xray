@@ -1,4 +1,10 @@
-#![feature(arbitrary_self_types, futures_api, pin)]
+#![feature(
+    arbitrary_self_types,
+    async_await,
+    await_macro,
+    futures_api,
+    pin
+)]
 
 extern crate futures;
 #[macro_use]
@@ -38,6 +44,12 @@ pub enum Error {
     InvalidDirEntry,
     InvalidOperation,
     CursorExhausted,
+}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        Error::IoError(error)
+    }
 }
 
 impl From<Error> for String {

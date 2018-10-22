@@ -4,28 +4,34 @@ use crate::time;
 use crate::Error;
 use crate::Oid;
 use crate::ReplicaId;
-use futures::{future::Future, stream::Stream};
-use std::cell::{Ref, RefCell, RefMut};
+use futures::prelude::*;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io;
+use std::marker::Unpin;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub trait GitProvider {
-    fn base_entries(&self, oid: Oid) -> Box<Stream<Item = Result<DirEntry, io::Error>>>;
-    fn base_text(&self, oid: Oid, path: &Path) -> Box<Future<Output = Result<String, io::Error>>>;
+    type BaseEntriesStream: Stream<Item = Result<DirEntry, io::Error>> + Unpin;
+    type BaseTextFuture: Future<Output = Result<String, io::Error>>;
+
+    fn base_entries(&self, oid: Oid) -> Self::BaseEntriesStream;
+    fn base_text(&self, oid: Oid, path: &Path) -> Self::BaseTextFuture;
 }
 
-pub struct WorkTree {
-    epoch: Option<Rc<RefCell<Epoch>>>,
-    buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+pub struct WorkTree<G>(Rc<RefCell<WorkTreeState<G>>>);
+
+struct WorkTreeState<G> {
+    epoch: Option<Epoch>,
+    buffers: HashMap<BufferId, FileId>,
     next_buffer_id: BufferId,
-    deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
-    lamport_clock: Rc<RefCell<time::Lamport>>,
-    git: Rc<GitProvider>,
+    deferred_ops: HashMap<epoch::Id, Vec<epoch::Operation>>,
+    lamport_clock: time::Lamport,
+    git: Rc<G>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -43,170 +49,198 @@ pub enum Operation {
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
 pub struct BufferId(u32);
 
-struct OpenTextFile {
-    buffer_id: BufferId,
-    path: PathBuf,
-    epoch: Rc<RefCell<Epoch>>,
-    git: Rc<GitProvider>,
-    buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
-    lamport_clock: Rc<RefCell<time::Lamport>>,
-    state: OpenTextFileState,
-}
-
-impl WorkTree {
+impl<G: 'static + GitProvider> WorkTree<G> {
     pub fn new<I>(
         replica_id: ReplicaId,
         base: Oid,
         ops: I,
-        git: Rc<GitProvider>,
-    ) -> Result<(WorkTree, Box<Stream<Item = Result<Operation, Error>>>), Error>
+        git: Rc<G>,
+    ) -> (
+        WorkTree<G>,
+        impl Future<Output = Result<Vec<Operation>, Error>>,
+    )
+    where
+        I: 'static + IntoIterator<Item = Operation>,
+    {
+        let tree = WorkTree(Rc::new(RefCell::new(WorkTreeState {
+            epoch: None,
+            buffers: HashMap::new(),
+            next_buffer_id: BufferId(0),
+            deferred_ops: HashMap::new(),
+            lamport_clock: time::Lamport::new(replica_id),
+            git,
+        })));
+        let ops = tree.init(base, ops);
+        (tree, ops)
+    }
+
+    fn init<I>(&self, base: Oid, ops: I) -> impl Future<Output = Result<Vec<Operation>, Error>>
     where
         I: 'static + IntoIterator<Item = Operation>,
     {
         let mut ops = ops.into_iter().peekable();
-        let mut tree = WorkTree {
-            epoch: None,
-            buffers: Rc::new(RefCell::new(HashMap::new())),
-            next_buffer_id: BufferId(0),
-            deferred_ops: Rc::new(RefCell::new(HashMap::new())),
-            lamport_clock: Rc::new(RefCell::new(time::Lamport::new(replica_id))),
-            git,
-        };
-
-        let ops = if ops.peek().is_none() {
-            Box::new(tree.reset(base)) as Box<Stream<Item = Result<Operation, Error>>>
-        } else {
-            Box::new(tree.apply_ops(ops)?) as Box<Stream<Item = Result<Operation, Error>>>
-        };
-
-        Ok((tree, ops))
+        let this = self.clone();
+        async move {
+            if ops.peek().is_none() {
+                await!(this.reset(base))
+            } else {
+                await!(this.apply_ops(ops))
+            }
+        }
     }
 
-    pub fn reset(&mut self, head: Oid) -> impl Stream<Item = Operation, Error = Error> {
-        let epoch_id = self.lamport_clock.borrow_mut().tick();
-        stream::once(Ok(Operation::StartEpoch { epoch_id, head }))
-            .chain(self.start_epoch(epoch_id, head))
+    pub fn reset(&self, head: Oid) -> impl Future<Output = Result<Vec<Operation>, Error>> {
+        let epoch_id = self.0.borrow_mut().lamport_clock.tick();
+        let mut ops = Vec::new();
+        ops.push(Operation::StartEpoch { epoch_id, head });
+
+        let this = self.clone();
+        async move {
+            ops.extend(await!(this.start_epoch(epoch_id, head))?);
+            Ok(ops)
+        }
     }
 
-    pub fn apply_ops<I>(
-        &mut self,
-        ops: I,
-    ) -> Result<impl Stream<Item = Operation, Error = Error>, Error>
+    pub fn apply_ops<I>(&self, ops: I) -> impl Future<Output = Result<Vec<Operation>, Error>>
     where
-        I: IntoIterator<Item = Operation>,
+        I: 'static + IntoIterator<Item = Operation>,
     {
         let mut cur_epoch_ops = Vec::new();
-        let mut epoch_streams = Vec::new();
+        let mut epoch_futures = Vec::new();
 
         for op in ops {
             match op {
                 Operation::StartEpoch { epoch_id, head } => {
-                    epoch_streams.push(self.start_epoch(epoch_id, head));
+                    epoch_futures.push(self.start_epoch(epoch_id, head));
                 }
                 Operation::EpochOperation {
                     epoch_id,
                     operation,
                 } => {
-                    if let Some(epoch) = self.epoch.clone() {
-                        match epoch_id.cmp(&epoch.borrow().id) {
-                            Ordering::Less => {}
-                            Ordering::Equal => cur_epoch_ops.push(operation),
-                            Ordering::Greater => self.defer_epoch_op(epoch_id, operation),
+                    if let Some(epoch) = self.0.borrow().epoch.as_ref() {
+                        match epoch_id.cmp(&epoch.id) {
+                            Ordering::Less => continue,
+                            Ordering::Equal => {
+                                cur_epoch_ops.push(operation);
+                                continue;
+                            }
+                            Ordering::Greater => {}
                         }
-                    } else {
-                        self.defer_epoch_op(epoch_id, operation);
                     }
+
+                    self.defer_epoch_op(epoch_id, operation);
                 }
             }
         }
 
-        if let Some(epoch) = self.epoch.clone() {
-            let mut epoch = epoch.borrow_mut();
-            let fixup_ops = epoch.apply_ops(cur_epoch_ops, &mut self.lamport_clock.borrow_mut())?;
-            let fixup_ops_stream = Box::new(stream::iter_ok(Operation::stamp(epoch.id, fixup_ops)));
-            Ok(epoch_streams.into_iter().fold(
-                fixup_ops_stream as Box<Stream<Item = Operation, Error = Error>>,
-                |acc, stream| Box::new(acc.chain(stream)),
-            ))
-        } else {
-            Err(Error::InvalidOperations)
+        let state = self.0.clone();
+        async move {
+            let mut fixup_ops = Vec::new();
+            {
+                let state = &mut *state.borrow_mut();
+                if let Some(epoch) = state.epoch.as_mut() {
+                    fixup_ops.extend(Operation::stamp(
+                        epoch.id,
+                        epoch.apply_ops(cur_epoch_ops, &mut state.lamport_clock)?,
+                    ));
+                } else {
+                    return Err(Error::InvalidOperations);
+                }
+            }
+
+            for epoch_future in epoch_futures {
+                fixup_ops.extend(await!(epoch_future)?);
+            }
+            Ok(fixup_ops)
         }
     }
 
     fn start_epoch(
-        &mut self,
+        &self,
         epoch_id: epoch::Id,
         head: Oid,
-    ) -> Box<Stream<Item = Operation, Error = Error>> {
-        if self
-            .epoch
-            .as_ref()
-            .map_or(true, |e| epoch_id > e.borrow().id)
+    ) -> impl Future<Output = Result<Vec<Operation>, Error>> {
+        let mut epoch_to_start = Some(Epoch::new(self.replica_id(), epoch_id, head));
         {
-            let epoch = Rc::new(RefCell::new(Epoch::new(self.replica_id(), epoch_id, head)));
-            if self.epoch.is_none() {
-                self.epoch = Some(epoch.clone());
+            let mut state = self.0.borrow_mut();
+            if state.epoch.is_none() {
+                state.epoch = epoch_to_start.take();
             }
-            let cur_epoch = self.epoch.clone().unwrap();
-            let deferred_ops = self.deferred_ops.clone();
-            let lamport_clock_1 = self.lamport_clock.clone();
-            let lamport_clock_2 = self.lamport_clock.clone();
+        }
 
-            let epoch_1 = epoch.clone();
-            let load_base_entries = self
-                .git
-                .base_entries(head)
-                .map_err(|err| Error::IoError(err))
-                .chunks(500)
-                .and_then(move |base_entries| {
-                    let fixup_ops = epoch_1
-                        .borrow_mut()
-                        .append_base_entries(base_entries, &mut lamport_clock_1.borrow_mut())?;
-                    Ok(stream::iter_ok(Operation::stamp(epoch_id, fixup_ops)))
-                })
-                .flatten();
+        let state = self.0.clone();
+        async move {
+            let mut fixup_ops = Vec::new();
+            if epoch_id >= state.borrow().epoch.as_ref().unwrap().id {
+                let mut pending_base_entries = state.borrow().git.base_entries(head).chunks(500);
+                loop {
+                    let (base_entries, next_pending_base_entries) =
+                        await!(pending_base_entries.into_future());
+                    pending_base_entries = next_pending_base_entries;
 
-            let epoch_2 = epoch.clone();
-            let assign_epoch = future::lazy(move || {
-                let mut fixup_ops = Vec::new();
-                if epoch_id > cur_epoch.borrow().id {
-                    cur_epoch.swap(epoch_2.as_ref());
-                    if let Some(ops) = deferred_ops.borrow_mut().remove(&epoch_id) {
-                        fixup_ops = cur_epoch
-                            .borrow_mut()
-                            .apply_ops(ops, &mut lamport_clock_2.borrow_mut())?;
+                    if let Some(base_entries) = base_entries {
+                        let mut unwrapped_entries = Vec::with_capacity(base_entries.len());
+                        for base_entry in base_entries {
+                            match base_entry {
+                                Ok(base_entry) => unwrapped_entries.push(base_entry),
+                                Err(error) => return Err(error.into()),
+                            }
+                        }
+
+                        let state = &mut *state.borrow_mut();
+                        if let Some(epoch_to_start) = epoch_to_start.as_mut() {
+                            epoch_to_start
+                                .append_base_entries(unwrapped_entries, &mut state.lamport_clock)?;
+                        } else {
+                            let epoch = state.epoch.as_mut().unwrap();
+                            if epoch_id == epoch.id {
+                                let epoch_fixup_ops = epoch.append_base_entries(
+                                    unwrapped_entries,
+                                    &mut state.lamport_clock,
+                                )?;
+                                fixup_ops.extend(Operation::stamp(epoch_id, epoch_fixup_ops));
+                            }
+                        }
+                    } else {
+                        break;
                     }
-                    deferred_ops.borrow_mut().retain(|id, _| *id > epoch_id);
                 }
 
-                Ok(Box::new(stream::iter_ok(Operation::stamp(
-                    epoch_id, fixup_ops,
-                ))))
-            })
-            .flatten_stream();
+                let state = &mut *state.borrow_mut();
+                let cur_epoch = state.epoch.as_mut().unwrap();
+                if epoch_id > cur_epoch.id {
+                    *cur_epoch = epoch_to_start.unwrap();
+                    if let Some(ops) = state.deferred_ops.remove(&epoch_id) {
+                        let epoch_fixup_ops = cur_epoch.apply_ops(ops, &mut state.lamport_clock)?;
+                        fixup_ops.extend(Operation::stamp(epoch_id, epoch_fixup_ops));
+                    }
+                    state.deferred_ops.retain(|id, _| *id > epoch_id);
+                }
+            }
 
-            Box::new(load_base_entries.chain(assign_epoch))
-        } else {
-            Box::new(stream::empty())
+            Ok(fixup_ops)
         }
     }
 
     pub fn version(&self) -> time::Global {
-        self.cur_epoch().version()
+        self.0.borrow().epoch.as_ref().unwrap().version()
     }
 
     pub fn with_cursor<F>(&self, mut f: F)
     where
         F: FnMut(&mut Cursor),
     {
-        if let Some(mut cursor) = self.cur_epoch().cursor() {
+        let state = self.0.borrow();
+        let cur_epoch = state.epoch.as_ref().unwrap();
+        if let Some(mut cursor) = cur_epoch.cursor() {
             f(&mut cursor);
         }
     }
 
-    pub fn new_text_file(&mut self) -> (FileId, Operation) {
-        let mut cur_epoch = self.cur_epoch_mut();
-        let (file_id, operation) = cur_epoch.new_text_file(&mut self.lamport_clock.borrow_mut());
+    pub fn new_text_file(&self) -> (FileId, Operation) {
+        let state = &mut *self.0.borrow_mut();
+        let cur_epoch = state.epoch.as_mut().unwrap();
+        let (file_id, operation) = cur_epoch.new_text_file(&mut state.lamport_clock);
         (
             file_id,
             Operation::EpochOperation {
@@ -216,14 +250,15 @@ impl WorkTree {
         )
     }
 
-    pub fn create_dir<N>(&mut self, path: &Path) -> Result<(FileId, Operation), Error>
+    pub fn create_dir<N>(&self, path: &Path) -> Result<(FileId, Operation), Error>
     where
         N: AsRef<OsStr>,
     {
         let name = path
             .file_name()
             .ok_or(Error::InvalidPath("path has no file name".into()))?;
-        let mut cur_epoch = self.cur_epoch_mut();
+        let state = &mut *self.0.borrow_mut();
+        let cur_epoch = state.epoch.as_mut().unwrap();
         let parent_id = if let Some(parent_path) = path.parent() {
             cur_epoch.file_id(parent_path)?
         } else {
@@ -231,7 +266,7 @@ impl WorkTree {
         };
         let epoch_id = cur_epoch.id;
         let (file_id, operation) =
-            cur_epoch.create_dir(parent_id, name, &mut self.lamport_clock.borrow_mut())?;
+            cur_epoch.create_dir(parent_id, name, &mut state.lamport_clock)?;
         Ok((
             file_id,
             Operation::EpochOperation {
@@ -241,87 +276,63 @@ impl WorkTree {
         ))
     }
 
-    pub fn open_text_file<T>(
+    pub fn open_text_file(
         &mut self,
         path: PathBuf,
-    ) -> Box<Future<Item = BufferId, Error = Error>>
-    where
-        T: Into<Text>,
-    {
-        if let Some(buffer_id) = self.existing_buffer(&path) {
-            Box::new(future::ok(buffer_id))
-        } else {
-            Self::open_text_file_internal(
-                self.next_buffer_id(),
-                path,
-                self.epoch.clone().unwrap(),
-                self.git.clone(),
-                self.buffers.clone(),
-                self.lamport_clock.clone(),
-            )
-        }
-    }
+    ) -> impl Future<Output = Result<BufferId, Error>> {
+        let this = self.clone();
+        async move {
+            loop {
+                if let Some(buffer_id) = this.existing_buffer(&path) {
+                    return Ok(buffer_id);
+                } else {
+                    let epoch_id;
+                    let epoch_head;
+                    let file_id;
+                    let base_path;
+                    {
+                        let state = this.0.borrow();
+                        let cur_epoch = state.epoch.as_ref().unwrap();
+                        epoch_id = cur_epoch.id;
+                        epoch_head = cur_epoch.head;
+                        file_id = cur_epoch.file_id(&path)?;
+                        base_path = cur_epoch.base_path(file_id);
+                    }
 
-    fn open_text_file_internal(
-        buffer_id: BufferId,
-        path: PathBuf,
-        epoch: Rc<RefCell<Epoch>>,
-        git: Rc<GitProvider>,
-        buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
-        lamport_clock: Rc<RefCell<time::Lamport>>,
-    ) -> Box<Future<Item = BufferId, Error = Error>> {
-        let mut epoch_ref = epoch.borrow_mut();
-        let epoch = epoch.clone();
+                    if let Some(base_path) = base_path {
+                        let base_text =
+                            await!(this.0.borrow().git.base_text(epoch_head, &base_path))?;
 
-        let file_id = match epoch_ref.file_id(&path) {
-            Ok(file_id) => file_id,
-            Err(err) => return Box::new(future::err(err)),
-        };
-        if let Some(base_path) = epoch_ref.base_path(file_id) {
-            let epoch_id = epoch_ref.id;
-            Box::new(
-                git.base_text(epoch_ref.head, &base_path)
-                    .map_err(|error| Error::IoError(error))
-                    .and_then(move |base_text| {
-                        let mut epoch_ref = epoch.borrow_mut();
-                        let epoch = epoch.clone();
-
-                        if epoch_ref.id == epoch_id {
-                            if let Err(error) = epoch_ref.open_text_file(
-                                file_id,
-                                base_text.as_str(),
-                                &mut lamport_clock.borrow_mut(),
-                            ) {
-                                Box::new(future::err(error))
-                            } else {
-                                Box::new(future::ok(buffer_id))
-                            }
+                        if let Some(buffer_id) = this.existing_buffer(&path) {
+                            return Ok(buffer_id);
+                        } else if epoch_id == this.0.borrow().epoch.as_ref().unwrap().id {
+                            return this.assoc_buffer(file_id, base_text);
                         } else {
-                            Self::open_text_file_internal(
-                                buffer_id,
-                                path,
-                                epoch,
-                                git,
-                                buffers,
-                                lamport_clock,
-                            )
+                            continue;
                         }
-                    }),
-            )
-        } else {
-            if let Err(error) =
-                epoch_ref.open_text_file(file_id, "", &mut lamport_clock.borrow_mut())
-            {
-                Box::new(future::err(error))
-            } else {
-                Box::new(future::ok(buffer_id))
+                    } else {
+                        return this.assoc_buffer(file_id, String::new());
+                    }
+                }
             }
         }
     }
 
+    fn assoc_buffer(&self, file_id: FileId, base_text: String) -> Result<BufferId, Error> {
+        let state = &mut *self.0.borrow_mut();
+        let epoch = state.epoch.as_mut().unwrap();
+        epoch.open_text_file(file_id, base_text.as_str(), &mut state.lamport_clock)?;
+
+        let buffer_id = state.next_buffer_id;
+        state.next_buffer_id.0 += 1;
+        state.buffers.insert(buffer_id, file_id);
+        Ok(buffer_id)
+    }
+
     fn existing_buffer(&self, path: &Path) -> Option<BufferId> {
-        let cur_epoch = self.cur_epoch();
-        for (buffer_id, file_id) in self.buffers.borrow().iter() {
+        let state = self.0.borrow();
+        let cur_epoch = state.epoch.as_ref().unwrap();
+        for (buffer_id, file_id) in &state.buffers {
             if let Some(existing_path) = cur_epoch.path(*file_id) {
                 if path == existing_path {
                     return Some(*buffer_id);
@@ -335,7 +346,9 @@ impl WorkTree {
     where
         N: AsRef<OsStr>,
     {
-        let mut cur_epoch = self.cur_epoch_mut();
+        let state = &mut *self.0.borrow_mut();
+        let cur_epoch = state.epoch.as_mut().unwrap();
+
         let file_id = cur_epoch.file_id(old_path)?;
         let new_name = new_path
             .file_name()
@@ -347,12 +360,8 @@ impl WorkTree {
         };
 
         let epoch_id = cur_epoch.id;
-        let operation = cur_epoch.rename(
-            file_id,
-            new_parent_id,
-            new_name,
-            &mut self.lamport_clock.borrow_mut(),
-        )?;
+        let operation =
+            cur_epoch.rename(file_id, new_parent_id, new_name, &mut state.lamport_clock)?;
         Ok(Operation::EpochOperation {
             epoch_id,
             operation,
@@ -360,10 +369,12 @@ impl WorkTree {
     }
 
     pub fn remove(&self, path: &Path) -> Result<Operation, Error> {
-        let mut cur_epoch = self.cur_epoch_mut();
+        let state = &mut *self.0.borrow_mut();
+        let cur_epoch = state.epoch.as_mut().unwrap();
+
         let file_id = cur_epoch.file_id(path)?;
         let epoch_id = cur_epoch.id;
-        let operation = cur_epoch.remove(file_id, &mut self.lamport_clock.borrow_mut())?;
+        let operation = cur_epoch.remove(file_id, &mut state.lamport_clock)?;
 
         Ok(Operation::EpochOperation {
             epoch_id,
@@ -382,15 +393,11 @@ impl WorkTree {
         T: Into<Text>,
     {
         let file_id = self.buffer_file_id(buffer_id)?;
-        let mut cur_epoch = self.cur_epoch_mut();
+        let state = &mut *self.0.borrow_mut();
+        let cur_epoch = state.epoch.as_mut().unwrap();
         let epoch_id = cur_epoch.id;
         let operation = cur_epoch
-            .edit(
-                file_id,
-                old_ranges,
-                new_text,
-                &mut self.lamport_clock.borrow_mut(),
-            )
+            .edit(file_id, old_ranges, new_text, &mut state.lamport_clock)
             .unwrap();
 
         Ok(Operation::EpochOperation {
@@ -410,15 +417,11 @@ impl WorkTree {
         T: Into<Text>,
     {
         let file_id = self.buffer_file_id(buffer_id)?;
-        let mut cur_epoch = self.cur_epoch_mut();
+        let state = &mut *self.0.borrow_mut();
+        let cur_epoch = state.epoch.as_mut().unwrap();
         let epoch_id = cur_epoch.id;
         let operation = cur_epoch
-            .edit_2d(
-                file_id,
-                old_ranges,
-                new_text,
-                &mut self.lamport_clock.borrow_mut(),
-            )
+            .edit_2d(file_id, old_ranges, new_text, &mut state.lamport_clock)
             .unwrap();
 
         Ok(Operation::EpochOperation {
@@ -428,15 +431,19 @@ impl WorkTree {
     }
 
     pub fn path(&self, buffer_id: BufferId) -> Option<PathBuf> {
-        self.buffers
-            .borrow()
+        let state = self.0.borrow();
+        let cur_epoch = state.epoch.as_ref().unwrap();
+        state
+            .buffers
             .get(&buffer_id)
-            .and_then(|file_id| self.cur_epoch().path(*file_id))
+            .and_then(|file_id| cur_epoch.path(*file_id))
     }
 
     pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
         let file_id = self.buffer_file_id(buffer_id)?;
-        self.cur_epoch().text(file_id)
+        let state = self.0.borrow();
+        let cur_epoch = state.epoch.as_ref().unwrap();
+        cur_epoch.text(file_id)
     }
 
     pub fn changes_since(
@@ -445,49 +452,37 @@ impl WorkTree {
         version: time::Global,
     ) -> Result<impl Iterator<Item = buffer::Change>, Error> {
         let file_id = self.buffer_file_id(buffer_id)?;
-        self.cur_epoch().changes_since(file_id, version)
-    }
-
-    fn cur_epoch(&self) -> Ref<Epoch> {
-        self.epoch.as_ref().unwrap().borrow()
-    }
-
-    fn cur_epoch_mut(&self) -> RefMut<Epoch> {
-        self.epoch.as_ref().unwrap().borrow_mut()
+        let state = self.0.borrow();
+        let cur_epoch = state.epoch.as_ref().unwrap();
+        cur_epoch.changes_since(file_id, version)
     }
 
     fn defer_epoch_op(&self, epoch_id: epoch::Id, operation: epoch::Operation) {
-        self.deferred_ops
+        self.0
             .borrow_mut()
+            .deferred_ops
             .entry(epoch_id)
             .or_insert(Vec::new())
             .push(operation);
     }
 
     fn replica_id(&self) -> ReplicaId {
-        self.lamport_clock.borrow().replica_id
-    }
-
-    fn parent_id<'a>(&self, epoch: &Epoch, path: &'a Path) -> Result<FileId, Error> {
-        if let Some(parent_path) = path.parent() {
-            epoch.file_id(parent_path)
-        } else {
-            Ok(epoch::ROOT_FILE_ID)
-        }
-    }
-
-    fn next_buffer_id(&mut self) -> BufferId {
-        let buffer_id = self.next_buffer_id;
-        self.next_buffer_id.0 += 1;
-        buffer_id
+        self.0.borrow().lamport_clock.replica_id
     }
 
     fn buffer_file_id(&self, buffer_id: BufferId) -> Result<FileId, Error> {
-        self.buffers
+        self.0
             .borrow()
+            .buffers
             .get(&buffer_id)
             .cloned()
             .ok_or(Error::InvalidBufferId)
+    }
+}
+
+impl<G> Clone for WorkTree<G> {
+    fn clone(&self) -> Self {
+        WorkTree(self.0.clone())
     }
 }
 
@@ -505,77 +500,13 @@ impl Operation {
     }
 }
 
-// This future is implemented as a hand-rolled state machine. If the path being opened corresponds
-// to a *new* file in the current epoch, we can open the file immediately with an empty base text.
-// If the file existed in the base commit, we use the GitProvider to load its base text
-// asynchronously. When the base text is done loading, we check that the current epoch did not
-// change during loading. If it didn't change, we proceed to open the buffer. If It did change, we
-// return to the Start state and try again.
-impl Future for OpenTextFile {
-    type Item = BufferId;
-    type Error = Error;
-
-    fn poll(&mut self) -> Poll<BufferId, Error> {
-        let mut epoch = self.epoch.borrow_mut();
-
-        loop {
-            let file_id;
-            let mut base_text = None;
-            let mut next_state = None;
-
-            match &mut self.state {
-                OpenTextFileState::Start => {
-                    file_id = epoch.file_id(&self.path)?;
-                    if let Some(base_path) = epoch.base_path(file_id) {
-                        next_state = Some(OpenTextFileState::Loading {
-                            file_id,
-                            epoch_id: epoch.id,
-                            base_text_future: self.git.base_text(epoch.head, &base_path),
-                        });
-                    } else {
-                        base_text = Some("".to_owned());
-                    }
-                }
-                OpenTextFileState::Loading {
-                    file_id: loaded_file_id,
-                    epoch_id,
-                    base_text_future,
-                } => {
-                    file_id = *loaded_file_id;
-                    if epoch.id == *epoch_id {
-                        match base_text_future.poll() {
-                            Ok(Async::Ready(text)) => base_text = Some(text),
-                            Ok(Async::NotReady) => return Ok(Async::NotReady),
-                            Err(error) => return Err(Error::IoError(error)),
-                        }
-                    } else {
-                        next_state = Some(OpenTextFileState::Start);
-                    }
-                }
-            }
-
-            if let Some(next_state) = next_state {
-                self.state = next_state;
-            }
-
-            if let Some(base_text) = base_text {
-                epoch.open_text_file(
-                    file_id,
-                    base_text.as_str(),
-                    &mut self.lamport_clock.borrow_mut(),
-                )?;
-                self.buffers.borrow_mut().insert(self.buffer_id, file_id);
-                return Ok(Async::Ready(self.buffer_id));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::epoch::CursorEntry;
+    use futures::executor::block_on;
     use rand::{SeedableRng, StdRng};
+    use std::vec;
 
     #[test]
     fn test_reset() {
@@ -595,34 +526,33 @@ mod tests {
         git.commit([2; 20], base_tree.clone());
 
         let git = Rc::new(git);
-        let (mut tree_1, ops_1) = WorkTree::new(1, [0; 20], Vec::new(), git.clone()).unwrap();
-        let (mut tree_2, ops_2) =
-            WorkTree::new(2, [0; 20], ops_1.collect().wait().unwrap(), git.clone()).unwrap();
-        assert!(ops_2.wait().next().is_none());
+        let (tree_1, ops_1) = WorkTree::new(1, [0; 20], Vec::new(), git.clone());
+        let (tree_2, ops_2) = WorkTree::new(2, [0; 20], block_on(ops_1).unwrap(), git.clone());
+        assert!(block_on(ops_2).unwrap().is_empty());
 
         assert_eq!(tree_1.dir_entries(), git.tree([0; 20]).dir_entries());
         assert_eq!(tree_2.dir_entries(), git.tree([0; 20]).dir_entries());
 
-        let ops_1 = tree_1.reset([1; 20]).collect().wait().unwrap();
+        let ops_1 = block_on(tree_1.reset([1; 20])).unwrap();
         assert_eq!(tree_1.dir_entries(), git.tree([1; 20]).dir_entries());
 
-        let ops_2 = tree_2.reset([2; 20]).collect().wait().unwrap();
+        let ops_2 = block_on(tree_2.reset([2; 20])).unwrap();
         assert_eq!(tree_2.dir_entries(), git.tree([2; 20]).dir_entries());
 
-        let fixup_ops_1 = tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
-        let fixup_ops_2 = tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
+        let fixup_ops_1 = block_on(tree_1.apply_ops(ops_2)).unwrap();
+        let fixup_ops_2 = block_on(tree_2.apply_ops(ops_1)).unwrap();
         assert!(fixup_ops_1.is_empty());
         assert!(fixup_ops_2.is_empty());
         assert_eq!(tree_1.entries(), tree_2.entries());
     }
 
-    impl WorkTree {
+    impl<G: GitProvider> WorkTree<G> {
         fn entries(&self) -> Vec<CursorEntry> {
-            self.epoch.as_ref().unwrap().borrow().entries()
+            self.0.borrow().epoch.as_ref().unwrap().entries()
         }
 
         fn dir_entries(&self) -> Vec<DirEntry> {
-            self.epoch.as_ref().unwrap().borrow().dir_entries()
+            self.0.borrow().epoch.as_ref().unwrap().dir_entries()
         }
     }
 
@@ -647,22 +577,23 @@ mod tests {
     }
 
     impl GitProvider for TestGitProvider {
-        fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>> {
-            Box::new(stream::iter_ok(
+        type BaseEntriesStream = stream::Iter<vec::IntoIter<Result<DirEntry, io::Error>>>;
+        type BaseTextFuture = future::Ready<Result<String, io::Error>>;
+
+        fn base_entries(&self, oid: Oid) -> Self::BaseEntriesStream {
+            stream::iter(
                 self.commits
                     .get(&oid)
                     .unwrap()
                     .entries()
                     .into_iter()
-                    .map(|entry| entry.into()),
-            ))
+                    .map(|entry| Ok(entry.into()))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            )
         }
 
-        fn base_text(
-            &self,
-            _oid: Oid,
-            _path: &Path,
-        ) -> Box<Future<Item = String, Error = io::Error>> {
+        fn base_text(&self, _oid: Oid, _path: &Path) -> Self::BaseTextFuture {
             unimplemented!()
         }
     }
