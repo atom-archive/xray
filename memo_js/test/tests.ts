@@ -40,18 +40,31 @@ suite("WorkTree", () => {
     assert.strictEqual(ops2.length, 0);
 
     const d = await tree1.openTextFile("d");
-    const c = await tree1.openTextFile("a/b/c");
+    const tree1BufferC = await tree1.openTextFile("a/b/c");
 
-    assert.strictEqual(tree1.getText(c), "abc");
-    //   const editOperation = tree1.edit(
-    //     buffer1,
-    //     [
-    //       { start: point(0, 0), end: point(0, 0) },
-    //       { start: point(0, 1), end: point(0, 2) },
-    //       { start: point(0, 3), end: point(0, 3) }
-    //     ],
-    //     "123"
-    //   );
+    assert.strictEqual(tree1.getText(tree1BufferC), "abc");
+    ops1.push(
+      tree1.edit(
+        tree1BufferC,
+        [
+          { start: point(0, 0), end: point(0, 0) },
+          { start: point(0, 1), end: point(0, 2) },
+          { start: point(0, 3), end: point(0, 3) }
+        ],
+        "123"
+      )
+    );
+    assert.strictEqual(tree1.getText(tree1BufferC), "123a123c123");
+
+    // const tree2VersionBeforeEdit = tree2.getVersion();
+    tree2.applyOps(ops1.slice(0, Infinity));
+    const tree2BufferC = await tree2.openTextFile("a/b/c");
+    assert.strictEqual(tree2.getText(tree2BufferC), "123a123c123");
+    // assert.deepEqual(tree2.changesSince(buffer1, tree2VersionBeforeEdit), [
+    //   { start: point(0, 0), end: point(0, 0), text: "123" },
+    //   { start: point(0, 4), end: point(0, 5), text: "123" },
+    //   { start: point(0, 8), end: point(0, 8), text: "123" }
+    // ]);
   });
 
   // test("basic API interaction", () => {
@@ -182,9 +195,9 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   return items;
 }
 
-// function point(row: number, column: number): memo.Point {
-//   return { row, column };
-// }
+function point(row: number, column: number): memo.Point {
+  return { row, column };
+}
 
 class TestGitProvider implements memo.GitProvider {
   private entries: Map<memo.Oid, ReadonlyArray<memo.BaseEntry>>;

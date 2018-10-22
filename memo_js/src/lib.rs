@@ -32,22 +32,6 @@ struct AsyncResult<T> {
     done: bool,
 }
 
-#[wasm_bindgen(module = "./support")]
-extern "C" {
-    pub type AsyncIteratorWrapper;
-
-    #[wasm_bindgen(method)]
-    fn next(this: &AsyncIteratorWrapper) -> js_sys::Promise;
-
-    pub type GitProviderWrapper;
-
-    #[wasm_bindgen(method, js_name = baseEntries)]
-    fn base_entries(this: &GitProviderWrapper, head: &str) -> AsyncIteratorWrapper;
-
-    #[wasm_bindgen(method, js_name = baseText)]
-    fn base_text(this: &GitProviderWrapper, head: &str, path: &str) -> js_sys::Promise;
-}
-
 struct AsyncIteratorToStream<T, E> {
     next_value: JsFuture,
     iterator: AsyncIteratorWrapper,
@@ -78,6 +62,28 @@ pub struct WorkTreeNewResult {
 pub struct WorkTreeCreateFileArgs {
     path: String,
     file_type: memo::FileType,
+}
+
+#[derive(Copy, Clone, Serialize, Deserialize)]
+struct EditRange {
+    start: memo::Point,
+    end: memo::Point,
+}
+
+#[wasm_bindgen(module = "./support")]
+extern "C" {
+    pub type AsyncIteratorWrapper;
+
+    #[wasm_bindgen(method)]
+    fn next(this: &AsyncIteratorWrapper) -> js_sys::Promise;
+
+    pub type GitProviderWrapper;
+
+    #[wasm_bindgen(method, js_name = baseEntries)]
+    fn base_entries(this: &GitProviderWrapper, head: &str) -> AsyncIteratorWrapper;
+
+    #[wasm_bindgen(method, js_name = baseText)]
+    fn base_text(this: &GitProviderWrapper, head: &str, path: &str) -> js_sys::Promise;
 }
 
 #[wasm_bindgen]
@@ -144,6 +150,25 @@ impl WorkTree {
         self.0
             .text(buffer_id.into_serde().unwrap())
             .map(|text| JsValue::from_str(&text.into_string()))
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    pub fn edit(
+        &self,
+        buffer_id: JsValue,
+        old_ranges: JsValue,
+        new_text: &str,
+    ) -> Result<JsValue, JsValue> {
+        let buffer_id = buffer_id.into_serde().unwrap();
+        let old_ranges = old_ranges
+            .into_serde::<Vec<EditRange>>()
+            .map_err(|error| JsValue::from_str(&error.to_string()))?
+            .into_iter()
+            .map(|EditRange { start, end }| start..end);
+
+        self.0
+            .edit_2d(buffer_id, old_ranges, new_text)
+            .map(|op| JsValue::from_serde(&Base64(op)).unwrap())
             .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 }
