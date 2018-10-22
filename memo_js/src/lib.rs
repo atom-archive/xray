@@ -111,6 +111,10 @@ impl WorkTree {
         })
     }
 
+    pub fn version(&self) -> JsValue {
+        JsValue::from_serde(&Base64(self.0.version())).unwrap()
+    }
+
     pub fn apply_ops(&mut self, ops: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
         let ops = ops
             .into_serde::<Vec<Base64<memo::Operation>>>()

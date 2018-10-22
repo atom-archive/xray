@@ -56,7 +56,7 @@ suite("WorkTree", () => {
     );
     assert.strictEqual(tree1.getText(tree1BufferC), "123a123c123");
 
-    // const tree2VersionBeforeEdit = tree2.getVersion();
+    const tree2VersionBeforeEdit = tree2.getVersion();
     tree2.applyOps(ops1.slice(0, Infinity));
     const tree2BufferC = await tree2.openTextFile("a/b/c");
     assert.strictEqual(tree2.getText(tree2BufferC), "123a123c123");

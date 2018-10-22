@@ -20,7 +20,7 @@ export async function init() {
 type Tagged<BaseType, TagName> = BaseType & { __tag: TagName };
 
 export type BufferId = Tagged<number, "BufferId">;
-export type Version = Tagged<object, "Version">;
+export type Version = Tagged<string, "Version">;
 export type Operation = Tagged<string, "Operation">;
 export type Point = { row: number; column: number };
 export type Range = { start: Point; end: Point };
@@ -44,6 +44,10 @@ export class WorkTree {
 
   constructor(tree: any) {
     this.tree = tree;
+  }
+
+  getVersion(): Version {
+    return this.tree.version()
   }
 
   applyOps(ops: Operation[]): AsyncIterable<Operation> {
