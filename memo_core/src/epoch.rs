@@ -1,6 +1,10 @@
 use crate::btree::{self, SeekBias};
 use crate::buffer::{self, Buffer, Point, Text};
 use crate::operation_queue::{self, OperationQueue};
+use crate::time;
+use crate::Error;
+use crate::Oid;
+use crate::ReplicaId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
@@ -10,10 +14,6 @@ use std::fmt;
 use std::ops::{Add, AddAssign, Range};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use crate::time;
-use crate::Error;
-use crate::Oid;
-use crate::ReplicaId;
 
 pub const ROOT_FILE_ID: FileId = FileId::Base(0);
 
@@ -508,6 +508,40 @@ impl Epoch {
         }
     }
 
+    pub fn create_file<N>(
+        &mut self,
+        parent_id: FileId,
+        name: N,
+        file_type: FileType,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<Operation, Error>
+    where
+        N: AsRef<OsStr>,
+    {
+        self.check_file_id(parent_id, Some(FileType::Directory))?;
+
+        let mut new_lamport_clock = *lamport_clock;
+        let mut new_epoch = self.clone();
+        let file_id = FileId::New(new_epoch.local_clock.tick());
+        let operation = Operation::InsertMetadata {
+            file_id,
+            file_type,
+            parent: Some((parent_id, Arc::new(name.as_ref().into()))),
+            local_timestamp: new_epoch.local_clock.tick(),
+            lamport_timestamp: new_lamport_clock.tick(),
+        };
+        let fixup_ops = new_epoch
+            .apply_ops_internal(Some(operation.clone()), &mut new_lamport_clock)
+            .unwrap();
+        if fixup_ops.is_empty() {
+            *lamport_clock = new_lamport_clock;
+            *self = new_epoch;
+            Ok(operation)
+        } else {
+            Err(Error::InvalidOperation)
+        }
+    }
+
     pub fn new_text_file(&mut self, lamport_clock: &mut time::Lamport) -> (FileId, Operation) {
         let file_id = FileId::New(self.local_clock.tick());
         let operation = Operation::InsertMetadata {
@@ -519,39 +553,6 @@ impl Epoch {
         };
         self.apply_op(operation.clone(), lamport_clock).unwrap();
         (file_id, operation)
-    }
-
-    pub fn create_dir<N>(
-        &mut self,
-        parent_id: FileId,
-        name: N,
-        lamport_clock: &mut time::Lamport,
-    ) -> Result<(FileId, Operation), Error>
-    where
-        N: AsRef<OsStr>,
-    {
-        self.check_file_id(parent_id, Some(FileType::Directory))?;
-
-        let mut new_lamport_clock = *lamport_clock;
-        let mut new_epoch = self.clone();
-        let file_id = FileId::New(new_epoch.local_clock.tick());
-        let operation = Operation::InsertMetadata {
-            file_id,
-            file_type: FileType::Directory,
-            parent: Some((parent_id, Arc::new(name.as_ref().into()))),
-            local_timestamp: new_epoch.local_clock.tick(),
-            lamport_timestamp: new_lamport_clock.tick(),
-        };
-        let fixup_ops = new_epoch
-            .apply_ops_internal(Some(operation.clone()), &mut new_lamport_clock)
-            .unwrap();
-        if fixup_ops.is_empty() {
-            *lamport_clock = new_lamport_clock;
-            *self = new_epoch;
-            Ok((file_id, operation))
-        } else {
-            Err(Error::InvalidOperation)
-        }
     }
 
     pub fn open_text_file<T>(
@@ -1521,7 +1522,9 @@ mod tests {
         let a = epoch.file_id("a").unwrap();
         let (file_1, _) = epoch.new_text_file(&mut lamport_clock);
         epoch.rename(file_1, a, "e", &mut lamport_clock).unwrap();
-        epoch.create_dir(a, "z", &mut lamport_clock).unwrap();
+        epoch
+            .create_file(a, "z", FileType::Directory, &mut lamport_clock)
+            .unwrap();
 
         let fixup_ops = epoch
             .append_base_entries(
@@ -1809,11 +1812,9 @@ mod tests {
         assert_eq!(changes[1].code_units, [b'y' as u16]);
 
         let dir_id = tree_1.file_id("dir").unwrap();
-        assert!(
-            tree_1
-                .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
-                .is_err()
-        );
+        assert!(tree_1
+            .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
+            .is_err());
     }
 
     #[test]
@@ -2052,27 +2053,22 @@ mod tests {
                         .select_file(rng, Some(FileType::Directory), true)
                         .unwrap();
 
-                    if rng.gen() {
-                        loop {
-                            match self.create_dir(parent_id, gen_name(rng), lamport_clock) {
-                                Ok((_, op)) => {
-                                    ops.push(op);
-                                    break;
-                                }
-                                Err(_error) => {}
+                    loop {
+                        match self.create_file(
+                            parent_id,
+                            gen_name(rng),
+                            if rng.gen() {
+                                FileType::Directory
+                            } else {
+                                FileType::Text
+                            },
+                            lamport_clock,
+                        ) {
+                            Ok(op) => {
+                                ops.push(op);
+                                break;
                             }
-                        }
-                    } else {
-                        let (file_id, op) = self.new_text_file(lamport_clock);
-                        ops.push(op);
-                        loop {
-                            match self.rename(file_id, parent_id, gen_name(rng), lamport_clock) {
-                                Ok(op) => {
-                                    ops.push(op);
-                                    break;
-                                }
-                                Err(_error) => {}
-                            }
+                            Err(_error) => {}
                         }
                     }
                 } else if k == 1 {

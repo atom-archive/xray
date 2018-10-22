@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::Cell;
 use std::io;
 use std::marker::PhantomData;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{future_to_promise, JsFuture};
@@ -43,6 +43,9 @@ extern "C" {
 
     #[wasm_bindgen(method, js_name = baseEntries)]
     fn base_entries(this: &GitProviderWrapper, head: &str) -> AsyncIteratorWrapper;
+
+    #[wasm_bindgen(method, js_name = baseText)]
+    fn base_text(this: &GitProviderWrapper, head: &str, path: &str) -> js_sys::Promise;
 }
 
 struct AsyncIteratorToStream<T, E> {
@@ -71,10 +74,10 @@ pub struct WorkTreeNewResult {
     operations: Option<StreamToAsyncIterator>,
 }
 
-#[derive(Serialize)]
-pub struct WorkTreeNewTextFileResult {
-    file_id: Base64<memo::FileId>,
-    operation: Base64<memo::Operation>,
+#[derive(Deserialize)]
+pub struct WorkTreeCreateFileArgs {
+    path: String,
+    file_type: memo::FileType,
 }
 
 #[wasm_bindgen]
@@ -90,7 +93,8 @@ impl WorkTree {
             base,
             start_ops.into_iter().map(|op| op.0),
             Rc::new(git),
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
         Ok(WorkTreeNewResult {
             tree: Some(WorkTree(tree)),
             operations: Some(StreamToAsyncIterator::new(
@@ -101,17 +105,46 @@ impl WorkTree {
         })
     }
 
-    pub fn new_text_file(&mut self) -> JsValue {
-        let (file_id, operation) = self.0.new_text_file();
-        JsValue::from_serde(&WorkTreeNewTextFileResult {
-            file_id: Base64(file_id),
-            operation: Base64(operation),
-        }).unwrap()
+    pub fn apply_ops(&mut self, ops: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
+        let ops = ops
+            .into_serde::<Vec<Base64<memo::Operation>>>()
+            .map(|ops| ops.into_iter().map(|Base64(op)| op.clone()))
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+
+        self.0
+            .apply_ops(ops)
+            .map(|fixup_ops| {
+                StreamToAsyncIterator::new(
+                    fixup_ops
+                        .map(|op| Base64(op))
+                        .map_err(|err| err.to_string()),
+                )
+            })
+            .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
-    pub fn open_text_file(&mut self, file_id: JsValue) -> js_sys::Promise {
-        let Base64(file_id) = file_id.into_serde().unwrap();
-        self.0.open_text_file(file_id)
+    pub fn create_file(&self, args: JsValue) -> Result<JsValue, JsValue> {
+        let WorkTreeCreateFileArgs { path, file_type } = args.into_serde().unwrap();
+        self.0
+            .create_file(&PathBuf::from(path), file_type)
+            .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    pub fn open_text_file(&mut self, path: String) -> js_sys::Promise {
+        future_to_promise(
+            self.0
+                .open_text_file(path)
+                .map(|buffer_id| JsValue::from_serde(&buffer_id).unwrap())
+                .map_err(|error| JsValue::from_str(&error.to_string())),
+        )
+    }
+
+    pub fn text(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
+        self.0
+            .text(buffer_id.into_serde().unwrap())
+            .map(|text| JsValue::from_str(&text.into_string()))
+            .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 }
 
@@ -173,8 +206,10 @@ impl StreamToAsyncIterator {
                 JsValue::from_serde(&AsyncResult {
                     value: Some(value),
                     done: false,
-                }).unwrap()
-            }).map_err(|error| JsValue::from_serde(&error).unwrap());
+                })
+                .unwrap()
+            })
+            .map_err(|error| JsValue::from_serde(&error).unwrap());
 
         StreamToAsyncIterator(Rc::new(Cell::new(Some(Box::new(js_value_stream)))))
     }
@@ -192,7 +227,8 @@ impl StreamToAsyncIterator {
                         JsValue::from_serde(&AsyncResult::<()> {
                             value: None,
                             done: true,
-                        }).unwrap(),
+                        })
+                        .unwrap(),
                     ))
                 }
                 Err((error, _)) => Err(error),
@@ -218,7 +254,15 @@ impl memo::GitProvider for GitProviderWrapper {
         oid: memo::Oid,
         path: &Path,
     ) -> Box<Future<Item = String, Error = io::Error>> {
-        unimplemented!()
+        Box::new(
+            JsFuture::from(GitProviderWrapper::base_text(
+                self,
+                &hex::encode(oid),
+                path.to_string_lossy().as_ref(),
+            ))
+            .map(|value| value.as_string().unwrap())
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.as_string().unwrap())),
+        )
     }
 }
 

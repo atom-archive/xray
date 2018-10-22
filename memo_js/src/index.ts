@@ -1,29 +1,36 @@
-export { BaseEntry, GitProvider, FileType, Oid } from './support';
-import { GitProvider, GitProviderWrapper, Oid } from './support';
-import { decode } from 'punycode';
+export { BaseEntry, GitProvider, FileType, Oid, Path } from "./support";
+import { GitProvider, GitProviderWrapper, FileType, Oid, Path } from "./support";
 
 let memo: any;
 
 export async function init() {
   memo = await import("../dist/memo_js");
-  memo.StreamToAsyncIterator.prototype[Symbol.asyncIterator] = function () {
+  memo.StreamToAsyncIterator.prototype[Symbol.asyncIterator] = function() {
     return this;
-  }
+  };
   return { WorkTree };
 }
 
 type Tagged<BaseType, TagName> = BaseType & { __tag: TagName };
 
-export type FileId = Tagged<string, "FileId">;
-export type BufferId = Tagged<string, "BufferId">;
+export type BufferId = Tagged<number, "BufferId">;
 export type Version = Tagged<object, "Version">;
 export type Operation = Tagged<string, "Operation">;
 
 export class WorkTree {
   private tree: any;
 
-  static create(replicaId: number, base: Oid, startOps: ReadonlyArray<Operation>, git: GitProvider): [WorkTree, AsyncIterable<Operation>] {
-    const result = memo.WorkTree.new(new GitProviderWrapper(git), { replica_id: replicaId, base, start_ops: startOps });
+  static create(
+    replicaId: number,
+    base: Oid,
+    startOps: ReadonlyArray<Operation>,
+    git: GitProvider
+  ): [WorkTree, AsyncIterable<Operation>] {
+    const result = memo.WorkTree.new(new GitProviderWrapper(git), {
+      replica_id: replicaId,
+      base,
+      start_ops: startOps
+    });
     return [new WorkTree(result.tree()), result.operations()];
   }
 
@@ -31,12 +38,22 @@ export class WorkTree {
     this.tree = tree;
   }
 
-  newTextFile(): { fileId: FileId; operation: Operation } {
-    const { file_id, operation } = this.tree.new_text_file();
-    return { fileId: file_id, operation };
+  applyOps(ops: Operation[]): AsyncIterable<Operation> {
+    return this.tree.apply_ops(ops);
   }
 
-  openTextFile(fileId: FileId): Promise<BufferId> {
-    return this.tree.open_text_file(fileId);
+  createFile(path: Path, fileType: FileType): Operation {
+    return this.tree.create_file({
+      path,
+      file_type: fileType
+    });
+  }
+
+  openTextFile(path: Path): Promise<BufferId> {
+    return this.tree.open_text_file(path);
+  }
+
+  getText(bufferId: BufferId): string {
+    return this.tree.text(bufferId);
   }
 }

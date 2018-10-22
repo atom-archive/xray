@@ -1369,7 +1369,6 @@ impl Iter {
         self
     }
 
-    #[cfg(test)]
     pub fn into_string(self) -> String {
         String::from_utf16_lossy(&self.collect::<Vec<u16>>())
     }

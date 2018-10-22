@@ -17,11 +17,11 @@ pub mod time;
 mod work_tree;
 
 pub use crate::buffer::{Buffer, Point};
-pub use crate::epoch::{Cursor, DirEntry, Epoch, FileId, FileStatus, FileType, ROOT_FILE_ID};
+pub use crate::epoch::{Cursor, DirEntry, Epoch, FileStatus, FileType, ROOT_FILE_ID};
+pub use crate::work_tree::{BufferId, GitProvider, Operation, WorkTree};
 use std::borrow::Cow;
 use std::fmt;
 use std::io;
-pub use crate::work_tree::{GitProvider, Operation, WorkTree};
 
 pub type ReplicaId = u64;
 pub type UserId = u64;

@@ -1,4 +1,5 @@
 export type Oid = string;
+export type Path = string;
 
 export interface BaseEntry {
     readonly depth: number;
@@ -13,6 +14,7 @@ export enum FileType {
 
 export interface GitProvider {
     baseEntries(oid: Oid): AsyncIterable<BaseEntry>;
+    baseText(oid: Oid, path: Path): Promise<string>;
 }
 
 export class GitProviderWrapper {
@@ -24,6 +26,10 @@ export class GitProviderWrapper {
 
     baseEntries(oid: Oid): AsyncIteratorWrapper<BaseEntry> {
         return new AsyncIteratorWrapper(this.git.baseEntries(oid)[Symbol.asyncIterator]());
+    }
+
+    baseText(oid: Oid, path: Path): Promise<string> {
+      return this.git.baseText(oid, path);
     }
 }
 

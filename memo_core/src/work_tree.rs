@@ -1,5 +1,5 @@
 use crate::buffer::{self, Point, Text};
-use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId};
+use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId, FileType};
 use crate::notify_cell::NotifyCell;
 use crate::{time, Error, Oid, ReplicaId};
 use futures::{future, stream, Future, Stream};
@@ -39,7 +39,7 @@ pub enum Operation {
     },
 }
 
-#[derive(Copy, Clone, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct BufferId(u32);
 
 impl WorkTree {
@@ -194,22 +194,7 @@ impl WorkTree {
         }
     }
 
-    pub fn new_text_file(&mut self) -> (FileId, Operation) {
-        let mut cur_epoch = self.cur_epoch_mut();
-        let (file_id, operation) = cur_epoch.new_text_file(&mut self.lamport_clock.borrow_mut());
-        (
-            file_id,
-            Operation::EpochOperation {
-                epoch_id: cur_epoch.id,
-                operation,
-            },
-        )
-    }
-
-    pub fn create_dir<N>(&mut self, path: &Path) -> Result<(FileId, Operation), Error>
-    where
-        N: AsRef<OsStr>,
-    {
+    pub fn create_file(&self, path: &Path, file_type: FileType) -> Result<Operation, Error> {
         let name = path
             .file_name()
             .ok_or(Error::InvalidPath("path has no file name".into()))?;
@@ -220,20 +205,61 @@ impl WorkTree {
             epoch::ROOT_FILE_ID
         };
         let epoch_id = cur_epoch.id;
-        let (file_id, operation) =
-            cur_epoch.create_dir(parent_id, name, &mut self.lamport_clock.borrow_mut())?;
-        Ok((
-            file_id,
-            Operation::EpochOperation {
-                epoch_id,
-                operation,
-            },
-        ))
+        let operation = cur_epoch.create_file(
+            parent_id,
+            name,
+            file_type,
+            &mut self.lamport_clock.borrow_mut(),
+        )?;
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
     }
 
-    pub fn open_text_file(&mut self, path: PathBuf) -> Box<Future<Item = BufferId, Error = Error>> {
+    pub fn rename(&self, old_path: &Path, new_path: &Path) -> Result<Operation, Error> {
+        let mut cur_epoch = self.cur_epoch_mut();
+        let file_id = cur_epoch.file_id(old_path)?;
+        let new_name = new_path
+            .file_name()
+            .ok_or(Error::InvalidPath("new path has no file name".into()))?;
+        let new_parent_id = if let Some(parent_path) = new_path.parent() {
+            cur_epoch.file_id(parent_path)?
+        } else {
+            epoch::ROOT_FILE_ID
+        };
+
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch.rename(
+            file_id,
+            new_parent_id,
+            new_name,
+            &mut self.lamport_clock.borrow_mut(),
+        )?;
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
+    }
+
+    pub fn remove(&self, path: &Path) -> Result<Operation, Error> {
+        let mut cur_epoch = self.cur_epoch_mut();
+        let file_id = cur_epoch.file_id(path)?;
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch.remove(file_id, &mut self.lamport_clock.borrow_mut())?;
+
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
+    }
+
+    pub fn open_text_file<P>(&mut self, path: P) -> Box<Future<Item = BufferId, Error = Error>>
+    where
+        P: Into<PathBuf>,
+    {
         Self::open_text_file_internal(
-            path,
+            path.into(),
             self.epoch.clone().unwrap(),
             self.git.clone(),
             self.buffers.clone(),
@@ -325,46 +351,6 @@ impl WorkTree {
             }
             Err(error) => Box::new(future::err(error)),
         }
-    }
-
-    pub fn rename<N>(&self, old_path: &Path, new_path: &Path) -> Result<Operation, Error>
-    where
-        N: AsRef<OsStr>,
-    {
-        let mut cur_epoch = self.cur_epoch_mut();
-        let file_id = cur_epoch.file_id(old_path)?;
-        let new_name = new_path
-            .file_name()
-            .ok_or(Error::InvalidPath("new path has no file name".into()))?;
-        let new_parent_id = if let Some(parent_path) = new_path.parent() {
-            cur_epoch.file_id(parent_path)?
-        } else {
-            epoch::ROOT_FILE_ID
-        };
-
-        let epoch_id = cur_epoch.id;
-        let operation = cur_epoch.rename(
-            file_id,
-            new_parent_id,
-            new_name,
-            &mut self.lamport_clock.borrow_mut(),
-        )?;
-        Ok(Operation::EpochOperation {
-            epoch_id,
-            operation,
-        })
-    }
-
-    pub fn remove(&self, path: &Path) -> Result<Operation, Error> {
-        let mut cur_epoch = self.cur_epoch_mut();
-        let file_id = cur_epoch.file_id(path)?;
-        let epoch_id = cur_epoch.id;
-        let operation = cur_epoch.remove(file_id, &mut self.lamport_clock.borrow_mut())?;
-
-        Ok(Operation::EpochOperation {
-            epoch_id,
-            operation,
-        })
     }
 
     pub fn edit<I, T>(

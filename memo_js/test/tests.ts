@@ -1,5 +1,5 @@
 import * as memo from "../src/index";
-import * as assert from 'assert';
+import * as assert from "assert";
 
 suite("WorkTree", () => {
   let WorkTree: typeof memo.WorkTree;
@@ -15,22 +15,44 @@ suite("WorkTree", () => {
     git.commit(OID_0, [
       { depth: 1, name: "a", type: memo.FileType.Directory },
       { depth: 2, name: "b", type: memo.FileType.Directory },
-      { depth: 3, name: "c", type: memo.FileType.Text }
+      { depth: 3, name: "c", type: memo.FileType.Text, text: "abc" }
     ]);
 
-    const [tree1, ops1] = WorkTree.create(1, OID_0, [], git);
-    const [tree2, ops2] = WorkTree.create(2, OID_0, await collect(ops1), git);
-    assert.strictEqual((await collect(ops2)).length, 0);
+    const [tree1, initOps1] = WorkTree.create(1, OID_0, [], git);
+    const [tree2, initOps2] = WorkTree.create(
+      2,
+      OID_0,
+      await collect(initOps1),
+      git
+    );
+    assert.strictEqual((await collect(initOps2)).length, 0);
 
-    const file1 = tree1.newTextFile();
-    const file2 = tree2.newTextFile();
+    const ops1 = [];
+    const ops2 = [];
+    ops1.push(tree1.createFile("d", memo.FileType.Text));
+    ops2.push(tree2.createFile("e", memo.FileType.Text));
 
-    await assert.rejects(() => tree1.openTextFile(file2.fileId));
+    await assert.rejects(() => tree2.openTextFile("d"));
 
-    //   tree1.applyOps([file2.operation]);
-    //   tree2.applyOps([file1.operation]);
+    ops1.push(...(await collect(tree1.applyOps(ops2.splice(0, Infinity)))));
+    ops2.push(...(await collect(tree2.applyOps(ops1.splice(0, Infinity)))));
+    assert.strictEqual(ops1.length, 0);
+    assert.strictEqual(ops2.length, 0);
 
-  })
+    const d = await tree1.openTextFile("d");
+    const c = await tree1.openTextFile("a/b/c");
+
+    assert.strictEqual(tree1.getText(c), "abc");
+    //   const editOperation = tree1.edit(
+    //     buffer1,
+    //     [
+    //       { start: point(0, 0), end: point(0, 0) },
+    //       { start: point(0, 1), end: point(0, 2) },
+    //       { start: point(0, 3), end: point(0, 3) }
+    //     ],
+    //     "123"
+    //   );
+  });
 
   // test("basic API interaction", () => {
   //   const rootFileId = WorkTree.getRootFileId();
@@ -148,6 +170,10 @@ suite("WorkTree", () => {
   // });
 });
 
+type BaseEntry =
+  | memo.BaseEntry & { type: memo.FileType.Directory }
+  | memo.BaseEntry & { type: memo.FileType.Text; text: string };
+
 async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   const items = [];
   for await (const item of iterable) {
@@ -161,18 +187,31 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 // }
 
 class TestGitProvider implements memo.GitProvider {
-  private commits: Map<memo.Oid, ReadonlyArray<memo.BaseEntry>>;
+  private entries: Map<memo.Oid, ReadonlyArray<memo.BaseEntry>>;
+  private text: Map<memo.Oid, Map<memo.Path, string>>;
 
   constructor() {
-    this.commits = new Map();
+    this.entries = new Map();
+    this.text = new Map();
   }
 
-  commit(oid: memo.Oid, entries: ReadonlyArray<memo.BaseEntry>) {
-    this.commits.set(oid, entries);
+  commit(oid: memo.Oid, entries: ReadonlyArray<BaseEntry>) {
+    this.entries.set(oid, entries);
+
+    const textByPath = new Map();
+    const path = [];
+    for (const entry of entries) {
+      path.length = entry.depth - 1;
+      path.push(entry.name);
+      if (entry.type === memo.FileType.Text) {
+        textByPath.set(path.join("/"), entry.text);
+      }
+    }
+    this.text.set(oid, textByPath);
   }
 
   async *baseEntries(oid: memo.Oid): AsyncIterable<memo.BaseEntry> {
-    const entries = this.commits.get(oid);
+    const entries = this.entries.get(oid);
     if (entries) {
       for (const entry of entries) {
         yield entry;
@@ -181,6 +220,19 @@ class TestGitProvider implements memo.GitProvider {
       throw new Error("yy");
     }
   }
-  // throw new Error("Method not implemented.");
-}
 
+  async baseText(oid: memo.Oid, path: memo.Path): Promise<string> {
+    const textByPath = this.text.get(oid);
+    if (textByPath != null) {
+      const text = textByPath.get(path);
+      if (text != null) {
+        await Promise.resolve();
+        return text;
+      } else {
+        throw new Error(`No text found at path ${path}`);
+      }
+    } else {
+      throw new Error(`No commit found with oid ${oid}`);
+    }
+  }
+}
