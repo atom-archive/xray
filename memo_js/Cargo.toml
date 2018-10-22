@@ -2,6 +2,7 @@
 name = "memo_js"
 version = "0.1.0"
 authors = ["Antonio Scandurra <as-cii@github.com>", "Nathan Sobo <nathan@github.com>"]
+edition = "2018"
 
 [lib]
 crate-type = ["cdylib"]
