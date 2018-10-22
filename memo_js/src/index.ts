@@ -24,6 +24,7 @@ export type Version = Tagged<string, "Version">;
 export type Operation = Tagged<string, "Operation">;
 export type Point = { row: number; column: number };
 export type Range = { start: Point; end: Point };
+export type Change = Range & { text: string };
 
 export class WorkTree {
   private tree: any;
@@ -71,5 +72,9 @@ export class WorkTree {
 
   edit(bufferId: BufferId, oldRanges: Range[], newText: string): Operation {
     return this.tree.edit(bufferId, oldRanges, newText);
+  }
+
+  changesSince(bufferId: BufferId, version: Version): Change[] {
+    return this.tree.changes_since(bufferId, version);
   }
 }

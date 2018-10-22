@@ -60,11 +60,11 @@ suite("WorkTree", () => {
     tree2.applyOps(ops1.slice(0, Infinity));
     const tree2BufferC = await tree2.openTextFile("a/b/c");
     assert.strictEqual(tree2.getText(tree2BufferC), "123a123c123");
-    // assert.deepEqual(tree2.changesSince(buffer1, tree2VersionBeforeEdit), [
-    //   { start: point(0, 0), end: point(0, 0), text: "123" },
-    //   { start: point(0, 4), end: point(0, 5), text: "123" },
-    //   { start: point(0, 8), end: point(0, 8), text: "123" }
-    // ]);
+    assert.deepEqual(tree2.changesSince(tree2BufferC, tree2VersionBeforeEdit), [
+      { start: point(0, 0), end: point(0, 0), text: "123" },
+      { start: point(0, 4), end: point(0, 5), text: "123" },
+      { start: point(0, 8), end: point(0, 8), text: "123" }
+    ]);
   });
 
   // test("basic API interaction", () => {

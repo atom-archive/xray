@@ -70,6 +70,13 @@ struct EditRange {
     end: memo::Point,
 }
 
+#[derive(Serialize)]
+struct Change {
+    start: memo::Point,
+    end: memo::Point,
+    text: String,
+}
+
 #[wasm_bindgen(module = "./support")]
 extern "C" {
     pub type AsyncIteratorWrapper;
@@ -173,6 +180,25 @@ impl WorkTree {
         self.0
             .edit_2d(buffer_id, old_ranges, new_text)
             .map(|op| JsValue::from_serde(&Base64(op)).unwrap())
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    pub fn changes_since(&self, buffer_id: JsValue, version: JsValue) -> Result<JsValue, JsValue> {
+        let buffer_id = buffer_id.into_serde().unwrap();
+        let Base64(version) = version.into_serde().unwrap();
+
+        self.0
+            .changes_since(buffer_id, version)
+            .map(|changes| {
+                let changes = changes
+                    .map(|change| Change {
+                        start: change.range.start,
+                        end: change.range.end,
+                        text: String::from_utf16_lossy(&change.code_units),
+                    })
+                    .collect::<Vec<_>>();
+                JsValue::from_serde(&changes).unwrap()
+            })
             .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 }
