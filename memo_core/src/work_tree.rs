@@ -1,7 +1,8 @@
 use crate::buffer::{self, Point, Text};
 use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId};
-use futures::{future, stream, Async, Future, Poll, Stream};
 use crate::notify_cell::NotifyCell;
+use crate::{time, Error, Oid, ReplicaId};
+use futures::{future, stream, Future, Stream};
 use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -10,10 +11,6 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use crate::time;
-use crate::Error;
-use crate::Oid;
-use crate::ReplicaId;
 
 pub trait GitProvider {
     fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>>;
@@ -23,7 +20,7 @@ pub trait GitProvider {
 pub struct WorkTree {
     epoch: Option<Rc<RefCell<Epoch>>>,
     buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
-    next_buffer_id: BufferId,
+    next_buffer_id: Rc<RefCell<BufferId>>,
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
     git: Rc<GitProvider>,
@@ -45,25 +42,6 @@ pub enum Operation {
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
 pub struct BufferId(u32);
 
-struct OpenTextFile {
-    buffer_id: BufferId,
-    path: PathBuf,
-    epoch: Rc<RefCell<Epoch>>,
-    git: Rc<GitProvider>,
-    buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
-    lamport_clock: Rc<RefCell<time::Lamport>>,
-    state: OpenTextFileState,
-}
-
-enum OpenTextFileState {
-    Start,
-    Loading {
-        file_id: FileId,
-        epoch_id: epoch::Id,
-        base_text_future: Box<Future<Item = String, Error = io::Error>>,
-    },
-}
-
 impl WorkTree {
     pub fn new<I>(
         replica_id: ReplicaId,
@@ -78,7 +56,7 @@ impl WorkTree {
         let mut tree = WorkTree {
             epoch: None,
             buffers: Rc::new(RefCell::new(HashMap::new())),
-            next_buffer_id: BufferId(0),
+            next_buffer_id: Rc::new(RefCell::new(BufferId(0))),
             deferred_ops: Rc::new(RefCell::new(HashMap::new())),
             lamport_clock: Rc::new(RefCell::new(time::Lamport::new(replica_id))),
             git,
@@ -253,94 +231,100 @@ impl WorkTree {
         ))
     }
 
-    pub fn open_text_file<T>(
-        &mut self,
-        path: PathBuf,
-    ) -> Box<Future<Item = BufferId, Error = Error>>
-    where
-        T: Into<Text>,
-    {
-        if let Some(buffer_id) = self.existing_buffer(&path) {
-            Box::new(future::ok(buffer_id))
-        } else {
-            Self::open_text_file_internal(
-                self.next_buffer_id(),
-                path,
-                self.epoch.clone().unwrap(),
-                self.git.clone(),
-                self.buffers.clone(),
-                self.lamport_clock.clone(),
-            )
-        }
+    pub fn open_text_file(&mut self, path: PathBuf) -> Box<Future<Item = BufferId, Error = Error>> {
+        Self::open_text_file_internal(
+            path,
+            self.epoch.clone().unwrap(),
+            self.git.clone(),
+            self.buffers.clone(),
+            self.next_buffer_id.clone(),
+            self.lamport_clock.clone(),
+        )
     }
 
     fn open_text_file_internal(
-        buffer_id: BufferId,
         path: PathBuf,
         epoch: Rc<RefCell<Epoch>>,
         git: Rc<GitProvider>,
         buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+        next_buffer_id: Rc<RefCell<BufferId>>,
         lamport_clock: Rc<RefCell<time::Lamport>>,
     ) -> Box<Future<Item = BufferId, Error = Error>> {
-        let mut epoch_ref = epoch.borrow_mut();
-        let epoch = epoch.clone();
-
-        let file_id = match epoch_ref.file_id(&path) {
-            Ok(file_id) => file_id,
-            Err(err) => return Box::new(future::err(err)),
-        };
-        if let Some(base_path) = epoch_ref.base_path(file_id) {
-            let epoch_id = epoch_ref.id;
+        if let Some(buffer_id) = Self::existing_buffer(&epoch, &buffers, &path) {
+            Box::new(future::ok(buffer_id))
+        } else {
+            let epoch_id = epoch.borrow().id;
             Box::new(
-                git.base_text(epoch_ref.head, &base_path)
-                    .map_err(|error| Error::IoError(error))
-                    .and_then(move |base_text| {
-                        let mut epoch_ref = epoch.borrow_mut();
-                        let epoch = epoch.clone();
-
-                        if epoch_ref.id == epoch_id {
-                            if let Err(error) = epoch_ref.open_text_file(
+                Self::base_text(&path, epoch.as_ref(), git.as_ref()).and_then(
+                    move |(file_id, base_text)| {
+                        if let Some(buffer_id) = Self::existing_buffer(&epoch, &buffers, &path) {
+                            Box::new(future::ok(buffer_id))
+                        } else if epoch.borrow().id == epoch_id {
+                            match epoch.borrow_mut().open_text_file(
                                 file_id,
                                 base_text.as_str(),
                                 &mut lamport_clock.borrow_mut(),
                             ) {
-                                Box::new(future::err(error))
-                            } else {
-                                Box::new(future::ok(buffer_id))
+                                Ok(()) => {
+                                    let buffer_id = *next_buffer_id.borrow();
+                                    next_buffer_id.borrow_mut().0 += 1;
+                                    buffers.borrow_mut().insert(buffer_id, file_id);
+                                    Box::new(future::ok(buffer_id))
+                                }
+                                Err(error) => Box::new(future::err(error)),
                             }
                         } else {
                             Self::open_text_file_internal(
-                                buffer_id,
                                 path,
                                 epoch,
                                 git,
                                 buffers,
+                                next_buffer_id,
                                 lamport_clock,
                             )
                         }
-                    }),
+                    },
+                ),
             )
-        } else {
-            if let Err(error) =
-                epoch_ref.open_text_file(file_id, "", &mut lamport_clock.borrow_mut())
-            {
-                Box::new(future::err(error))
-            } else {
-                Box::new(future::ok(buffer_id))
-            }
         }
     }
 
-    fn existing_buffer(&self, path: &Path) -> Option<BufferId> {
-        let cur_epoch = self.cur_epoch();
-        for (buffer_id, file_id) in self.buffers.borrow().iter() {
-            if let Some(existing_path) = cur_epoch.path(*file_id) {
+    fn existing_buffer(
+        epoch: &Rc<RefCell<Epoch>>,
+        buffers: &Rc<RefCell<HashMap<BufferId, FileId>>>,
+        path: &Path,
+    ) -> Option<BufferId> {
+        let epoch = epoch.borrow();
+        for (buffer_id, file_id) in buffers.borrow().iter() {
+            if let Some(existing_path) = epoch.path(*file_id) {
                 if path == existing_path {
                     return Some(*buffer_id);
                 }
             }
         }
         None
+    }
+
+    fn base_text(
+        path: &Path,
+        epoch: &RefCell<Epoch>,
+        git: &GitProvider,
+    ) -> Box<Future<Item = (FileId, String), Error = Error>> {
+        let epoch = epoch.borrow();
+        match epoch.file_id(&path) {
+            Ok(file_id) => {
+                if let Some(base_path) = epoch.base_path(file_id) {
+                    Box::new(
+                        git.base_text(epoch.head, &base_path)
+                            .map_err(|err| Error::IoError(err))
+                            .map(move |text| (file_id, text)),
+                    )
+                } else {
+                    Box::new(future::ok((file_id, String::new())))
+                }
+            }
+            Err(error) => Box::new(future::err(error)),
+        }
     }
 
     pub fn rename<N>(&self, old_path: &Path, new_path: &Path) -> Result<Operation, Error>
@@ -480,20 +464,6 @@ impl WorkTree {
         self.lamport_clock.borrow().replica_id
     }
 
-    fn parent_id<'a>(&self, epoch: &Epoch, path: &'a Path) -> Result<FileId, Error> {
-        if let Some(parent_path) = path.parent() {
-            epoch.file_id(parent_path)
-        } else {
-            Ok(epoch::ROOT_FILE_ID)
-        }
-    }
-
-    fn next_buffer_id(&mut self) -> BufferId {
-        let buffer_id = self.next_buffer_id;
-        self.next_buffer_id.0 += 1;
-        buffer_id
-    }
-
     fn buffer_file_id(&self, buffer_id: BufferId) -> Result<FileId, Error> {
         self.buffers
             .borrow()
@@ -514,72 +484,6 @@ impl Operation {
                 epoch_id,
                 operation,
             })
-    }
-}
-
-// This future is implemented as a hand-rolled state machine. If the path being opened corresponds
-// to a *new* file in the current epoch, we can open the file immediately with an empty base text.
-// If the file existed in the base commit, we use the GitProvider to load its base text
-// asynchronously. When the base text is done loading, we check that the current epoch did not
-// change during loading. If it didn't change, we proceed to open the buffer. If It did change, we
-// return to the Start state and try again.
-impl Future for OpenTextFile {
-    type Item = BufferId;
-    type Error = Error;
-
-    fn poll(&mut self) -> Poll<BufferId, Error> {
-        let mut epoch = self.epoch.borrow_mut();
-
-        loop {
-            let file_id;
-            let mut base_text = None;
-            let mut next_state = None;
-
-            match &mut self.state {
-                OpenTextFileState::Start => {
-                    file_id = epoch.file_id(&self.path)?;
-                    if let Some(base_path) = epoch.base_path(file_id) {
-                        next_state = Some(OpenTextFileState::Loading {
-                            file_id,
-                            epoch_id: epoch.id,
-                            base_text_future: self.git.base_text(epoch.head, &base_path),
-                        });
-                    } else {
-                        base_text = Some("".to_owned());
-                    }
-                }
-                OpenTextFileState::Loading {
-                    file_id: loaded_file_id,
-                    epoch_id,
-                    base_text_future,
-                } => {
-                    file_id = *loaded_file_id;
-                    if epoch.id == *epoch_id {
-                        match base_text_future.poll() {
-                            Ok(Async::Ready(text)) => base_text = Some(text),
-                            Ok(Async::NotReady) => return Ok(Async::NotReady),
-                            Err(error) => return Err(Error::IoError(error)),
-                        }
-                    } else {
-                        next_state = Some(OpenTextFileState::Start);
-                    }
-                }
-            }
-
-            if let Some(next_state) = next_state {
-                self.state = next_state;
-            }
-
-            if let Some(base_text) = base_text {
-                epoch.open_text_file(
-                    file_id,
-                    base_text.as_str(),
-                    &mut self.lamport_clock.borrow_mut(),
-                )?;
-                self.buffers.borrow_mut().insert(self.buffer_id, file_id);
-                return Ok(Async::Ready(self.buffer_id));
-            }
-        }
     }
 }
 

@@ -2582,7 +2582,7 @@ mod tests {
             let mut lamport_clocks = Vec::new();
             let mut queues: Vec<Vec<Operation>> = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new(base_text.as_str());
+                let buffer = Buffer::new(base_text.as_str());
                 buffers.push(buffer);
                 local_clocks.push(time::Local::new(i + 1));
                 lamport_clocks.push(time::Lamport::new(i + 1));
