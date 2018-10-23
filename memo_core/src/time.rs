@@ -29,7 +29,7 @@ pub struct Lamport {
 }
 
 impl Local {
-    pub fn new(replica_id: u64) -> Self {
+    pub fn new(replica_id: ReplicaId) -> Self {
         Self { replica_id, seq: 1 }
     }
 

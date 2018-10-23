@@ -23,7 +23,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io;
 
-pub type ReplicaId = u64;
+pub type ReplicaId = u32;
 pub type UserId = u64;
 pub type Oid = [u8; 20];
 
