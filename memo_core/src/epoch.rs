@@ -21,7 +21,7 @@ pub type Id = time::Lamport;
 #[derive(Clone)]
 pub struct Epoch {
     pub id: Id,
-    pub head: Oid,
+    pub head: Option<Oid>,
     base_entries_next_id: u64,
     base_entries_stack: Vec<FileId>,
     metadata: btree::Tree<Metadata>,
@@ -180,7 +180,7 @@ enum TextFile {
 }
 
 impl Epoch {
-    pub fn new(replica_id: ReplicaId, id: Id, head: Oid) -> Self {
+    pub fn new(replica_id: ReplicaId, id: Id, head: Option<Oid>) -> Self {
         Self {
             id,
             head,
@@ -1172,6 +1172,15 @@ impl Operation {
             } => *lamport_timestamp,
         }
     }
+
+    #[cfg(test)]
+    fn file_id(&self) -> FileId {
+        match self {
+            Operation::InsertMetadata { file_id, .. } => *file_id,
+            Operation::UpdateParent { child_id, .. } => *child_id,
+            Operation::EditText { file_id, .. } => *file_id,
+        }
+    }
 }
 
 impl operation_queue::Operation for Operation {
@@ -1812,11 +1821,9 @@ mod tests {
         assert_eq!(changes[1].code_units, [b'y' as u16]);
 
         let dir_id = tree_1.file_id("dir").unwrap();
-        assert!(
-            tree_1
-                .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
-                .is_err()
-        );
+        assert!(tree_1
+            .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
+            .is_err());
     }
 
     #[test]
@@ -2007,7 +2014,7 @@ mod tests {
 
     impl Epoch {
         pub fn with_replica_id(replica_id: ReplicaId) -> Self {
-            Epoch::new(replica_id, Id::default(), [0; 20])
+            Epoch::new(replica_id, Id::default(), None)
         }
 
         pub fn entries(&self) -> Vec<CursorEntry> {
@@ -2056,21 +2063,27 @@ mod tests {
                         .unwrap();
 
                     loop {
-                        match self.create_file(
-                            parent_id,
-                            gen_name(rng),
-                            if rng.gen() {
-                                FileType::Directory
-                            } else {
-                                FileType::Text
-                            },
-                            lamport_clock,
-                        ) {
+                        let name = gen_name(rng);
+                        let file_type = if rng.gen() {
+                            FileType::Directory
+                        } else {
+                            FileType::Text
+                        };
+
+                        match self.create_file(parent_id, name, file_type, lamport_clock) {
                             Ok(op) => {
+                                if file_type == FileType::Text {
+                                    let base_text_len = rng.gen_range(0, 10);
+                                    let base_text: String =
+                                        rng.gen_ascii_chars().take(base_text_len).collect();
+                                    self.open_text_file(op.file_id(), base_text, lamport_clock)
+                                        .unwrap();
+                                }
+
                                 ops.push(op);
                                 break;
                             }
-                            Err(_error) => {}
+                            Err(_) => {}
                         }
                     }
                 } else if k == 1 {

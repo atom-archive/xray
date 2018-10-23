@@ -1,5 +1,8 @@
 use crate::btree::{self, SeekBias};
 use crate::operation_queue::{self, OperationQueue};
+use crate::time;
+use crate::ReplicaId;
+use crate::UserId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::cell::RefCell;
@@ -9,9 +12,6 @@ use std::iter;
 use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
 use std::sync::Arc;
-use crate::time;
-use crate::ReplicaId;
-use crate::UserId;
 
 type SelectionSetVersion = usize;
 
@@ -1763,6 +1763,12 @@ impl Text {
 impl<'a> From<&'a str> for Text {
     fn from(s: &'a str) -> Self {
         Self::new(s.encode_utf16().collect())
+    }
+}
+
+impl From<String> for Text {
+    fn from(s: String) -> Self {
+        Self::from(s.as_str())
     }
 }
 
