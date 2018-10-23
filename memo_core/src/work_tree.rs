@@ -1,4 +1,4 @@
-use crate::buffer::{self, Point, Text};
+use crate::buffer::{self, Change, Point, Text};
 use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId, FileType};
 use crate::{time, Error, Oid, ReplicaId};
 use futures::{future, stream, Async, Future, Poll, Stream};
@@ -16,6 +16,10 @@ pub trait GitProvider {
     fn base_text(&self, oid: Oid, path: &Path) -> Box<Future<Item = String, Error = io::Error>>;
 }
 
+pub trait ChangeObserver {
+    fn text_changed(&self, buffer_id: BufferId, changes: Box<Iterator<Item = Change>>);
+}
+
 #[derive(Clone)]
 pub struct WorkTree {
     epoch: Option<Rc<RefCell<Epoch>>>,
@@ -24,6 +28,7 @@ pub struct WorkTree {
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
     git: Rc<GitProvider>,
+    observer: Option<Rc<ChangeObserver>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -69,6 +74,7 @@ impl WorkTree {
         base: Option<Oid>,
         ops: I,
         git: Rc<GitProvider>,
+        observer: Option<Rc<ChangeObserver>>,
     ) -> Result<(WorkTree, Box<Stream<Item = Operation, Error = Error>>), Error>
     where
         I: 'static + IntoIterator<Item = Operation>,
@@ -81,6 +87,7 @@ impl WorkTree {
             deferred_ops: Rc::new(RefCell::new(HashMap::new())),
             lamport_clock: Rc::new(RefCell::new(time::Lamport::new(replica_id))),
             git,
+            observer,
         };
 
         let ops = if ops.peek().is_none() {
@@ -675,7 +682,7 @@ mod tests {
         const COMMIT_1: [u8; 20] = [1; 20];
         const COMMIT_2: [u8; 20] = [2; 20];
 
-        let git = TestGitProvider::new();
+        let git = Rc::new(TestGitProvider::new());
         let mut base_tree = WorkTree::empty();
         base_tree.create_file("a", FileType::Text).unwrap();
         let a_base = base_tree.open_text_file("a").wait().unwrap();
@@ -691,10 +698,24 @@ mod tests {
         base_tree.create_file("b/c", FileType::Text).unwrap();
         git.commit(COMMIT_2, base_tree.clone());
 
-        let git = Rc::new(git);
-        let (mut tree_1, ops_1) = WorkTree::new(1, Some(COMMIT_0), vec![], git.clone()).unwrap();
-        let ops_1 = ops_1.collect().wait().unwrap();
-        let (mut tree_2, ops_2) = WorkTree::new(2, Some(COMMIT_0), ops_1, git.clone()).unwrap();
+        let observer_1 = Rc::new(TestChangeObserver::new());
+        let observer_2 = Rc::new(TestChangeObserver::new());
+        let (mut tree_1, ops_1) = WorkTree::new(
+            1,
+            Some(COMMIT_0),
+            vec![],
+            git.clone(),
+            Some(observer_1.clone()),
+        )
+        .unwrap();
+        let (mut tree_2, ops_2) = WorkTree::new(
+            2,
+            Some(COMMIT_0),
+            ops_1.collect().wait().unwrap(),
+            git.clone(),
+            Some(observer_2.clone()),
+        )
+        .unwrap();
         assert!(ops_2.wait().next().is_none());
 
         assert_eq!(tree_1.dir_entries(), git.tree(COMMIT_0).dir_entries());
@@ -702,6 +723,8 @@ mod tests {
 
         let a_1 = tree_1.open_text_file("a").wait().unwrap();
         let a_2 = tree_2.open_text_file("a").wait().unwrap();
+        observer_1.opened_buffer(a_1, &tree_1);
+        observer_2.opened_buffer(a_2, &tree_2);
         assert_eq!(
             tree_1.text_as_string(a_1),
             git.tree(COMMIT_0).text_as_string(a_base)
@@ -736,7 +759,7 @@ mod tests {
     impl WorkTree {
         fn empty() -> Self {
             let (tree, _) =
-                Self::new(999, None, Vec::new(), Rc::new(TestGitProvider::new())).unwrap();
+                Self::new(999, None, Vec::new(), Rc::new(TestGitProvider::new()), None).unwrap();
             tree
         }
 
@@ -755,6 +778,12 @@ mod tests {
 
     struct TestGitProvider {
         commits: RefCell<HashMap<Oid, WorkTree>>,
+    }
+
+    struct TestChangeObserver {
+        buffers: RefCell<HashMap<BufferId, buffer::Buffer>>,
+        local_clock: RefCell<time::Local>,
+        lamport_clock: RefCell<time::Lamport>,
     }
 
     impl TestGitProvider {
@@ -811,6 +840,42 @@ mod tests {
                     })
                     .into_future(),
             )
+        }
+    }
+
+    impl TestChangeObserver {
+        fn new() -> Self {
+            Self {
+                buffers: RefCell::new(HashMap::new()),
+                local_clock: RefCell::new(time::Local::default()),
+                lamport_clock: RefCell::new(time::Lamport::default()),
+            }
+        }
+
+        fn opened_buffer(&self, buffer_id: BufferId, tree: &WorkTree) {
+            let text = tree.text(buffer_id).unwrap().collect::<Vec<u16>>();
+            self.buffers
+                .borrow_mut()
+                .insert(buffer_id, buffer::Buffer::new(text));
+        }
+
+        fn text(&self, buffer_id: BufferId) -> String {
+            self.buffers.borrow().get(&buffer_id).unwrap().to_string()
+        }
+    }
+
+    impl ChangeObserver for TestChangeObserver {
+        fn text_changed(&self, buffer_id: BufferId, changes: Box<Iterator<Item = Change>>) {
+            if let Some(buffer) = self.buffers.borrow_mut().get_mut(&buffer_id) {
+                for change in changes {
+                    buffer.edit_2d(
+                        Some(change.range),
+                        change.code_units,
+                        &mut self.local_clock.borrow_mut(),
+                        &mut self.lamport_clock.borrow_mut(),
+                    );
+                }
+            }
         }
     }
 }
