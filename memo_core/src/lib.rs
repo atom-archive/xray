@@ -11,7 +11,6 @@ extern crate smallvec;
 mod btree;
 mod buffer;
 mod epoch;
-mod notify_cell;
 mod operation_queue;
 pub mod time;
 mod work_tree;

@@ -1,6 +1,5 @@
 use crate::buffer::{self, Point, Text};
 use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId, FileType};
-use crate::notify_cell::NotifyCell;
 use crate::{time, Error, Oid, ReplicaId};
 use futures::{future, stream, Future, Stream};
 use std::cell::{Ref, RefCell, RefMut};
@@ -23,7 +22,6 @@ pub struct WorkTree {
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
     git: Rc<GitProvider>,
-    updates: NotifyCell<()>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -59,7 +57,6 @@ impl WorkTree {
             deferred_ops: Rc::new(RefCell::new(HashMap::new())),
             lamport_clock: Rc::new(RefCell::new(time::Lamport::new(replica_id))),
             git,
-            updates: NotifyCell::new(()),
         };
 
         let ops = if ops.peek().is_none() {
