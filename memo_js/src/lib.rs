@@ -148,7 +148,7 @@ impl WorkTree {
     pub fn create_file(&self, path: String, file_type: JsValue) -> Result<JsValue, JsValue> {
         let file_type = file_type.into_serde().unwrap();
         self.0
-            .create_file(&PathBuf::from(path), file_type)
+            .create_file(&path, file_type)
             .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
             .map_js_err()
     }
