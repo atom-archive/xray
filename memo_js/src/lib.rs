@@ -105,7 +105,7 @@ impl WorkTree {
         start_ops: JsValue,
     ) -> Result<WorkTreeNewResult, JsValue> {
         let HexOid(base) = base.into_serde().map_js_err()?;
-        let start_ops: Vec<Base64<memo::Operation>> = start_ops.into_serde().unwrap();
+        let start_ops: Vec<Base64<memo::Operation>> = start_ops.into_serde().map_js_err()?;
         let (tree, operations) = memo::WorkTree::new(
             replica_id,
             base,
@@ -146,7 +146,7 @@ impl WorkTree {
     }
 
     pub fn create_file(&self, path: String, file_type: JsValue) -> Result<JsValue, JsValue> {
-        let file_type = file_type.into_serde().unwrap();
+        let file_type = file_type.into_serde().map_js_err()?;
         self.0
             .create_file(&path, file_type)
             .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
@@ -189,7 +189,7 @@ impl WorkTree {
         old_ranges: JsValue,
         new_text: &str,
     ) -> Result<JsValue, JsValue> {
-        let buffer_id = buffer_id.into_serde().unwrap();
+        let buffer_id = buffer_id.into_serde().map_js_err()?;
         let old_ranges = old_ranges
             .into_serde::<Vec<EditRange>>()
             .map_js_err()?

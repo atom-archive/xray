@@ -10,7 +10,6 @@ use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::ops::{Add, AddAssign, Range};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -690,11 +689,12 @@ impl Epoch {
 
     pub fn file_id<P>(&self, path: P) -> Result<FileId, Error>
     where
-        P: AsRef<Path> + fmt::Debug,
+        P: AsRef<Path>,
     {
+        let path = path.as_ref();
         let mut cursor = self.child_refs.cursor();
         let mut parent_id = ROOT_FILE_ID;
-        for component in path.as_ref().components() {
+        for component in path.components() {
             match component {
                 Component::Normal(name) => {
                     let name = Arc::new(name.into());
@@ -1812,9 +1812,11 @@ mod tests {
         assert_eq!(changes[1].code_units, [b'y' as u16]);
 
         let dir_id = tree_1.file_id("dir").unwrap();
-        assert!(tree_1
-            .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
-            .is_err());
+        assert!(
+            tree_1
+                .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
+                .is_err()
+        );
     }
 
     #[test]

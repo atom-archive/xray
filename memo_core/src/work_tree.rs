@@ -1,11 +1,12 @@
 use crate::buffer::{self, Point, Text};
 use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId, FileType};
 use crate::{time, Error, Oid, ReplicaId};
-use futures::{future, stream, Future, Stream};
+use futures::{future, stream, Async, Future, Poll, Stream};
 use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io;
+use std::mem;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -38,6 +39,28 @@ pub enum Operation {
 
 #[derive(Copy, Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct BufferId(u32);
+
+enum MaybeDone<F: Future> {
+    Pending(F),
+    Done(Result<F::Item, F::Error>),
+}
+
+struct BaseTextRequest {
+    future: MaybeDone<Box<Future<Item = String, Error = io::Error>>>,
+    path: PathBuf,
+}
+
+struct SwitchEpoch {
+    to_assign: Rc<RefCell<Epoch>>,
+    fixup_ops: Vec<Operation>,
+    cur_epoch: Rc<RefCell<Epoch>>,
+    last_seen: epoch::Id,
+    base_text_requests: HashMap<BufferId, Option<BaseTextRequest>>,
+    buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+    deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
+    lamport_clock: Rc<RefCell<time::Lamport>>,
+    git: Rc<GitProvider>,
+}
 
 impl WorkTree {
     pub fn new<I>(
@@ -121,57 +144,51 @@ impl WorkTree {
 
     fn start_epoch(
         &mut self,
-        epoch_id: epoch::Id,
-        head: Oid,
+        new_epoch_id: epoch::Id,
+        new_head: Oid,
     ) -> Box<Stream<Item = Operation, Error = Error>> {
         if self
             .epoch
             .as_ref()
-            .map_or(true, |e| epoch_id > e.borrow().id)
+            .map_or(true, |e| new_epoch_id > e.borrow().id)
         {
-            let epoch = Rc::new(RefCell::new(Epoch::new(self.replica_id(), epoch_id, head)));
-            if self.epoch.is_none() {
-                self.epoch = Some(epoch.clone());
-            }
-            let cur_epoch = self.epoch.clone().unwrap();
-            let deferred_ops = self.deferred_ops.clone();
-            let lamport_clock_1 = self.lamport_clock.clone();
-            let lamport_clock_2 = self.lamport_clock.clone();
+            let new_epoch = Rc::new(RefCell::new(Epoch::new(
+                self.replica_id(),
+                new_epoch_id,
+                new_head,
+            )));
 
-            let epoch_1 = epoch.clone();
+            let lamport_clock = self.lamport_clock.clone();
+            let new_epoch_clone = new_epoch.clone();
             let load_base_entries = self
                 .git
-                .base_entries(head)
+                .base_entries(new_head)
                 .map_err(|err| Error::IoError(err))
                 .chunks(500)
                 .and_then(move |base_entries| {
-                    let fixup_ops = epoch_1
+                    let fixup_ops = new_epoch_clone
                         .borrow_mut()
-                        .append_base_entries(base_entries, &mut lamport_clock_1.borrow_mut())?;
-                    Ok(stream::iter_ok(Operation::stamp(epoch_id, fixup_ops)))
+                        .append_base_entries(base_entries, &mut lamport_clock.borrow_mut())?;
+                    Ok(stream::iter_ok(Operation::stamp(new_epoch_id, fixup_ops)))
                 })
                 .flatten();
 
-            let epoch_2 = epoch.clone();
-            let assign_epoch = future::lazy(move || {
-                let mut fixup_ops = Vec::new();
-                if epoch_id > cur_epoch.borrow().id {
-                    cur_epoch.swap(epoch_2.as_ref());
-                    if let Some(ops) = deferred_ops.borrow_mut().remove(&epoch_id) {
-                        fixup_ops = cur_epoch
-                            .borrow_mut()
-                            .apply_ops(ops, &mut lamport_clock_2.borrow_mut())?;
-                    }
-                    deferred_ops.borrow_mut().retain(|id, _| *id > epoch_id);
-                }
-
-                Ok(Box::new(stream::iter_ok(Operation::stamp(
-                    epoch_id, fixup_ops,
-                ))))
-            })
-            .flatten_stream();
-
-            Box::new(load_base_entries.chain(assign_epoch))
+            if let Some(cur_epoch) = self.epoch.clone() {
+                let switch_epoch = SwitchEpoch::new(
+                    new_epoch,
+                    cur_epoch,
+                    self.buffers.clone(),
+                    self.deferred_ops.clone(),
+                    self.lamport_clock.clone(),
+                    self.git.clone(),
+                )
+                .then(|fixup_ops| Ok(stream::iter_ok(fixup_ops?)))
+                .flatten_stream();
+                Box::new(load_base_entries.chain(switch_epoch))
+            } else {
+                self.epoch = Some(new_epoch.clone());
+                Box::new(load_base_entries)
+            }
         } else {
             Box::new(stream::empty())
         }
@@ -480,6 +497,161 @@ impl Operation {
                 epoch_id,
                 operation,
             })
+    }
+}
+
+impl SwitchEpoch {
+    fn new(
+        to_assign: Rc<RefCell<Epoch>>,
+        cur_epoch: Rc<RefCell<Epoch>>,
+        buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+        deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
+        lamport_clock: Rc<RefCell<time::Lamport>>,
+        git: Rc<GitProvider>,
+    ) -> Self {
+        let last_seen = cur_epoch.borrow().id;
+        Self {
+            to_assign,
+            fixup_ops: Vec::new(),
+            cur_epoch,
+            last_seen,
+            base_text_requests: HashMap::new(),
+            buffers,
+            deferred_ops,
+            lamport_clock,
+            git,
+        }
+    }
+}
+
+impl Future for SwitchEpoch {
+    type Item = Vec<Operation>;
+    type Error = Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        let mut buffers = self.buffers.borrow_mut();
+        let mut cur_epoch = self.cur_epoch.borrow_mut();
+        let mut to_assign = self.to_assign.borrow_mut();
+        let mut deferred_ops = self.deferred_ops.borrow_mut();
+        let mut lamport_clock = self.lamport_clock.borrow_mut();
+
+        if to_assign.id > cur_epoch.id {
+            if self.last_seen != cur_epoch.id {
+                self.last_seen = cur_epoch.id;
+                self.base_text_requests.clear();
+            }
+
+            for (buffer_id, file_id) in buffers.iter() {
+                let path = cur_epoch.path(*file_id);
+                let should_load = if let Some(request) = self.base_text_requests.get(&buffer_id) {
+                    path.as_ref() == request.as_ref().map(|r| &r.path)
+                } else {
+                    true
+                };
+
+                if should_load {
+                    if path
+                        .as_ref()
+                        .map_or(false, |path| to_assign.file_id(path).is_ok())
+                    {
+                        let path = path.unwrap();
+                        let base_text = self.git.base_text(to_assign.head, &path);
+                        self.base_text_requests.insert(
+                            *buffer_id,
+                            Some(BaseTextRequest {
+                                future: MaybeDone::Pending(base_text),
+                                path,
+                            }),
+                        );
+                    } else {
+                        self.base_text_requests.insert(*buffer_id, None);
+                    }
+                }
+            }
+
+            let mut is_done = true;
+            for request in self.base_text_requests.values_mut() {
+                if let Some(request) = request {
+                    request.future.poll();
+                    is_done = is_done && request.future.is_done();
+                }
+            }
+
+            if is_done {
+                for (buffer_id, request) in self.base_text_requests.drain() {
+                    let file_id;
+                    let base_text;
+                    if let Some(request) = request {
+                        base_text = request.future.take_result().unwrap()?;
+                        file_id = to_assign.file_id(request.path).unwrap();
+                    } else {
+                        // TODO: This may be okay for now, but I think we should take a smarter
+                        // approach, where the site which initiates the reset transmits a mapping of
+                        // previous file ids to new file ids. Then, when receiving a new epoch, we will
+                        // check if we can map the open buffer to a file id and, only if we can't, we
+                        // will resort to path-based mapping or to creating a completely new file id
+                        // for untitled buffers.
+                        let (new_file_id, operation) = to_assign.new_text_file(&mut lamport_clock);
+                        file_id = new_file_id;
+                        base_text = String::new();
+                        self.fixup_ops.push(Operation::EpochOperation {
+                            epoch_id: to_assign.id,
+                            operation,
+                        });
+                    }
+
+                    to_assign.open_text_file(file_id, base_text.as_str(), &mut lamport_clock)?;
+
+                    // Okay now we perform the diff.
+                    buffers.insert(buffer_id, file_id);
+                }
+
+                let mut fixup_ops = Vec::new();
+                if let Some(ops) = deferred_ops.remove(&to_assign.id) {
+                    fixup_ops.extend(Operation::stamp(
+                        to_assign.id,
+                        to_assign.apply_ops(ops, &mut lamport_clock)?,
+                    ));
+                }
+                deferred_ops.retain(|id, _| *id > to_assign.id);
+
+                mem::swap(&mut *cur_epoch, &mut *to_assign);
+                Ok(Async::Ready(fixup_ops))
+            } else {
+                Ok(Async::NotReady)
+            }
+        } else {
+            // Cancel future prematurely if the current epoch is newer than the one we wanted to
+            // assign.
+            Ok(Async::Ready(Vec::new()))
+        }
+    }
+}
+
+impl<F: Future> MaybeDone<F> {
+    fn is_done(&self) -> bool {
+        match self {
+            MaybeDone::Pending(_) => false,
+            MaybeDone::Done(_) => true,
+        }
+    }
+
+    fn poll(&mut self) {
+        match self {
+            MaybeDone::Pending(f) => match f.poll() {
+                Ok(Async::Ready(value)) => *self = MaybeDone::Done(Ok(value)),
+                Ok(Async::NotReady) => {}
+                Err(error) => *self = MaybeDone::Done(Err(error)),
+            },
+            MaybeDone::Done(_) => {}
+        }
+    }
+
+    fn take_result(self) -> Option<Result<F::Item, F::Error>> {
+        match self {
+            MaybeDone::Pending(_) => None,
+            MaybeDone::Done(result) => Some(result),
+        }
     }
 }
 
