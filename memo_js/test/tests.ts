@@ -19,7 +19,12 @@ suite("WorkTree", () => {
     ]);
 
     const [tree1, initOps1] = WorkTree.create(1, OID_0, [], git);
-    const [tree2, initOps2] = WorkTree.create(2, OID_0, await collect(initOps1), git);
+    const [tree2, initOps2] = WorkTree.create(
+      2,
+      OID_0,
+      await collect(initOps1),
+      git
+    );
     assert.strictEqual((await collect(initOps2)).length, 0);
 
     const ops1 = [];
@@ -96,58 +101,61 @@ suite("WorkTree", () => {
         path: "e",
         status: memo.FileStatus.New,
         visible: true
-      },
+      }
     ]);
-    assert.deepEqual(tree1.entries({ showDeleted: true, descendInto: ["a", "a/b"] }), [
-      {
-        depth: 1,
-        type: memo.FileType.Directory,
-        name: "a",
-        path: "a",
-        status: memo.FileStatus.Unchanged,
-        visible: true
-      },
-      {
-        depth: 2,
-        type: memo.FileType.Directory,
-        name: "b",
-        path: "a/b",
-        status: memo.FileStatus.Unchanged,
-        visible: true
-      },
-      {
-        depth: 3,
-        type: memo.FileType.Text,
-        name: "c",
-        path: "a/b/c",
-        status: memo.FileStatus.Removed,
-        visible: false
-      },
-      {
-        depth: 3,
-        type: memo.FileType.Directory,
-        name: "x",
-        path: "a/b/x",
-        status: memo.FileStatus.New,
-        visible: true
-      },
-      {
-        depth: 1,
-        type: memo.FileType.Text,
-        name: "d",
-        path: "d",
-        status: memo.FileStatus.New,
-        visible: true
-      },
-      {
-        depth: 1,
-        type: memo.FileType.Text,
-        name: "e",
-        path: "e",
-        status: memo.FileStatus.New,
-        visible: true
-      },
-    ]);
+    assert.deepEqual(
+      tree1.entries({ showDeleted: true, descendInto: ["a", "a/b"] }),
+      [
+        {
+          depth: 1,
+          type: memo.FileType.Directory,
+          name: "a",
+          path: "a",
+          status: memo.FileStatus.Unchanged,
+          visible: true
+        },
+        {
+          depth: 2,
+          type: memo.FileType.Directory,
+          name: "b",
+          path: "a/b",
+          status: memo.FileStatus.Unchanged,
+          visible: true
+        },
+        {
+          depth: 3,
+          type: memo.FileType.Text,
+          name: "c",
+          path: "a/b/c",
+          status: memo.FileStatus.Removed,
+          visible: false
+        },
+        {
+          depth: 3,
+          type: memo.FileType.Directory,
+          name: "x",
+          path: "a/b/x",
+          status: memo.FileStatus.New,
+          visible: true
+        },
+        {
+          depth: 1,
+          type: memo.FileType.Text,
+          name: "d",
+          path: "d",
+          status: memo.FileStatus.New,
+          visible: true
+        },
+        {
+          depth: 1,
+          type: memo.FileType.Text,
+          name: "e",
+          path: "e",
+          status: memo.FileStatus.New,
+          visible: true
+        }
+      ]
+    );
   });
 });
 

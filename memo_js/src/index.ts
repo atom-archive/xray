@@ -11,7 +11,7 @@ let memo: any;
 
 export async function init() {
   memo = await import("../dist/memo_js");
-  memo.StreamToAsyncIterator.prototype[Symbol.asyncIterator] = function () {
+  memo.StreamToAsyncIterator.prototype[Symbol.asyncIterator] = function() {
     return this;
   };
   return { WorkTree };
@@ -52,7 +52,12 @@ export class WorkTree {
     startOps: ReadonlyArray<Operation>,
     git: GitProvider
   ): [WorkTree, AsyncIterable<Operation>] {
-    const result = memo.WorkTree.new(new GitProviderWrapper(git), replicaId, base, startOps);
+    const result = memo.WorkTree.new(
+      new GitProviderWrapper(git),
+      replicaId,
+      base,
+      startOps
+    );
     return [new WorkTree(result.tree()), result.operations()];
   }
 
@@ -61,7 +66,7 @@ export class WorkTree {
   }
 
   getVersion(): Version {
-    return this.tree.version()
+    return this.tree.version();
   }
 
   applyOps(ops: Operation[]): AsyncIterable<Operation> {
@@ -80,7 +85,7 @@ export class WorkTree {
     return this.tree.remove(path);
   }
 
-  entries(options?: { descendInto?: Path[], showDeleted?: boolean }) {
+  entries(options?: { descendInto?: Path[]; showDeleted?: boolean }): Entry[] {
     let descendInto = null;
     let showDeleted = false;
     if (options) {
