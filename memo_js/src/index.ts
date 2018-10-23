@@ -52,11 +52,7 @@ export class WorkTree {
     startOps: ReadonlyArray<Operation>,
     git: GitProvider
   ): [WorkTree, AsyncIterable<Operation>] {
-    const result = memo.WorkTree.new(new GitProviderWrapper(git), {
-      replica_id: replicaId,
-      base,
-      start_ops: startOps
-    });
+    const result = memo.WorkTree.new(new GitProviderWrapper(git), replicaId, base, startOps);
     return [new WorkTree(result.tree()), result.operations()];
   }
 
@@ -73,7 +69,7 @@ export class WorkTree {
   }
 
   createFile(path: Path, fileType: FileType): Operation {
-    return this.tree.create_file({ path, file_type: fileType });
+    return this.tree.create_file(path, fileType);
   }
 
   rename(oldPath: Path, newPath: Path): Operation {

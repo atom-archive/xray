@@ -42,27 +42,14 @@ struct AsyncIteratorToStream<T, E> {
 #[wasm_bindgen]
 pub struct StreamToAsyncIterator(Rc<Cell<Option<Box<Stream<Item = JsValue, Error = JsValue>>>>>);
 
-struct HexOid(memo::Oid);
+pub struct HexOid(memo::Oid);
 
-struct Base64<T>(T);
-
-#[derive(Deserialize)]
-pub struct WorkTreeNewArgs {
-    replica_id: memo::ReplicaId,
-    base: HexOid,
-    start_ops: Vec<Base64<memo::Operation>>,
-}
+pub struct Base64<T>(T);
 
 #[wasm_bindgen]
 pub struct WorkTreeNewResult {
     tree: Option<WorkTree>,
     operations: Option<StreamToAsyncIterator>,
-}
-
-#[derive(Deserialize)]
-pub struct WorkTreeCreateFileArgs {
-    path: String,
-    file_type: memo::FileType,
 }
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
@@ -107,12 +94,14 @@ extern "C" {
 
 #[wasm_bindgen]
 impl WorkTree {
-    pub fn new(git: GitProviderWrapper, args: JsValue) -> Result<WorkTreeNewResult, JsValue> {
-        let WorkTreeNewArgs {
-            replica_id,
-            base: HexOid(base),
-            start_ops,
-        } = args.into_serde().unwrap();
+    pub fn new(
+        git: GitProviderWrapper,
+        replica_id: memo::ReplicaId,
+        base: JsValue,
+        start_ops: JsValue,
+    ) -> Result<WorkTreeNewResult, JsValue> {
+        let HexOid(base) = base.into_serde().unwrap();
+        let start_ops: Vec<Base64<memo::Operation>> = start_ops.into_serde().unwrap();
         let (tree, operations) = memo::WorkTree::new(
             replica_id,
             base,
@@ -152,8 +141,8 @@ impl WorkTree {
             .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
-    pub fn create_file(&self, args: JsValue) -> Result<JsValue, JsValue> {
-        let WorkTreeCreateFileArgs { path, file_type } = args.into_serde().unwrap();
+    pub fn create_file(&self, path: String, file_type: JsValue) -> Result<JsValue, JsValue> {
+        let file_type = file_type.into_serde().unwrap();
         self.0
             .create_file(&PathBuf::from(path), file_type)
             .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
