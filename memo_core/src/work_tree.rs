@@ -6,7 +6,6 @@ use futures::{future, stream, Future, Stream};
 use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -194,7 +193,11 @@ impl WorkTree {
         }
     }
 
-    pub fn create_file(&self, path: &Path, file_type: FileType) -> Result<Operation, Error> {
+    pub fn create_file<P>(&self, path: P, file_type: FileType) -> Result<Operation, Error>
+    where
+        P: AsRef<Path>,
+    {
+        let path = path.as_ref();
         let name = path
             .file_name()
             .ok_or(Error::InvalidPath("path has no file name".into()))?;
@@ -217,7 +220,14 @@ impl WorkTree {
         })
     }
 
-    pub fn rename(&self, old_path: &Path, new_path: &Path) -> Result<Operation, Error> {
+    pub fn rename<P1, P2>(&self, old_path: P1, new_path: P2) -> Result<Operation, Error>
+    where
+        P1: AsRef<Path>,
+        P2: AsRef<Path>,
+    {
+        let old_path = old_path.as_ref();
+        let new_path = new_path.as_ref();
+
         let mut cur_epoch = self.cur_epoch_mut();
         let file_id = cur_epoch.file_id(old_path)?;
         let new_name = new_path
@@ -242,9 +252,12 @@ impl WorkTree {
         })
     }
 
-    pub fn remove(&self, path: &Path) -> Result<Operation, Error> {
+    pub fn remove<P>(&self, path: P) -> Result<Operation, Error>
+    where
+        P: AsRef<Path>,
+    {
         let mut cur_epoch = self.cur_epoch_mut();
-        let file_id = cur_epoch.file_id(path)?;
+        let file_id = cur_epoch.file_id(path.as_ref())?;
         let epoch_id = cur_epoch.id;
         let operation = cur_epoch.remove(file_id, &mut self.lamport_clock.borrow_mut())?;
 

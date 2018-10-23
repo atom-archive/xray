@@ -11,7 +11,7 @@ let memo: any;
 
 export async function init() {
   memo = await import("../dist/memo_js");
-  memo.StreamToAsyncIterator.prototype[Symbol.asyncIterator] = function() {
+  memo.StreamToAsyncIterator.prototype[Symbol.asyncIterator] = function () {
     return this;
   };
   return { WorkTree };
@@ -25,6 +25,23 @@ export type Operation = Tagged<string, "Operation">;
 export type Point = { row: number; column: number };
 export type Range = { start: Point; end: Point };
 export type Change = Range & { text: string };
+export enum FileStatus {
+  New = "New",
+  Renamed = "Renamed",
+  Removed = "Removed",
+  Modified = "Modified",
+  RenamedAndModified = "RenamedAndModified",
+  Unchanged = "Unchanged"
+}
+
+export interface Entry {
+  readonly depth: number;
+  readonly type: FileType;
+  readonly name: string;
+  readonly path: string;
+  readonly status: FileStatus;
+  readonly visible: boolean;
+}
 
 export class WorkTree {
   private tree: any;
@@ -56,10 +73,25 @@ export class WorkTree {
   }
 
   createFile(path: Path, fileType: FileType): Operation {
-    return this.tree.create_file({
-      path,
-      file_type: fileType
-    });
+    return this.tree.create_file({ path, file_type: fileType });
+  }
+
+  rename(oldPath: Path, newPath: Path): Operation {
+    return this.tree.rename(oldPath, newPath);
+  }
+
+  remove(path: Path): Operation {
+    return this.tree.remove(path);
+  }
+
+  entries(options?: { descendInto?: Path[], showDeleted?: boolean }) {
+    let descendInto = null;
+    let showDeleted = false;
+    if (options) {
+      if (options.descendInto) descendInto = options.descendInto;
+      if (options.showDeleted) showDeleted = options.showDeleted;
+    }
+    return this.tree.entries(descendInto, showDeleted);
   }
 
   openTextFile(path: Path): Promise<BufferId> {

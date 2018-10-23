@@ -16,6 +16,7 @@ use futures::{Async, Future, Poll, Stream};
 use memo_core as memo;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::io;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -75,6 +76,17 @@ struct Change {
     start: memo::Point,
     end: memo::Point,
     text: String,
+}
+
+#[derive(Serialize)]
+struct Entry {
+    #[serde(rename = "type")]
+    file_type: memo::FileType,
+    depth: usize,
+    name: String,
+    path: String,
+    status: memo::FileStatus,
+    visible: bool,
 }
 
 #[wasm_bindgen(module = "./support")]
@@ -148,6 +160,20 @@ impl WorkTree {
             .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
+    pub fn rename(&self, old_path: String, new_path: String) -> Result<JsValue, JsValue> {
+        self.0
+            .rename(&old_path, &new_path)
+            .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    pub fn remove(&self, path: String) -> Result<JsValue, JsValue> {
+        self.0
+            .remove(&path)
+            .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
     pub fn open_text_file(&mut self, path: String) -> js_sys::Promise {
         future_to_promise(
             self.0
@@ -200,6 +226,32 @@ impl WorkTree {
                 JsValue::from_serde(&changes).unwrap()
             })
             .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    pub fn entries(&self, descend_into: JsValue, show_deleted: bool) -> JsValue {
+        let descend_into: Option<HashSet<PathBuf>> = descend_into.into_serde().unwrap();
+        let mut entries = Vec::new();
+        self.0.with_cursor(|cursor| loop {
+            let entry = cursor.entry().unwrap();
+            let mut descend = false;
+            if show_deleted || entry.status != memo::FileStatus::Removed {
+                let path = cursor.path().unwrap();
+                entries.push(Entry {
+                    file_type: entry.file_type,
+                    depth: entry.depth,
+                    name: entry.name.to_string_lossy().into_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    status: entry.status,
+                    visible: entry.visible,
+                });
+                descend = descend_into.as_ref().map_or(true, |d| d.contains(path));
+            }
+
+            if !cursor.next(descend) {
+                break;
+            }
+        });
+        JsValue::from_serde(&entries).unwrap()
     }
 }
 
