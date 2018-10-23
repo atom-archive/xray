@@ -1844,9 +1844,9 @@ mod tests {
                 .unwrap();
 
             let mut epochs =
-                Vec::from_iter((0..PEERS).map(|i| Epoch::with_replica_id(i as u64 + 1)));
+                Vec::from_iter((0..PEERS).map(|i| Epoch::with_replica_id(i as u32 + 1)));
             let mut lamport_clocks =
-                Vec::from_iter((0..PEERS).map(|i| time::Lamport::new(i as u64 + 1)));
+                Vec::from_iter((0..PEERS).map(|i| time::Lamport::new(i as u32 + 1)));
             let mut base_entries_to_append =
                 Vec::from_iter((0..PEERS).map(|_| base_entries.clone()));
             let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
