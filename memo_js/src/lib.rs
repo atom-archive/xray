@@ -24,6 +24,10 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
+trait MapJsError<T> {
+    fn map_js_err(self) -> Result<T, JsValue>;
+}
+
 #[wasm_bindgen]
 pub struct WorkTree(memo::WorkTree);
 
@@ -100,7 +104,7 @@ impl WorkTree {
         base: JsValue,
         start_ops: JsValue,
     ) -> Result<WorkTreeNewResult, JsValue> {
-        let HexOid(base) = base.into_serde().unwrap();
+        let HexOid(base) = base.into_serde().map_js_err()?;
         let start_ops: Vec<Base64<memo::Operation>> = start_ops.into_serde().unwrap();
         let (tree, operations) = memo::WorkTree::new(
             replica_id,
@@ -108,7 +112,7 @@ impl WorkTree {
             start_ops.into_iter().map(|op| op.0),
             Rc::new(git),
         )
-        .map_err(|e| e.to_string())?;
+        .map_js_err()?;
         Ok(WorkTreeNewResult {
             tree: Some(WorkTree(tree)),
             operations: Some(StreamToAsyncIterator::new(
@@ -119,15 +123,15 @@ impl WorkTree {
         })
     }
 
-    pub fn version(&self) -> JsValue {
-        JsValue::from_serde(&Base64(self.0.version())).unwrap()
+    pub fn version(&self) -> Result<JsValue, JsValue> {
+        JsValue::from_serde(&Base64(self.0.version())).map_js_err()
     }
 
     pub fn apply_ops(&mut self, ops: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
         let ops = ops
             .into_serde::<Vec<Base64<memo::Operation>>>()
             .map(|ops| ops.into_iter().map(|Base64(op)| op.clone()))
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            .map_js_err()?;
 
         self.0
             .apply_ops(ops)
@@ -138,7 +142,7 @@ impl WorkTree {
                         .map_err(|err| err.to_string()),
                 )
             })
-            .map_err(|error| JsValue::from_str(&error.to_string()))
+            .map_js_err()
     }
 
     pub fn create_file(&self, path: String, file_type: JsValue) -> Result<JsValue, JsValue> {
@@ -146,21 +150,21 @@ impl WorkTree {
         self.0
             .create_file(&PathBuf::from(path), file_type)
             .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
-            .map_err(|error| JsValue::from_str(&error.to_string()))
+            .map_js_err()
     }
 
     pub fn rename(&self, old_path: String, new_path: String) -> Result<JsValue, JsValue> {
         self.0
             .rename(&old_path, &new_path)
             .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
-            .map_err(|error| JsValue::from_str(&error.to_string()))
+            .map_js_err()
     }
 
     pub fn remove(&self, path: String) -> Result<JsValue, JsValue> {
         self.0
             .remove(&path)
             .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
-            .map_err(|error| JsValue::from_str(&error.to_string()))
+            .map_js_err()
     }
 
     pub fn open_text_file(&mut self, path: String) -> js_sys::Promise {
@@ -174,9 +178,9 @@ impl WorkTree {
 
     pub fn text(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
         self.0
-            .text(buffer_id.into_serde().unwrap())
+            .text(buffer_id.into_serde().map_js_err()?)
             .map(|text| JsValue::from_str(&text.into_string()))
-            .map_err(|error| JsValue::from_str(&error.to_string()))
+            .map_js_err()
     }
 
     pub fn edit(
@@ -188,19 +192,19 @@ impl WorkTree {
         let buffer_id = buffer_id.into_serde().unwrap();
         let old_ranges = old_ranges
             .into_serde::<Vec<EditRange>>()
-            .map_err(|error| JsValue::from_str(&error.to_string()))?
+            .map_js_err()?
             .into_iter()
             .map(|EditRange { start, end }| start..end);
 
         self.0
             .edit_2d(buffer_id, old_ranges, new_text)
             .map(|op| JsValue::from_serde(&Base64(op)).unwrap())
-            .map_err(|error| JsValue::from_str(&error.to_string()))
+            .map_js_err()
     }
 
     pub fn changes_since(&self, buffer_id: JsValue, version: JsValue) -> Result<JsValue, JsValue> {
-        let buffer_id = buffer_id.into_serde().unwrap();
-        let Base64(version) = version.into_serde().unwrap();
+        let buffer_id = buffer_id.into_serde().map_js_err()?;
+        let Base64(version) = version.into_serde().map_js_err()?;
 
         self.0
             .changes_since(buffer_id, version)
@@ -214,11 +218,11 @@ impl WorkTree {
                     .collect::<Vec<_>>();
                 JsValue::from_serde(&changes).unwrap()
             })
-            .map_err(|error| JsValue::from_str(&error.to_string()))
+            .map_js_err()
     }
 
-    pub fn entries(&self, descend_into: JsValue, show_deleted: bool) -> JsValue {
-        let descend_into: Option<HashSet<PathBuf>> = descend_into.into_serde().unwrap();
+    pub fn entries(&self, descend_into: JsValue, show_deleted: bool) -> Result<JsValue, JsValue> {
+        let descend_into: Option<HashSet<PathBuf>> = descend_into.into_serde().map_js_err()?;
         let mut entries = Vec::new();
         self.0.with_cursor(|cursor| loop {
             let entry = cursor.entry().unwrap();
@@ -240,7 +244,7 @@ impl WorkTree {
                 break;
             }
         });
-        JsValue::from_serde(&entries).unwrap()
+        JsValue::from_serde(&entries).map_js_err()
     }
 }
 
@@ -403,5 +407,14 @@ impl<'de1, T: for<'de2> Deserialize<'de2>> Deserialize<'de1> for Base64<T> {
         let bytes = base64::decode(&String::deserialize(deserializer)?).map_err(Error::custom)?;
         let inner = bincode::deserialize::<T>(&bytes).map_err(D::Error::custom)?;
         Ok(Base64(inner))
+    }
+}
+
+impl<T, E> MapJsError<T> for Result<T, E>
+where
+    E: ToString,
+{
+    fn map_js_err(self) -> Result<T, JsValue> {
+        self.map_err(|err| JsValue::from(err.to_string()))
     }
 }
