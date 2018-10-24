@@ -1500,7 +1500,7 @@ impl Iterator for DiffIter {
                     let mut rows = 0;
                     let mut last_row_len = 0;
                     for line in text.lines() {
-                        last_row_len = line.len() as u32;
+                        last_row_len = line.encode_utf16().count() as u32;
                         rows += 1;
                     }
                     Point::new(rows - 1, last_row_len)
