@@ -148,7 +148,20 @@ impl WorkTree {
 
         if let Some(epoch) = self.epoch.clone() {
             let mut epoch = epoch.borrow_mut();
+
+            let prev_version = epoch.version();
             let fixup_ops = epoch.apply_ops(cur_epoch_ops, &mut self.lamport_clock.borrow_mut())?;
+            for (buffer_id, file_id) in self.buffers.borrow().iter() {
+                let mut changes = epoch
+                    .changes_since(*file_id, prev_version.clone())?
+                    .peekable();
+                if changes.peek().is_some() {
+                    if let Some(observer) = self.observer.as_ref() {
+                        observer.text_changed(*buffer_id, Box::new(changes));
+                    }
+                }
+            }
+
             let fixup_ops_stream = Box::new(stream::iter_ok(Operation::stamp(epoch.id, fixup_ops)));
             Ok(epoch_streams.into_iter().fold(
                 fixup_ops_stream as Box<Stream<Item = Operation, Error = Error>>,
