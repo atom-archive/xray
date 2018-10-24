@@ -59,7 +59,6 @@ struct BaseTextRequest {
 
 struct SwitchEpoch {
     to_assign: Rc<RefCell<Epoch>>,
-    fixup_ops: Vec<Operation>,
     cur_epoch: Rc<RefCell<Epoch>>,
     last_seen: epoch::Id,
     base_text_requests: HashMap<BufferId, Option<BaseTextRequest>>,
@@ -67,6 +66,7 @@ struct SwitchEpoch {
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
     git: Rc<GitProvider>,
+    observer: Option<Rc<ChangeObserver>>,
 }
 
 impl WorkTree {
@@ -211,6 +211,7 @@ impl WorkTree {
                     self.deferred_ops.clone(),
                     self.lamport_clock.clone(),
                     self.git.clone(),
+                    self.observer.clone(),
                 )
                 .then(|fixup_ops| Ok(stream::iter_ok(fixup_ops?)))
                 .flatten_stream();
@@ -538,11 +539,11 @@ impl SwitchEpoch {
         deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
         lamport_clock: Rc<RefCell<time::Lamport>>,
         git: Rc<GitProvider>,
+        observer: Option<Rc<ChangeObserver>>,
     ) -> Self {
         let last_seen = cur_epoch.borrow().id;
         Self {
             to_assign,
-            fixup_ops: Vec::new(),
             cur_epoch,
             last_seen,
             base_text_requests: HashMap::new(),
@@ -550,6 +551,7 @@ impl SwitchEpoch {
             deferred_ops,
             lamport_clock,
             git,
+            observer,
         }
     }
 }
@@ -608,6 +610,15 @@ impl Future for SwitchEpoch {
             }
 
             if is_done {
+                let mut fixup_ops = Vec::new();
+                if let Some(ops) = deferred_ops.remove(&to_assign.id) {
+                    fixup_ops.extend(Operation::stamp(
+                        to_assign.id,
+                        to_assign.apply_ops(ops, &mut lamport_clock)?,
+                    ));
+                }
+                deferred_ops.retain(|id, _| *id > to_assign.id);
+
                 for (buffer_id, request) in self.base_text_requests.drain() {
                     let file_id;
                     let base_text;
@@ -624,26 +635,23 @@ impl Future for SwitchEpoch {
                         let (new_file_id, operation) = to_assign.new_text_file(&mut lamport_clock);
                         file_id = new_file_id;
                         base_text = String::new();
-                        self.fixup_ops.push(Operation::EpochOperation {
+                        fixup_ops.push(Operation::EpochOperation {
                             epoch_id: to_assign.id,
                             operation,
                         });
                     }
 
                     to_assign.open_text_file(file_id, base_text, &mut lamport_clock)?;
-
-                    // Okay now we perform the diff.
+                    let old_text = cur_epoch.text(buffers[&buffer_id])?.into_string();
+                    let new_text = to_assign.text(file_id)?.into_string();
+                    let mut changes = buffer::diff(&old_text, &new_text).peekable();
+                    if changes.peek().is_some() {
+                        if let Some(observer) = self.observer.as_ref() {
+                            observer.text_changed(buffer_id, Box::new(changes));
+                        }
+                    }
                     buffers.insert(buffer_id, file_id);
                 }
-
-                let mut fixup_ops = Vec::new();
-                if let Some(ops) = deferred_ops.remove(&to_assign.id) {
-                    fixup_ops.extend(Operation::stamp(
-                        to_assign.id,
-                        to_assign.apply_ops(ops, &mut lamport_clock)?,
-                    ));
-                }
-                deferred_ops.retain(|id, _| *id > to_assign.id);
 
                 mem::swap(&mut *cur_epoch, &mut *to_assign);
                 Ok(Async::Ready(fixup_ops))

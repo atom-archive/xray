@@ -3,6 +3,7 @@ use crate::operation_queue::{self, OperationQueue};
 use crate::time;
 use crate::ReplicaId;
 use crate::UserId;
+use difference::{Changeset, Difference};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ use std::iter;
 use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
 use std::sync::Arc;
+use std::vec;
 
 type SelectionSetVersion = usize;
 
@@ -87,6 +89,11 @@ pub struct Iter {
 struct ChangesIter<F: Fn(&FragmentSummary) -> bool> {
     cursor: btree::FilterCursor<F, Fragment>,
     since: time::Global,
+}
+
+struct DiffIter {
+    position: Point,
+    diff: vec::IntoIter<Difference>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1468,6 +1475,70 @@ impl<F: Fn(&FragmentSummary) -> bool> Iterator for ChangesIter<F> {
             }
 
             self.cursor.next();
+        }
+
+        change
+    }
+}
+
+pub fn diff(a: &str, b: &str) -> impl Iterator<Item = Change> {
+    DiffIter {
+        position: Point::zero(),
+        diff: Changeset::new(a, b, "").diffs.into_iter(),
+    }
+}
+
+impl Iterator for DiffIter {
+    type Item = Change;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut change: Option<Change> = None;
+
+        while let Some(diff) = self.diff.next() {
+            let extent = match &diff {
+                Difference::Same(text) | Difference::Rem(text) | Difference::Add(text) => {
+                    let mut rows = 0;
+                    let mut last_row_len = 0;
+                    for line in text.lines() {
+                        last_row_len = line.len() as u32;
+                        rows += 1;
+                    }
+                    Point::new(rows - 1, last_row_len)
+                }
+            };
+
+            match diff {
+                Difference::Same(_) => {
+                    self.position += &extent;
+                    if change.is_some() {
+                        break;
+                    }
+                }
+                Difference::Rem(_) => {
+                    if let Some(change) = change.as_mut() {
+                        change.range.end += &extent;
+                    } else {
+                        change = Some(Change {
+                            range: self.position..self.position + &extent,
+                            code_units: Vec::new(),
+                            new_extent: Point::zero(),
+                        });
+                    }
+                }
+                Difference::Add(text) => {
+                    if let Some(change) = change.as_mut() {
+                        change.code_units.extend(text.encode_utf16());
+                        change.new_extent += &extent;
+                    } else {
+                        change = Some(Change {
+                            range: self.position..self.position,
+                            code_units: text.encode_utf16().collect(),
+                            new_extent: extent,
+                        });
+                    }
+                    self.position += &extent;
+                }
+            }
         }
 
         change
