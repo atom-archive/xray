@@ -21,7 +21,6 @@ pub trait ChangeObserver {
     fn text_changed(&self, buffer_id: BufferId, changes: Box<Iterator<Item = Change>>);
 }
 
-#[derive(Clone)]
 pub struct WorkTree {
     epoch: Option<Rc<RefCell<Epoch>>>,
     buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
@@ -312,7 +311,7 @@ impl WorkTree {
         })
     }
 
-    pub fn open_text_file<P>(&mut self, path: P) -> Box<Future<Item = BufferId, Error = Error>>
+    pub fn open_text_file<P>(&self, path: P) -> Box<Future<Item = BufferId, Error = Error>>
     where
         P: Into<PathBuf>,
     {
@@ -697,11 +696,72 @@ impl<F: Future> MaybeDone<F> {
 mod tests {
     use super::*;
     use crate::epoch::CursorEntry;
+    use rand::{Rng, SeedableRng, StdRng};
+
+    #[test]
+    fn test_random() {
+        use crate::tests::Network;
+
+        const PEERS: usize = 2;
+
+        for seed in 0..100 {
+            let mut rng = StdRng::from_seed(&[seed]);
+            let git = Rc::new(TestGitProvider::new());
+
+            let mut commits = vec![];
+            let base_tree = WorkTree::empty();
+            for _ in 0..rng.gen_range(1, 10) {
+                base_tree.mutate(&mut rng, 5);
+                commits.push(Some(git.commit(&base_tree)));
+            }
+
+            let mut observers = Vec::new();
+            let mut trees = Vec::new();
+            let mut network = Network::new();
+            for i in 0..PEERS {
+                let replica_id = i as ReplicaId + 1;
+                network.add_peer(replica_id);
+                let observer = Rc::new(TestChangeObserver::new());
+                observers.push(observer.clone());
+                let (tree, ops) = WorkTree::new(
+                    replica_id,
+                    *rng.choose(&commits).unwrap(),
+                    None,
+                    git.clone(),
+                    Some(observer),
+                )
+                .unwrap();
+                trees.push(tree);
+                network.broadcast(replica_id, ops.collect().wait().unwrap(), &mut rng);
+            }
+
+            for _ in 0..5 {
+                let replica_index = rng.gen_range(0, PEERS);
+                let replica_id = replica_index as ReplicaId + 1;
+                let tree = &mut trees[replica_index];
+                let k = rng.gen_range(0, 3);
+
+                if k == 0 {
+                    let ops = tree.mutate(&mut rng, 5);
+                    network.broadcast(replica_id, ops, &mut rng);
+                } else if k == 1 {
+                    let head = rng.choose(&commits).unwrap().unwrap();
+                    let ops = tree.reset(head).collect().wait().unwrap();
+                    network.broadcast(replica_id, ops, &mut rng);
+                } else if k == 2 {
+                    let fixup_ops = tree
+                        .apply_ops(network.receive(replica_id, &mut rng))
+                        .unwrap();
+                    network.broadcast(replica_id, fixup_ops.collect().wait().unwrap(), &mut rng);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_reset() {
         let git = Rc::new(TestGitProvider::new());
-        let mut base_tree = WorkTree::empty();
+        let base_tree = WorkTree::empty();
         base_tree.create_file("a", FileType::Text).unwrap();
         let a_base = base_tree.open_text_file("a").wait().unwrap();
         base_tree.edit(a_base, Some(0..0), "abc").unwrap();
@@ -775,15 +835,24 @@ mod tests {
         }
 
         fn entries(&self) -> Vec<CursorEntry> {
-            self.epoch.as_ref().unwrap().borrow().entries()
+            self.cur_epoch().entries()
         }
 
         fn dir_entries(&self) -> Vec<DirEntry> {
-            self.epoch.as_ref().unwrap().borrow().dir_entries()
+            self.cur_epoch().dir_entries()
         }
 
         fn text_str(&self, buffer_id: BufferId) -> String {
             self.text(buffer_id).unwrap().into_string()
+        }
+
+        fn mutate<T: Rng>(&self, rng: &mut T, count: usize) -> Vec<Operation> {
+            let mut epoch = self.cur_epoch_mut();
+            Operation::stamp(
+                epoch.id,
+                epoch.mutate(rng, &mut self.lamport_clock.borrow_mut(), count),
+            )
+            .collect()
         }
     }
 
@@ -842,9 +911,7 @@ mod tests {
     impl GitProvider for TestGitProvider {
         fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>> {
             match self.commits.borrow().get(&oid) {
-                Some(tree) => Box::new(stream::iter_ok(
-                    tree.entries().into_iter().map(|entry| entry.into()),
-                )),
+                Some(tree) => Box::new(stream::iter_ok(tree.dir_entries().into_iter())),
                 None => Box::new(stream::once(Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Commit does not exist",

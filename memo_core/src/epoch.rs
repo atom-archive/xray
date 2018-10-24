@@ -1173,15 +1173,6 @@ impl Operation {
             } => *lamport_timestamp,
         }
     }
-
-    #[cfg(test)]
-    fn file_id(&self) -> FileId {
-        match self {
-            Operation::InsertMetadata { file_id, .. } => *file_id,
-            Operation::UpdateParent { child_id, .. } => *child_id,
-            Operation::EditText { file_id, .. } => *file_id,
-        }
-    }
 }
 
 impl operation_queue::Operation for Operation {
@@ -1491,7 +1482,6 @@ mod tests {
     use super::*;
     use crate::buffer::Point;
     use rand::{Rng, SeedableRng, StdRng};
-    use std::iter::FromIterator;
 
     #[test]
     fn test_append_base_entries() {
@@ -1970,7 +1960,23 @@ mod tests {
         }
 
         pub fn dir_entries(&self) -> Vec<DirEntry> {
-            self.entries().into_iter().map(|e| e.into()).collect()
+            let mut entries = Vec::new();
+            if let Some(mut cursor) = self.cursor() {
+                loop {
+                    let entry = cursor.entry().unwrap();
+                    let advanced = if entry.visible {
+                        entries.push(entry.into());
+                        cursor.next(true)
+                    } else {
+                        cursor.next(false)
+                    };
+
+                    if !advanced {
+                        break;
+                    }
+                }
+            }
+            entries
         }
 
         fn paths(&self) -> Vec<String> {
