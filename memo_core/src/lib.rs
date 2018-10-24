@@ -1,13 +1,3 @@
-extern crate futures;
-#[macro_use]
-extern crate lazy_static;
-#[cfg(test)]
-extern crate rand;
-#[macro_use]
-extern crate serde_derive;
-extern crate serde;
-extern crate smallvec;
-
 mod btree;
 mod buffer;
 mod epoch;

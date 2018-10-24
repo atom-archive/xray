@@ -6,6 +6,7 @@ use crate::Error;
 use crate::Oid;
 use crate::ReplicaId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -1821,9 +1822,11 @@ mod tests {
         assert_eq!(changes[1].code_units, [b'y' as u16]);
 
         let dir_id = tree_1.file_id("dir").unwrap();
-        assert!(tree_1
-            .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
-            .is_err());
+        assert!(
+            tree_1
+                .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
+                .is_err()
+        );
     }
 
     #[test]

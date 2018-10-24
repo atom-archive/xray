@@ -3,7 +3,9 @@ use crate::operation_queue::{self, OperationQueue};
 use crate::time;
 use crate::ReplicaId;
 use crate::UserId;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
@@ -2056,10 +2058,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    extern crate rand;
-
-    use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
+    use rand::{Rng, SeedableRng, StdRng};
 
     #[test]
     fn test_edit() {
@@ -2374,7 +2374,7 @@ mod tests {
     #[test]
     fn test_fragment_ids() {
         for seed in 0..10 {
-            use self::rand::{Rng, SeedableRng, StdRng};
+            use rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut ids = vec![FragmentId(Arc::new(vec![0])), FragmentId(Arc::new(vec![4]))];

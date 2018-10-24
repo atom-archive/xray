@@ -1,20 +1,9 @@
 #![feature(macros_in_extern)]
 
-extern crate bincode;
-extern crate futures;
-extern crate hex;
-extern crate js_sys;
-extern crate memo_core;
-#[macro_use]
-extern crate serde_derive;
-extern crate base64;
-extern crate serde;
-extern crate wasm_bindgen;
-extern crate wasm_bindgen_futures;
-
 use futures::{Async, Future, Poll, Stream};
 use memo_core as memo;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_derive::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::io;

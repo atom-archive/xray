@@ -2,6 +2,7 @@ use crate::buffer::{self, Change, Point, Text};
 use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId, FileType};
 use crate::{time, Error, Oid, ReplicaId};
 use futures::{future, stream, Async, Future, Poll, Stream};
+use serde_derive::{Deserialize, Serialize};
 use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 use std::collections::HashMap;
