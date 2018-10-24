@@ -700,31 +700,26 @@ mod tests {
 
     #[test]
     fn test_reset() {
-        const COMMIT_0: [u8; 20] = [0; 20];
-        const COMMIT_1: [u8; 20] = [1; 20];
-        const COMMIT_2: [u8; 20] = [2; 20];
-
         let git = Rc::new(TestGitProvider::new());
         let mut base_tree = WorkTree::empty();
         base_tree.create_file("a", FileType::Text).unwrap();
         let a_base = base_tree.open_text_file("a").wait().unwrap();
         base_tree.edit(a_base, Some(0..0), "abc").unwrap();
-
-        git.commit(COMMIT_0, &base_tree);
+        let commit_0 = git.commit(&base_tree);
 
         base_tree.edit(a_base, Some(1..2), "def").unwrap();
         base_tree.create_file("b", FileType::Directory).unwrap();
-        git.commit(COMMIT_1, &base_tree);
+        let commit_1 = git.commit(&base_tree);
 
         base_tree.edit(a_base, Some(2..3), "ghi").unwrap();
         base_tree.create_file("b/c", FileType::Text).unwrap();
-        git.commit(COMMIT_2, &base_tree);
+        let commit_2 = git.commit(&base_tree);
 
         let observer_1 = Rc::new(TestChangeObserver::new());
         let observer_2 = Rc::new(TestChangeObserver::new());
         let (mut tree_1, ops_1) = WorkTree::new(
             1,
-            Some(COMMIT_0),
+            Some(commit_0),
             vec![],
             git.clone(),
             Some(observer_1.clone()),
@@ -732,7 +727,7 @@ mod tests {
         .unwrap();
         let (mut tree_2, ops_2) = WorkTree::new(
             2,
-            Some(COMMIT_0),
+            Some(commit_0),
             ops_1.collect().wait().unwrap(),
             git.clone(),
             Some(observer_2.clone()),
@@ -740,24 +735,24 @@ mod tests {
         .unwrap();
         assert!(ops_2.wait().next().is_none());
 
-        assert_eq!(tree_1.dir_entries(), git.tree(COMMIT_0).dir_entries());
-        assert_eq!(tree_2.dir_entries(), git.tree(COMMIT_0).dir_entries());
+        assert_eq!(tree_1.dir_entries(), git.tree(commit_0).dir_entries());
+        assert_eq!(tree_2.dir_entries(), git.tree(commit_0).dir_entries());
 
         let a_1 = tree_1.open_text_file("a").wait().unwrap();
         let a_2 = tree_2.open_text_file("a").wait().unwrap();
         observer_1.opened_buffer(a_1, &tree_1);
         observer_2.opened_buffer(a_2, &tree_2);
-        assert_eq!(tree_1.text_str(a_1), git.tree(COMMIT_0).text_str(a_base));
-        assert_eq!(tree_2.text_str(a_2), git.tree(COMMIT_0).text_str(a_base));
+        assert_eq!(tree_1.text_str(a_1), git.tree(commit_0).text_str(a_base));
+        assert_eq!(tree_2.text_str(a_2), git.tree(commit_0).text_str(a_base));
 
-        let ops_1 = tree_1.reset(COMMIT_1).collect().wait().unwrap();
-        assert_eq!(tree_1.dir_entries(), git.tree(COMMIT_1).dir_entries());
-        assert_eq!(tree_1.text_str(a_1), git.tree(COMMIT_1).text_str(a_1));
+        let ops_1 = tree_1.reset(commit_1).collect().wait().unwrap();
+        assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
+        assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));
         assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
 
-        let ops_2 = tree_2.reset(COMMIT_2).collect().wait().unwrap();
-        assert_eq!(tree_2.dir_entries(), git.tree(COMMIT_2).dir_entries());
-        assert_eq!(tree_2.text_str(a_2), git.tree(COMMIT_2).text_str(a_2));
+        let ops_2 = tree_2.reset(commit_2).collect().wait().unwrap();
+        assert_eq!(tree_2.dir_entries(), git.tree(commit_2).dir_entries());
+        assert_eq!(tree_2.text_str(a_2), git.tree(commit_2).text_str(a_2));
         assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
 
         let fixup_ops_1 = tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
@@ -765,10 +760,10 @@ mod tests {
         assert!(fixup_ops_1.is_empty());
         assert!(fixup_ops_2.is_empty());
         assert_eq!(tree_1.entries(), tree_2.entries());
-        assert_eq!(tree_1.dir_entries(), git.tree(COMMIT_1).dir_entries());
-        assert_eq!(tree_1.text_str(a_1), git.tree(COMMIT_1).text_str(a_1));
+        assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
+        assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));
         assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
-        assert_eq!(tree_2.text_str(a_2), git.tree(COMMIT_1).text_str(a_2));
+        assert_eq!(tree_2.text_str(a_2), git.tree(commit_1).text_str(a_2));
         assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
     }
 
@@ -794,6 +789,7 @@ mod tests {
 
     struct TestGitProvider {
         commits: RefCell<HashMap<Oid, WorkTree>>,
+        next_oid: RefCell<u64>,
     }
 
     struct TestChangeObserver {
@@ -806,21 +802,40 @@ mod tests {
         fn new() -> Self {
             TestGitProvider {
                 commits: RefCell::new(HashMap::new()),
+                next_oid: RefCell::new(0),
             }
         }
 
-        fn commit(&self, oid: Oid, tree: &WorkTree) {
+        fn commit(&self, tree: &WorkTree) -> Oid {
             let mut tree_clone = WorkTree::empty();
             tree_clone.epoch = tree
                 .epoch
                 .as_ref()
                 .map(|e| Rc::new(RefCell::new(e.borrow().clone())));
             tree_clone.buffers = Rc::new(RefCell::new(tree.buffers.borrow().clone()));
+
+            let oid = self.gen_oid();
             self.commits.borrow_mut().insert(oid, tree_clone);
+            oid
         }
 
         fn tree(&self, oid: Oid) -> Ref<WorkTree> {
             Ref::map(self.commits.borrow(), |commits| commits.get(&oid).unwrap())
+        }
+
+        fn gen_oid(&self) -> Oid {
+            let mut next_oid = self.next_oid.borrow_mut();
+            let mut oid = [0; 20];
+            oid[0] = (*next_oid >> 0) as u8;
+            oid[1] = (*next_oid >> 8) as u8;
+            oid[2] = (*next_oid >> 16) as u8;
+            oid[3] = (*next_oid >> 24) as u8;
+            oid[4] = (*next_oid >> 32) as u8;
+            oid[5] = (*next_oid >> 40) as u8;
+            oid[6] = (*next_oid >> 48) as u8;
+            oid[7] = (*next_oid >> 56) as u8;
+            *next_oid += 1;
+            oid
         }
     }
 
