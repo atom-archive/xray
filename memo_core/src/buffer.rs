@@ -2191,7 +2191,7 @@ mod tests {
                         new_text.as_str(),
                         &reference_string[old_range.end..],
                     ]
-                        .concat();
+                    .concat();
                 }
                 assert_eq!(buffer.to_string(), reference_string);
 
@@ -2645,29 +2645,34 @@ mod tests {
 
     #[test]
     fn test_random_concurrent_edits() {
-        for seed in 0..100 {
+        use crate::tests::Network;
+
+        const PEERS: usize = 3;
+
+        for seed in 0..50 {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let site_range = 0..5;
             let base_text = RandomCharIter(rng)
                 .take(rng.gen_range(0, 10))
                 .collect::<String>();
             let mut buffers = Vec::new();
             let mut local_clocks = Vec::new();
             let mut lamport_clocks = Vec::new();
-            let mut queues: Vec<Vec<Operation>> = Vec::new();
-            for i in site_range.clone() {
+            let mut network = Network::new();
+            for i in 0..PEERS {
+                let replica_id = i as ReplicaId + 1;
                 let buffer = Buffer::new(base_text.as_str());
                 buffers.push(buffer);
-                local_clocks.push(time::Local::new(i + 1));
-                lamport_clocks.push(time::Lamport::new(i + 1));
-                queues.push(Vec::new());
+                local_clocks.push(time::Local::new(replica_id));
+                lamport_clocks.push(time::Lamport::new(replica_id));
+                network.add_peer(replica_id);
             }
 
             let mut edit_count = 10;
             loop {
-                let replica_index = rng.gen_range(site_range.start, site_range.end) as usize;
+                let replica_index = rng.gen_range(0, PEERS);
+                let replica_id = replica_index as u32 + 1;
                 let buffer = &mut buffers[replica_index];
                 let local_clock = &mut local_clocks[replica_index];
                 let lamport_clock = &mut lamport_clocks[replica_index];
@@ -2690,44 +2695,21 @@ mod tests {
                         local_clock.tick();
                     }
 
-                    for op in buffer.edit(old_ranges, new_text.as_str(), local_clock, lamport_clock)
-                    {
-                        for (index, queue) in queues.iter_mut().enumerate() {
-                            if index != replica_index {
-                                let min_index = queue
-                                    .iter()
-                                    .enumerate()
-                                    .rev()
-                                    .find_map(|(index, existing_op)| {
-                                        if existing_op.id.replica_id == op.id.replica_id {
-                                            Some(index + 1)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap_or(0);
-
-                                for _ in 0..rng.gen_range(1, 4) {
-                                    let insertion_index = rng.gen_range(min_index, queue.len() + 1);
-                                    queue.insert(insertion_index, op.clone());
-                                }
-                            }
-                        }
-                    }
-
+                    let ops =
+                        buffer.edit(old_ranges, new_text.as_str(), local_clock, lamport_clock);
+                    network.broadcast(replica_id, ops, &mut rng);
                     edit_count -= 1;
-                } else if !queues[replica_index].is_empty() {
-                    let count = rng.gen_range(1, queues[replica_index].len() + 1);
+                } else if network.has_unreceived(replica_id) {
                     buffer
                         .apply_ops(
-                            queues[replica_index].drain(0..count),
+                            network.receive(replica_id, &mut rng),
                             local_clock,
                             lamport_clock,
                         )
                         .unwrap();
                 }
 
-                if edit_count == 0 && queues.iter().all(|q| q.is_empty()) {
+                if edit_count == 0 && network.is_idle() {
                     break;
                 }
             }

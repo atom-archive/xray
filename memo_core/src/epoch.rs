@@ -1822,15 +1822,15 @@ mod tests {
         assert_eq!(changes[1].code_units, [b'y' as u16]);
 
         let dir_id = tree_1.file_id("dir").unwrap();
-        assert!(
-            tree_1
-                .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
-                .is_err()
-        );
+        assert!(tree_1
+            .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
+            .is_err());
     }
 
     #[test]
     fn test_replication_random() {
+        use crate::tests::Network;
+
         const PEERS: usize = 5;
 
         for seed in 0..100 {
@@ -1855,19 +1855,23 @@ mod tests {
                 .append_base_entries(base_entries.clone(), &mut time::Lamport::new(999))
                 .unwrap();
 
-            let mut epochs =
-                Vec::from_iter((0..PEERS).map(|i| Epoch::with_replica_id(i as u32 + 1)));
-            let mut lamport_clocks =
-                Vec::from_iter((0..PEERS).map(|i| time::Lamport::new(i as u32 + 1)));
-            let mut base_entries_to_append =
-                Vec::from_iter((0..PEERS).map(|_| base_entries.clone()));
-            let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
-            let mut all_ops = Vec::new();
+            let mut epochs = Vec::new();
+            let mut lamport_clocks = Vec::new();
+            let mut base_entries_to_append = Vec::new();
+            let mut network = Network::new();
+            for i in 0..PEERS {
+                let replica_id = i as ReplicaId + 1;
+                epochs.push(Epoch::with_replica_id(replica_id));
+                lamport_clocks.push(time::Lamport::new(replica_id));
+                base_entries_to_append.push(base_entries.clone());
+                network.add_peer(replica_id);
+            }
 
             // Generate and deliver random mutations
             for _ in 0..10 {
                 let k = rng.gen_range(0, 10);
                 let replica_index = rng.gen_range(0, PEERS);
+                let replica_id = replica_index as ReplicaId + 1;
                 let epoch = &mut epochs[replica_index];
                 let lamport_clock = &mut lamport_clocks[replica_index];
                 let base_entries_to_append = &mut base_entries_to_append[replica_index];
@@ -1877,42 +1881,23 @@ mod tests {
                     let fixup_ops = epoch
                         .append_base_entries(base_entries_to_append.drain(0..count), lamport_clock)
                         .unwrap();
-                    deliver_ops(
-                        &mut rng,
-                        replica_index,
-                        &mut inboxes,
-                        &mut all_ops,
-                        fixup_ops,
-                    );
-                } else if k < 6 && !inboxes[replica_index].is_empty() {
-                    let count = rng.gen_range(1, inboxes[replica_index].len() + 1);
+                    network.broadcast(replica_id, fixup_ops, &mut rng);
+                } else if k < 6 && network.has_unreceived(replica_id) {
                     let fixup_ops = epoch
-                        .apply_ops(inboxes[replica_index].drain(0..count), lamport_clock)
+                        .apply_ops(network.receive(replica_id, &mut rng), lamport_clock)
                         .unwrap();
-                    deliver_ops(
-                        &mut rng,
-                        replica_index,
-                        &mut inboxes,
-                        &mut all_ops,
-                        fixup_ops,
-                    );
-                } else if k < 7 && !all_ops.is_empty() {
-                    inboxes[replica_index].clear();
+                    network.broadcast(replica_id, fixup_ops, &mut rng);
+                } else if k < 7 && !network.all_messages().is_empty() {
+                    network.clear_unreceived(replica_id);
                     *base_entries_to_append = base_entries.clone();
                     *epoch = Epoch::with_replica_id(epoch.local_clock.replica_id);
                     let fixup_ops = epoch
-                        .apply_ops(all_ops.iter().cloned(), lamport_clock)
+                        .apply_ops(network.all_messages().iter().cloned(), lamport_clock)
                         .unwrap();
-                    deliver_ops(
-                        &mut rng,
-                        replica_index,
-                        &mut inboxes,
-                        &mut all_ops,
-                        fixup_ops,
-                    );
+                    network.broadcast(replica_id, fixup_ops, &mut rng);
                 } else {
                     let ops = epoch.mutate(&mut rng, lamport_clock, 5);
-                    deliver_ops(&mut rng, replica_index, &mut inboxes, &mut all_ops, ops);
+                    network.broadcast(replica_id, ops, &mut rng);
                 }
             }
 
@@ -1920,6 +1905,7 @@ mod tests {
             loop {
                 let mut done = true;
                 for replica_index in 0..PEERS {
+                    let replica_id = replica_index as ReplicaId + 1;
                     let epoch = &mut epochs[replica_index];
                     let lamport_clock = &mut lamport_clocks[replica_index];
                     let base_entries_to_append = &mut base_entries_to_append[replica_index];
@@ -1927,27 +1913,14 @@ mod tests {
                         let fixup_ops = epoch
                             .append_base_entries(base_entries_to_append.drain(..), lamport_clock)
                             .unwrap();
-                        deliver_ops(
-                            &mut rng,
-                            replica_index,
-                            &mut inboxes,
-                            &mut all_ops,
-                            fixup_ops,
-                        );
+                        network.broadcast(replica_id, fixup_ops, &mut rng);
                     }
 
-                    if !inboxes[replica_index].is_empty() {
-                        let count = rng.gen_range(1, inboxes[replica_index].len() + 1);
+                    if network.has_unreceived(replica_id) {
                         let fixup_ops = epoch
-                            .apply_ops(inboxes[replica_index].drain(0..count), lamport_clock)
+                            .apply_ops(network.receive(replica_id, &mut rng), lamport_clock)
                             .unwrap();
-                        deliver_ops(
-                            &mut rng,
-                            replica_index,
-                            &mut inboxes,
-                            &mut all_ops,
-                            fixup_ops,
-                        );
+                        network.broadcast(replica_id, fixup_ops, &mut rng);
                         done = false;
                     }
                 }
@@ -1974,43 +1947,6 @@ mod tests {
                         base_epoch.path(base_file_id).unwrap()
                     );
                 }
-            }
-
-            fn deliver_ops<T: Rng>(
-                rng: &mut T,
-                sender: usize,
-                inboxes: &mut Vec<Vec<Operation>>,
-                all_ops: &mut Vec<Operation>,
-                ops: Vec<Operation>,
-            ) {
-                for (i, inbox) in inboxes.iter_mut().enumerate() {
-                    if i != sender {
-                        for op in &ops {
-                            let min_index = inbox
-                                .iter()
-                                .enumerate()
-                                .rev()
-                                .find_map(|(index, existing_op)| {
-                                    if existing_op.lamport_timestamp().replica_id
-                                        == op.lamport_timestamp().replica_id
-                                    {
-                                        Some(index + 1)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or(0);
-
-                            // Insert one or more duplicates of this operation *after* the previous
-                            // operation delivered by this replica.
-                            for _ in 0..rng.gen_range(1, 4) {
-                                let insertion_index = rng.gen_range(min_index, inbox.len() + 1);
-                                inbox.insert(insertion_index, op.clone());
-                            }
-                        }
-                    }
-                }
-                all_ops.extend(ops);
             }
         }
     }
@@ -2058,7 +1994,7 @@ mod tests {
         ) -> Vec<Operation> {
             let mut ops = Vec::new();
             for _ in 0..count {
-                let k = rng.gen_range(0, 3);
+                let k = rng.gen_range(0, 4);
                 if self.child_refs.is_empty() || k == 0 {
                     // println!("Random mutation: Creating file");
                     let parent_id = self
@@ -2075,14 +2011,6 @@ mod tests {
 
                         match self.create_file(parent_id, name, file_type, lamport_clock) {
                             Ok(op) => {
-                                if file_type == FileType::Text {
-                                    let base_text_len = rng.gen_range(0, 10);
-                                    let base_text: String =
-                                        rng.gen_ascii_chars().take(base_text_len).collect();
-                                    self.open_text_file(op.file_id(), base_text, lamport_clock)
-                                        .unwrap();
-                                }
-
                                 ops.push(op);
                                 break;
                             }
@@ -2093,7 +2021,7 @@ mod tests {
                     let file_id = self.select_file(rng, None, false).unwrap();
                     // println!("Random mutation: Removing {:?}", file_id);
                     ops.push(self.remove(file_id, lamport_clock).unwrap());
-                } else {
+                } else if k == 2 {
                     let file_id = self.select_file(rng, None, false).unwrap();
                     loop {
                         let new_parent_id = self
@@ -2112,6 +2040,15 @@ mod tests {
                             Err(_error) => {}
                         }
                     }
+                } else if let Some(file_id) = self.select_file(rng, Some(FileType::Text), false) {
+                    self.open_text_file(file_id, "", lamport_clock).unwrap();
+                    let text_len = self.text(file_id).unwrap().count();
+                    let end = rng.gen_range::<usize>(0, text_len + 1);
+                    let start = rng.gen_range::<usize>(0, end + 1);
+                    ops.push(
+                        self.edit(file_id, Some(start..end), gen_text(rng), lamport_clock)
+                            .unwrap(),
+                    );
                 }
             }
             ops
@@ -2161,5 +2098,15 @@ mod tests {
         }
 
         name
+    }
+
+    fn gen_text<T: Rng>(rng: &mut T) -> String {
+        let text_len = rng.gen_range(0, 50);
+        let mut text: String = rng.gen_ascii_chars().take(text_len).collect();
+        for _ in 0..rng.gen_range(0, 5) {
+            let index = rng.gen_range(0, text.len() + 1);
+            text.insert(index, '\n');
+        }
+        text
     }
 }
