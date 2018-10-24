@@ -710,15 +710,15 @@ mod tests {
         let a_base = base_tree.open_text_file("a").wait().unwrap();
         base_tree.edit(a_base, Some(0..0), "abc").unwrap();
 
-        git.commit(COMMIT_0, base_tree.clone());
+        git.commit(COMMIT_0, &base_tree);
 
         base_tree.edit(a_base, Some(1..2), "def").unwrap();
         base_tree.create_file("b", FileType::Directory).unwrap();
-        git.commit(COMMIT_1, base_tree.clone());
+        git.commit(COMMIT_1, &base_tree);
 
         base_tree.edit(a_base, Some(2..3), "ghi").unwrap();
         base_tree.create_file("b/c", FileType::Text).unwrap();
-        git.commit(COMMIT_2, base_tree.clone());
+        git.commit(COMMIT_2, &base_tree);
 
         let observer_1 = Rc::new(TestChangeObserver::new());
         let observer_2 = Rc::new(TestChangeObserver::new());
@@ -747,20 +747,18 @@ mod tests {
         let a_2 = tree_2.open_text_file("a").wait().unwrap();
         observer_1.opened_buffer(a_1, &tree_1);
         observer_2.opened_buffer(a_2, &tree_2);
-        assert_eq!(
-            tree_1.text_as_string(a_1),
-            git.tree(COMMIT_0).text_as_string(a_base)
-        );
-        assert_eq!(
-            tree_2.text_as_string(a_2),
-            git.tree(COMMIT_0).text_as_string(a_base)
-        );
+        assert_eq!(tree_1.text_str(a_1), git.tree(COMMIT_0).text_str(a_base));
+        assert_eq!(tree_2.text_str(a_2), git.tree(COMMIT_0).text_str(a_base));
 
         let ops_1 = tree_1.reset(COMMIT_1).collect().wait().unwrap();
         assert_eq!(tree_1.dir_entries(), git.tree(COMMIT_1).dir_entries());
+        assert_eq!(tree_1.text_str(a_1), git.tree(COMMIT_1).text_str(a_1));
+        assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
 
         let ops_2 = tree_2.reset(COMMIT_2).collect().wait().unwrap();
         assert_eq!(tree_2.dir_entries(), git.tree(COMMIT_2).dir_entries());
+        assert_eq!(tree_2.text_str(a_2), git.tree(COMMIT_2).text_str(a_2));
+        assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
 
         let fixup_ops_1 = tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
         let fixup_ops_2 = tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
@@ -768,14 +766,10 @@ mod tests {
         assert!(fixup_ops_2.is_empty());
         assert_eq!(tree_1.entries(), tree_2.entries());
         assert_eq!(tree_1.dir_entries(), git.tree(COMMIT_1).dir_entries());
-        assert_eq!(
-            tree_2.text_as_string(a_2),
-            git.tree(COMMIT_1).text_as_string(a_base)
-        );
-        assert_eq!(
-            tree_1.text_as_string(a_1),
-            git.tree(COMMIT_1).text_as_string(a_base)
-        );
+        assert_eq!(tree_1.text_str(a_1), git.tree(COMMIT_1).text_str(a_1));
+        assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
+        assert_eq!(tree_2.text_str(a_2), git.tree(COMMIT_1).text_str(a_2));
+        assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
     }
 
     impl WorkTree {
@@ -793,7 +787,7 @@ mod tests {
             self.epoch.as_ref().unwrap().borrow().dir_entries()
         }
 
-        fn text_as_string(&self, buffer_id: BufferId) -> String {
+        fn text_str(&self, buffer_id: BufferId) -> String {
             self.text(buffer_id).unwrap().into_string()
         }
     }
@@ -815,8 +809,14 @@ mod tests {
             }
         }
 
-        fn commit(&self, oid: Oid, tree: WorkTree) {
-            self.commits.borrow_mut().insert(oid, tree);
+        fn commit(&self, oid: Oid, tree: &WorkTree) {
+            let mut tree_clone = WorkTree::empty();
+            tree_clone.epoch = tree
+                .epoch
+                .as_ref()
+                .map(|e| Rc::new(RefCell::new(e.borrow().clone())));
+            tree_clone.buffers = Rc::new(RefCell::new(tree.buffers.borrow().clone()));
+            self.commits.borrow_mut().insert(oid, tree_clone);
         }
 
         fn tree(&self, oid: Oid) -> Ref<WorkTree> {
