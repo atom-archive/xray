@@ -50,7 +50,7 @@ impl fmt::Display for Error {
 mod tests {
     use crate::ReplicaId;
     use rand::Rng;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     #[derive(Clone)]
     struct Envelope<T: Clone> {
@@ -59,14 +59,14 @@ mod tests {
     }
 
     pub(crate) struct Network<T: Clone> {
-        inboxes: HashMap<ReplicaId, Vec<Envelope<T>>>,
+        inboxes: BTreeMap<ReplicaId, Vec<Envelope<T>>>,
         all_messages: Vec<T>,
     }
 
     impl<T: Clone> Network<T> {
         pub fn new() -> Self {
             Network {
-                inboxes: HashMap::new(),
+                inboxes: BTreeMap::new(),
                 all_messages: Vec::new(),
             }
         }
