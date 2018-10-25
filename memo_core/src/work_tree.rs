@@ -35,7 +35,7 @@ pub struct WorkTree {
 pub enum Operation {
     StartEpoch {
         epoch_id: epoch::Id,
-        head: Oid,
+        head: Option<Oid>,
     },
     EpochOperation {
         epoch_id: epoch::Id,
@@ -91,15 +91,7 @@ impl WorkTree {
         };
 
         let ops = if ops.peek().is_none() {
-            if let Some(base) = base {
-                Box::new(tree.reset(base)) as Box<Stream<Item = Operation, Error = Error>>
-            } else {
-                let epoch_id = tree.lamport_clock.borrow_mut().tick();
-                tree.epoch = Some(Rc::new(RefCell::new(Epoch::new(
-                    replica_id, epoch_id, None,
-                ))));
-                Box::new(stream::empty()) as Box<Stream<Item = Operation, Error = Error>>
-            }
+            Box::new(tree.reset(base)) as Box<Stream<Item = Operation, Error = Error>>
         } else {
             Box::new(tree.apply_ops(ops)?) as Box<Stream<Item = Operation, Error = Error>>
         };
@@ -107,7 +99,7 @@ impl WorkTree {
         Ok((tree, ops))
     }
 
-    pub fn reset(&mut self, head: Oid) -> impl Stream<Item = Operation, Error = Error> {
+    pub fn reset(&mut self, head: Option<Oid>) -> impl Stream<Item = Operation, Error = Error> {
         let epoch_id = self.lamport_clock.borrow_mut().tick();
         stream::once(Ok(Operation::StartEpoch { epoch_id, head }))
             .chain(self.start_epoch(epoch_id, head))
@@ -178,7 +170,7 @@ impl WorkTree {
     fn start_epoch(
         &mut self,
         new_epoch_id: epoch::Id,
-        new_head: Oid,
+        new_head: Option<Oid>,
     ) -> Box<Stream<Item = Operation, Error = Error>> {
         if self
             .epoch
@@ -188,23 +180,29 @@ impl WorkTree {
             let new_epoch = Rc::new(RefCell::new(Epoch::new(
                 self.replica_id(),
                 new_epoch_id,
-                Some(new_head),
+                new_head,
             )));
 
             let lamport_clock = self.lamport_clock.clone();
             let new_epoch_clone = new_epoch.clone();
-            let load_base_entries = self
-                .git
-                .base_entries(new_head)
-                .map_err(|err| Error::IoError(err))
-                .chunks(500)
-                .and_then(move |base_entries| {
-                    let fixup_ops = new_epoch_clone
-                        .borrow_mut()
-                        .append_base_entries(base_entries, &mut lamport_clock.borrow_mut())?;
-                    Ok(stream::iter_ok(Operation::stamp(new_epoch_id, fixup_ops)))
-                })
-                .flatten();
+            let load_base_entries = if let Some(new_head) = new_head {
+                Box::new(
+                    self.git
+                        .base_entries(new_head)
+                        .map_err(|err| Error::IoError(err))
+                        .chunks(500)
+                        .and_then(move |base_entries| {
+                            let fixup_ops = new_epoch_clone.borrow_mut().append_base_entries(
+                                base_entries,
+                                &mut lamport_clock.borrow_mut(),
+                            )?;
+                            Ok(stream::iter_ok(Operation::stamp(new_epoch_id, fixup_ops)))
+                        })
+                        .flatten(),
+                ) as Box<Stream<Item = Operation, Error = Error>>
+            } else {
+                Box::new(stream::empty())
+            };
 
             if let Some(cur_epoch) = self.epoch.clone() {
                 let switch_epoch = SwitchEpoch::new(
@@ -221,7 +219,7 @@ impl WorkTree {
                 Box::new(load_base_entries.chain(switch_epoch))
             } else {
                 self.epoch = Some(new_epoch.clone());
-                Box::new(load_base_entries)
+                load_base_entries
             }
         } else {
             Box::new(stream::empty())
@@ -724,7 +722,7 @@ mod tests {
             let mut rng = StdRng::from_seed(&[seed]);
             let git = Rc::new(TestGitProvider::new());
 
-            let mut commits = vec![];
+            let mut commits = vec![None];
             let base_tree = WorkTree::empty();
             for _ in 0..rng.gen_range(1, 10) {
                 base_tree.mutate(&mut rng, 5);
@@ -762,7 +760,7 @@ mod tests {
                     let ops = tree.mutate(&mut rng, 5);
                     network.broadcast(replica_id, ops, &mut rng);
                 } else if k == 1 {
-                    let head = rng.choose(&commits).unwrap().unwrap();
+                    let head = *rng.choose(&commits).unwrap();
                     let ops = tree.reset(head).collect().wait().unwrap();
                     network.broadcast(replica_id, ops, &mut rng);
                 } else if k == 2 {
@@ -871,12 +869,12 @@ mod tests {
         assert_eq!(tree_1.text_str(a_1), git.tree(commit_0).text_str(a_base));
         assert_eq!(tree_2.text_str(a_2), git.tree(commit_0).text_str(a_base));
 
-        let ops_1 = tree_1.reset(commit_1).collect().wait().unwrap();
+        let ops_1 = tree_1.reset(Some(commit_1)).collect().wait().unwrap();
         assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
         assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));
         assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
 
-        let ops_2 = tree_2.reset(commit_2).collect().wait().unwrap();
+        let ops_2 = tree_2.reset(Some(commit_2)).collect().wait().unwrap();
         assert_eq!(tree_2.dir_entries(), git.tree(commit_2).dir_entries());
         assert_eq!(tree_2.text_str(a_2), git.tree(commit_2).text_str(a_2));
         assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
