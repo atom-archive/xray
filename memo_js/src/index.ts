@@ -1,10 +1,26 @@
-export { BaseEntry, GitProvider, FileType, Oid, Path } from "./support";
+export {
+  BaseEntry,
+  Change,
+  GitProvider,
+  FileType,
+  Oid,
+  Path,
+  Point,
+  Range
+} from "./support";
 import {
+  BufferId,
+  Change,
+  ChangeObserver,
+  ChangeObserverCallback,
   GitProvider,
   GitProviderWrapper,
   FileType,
   Oid,
-  Path
+  Path,
+  Point,
+  Range,
+  Tagged
 } from "./support";
 
 let memo: any;
@@ -17,14 +33,9 @@ export async function init() {
   return { WorkTree };
 }
 
-type Tagged<BaseType, TagName> = BaseType & { __tag: TagName };
-
-export type BufferId = Tagged<number, "BufferId">;
 export type Version = Tagged<string, "Version">;
 export type Operation = Tagged<string, "Operation">;
-export type Point = { row: number; column: number };
-export type Range = { start: Point; end: Point };
-export type Change = Range & { text: string };
+
 export enum FileStatus {
   New = "New",
   Renamed = "Renamed",
@@ -45,6 +56,7 @@ export interface Entry {
 
 export class WorkTree {
   private tree: any;
+  private observer: ChangeObserver;
 
   static create(
     replicaId: number,
@@ -52,21 +64,20 @@ export class WorkTree {
     startOps: ReadonlyArray<Operation>,
     git: GitProvider
   ): [WorkTree, AsyncIterable<Operation>] {
+    const observer = new ChangeObserver();
     const result = memo.WorkTree.new(
       new GitProviderWrapper(git),
+      observer,
       replicaId,
       base,
       startOps
     );
-    return [new WorkTree(result.tree()), result.operations()];
+    return [new WorkTree(result.tree(), observer), result.operations()];
   }
 
-  constructor(tree: any) {
+  private constructor(tree: any, observer: ChangeObserver) {
     this.tree = tree;
-  }
-
-  getVersion(): Version {
-    return this.tree.version();
+    this.observer = observer;
   }
 
   applyOps(ops: Operation[]): AsyncIterable<Operation> {
@@ -95,19 +106,32 @@ export class WorkTree {
     return this.tree.entries(descendInto, showDeleted);
   }
 
-  openTextFile(path: Path): Promise<BufferId> {
-    return this.tree.open_text_file(path);
+  async openTextFile(path: Path): Promise<Buffer> {
+    const bufferId = await this.tree.open_text_file(path);
+    return new Buffer(bufferId, this.tree, this.observer);
+  }
+}
+
+export class Buffer {
+  private id: BufferId;
+  private tree: any;
+  private observer: ChangeObserver;
+
+  constructor(id: BufferId, tree: any, observer: ChangeObserver) {
+    this.id = id;
+    this.tree = tree;
+    this.observer = observer;
   }
 
-  getText(bufferId: BufferId): string {
-    return this.tree.text(bufferId);
+  edit(oldRanges: Range[], newText: string): Operation {
+    return this.tree.edit(this.id, oldRanges, newText);
   }
 
-  edit(bufferId: BufferId, oldRanges: Range[], newText: string): Operation {
-    return this.tree.edit(bufferId, oldRanges, newText);
+  getText(): string {
+    return this.tree.text(this.id);
   }
 
-  changesSince(bufferId: BufferId, version: Version): Change[] {
-    return this.tree.changes_since(bufferId, version);
+  onChange(callback: ChangeObserverCallback) {
+    this.observer.onChange(this.id, callback);
   }
 }

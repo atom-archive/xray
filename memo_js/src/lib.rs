@@ -83,23 +83,33 @@ extern "C" {
 
     #[wasm_bindgen(method, js_name = baseText)]
     fn base_text(this: &GitProviderWrapper, head: &str, path: &str) -> js_sys::Promise;
+
+    pub type ChangeObserver;
+
+    #[wasm_bindgen(method, js_name = textChanged)]
+    fn text_changed(this: &ChangeObserver, buffer_id: JsValue, changes: JsValue);
 }
 
 #[wasm_bindgen]
 impl WorkTree {
     pub fn new(
         git: GitProviderWrapper,
+        observer: ChangeObserver,
         replica_id: memo::ReplicaId,
         base: JsValue,
         start_ops: JsValue,
     ) -> Result<WorkTreeNewResult, JsValue> {
-        let HexOid(base) = base.into_serde().map_js_err()?;
+        let base = base
+            .into_serde::<Option<HexOid>>()
+            .map_js_err()?
+            .map(|b| b.0);
         let start_ops: Vec<Base64<memo::Operation>> = start_ops.into_serde().map_js_err()?;
         let (tree, operations) = memo::WorkTree::new(
             replica_id,
             base,
             start_ops.into_iter().map(|op| op.0),
             Rc::new(git),
+            Some(Rc::new(observer)),
         )
         .map_js_err()?;
         Ok(WorkTreeNewResult {
@@ -188,25 +198,6 @@ impl WorkTree {
         self.0
             .edit_2d(buffer_id, old_ranges, new_text)
             .map(|op| JsValue::from_serde(&Base64(op)).unwrap())
-            .map_js_err()
-    }
-
-    pub fn changes_since(&self, buffer_id: JsValue, version: JsValue) -> Result<JsValue, JsValue> {
-        let buffer_id = buffer_id.into_serde().map_js_err()?;
-        let Base64(version) = version.into_serde().map_js_err()?;
-
-        self.0
-            .changes_since(buffer_id, version)
-            .map(|changes| {
-                let changes = changes
-                    .map(|change| Change {
-                        start: change.range.start,
-                        end: change.range.end,
-                        text: String::from_utf16_lossy(&change.code_units),
-                    })
-                    .collect::<Vec<_>>();
-                JsValue::from_serde(&changes).unwrap()
-            })
             .map_js_err()
     }
 
@@ -352,6 +343,23 @@ impl memo::GitProvider for GitProviderWrapper {
             .map(|value| value.as_string().unwrap())
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error.as_string().unwrap())),
         )
+    }
+}
+
+impl memo::ChangeObserver for ChangeObserver {
+    fn text_changed(&self, buffer_id: memo::BufferId, changes: Box<Iterator<Item = memo::Change>>) {
+        let changes = changes
+            .map(|change| Change {
+                start: change.range.start,
+                end: change.range.end,
+                text: String::from_utf16_lossy(&change.code_units),
+            })
+            .collect::<Vec<_>>();
+        ChangeObserver::text_changed(
+            self,
+            JsValue::from_serde(&buffer_id).unwrap(),
+            JsValue::from_serde(&changes).unwrap(),
+        );
     }
 }
 

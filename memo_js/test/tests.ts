@@ -15,7 +15,7 @@ suite("WorkTree", () => {
     git.commit(OID_0, [
       { depth: 1, name: "a", type: memo.FileType.Directory },
       { depth: 2, name: "b", type: memo.FileType.Directory },
-      { depth: 3, name: "c", type: memo.FileType.Text, text: "abc" }
+      { depth: 3, name: "c", type: memo.FileType.Text, text: "oid0 base text" }
     ]);
 
     const [tree1, initOps1] = WorkTree.create(1, OID_0, [], git);
@@ -39,33 +39,34 @@ suite("WorkTree", () => {
     assert.strictEqual(ops1.length, 0);
     assert.strictEqual(ops2.length, 0);
 
-    const d = await tree1.openTextFile("d");
     const tree1BufferC = await tree1.openTextFile("a/b/c");
+    const tree2BufferC = await tree2.openTextFile("a/b/c");
+    assert.strictEqual(tree1BufferC.getText(), "oid0 base text");
+    assert.strictEqual(tree2BufferC.getText(), "oid0 base text");
 
-    assert.strictEqual(tree1.getText(tree1BufferC), "abc");
+    const tree1BufferChanges: memo.Change[] = [];
+    tree1BufferC.onChange(c => tree1BufferChanges.push(...c));
     ops1.push(
-      tree1.edit(
-        tree1BufferC,
+      tree1BufferC.edit(
         [
-          { start: point(0, 0), end: point(0, 0) },
-          { start: point(0, 1), end: point(0, 2) },
-          { start: point(0, 3), end: point(0, 3) }
+          { start: point(0, 4), end: point(0, 5) },
+          { start: point(0, 9), end: point(0, 10) }
         ],
-        "123"
+        "-"
       )
     );
-    assert.strictEqual(tree1.getText(tree1BufferC), "123a123c123");
+    assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
 
-    const tree2VersionBeforeEdit = tree2.getVersion();
+    const tree2BufferChanges: memo.Change[] = [];
+    tree2BufferC.onChange(c => tree2BufferChanges.push(...c));
     assert.deepStrictEqual(await collect(tree2.applyOps(ops1)), []);
-    ops1.length = 0;
-    const tree2BufferC = await tree2.openTextFile("a/b/c");
-    assert.strictEqual(tree2.getText(tree2BufferC), "123a123c123");
-    assert.deepEqual(tree2.changesSince(tree2BufferC, tree2VersionBeforeEdit), [
-      { start: point(0, 0), end: point(0, 0), text: "123" },
-      { start: point(0, 4), end: point(0, 5), text: "123" },
-      { start: point(0, 8), end: point(0, 8), text: "123" }
+    assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
+    assert.deepStrictEqual(tree1BufferChanges, []);
+    assert.deepStrictEqual(tree2BufferChanges, [
+      { start: point(0, 4), end: point(0, 5), text: "-" },
+      { start: point(0, 9), end: point(0, 10), text: "-" }
     ]);
+    ops1.length = 0;
 
     ops1.push(tree1.createFile("x", memo.FileType.Directory));
     ops1.push(tree1.createFile("x/y", memo.FileType.Directory));
