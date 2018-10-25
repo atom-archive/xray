@@ -2000,7 +2000,7 @@ mod tests {
         ) -> Vec<Operation> {
             let mut ops = Vec::new();
             for _ in 0..count {
-                let k = rng.gen_range(0, 4);
+                let k = rng.gen_range(0, 3);
                 if self.child_refs.is_empty() || k == 0 {
                     // println!("Random mutation: Creating file");
                     let parent_id = self
@@ -2046,15 +2046,6 @@ mod tests {
                             Err(_error) => {}
                         }
                     }
-                } else if let Some(file_id) = self.select_file(rng, Some(FileType::Text), false) {
-                    self.open_text_file(file_id, "", lamport_clock).unwrap();
-                    let text_len = self.text(file_id).unwrap().count();
-                    let end = rng.gen_range::<usize>(0, text_len + 1);
-                    let start = rng.gen_range::<usize>(0, end + 1);
-                    ops.push(
-                        self.edit(file_id, Some(start..end), gen_text(rng), lamport_clock)
-                            .unwrap(),
-                    );
                 }
             }
             ops
@@ -2104,15 +2095,5 @@ mod tests {
         }
 
         name
-    }
-
-    fn gen_text<T: Rng>(rng: &mut T) -> String {
-        let text_len = rng.gen_range(0, 50);
-        let mut text: String = rng.gen_ascii_chars().take(text_len).collect();
-        for _ in 0..rng.gen_range(0, 5) {
-            let index = rng.gen_range(0, text.len() + 1);
-            text.insert(index, '\n');
-        }
-        text
     }
 }

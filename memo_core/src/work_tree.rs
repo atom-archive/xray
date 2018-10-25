@@ -705,6 +705,7 @@ mod tests {
         const PEERS: usize = 2;
 
         for seed in 0..100 {
+            println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
             let git = Rc::new(TestGitProvider::new());
 
@@ -739,7 +740,8 @@ mod tests {
                 let replica_index = rng.gen_range(0, PEERS);
                 let replica_id = replica_index as ReplicaId + 1;
                 let tree = &mut trees[replica_index];
-                let k = rng.gen_range(0, 3);
+                let observer = &mut observers[replica_index];
+                let k = rng.gen_range(0, 4);
 
                 if k == 0 {
                     let ops = tree.mutate(&mut rng, 5);
@@ -753,6 +755,55 @@ mod tests {
                         .apply_ops(network.receive(replica_id, &mut rng))
                         .unwrap();
                     network.broadcast(replica_id, fixup_ops.collect().wait().unwrap(), &mut rng);
+                } else if k == 3 {
+                    let buffer_id = if tree.open_buffers().is_empty() || rng.gen() {
+                        tree.select_path(FileType::Text, &mut rng).map(|path| {
+                            let id = tree.open_text_file(path).wait().unwrap();
+                            observer.opened_buffer(id, tree);
+                            id
+                        })
+                    } else {
+                        rng.choose(&tree.open_buffers()).cloned()
+                    };
+
+                    if let Some(buffer_id) = buffer_id {
+                        let end = rng.gen_range(0, tree.text(buffer_id).unwrap().count() + 1);
+                        let start = rng.gen_range(0, end + 1);
+                        let text = gen_text(&mut rng);
+                        observer.edit(buffer_id, start..end, text.as_str());
+                        let op = tree.edit(buffer_id, Some(start..end), text).unwrap();
+                        network.broadcast(replica_id, vec![op], &mut rng);
+                    }
+                }
+            }
+
+            while !network.is_idle() {
+                for replica_index in 0..PEERS {
+                    let replica_id = replica_index as ReplicaId + 1;
+                    let tree = &mut trees[replica_index];
+                    let fixup_ops = tree
+                        .apply_ops(network.receive(replica_id, &mut rng))
+                        .unwrap();
+                    network.broadcast(replica_id, fixup_ops.collect().wait().unwrap(), &mut rng);
+                }
+            }
+
+            for replica_index in 0..PEERS - 1 {
+                let tree_1 = &trees[replica_index];
+                let tree_2 = &trees[replica_index + 1];
+                assert_eq!(tree_1.cur_epoch().id, tree_2.cur_epoch().id);
+                assert_eq!(tree_1.cur_epoch().head, tree_2.cur_epoch().head);
+                assert_eq!(tree_1.entries(), tree_2.entries());
+            }
+
+            for replica_index in 0..PEERS {
+                let tree = &trees[replica_index];
+                let observer = &observers[replica_index];
+                for buffer_id in tree.open_buffers() {
+                    assert_eq!(
+                        observer.text(buffer_id),
+                        tree.text(buffer_id).unwrap().into_string()
+                    );
                 }
             }
         }
@@ -842,6 +893,10 @@ mod tests {
             self.cur_epoch().dir_entries()
         }
 
+        fn open_buffers(&self) -> Vec<BufferId> {
+            self.buffers.borrow().keys().cloned().collect()
+        }
+
         fn text_str(&self, buffer_id: BufferId) -> String {
             self.text(buffer_id).unwrap().into_string()
         }
@@ -853,6 +908,31 @@ mod tests {
                 epoch.mutate(rng, &mut self.lamport_clock.borrow_mut(), count),
             )
             .collect()
+        }
+
+        fn select_path<T: Rng>(&self, file_type: FileType, rng: &mut T) -> Option<PathBuf> {
+            let mut visible_paths = Vec::new();
+            self.with_cursor(|cursor| loop {
+                let entry = cursor.entry().unwrap();
+                let advanced = if entry.visible {
+                    if file_type == entry.file_type {
+                        visible_paths.push(cursor.path().unwrap().to_path_buf());
+                    }
+                    cursor.next(true)
+                } else {
+                    cursor.next(false)
+                };
+
+                if !advanced {
+                    break;
+                }
+            });
+
+            if visible_paths.is_empty() {
+                None
+            } else {
+                Some(visible_paths.swap_remove(rng.gen_range(0, visible_paths.len())))
+            }
         }
     }
 
@@ -963,6 +1043,19 @@ mod tests {
                 .insert(buffer_id, buffer::Buffer::new(text));
         }
 
+        fn edit<T>(&self, buffer_id: BufferId, range: Range<usize>, text: T)
+        where
+            T: Into<Text>,
+        {
+            let mut buffers = self.buffers.borrow_mut();
+            buffers.get_mut(&buffer_id).unwrap().edit(
+                Some(range),
+                text,
+                &mut self.local_clock.borrow_mut(),
+                &mut self.lamport_clock.borrow_mut(),
+            );
+        }
+
         fn text(&self, buffer_id: BufferId) -> String {
             self.buffers.borrow().get(&buffer_id).unwrap().to_string()
         }
@@ -981,5 +1074,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn gen_text<T: Rng>(rng: &mut T) -> String {
+        let text_len = rng.gen_range(0, 50);
+        let mut text: String = rng.gen_ascii_chars().take(text_len).collect();
+        for _ in 0..rng.gen_range(0, 5) {
+            let index = rng.gen_range(0, text.len() + 1);
+            text.insert(index, '\n');
+        }
+        text
     }
 }
