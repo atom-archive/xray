@@ -10,12 +10,19 @@ suite("WorkTree", () => {
 
   test("basic API interaction", async () => {
     const OID_0 = "0".repeat(40);
+    const OID_1 = "1".repeat(40);
 
     const git = new TestGitProvider();
     git.commit(OID_0, [
       { depth: 1, name: "a", type: memo.FileType.Directory },
       { depth: 2, name: "b", type: memo.FileType.Directory },
-      { depth: 3, name: "c", type: memo.FileType.Text, text: "oid0 base text" }
+      { depth: 3, name: "c", type: memo.FileType.Text, text: "oid0 base text" },
+      { depth: 3, name: "d", type: memo.FileType.Directory }
+    ]);
+    git.commit(OID_1, [
+      { depth: 1, name: "a", type: memo.FileType.Directory },
+      { depth: 2, name: "b", type: memo.FileType.Directory },
+      { depth: 3, name: "c", type: memo.FileType.Text, text: "oid1 base text" }
     ]);
 
     const [tree1, initOps1] = WorkTree.create(1, OID_0, [], git);
@@ -29,10 +36,10 @@ suite("WorkTree", () => {
 
     const ops1 = [];
     const ops2 = [];
-    ops1.push(tree1.createFile("d", memo.FileType.Text));
-    ops2.push(tree2.createFile("e", memo.FileType.Text));
+    ops1.push(tree1.createFile("e", memo.FileType.Text));
+    ops2.push(tree2.createFile("f", memo.FileType.Text));
 
-    await assert.rejects(() => tree2.openTextFile("d"));
+    await assert.rejects(() => tree2.openTextFile("e"));
 
     ops1.push(...(await collect(tree1.applyOps(ops2.splice(0, Infinity)))));
     ops2.push(...(await collect(tree2.applyOps(ops1.splice(0, Infinity)))));
@@ -71,7 +78,7 @@ suite("WorkTree", () => {
     ops1.push(tree1.createFile("x", memo.FileType.Directory));
     ops1.push(tree1.createFile("x/y", memo.FileType.Directory));
     ops1.push(tree1.rename("x", "a/b/x"));
-    ops1.push(tree1.remove("a/b/c"));
+    ops1.push(tree1.remove("a/b/d"));
     assert.deepStrictEqual(await collect(tree2.applyOps(ops1)), []);
     assert.deepStrictEqual(await collect(tree1.applyOps(ops2)), []);
     ops1.length = 0;
@@ -90,16 +97,16 @@ suite("WorkTree", () => {
       {
         depth: 1,
         type: memo.FileType.Text,
-        name: "d",
-        path: "d",
+        name: "e",
+        path: "e",
         status: memo.FileStatus.New,
         visible: true
       },
       {
         depth: 1,
         type: memo.FileType.Text,
-        name: "e",
-        path: "e",
+        name: "f",
+        path: "f",
         status: memo.FileStatus.New,
         visible: true
       }
@@ -128,6 +135,14 @@ suite("WorkTree", () => {
           type: memo.FileType.Text,
           name: "c",
           path: "a/b/c",
+          status: memo.FileStatus.Modified,
+          visible: true
+        },
+        {
+          depth: 3,
+          type: memo.FileType.Directory,
+          name: "d",
+          path: "a/b/d",
           status: memo.FileStatus.Removed,
           visible: false
         },
@@ -142,21 +157,36 @@ suite("WorkTree", () => {
         {
           depth: 1,
           type: memo.FileType.Text,
-          name: "d",
-          path: "d",
+          name: "e",
+          path: "e",
           status: memo.FileStatus.New,
           visible: true
         },
         {
           depth: 1,
           type: memo.FileType.Text,
-          name: "e",
-          path: "e",
+          name: "f",
+          path: "f",
           status: memo.FileStatus.New,
           visible: true
         }
       ]
     );
+
+    tree1BufferChanges.length = 0;
+    tree2BufferChanges.length = 0;
+    ops1.push(...(await collect(tree1.reset(OID_1))));
+    assert.deepStrictEqual(await collect(tree2.applyOps(ops1)), []);
+    assert.strictEqual(tree1BufferC.getText(), "oid1 base text");
+    assert.strictEqual(tree2BufferC.getText(), "oid1 base text");
+    assert.deepStrictEqual(tree1BufferChanges, [
+      { start: point(0, 3), end: point(0, 5), text: "1 " },
+      { start: point(0, 9), end: point(0, 10), text: " " }
+    ]);
+    assert.deepStrictEqual(tree2BufferChanges, [
+      { start: point(0, 3), end: point(0, 5), text: "1 " },
+      { start: point(0, 9), end: point(0, 10), text: " " }
+    ]);
   });
 });
 

@@ -122,8 +122,17 @@ impl WorkTree {
         })
     }
 
-    pub fn version(&self) -> Result<JsValue, JsValue> {
-        JsValue::from_serde(&Base64(self.0.version())).map_js_err()
+    pub fn reset(&mut self, base: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
+        let base = base
+            .into_serde::<Option<HexOid>>()
+            .map_js_err()?
+            .map(|b| b.0);
+        Ok(StreamToAsyncIterator::new(
+            self.0
+                .reset(base)
+                .map(|op| Base64(op))
+                .map_err(|err| err.to_string()),
+        ))
     }
 
     pub fn apply_ops(&mut self, ops: JsValue) -> Result<StreamToAsyncIterator, JsValue> {

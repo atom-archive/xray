@@ -60,7 +60,7 @@ export class WorkTree {
 
   static create(
     replicaId: number,
-    base: Oid,
+    base: Oid | null,
     startOps: ReadonlyArray<Operation>,
     git: GitProvider
   ): [WorkTree, AsyncIterable<Operation>] {
@@ -78,6 +78,10 @@ export class WorkTree {
   private constructor(tree: any, observer: ChangeObserver) {
     this.tree = tree;
     this.observer = observer;
+  }
+
+  reset(base: Oid | null): AsyncIterable<Operation> {
+    return this.tree.reset(base);
   }
 
   applyOps(ops: Operation[]): AsyncIterable<Operation> {
