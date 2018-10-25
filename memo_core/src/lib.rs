@@ -11,8 +11,9 @@ pub use crate::work_tree::{BufferId, ChangeObserver, GitProvider, Operation, Wor
 use std::borrow::Cow;
 use std::fmt;
 use std::io;
+use uuid::Uuid;
 
-pub type ReplicaId = u32;
+pub type ReplicaId = Uuid;
 pub type UserId = u64;
 pub type Oid = [u8; 20];
 

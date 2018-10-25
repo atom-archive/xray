@@ -727,6 +727,7 @@ mod tests {
     use super::*;
     use crate::epoch::CursorEntry;
     use rand::{Rng, SeedableRng, StdRng};
+    use uuid::Uuid;
 
     #[test]
     fn test_random() {
@@ -750,26 +751,25 @@ mod tests {
             let mut trees = Vec::new();
             let mut network = Network::new();
             for i in 0..PEERS {
-                let replica_id = i as ReplicaId + 1;
-                network.add_peer(replica_id);
                 let observer = Rc::new(TestChangeObserver::new());
                 observers.push(observer.clone());
                 let (tree, ops) = WorkTree::new(
-                    replica_id,
+                    Uuid::from_u128((i + 1) as u128),
                     *rng.choose(&commits).unwrap(),
                     None,
                     git.clone(),
                     Some(observer),
                 )
                 .unwrap();
+                network.add_peer(tree.replica_id());
+                network.broadcast(tree.replica_id(), ops.collect().wait().unwrap(), &mut rng);
                 trees.push(tree);
-                network.broadcast(replica_id, ops.collect().wait().unwrap(), &mut rng);
             }
 
             for _ in 0..5 {
                 let replica_index = rng.gen_range(0, PEERS);
-                let replica_id = replica_index as ReplicaId + 1;
                 let tree = &mut trees[replica_index];
+                let replica_id = tree.replica_id();
                 let observer = &mut observers[replica_index];
                 let k = rng.gen_range(0, 4);
 
@@ -809,8 +809,8 @@ mod tests {
 
             while !network.is_idle() {
                 for replica_index in 0..PEERS {
-                    let replica_id = replica_index as ReplicaId + 1;
                     let tree = &mut trees[replica_index];
+                    let replica_id = tree.replica_id();
                     let fixup_ops = tree
                         .apply_ops(network.receive(replica_id, &mut rng))
                         .unwrap();
@@ -859,7 +859,7 @@ mod tests {
         let observer_1 = Rc::new(TestChangeObserver::new());
         let observer_2 = Rc::new(TestChangeObserver::new());
         let (mut tree_1, ops_1) = WorkTree::new(
-            1,
+            Uuid::from_u128(1),
             Some(commit_0),
             vec![],
             git.clone(),
@@ -867,7 +867,7 @@ mod tests {
         )
         .unwrap();
         let (mut tree_2, ops_2) = WorkTree::new(
-            2,
+            Uuid::from_u128(2),
             Some(commit_0),
             ops_1.collect().wait().unwrap(),
             git.clone(),
@@ -910,8 +910,14 @@ mod tests {
 
     impl WorkTree {
         fn empty() -> Self {
-            let (tree, _) =
-                Self::new(999, None, Vec::new(), Rc::new(TestGitProvider::new()), None).unwrap();
+            let (tree, _) = Self::new(
+                Uuid::from_u128(999 as u128),
+                None,
+                Vec::new(),
+                Rc::new(TestGitProvider::new()),
+                None,
+            )
+            .unwrap();
             tree
         }
 

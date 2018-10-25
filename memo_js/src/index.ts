@@ -22,6 +22,7 @@ import {
   Range,
   Tagged
 } from "./support";
+import { randomBytes } from "crypto";
 
 let memo: any;
 
@@ -35,9 +36,10 @@ export async function init() {
 
 export type Version = Tagged<string, "Version">;
 export type Operation = Tagged<string, "Operation">;
+export type ReplicaId = Tagged<string, "ReplicaId">;
 export type OperationEnvelope = {
   epochTimestamp: number;
-  epochReplicaId: number;
+  epochReplicaId: string;
   operation: Operation;
 };
 
@@ -64,7 +66,6 @@ export class WorkTree {
   private observer: ChangeObserver;
 
   static create(
-    replicaId: number,
     base: Oid | null,
     startOps: ReadonlyArray<Operation>,
     git: GitProvider
@@ -73,7 +74,7 @@ export class WorkTree {
     const result = memo.WorkTree.new(
       new GitProviderWrapper(git),
       observer,
-      replicaId,
+      randomBytes(16),
       base,
       startOps
     );

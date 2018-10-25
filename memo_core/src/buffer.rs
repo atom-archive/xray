@@ -2139,11 +2139,13 @@ where
 mod tests {
     use super::*;
     use rand::{Rng, SeedableRng, StdRng};
+    use uuid::Uuid;
 
     #[test]
     fn test_edit() {
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         let mut buffer = Buffer::new("abc");
         assert_eq!(buffer.to_string(), "abc");
         buffer.edit(vec![3..3], "def", &mut local_clock, &mut lamport_clock);
@@ -2169,8 +2171,9 @@ mod tests {
                 .collect::<String>();
             let mut buffer = Buffer::new(reference_string.as_str());
             let mut buffer_versions = Vec::new();
-            let mut local_clock = time::Local::new(1);
-            let mut lamport_clock = time::Lamport::new(1);
+            let replica_id = Uuid::from_u128(1);
+            let mut local_clock = time::Local::new(replica_id);
+            let mut lamport_clock = time::Lamport::new(replica_id);
 
             for _i in 0..10 {
                 let mut old_ranges: Vec<Range<usize>> = Vec::new();
@@ -2225,8 +2228,9 @@ mod tests {
     #[test]
     fn test_len_for_row() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         buffer.edit(
             vec![0..0],
             "abcd\nefg\nhij",
@@ -2259,8 +2263,9 @@ mod tests {
     #[test]
     fn test_longest_row() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         assert_eq!(buffer.longest_row(), 0);
         buffer.edit(
             vec![0..0],
@@ -2287,8 +2292,9 @@ mod tests {
     #[test]
     fn test_iter_starting_at_point() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         buffer.edit(
             vec![0..0],
             "abcd\nefgh\nij",
@@ -2342,8 +2348,9 @@ mod tests {
 
         // Regression test:
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         buffer.edit(vec![0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n", &mut local_clock, &mut lamport_clock);
         buffer.edit(vec![60..60], "\n", &mut local_clock, &mut lamport_clock);
 
@@ -2474,8 +2481,9 @@ mod tests {
     #[test]
     fn test_anchors() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         buffer.edit(vec![0..0], "abc", &mut local_clock, &mut lamport_clock);
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
@@ -2618,8 +2626,9 @@ mod tests {
     #[test]
     fn test_anchors_at_start_and_end() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
@@ -2643,8 +2652,9 @@ mod tests {
     #[test]
     fn test_is_modified() {
         let mut buffer = Buffer::new("abc");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
 
         assert!(!buffer.is_modified());
         buffer.edit(vec![1..2], "", &mut local_clock, &mut lamport_clock);
@@ -2664,14 +2674,16 @@ mod tests {
             let base_text = RandomCharIter(rng)
                 .take(rng.gen_range(0, 10))
                 .collect::<String>();
+            let mut replica_ids = Vec::new();
             let mut buffers = Vec::new();
             let mut local_clocks = Vec::new();
             let mut lamport_clocks = Vec::new();
             let mut network = Network::new();
             for i in 0..PEERS {
-                let replica_id = i as ReplicaId + 1;
                 let buffer = Buffer::new(base_text.as_str());
                 buffers.push(buffer);
+                let replica_id = Uuid::from_u128((i + 1) as u128);
+                replica_ids.push(replica_id);
                 local_clocks.push(time::Local::new(replica_id));
                 lamport_clocks.push(time::Lamport::new(replica_id));
                 network.add_peer(replica_id);
@@ -2680,7 +2692,7 @@ mod tests {
             let mut edit_count = 10;
             loop {
                 let replica_index = rng.gen_range(0, PEERS);
-                let replica_id = replica_index as u32 + 1;
+                let replica_id = replica_ids[replica_index];
                 let buffer = &mut buffers[replica_index];
                 let local_clock = &mut local_clocks[replica_index];
                 let lamport_clock = &mut lamport_clocks[replica_index];

@@ -103,7 +103,7 @@ impl WorkTree {
     pub fn new(
         git: GitProviderWrapper,
         observer: ChangeObserver,
-        replica_id: memo::ReplicaId,
+        replica_id_bytes_slice: &[u8],
         base: JsValue,
         start_ops: JsValue,
     ) -> Result<WorkTreeNewResult, JsValue> {
@@ -112,6 +112,9 @@ impl WorkTree {
             .map_js_err()?
             .map(|b| b.0);
         let start_ops: Vec<Base64<memo::Operation>> = start_ops.into_serde().map_js_err()?;
+        let mut replica_id_bytes = [0; 16];
+        replica_id_bytes.copy_from_slice(replica_id_bytes_slice);
+        let replica_id = memo::ReplicaId::from_random_bytes(replica_id_bytes);
         let (tree, operations) = memo::WorkTree::new(
             replica_id,
             base,

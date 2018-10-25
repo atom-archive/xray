@@ -25,9 +25,8 @@ suite("WorkTree", () => {
       { depth: 3, name: "c", type: memo.FileType.Text, text: "oid1 base text" }
     ]);
 
-    const [tree1, initOps1] = WorkTree.create(1, OID_0, [], git);
+    const [tree1, initOps1] = WorkTree.create(OID_0, [], git);
     const [tree2, initOps2] = WorkTree.create(
-      2,
       OID_0,
       await collectOps(initOps1),
       git

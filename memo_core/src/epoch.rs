@@ -263,13 +263,13 @@ impl Epoch {
             }));
             parent_ref_edits.push(btree::Edit::Insert(ParentRefValue {
                 child_id: file_id,
-                timestamp: time::Lamport::min_value(),
+                timestamp: time::Lamport::default(),
                 parent: Some((parent_id, name.clone())),
             }));
             child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
                 parent_id,
                 name: name.clone(),
-                timestamp: time::Lamport::min_value(),
+                timestamp: time::Lamport::default(),
                 child_id: file_id,
                 visible: true,
             }));
@@ -744,7 +744,7 @@ impl Epoch {
                 cursor.seek(
                     &ParentRefValueKey {
                         child_id: file_id,
-                        timestamp: time::Lamport::min_value(),
+                        timestamp: time::Lamport::default(),
                     },
                     SeekBias::Left,
                 );
@@ -1494,11 +1494,13 @@ mod tests {
     use super::*;
     use crate::buffer::Point;
     use rand::{Rng, SeedableRng, StdRng};
+    use uuid::Uuid;
 
     #[test]
     fn test_append_base_entries() {
-        let mut epoch = Epoch::with_replica_id(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::nil();
+        let mut epoch = Epoch::with_replica_id(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         assert!(epoch.paths().is_empty());
 
         let fixup_ops = epoch
@@ -1564,8 +1566,9 @@ mod tests {
 
     #[test]
     fn test_cursor() {
-        let mut epoch = Epoch::with_replica_id(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::nil();
+        let mut epoch = Epoch::with_replica_id(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
 
         epoch
             .append_base_entries(
@@ -1779,41 +1782,43 @@ mod tests {
         ];
         let base_text = Text::from("abc");
 
-        let mut tree_1 = Epoch::with_replica_id(1);
-        let mut lamport_clock_1 = time::Lamport::new(1);
-        tree_1
+        let replica_id_1 = Uuid::from_u128(1);
+        let mut epoch_1 = Epoch::with_replica_id(replica_id_1);
+        let mut lamport_clock_1 = time::Lamport::new(replica_id_1);
+        epoch_1
             .append_base_entries(base_entries.clone(), &mut lamport_clock_1)
             .unwrap();
-        let mut tree_2 = Epoch::with_replica_id(2);
-        let mut lamport_clock_2 = time::Lamport::new(2);
-        tree_2
+        let replica_id_2 = Uuid::from_u128(2);
+        let mut epoch_2 = Epoch::with_replica_id(replica_id_2);
+        let mut lamport_clock_2 = time::Lamport::new(replica_id_2);
+        epoch_2
             .append_base_entries(base_entries, &mut lamport_clock_2)
             .unwrap();
 
-        let file_id = tree_1.file_id("file").unwrap();
-        tree_2
+        let file_id = epoch_1.file_id("file").unwrap();
+        epoch_2
             .open_text_file(file_id, base_text.clone(), &mut lamport_clock_2)
             .unwrap();
-        let ops = tree_2.edit(file_id, vec![1..2, 3..3], "x", &mut lamport_clock_2);
-        tree_1.apply_ops(ops, &mut lamport_clock_1).unwrap();
+        let ops = epoch_2.edit(file_id, vec![1..2, 3..3], "x", &mut lamport_clock_2);
+        epoch_1.apply_ops(ops, &mut lamport_clock_1).unwrap();
 
         // Must call open_text_file on any given replica first before interacting with a buffer.
-        assert!(tree_1.text(file_id).is_err());
-        tree_1
+        assert!(epoch_1.text(file_id).is_err());
+        epoch_1
             .open_text_file(file_id, base_text, &mut lamport_clock_1)
             .unwrap();
-        assert_eq!(tree_1.text(file_id).unwrap().into_string(), "axcx");
-        assert_eq!(tree_2.text(file_id).unwrap().into_string(), "axcx");
+        assert_eq!(epoch_1.text(file_id).unwrap().into_string(), "axcx");
+        assert_eq!(epoch_2.text(file_id).unwrap().into_string(), "axcx");
 
-        let ops = tree_1.edit(file_id, vec![1..2, 4..4], "y", &mut lamport_clock_1);
-        let base_version = tree_2.version();
+        let ops = epoch_1.edit(file_id, vec![1..2, 4..4], "y", &mut lamport_clock_1);
+        let base_version = epoch_2.version();
 
-        tree_2.apply_ops(ops, &mut lamport_clock_2).unwrap();
+        epoch_2.apply_ops(ops, &mut lamport_clock_2).unwrap();
 
-        assert_eq!(tree_1.text(file_id).unwrap().into_string(), "aycxy");
-        assert_eq!(tree_2.text(file_id).unwrap().into_string(), "aycxy");
+        assert_eq!(epoch_1.text(file_id).unwrap().into_string(), "aycxy");
+        assert_eq!(epoch_2.text(file_id).unwrap().into_string(), "aycxy");
 
-        let changes = tree_2
+        let changes = epoch_2
             .changes_since(file_id, base_version.clone())
             .unwrap()
             .collect::<Vec<_>>();
@@ -1823,8 +1828,8 @@ mod tests {
         assert_eq!(changes[1].range, Point::new(0, 4)..Point::new(0, 4));
         assert_eq!(changes[1].code_units, [b'y' as u16]);
 
-        let dir_id = tree_1.file_id("dir").unwrap();
-        assert!(tree_1
+        let dir_id = epoch_1.file_id("dir").unwrap();
+        assert!(epoch_1
             .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
             .is_err());
     }
@@ -1839,8 +1844,8 @@ mod tests {
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut base_epoch = Epoch::with_replica_id(999);
-            base_epoch.mutate(&mut rng, &mut time::Lamport::new(999), 20);
+            let mut base_epoch = Epoch::with_replica_id(Uuid::nil());
+            base_epoch.mutate(&mut rng, &mut time::Lamport::new(Uuid::nil()), 20);
             let base_entries = base_epoch.entries();
             let base_entries = base_entries
                 .iter()
@@ -1852,17 +1857,19 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
 
-            let mut base_epoch = Epoch::with_replica_id(999);
+            let mut base_epoch = Epoch::with_replica_id(Uuid::nil());
             base_epoch
-                .append_base_entries(base_entries.clone(), &mut time::Lamport::new(999))
+                .append_base_entries(base_entries.clone(), &mut time::Lamport::new(Uuid::nil()))
                 .unwrap();
 
+            let mut replica_ids = Vec::new();
             let mut epochs = Vec::new();
             let mut lamport_clocks = Vec::new();
             let mut base_entries_to_append = Vec::new();
             let mut network = Network::new();
             for i in 0..PEERS {
-                let replica_id = i as ReplicaId + 1;
+                let replica_id = Uuid::from_u128((i + 1) as u128);
+                replica_ids.push(replica_id);
                 epochs.push(Epoch::with_replica_id(replica_id));
                 lamport_clocks.push(time::Lamport::new(replica_id));
                 base_entries_to_append.push(base_entries.clone());
@@ -1873,7 +1880,7 @@ mod tests {
             for _ in 0..10 {
                 let k = rng.gen_range(0, 10);
                 let replica_index = rng.gen_range(0, PEERS);
-                let replica_id = replica_index as ReplicaId + 1;
+                let replica_id = replica_ids[replica_index];
                 let epoch = &mut epochs[replica_index];
                 let lamport_clock = &mut lamport_clocks[replica_index];
                 let base_entries_to_append = &mut base_entries_to_append[replica_index];
@@ -1907,7 +1914,7 @@ mod tests {
             loop {
                 let mut done = true;
                 for replica_index in 0..PEERS {
-                    let replica_id = replica_index as ReplicaId + 1;
+                    let replica_id = replica_ids[replica_index];
                     let epoch = &mut epochs[replica_index];
                     let lamport_clock = &mut lamport_clocks[replica_index];
                     let base_entries_to_append = &mut base_entries_to_append[replica_index];
