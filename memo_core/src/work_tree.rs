@@ -616,6 +616,33 @@ impl Future for SwitchEpoch {
 
             if is_done {
                 let mut fixup_ops = Vec::new();
+
+                let mut buffer_mappings = Vec::with_capacity(self.base_text_requests.len());
+                for (buffer_id, request) in self.base_text_requests.drain() {
+                    let new_file_id;
+                    let base_text;
+                    if let Some(request) = request {
+                        base_text = request.future.take_result().unwrap()?;
+                        new_file_id = to_assign.file_id(request.path).unwrap();
+                    } else {
+                        // TODO: This may be okay for now, but I think we should take a smarter
+                        // approach, where the site which initiates the reset transmits a mapping of
+                        // previous file ids to new file ids. Then, when receiving a new epoch, we will
+                        // check if we can map the open buffer to a file id and, only if we can't, we
+                        // will resort to path-based mapping or to creating a completely new file id
+                        // for untitled buffers.
+                        let (file_id, operation) = to_assign.new_text_file(&mut lamport_clock);
+                        new_file_id = file_id;
+                        base_text = String::new();
+                        fixup_ops.push(Operation::EpochOperation {
+                            epoch_id: to_assign.id,
+                            operation,
+                        });
+                    }
+                    to_assign.open_text_file(new_file_id, base_text, &mut lamport_clock)?;
+                    buffer_mappings.push((buffer_id, new_file_id));
+                }
+
                 if let Some(ops) = deferred_ops.remove(&to_assign.id) {
                     fixup_ops.extend(Operation::stamp(
                         to_assign.id,
@@ -624,38 +651,16 @@ impl Future for SwitchEpoch {
                 }
                 deferred_ops.retain(|id, _| *id > to_assign.id);
 
-                for (buffer_id, request) in self.base_text_requests.drain() {
-                    let file_id;
-                    let base_text;
-                    if let Some(request) = request {
-                        base_text = request.future.take_result().unwrap()?;
-                        file_id = to_assign.file_id(request.path).unwrap();
-                    } else {
-                        // TODO: This may be okay for now, but I think we should take a smarter
-                        // approach, where the site which initiates the reset transmits a mapping of
-                        // previous file ids to new file ids. Then, when receiving a new epoch, we will
-                        // check if we can map the open buffer to a file id and, only if we can't, we
-                        // will resort to path-based mapping or to creating a completely new file id
-                        // for untitled buffers.
-                        let (new_file_id, operation) = to_assign.new_text_file(&mut lamport_clock);
-                        file_id = new_file_id;
-                        base_text = String::new();
-                        fixup_ops.push(Operation::EpochOperation {
-                            epoch_id: to_assign.id,
-                            operation,
-                        });
-                    }
-
-                    to_assign.open_text_file(file_id, base_text, &mut lamport_clock)?;
+                for (buffer_id, new_file_id) in buffer_mappings {
                     let old_text = cur_epoch.text(buffers[&buffer_id])?.into_string();
-                    let new_text = to_assign.text(file_id)?.into_string();
+                    let new_text = to_assign.text(new_file_id)?.into_string();
                     let mut changes = buffer::diff(&old_text, &new_text).peekable();
                     if changes.peek().is_some() {
                         if let Some(observer) = self.observer.as_ref() {
                             observer.text_changed(buffer_id, Box::new(changes));
                         }
                     }
-                    buffers.insert(buffer_id, file_id);
+                    buffers.insert(buffer_id, new_file_id);
                 }
 
                 mem::swap(&mut *cur_epoch, &mut *to_assign);
