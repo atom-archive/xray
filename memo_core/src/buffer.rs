@@ -1495,17 +1495,25 @@ impl Iterator for DiffIter {
         let mut change: Option<Change> = None;
 
         while let Some(diff) = self.diff.next() {
-            let extent = match &diff {
+            let code_units;
+            let extent;
+            match &diff {
                 Difference::Same(text) | Difference::Rem(text) | Difference::Add(text) => {
+                    code_units = text.encode_utf16().collect::<Vec<_>>();
+
                     let mut rows = 0;
                     let mut last_row_len = 0;
-                    for line in text.lines() {
-                        last_row_len = line.encode_utf16().count() as u32;
-                        rows += 1;
+                    for ch in &code_units {
+                        if *ch == b'\n' as u16 {
+                            rows += 1;
+                            last_row_len = 0;
+                        } else {
+                            last_row_len += 1;
+                        }
                     }
-                    Point::new(rows - 1, last_row_len)
+                    extent = Point::new(rows, last_row_len);
                 }
-            };
+            }
 
             match diff {
                 Difference::Same(_) => {
@@ -1525,14 +1533,14 @@ impl Iterator for DiffIter {
                         });
                     }
                 }
-                Difference::Add(text) => {
+                Difference::Add(_) => {
                     if let Some(change) = change.as_mut() {
-                        change.code_units.extend(text.encode_utf16());
+                        change.code_units.extend(code_units);
                         change.new_extent += &extent;
                     } else {
                         change = Some(Change {
                             range: self.position..self.position,
-                            code_units: text.encode_utf16().collect(),
+                            code_units,
                             new_extent: extent,
                         });
                     }
