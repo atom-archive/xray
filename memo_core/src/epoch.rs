@@ -788,6 +788,10 @@ impl Epoch {
         }
     }
 
+    pub fn file_type(&self, file_id: FileId) -> Result<FileType, Error> {
+        Ok(self.metadata(file_id)?.file_type)
+    }
+
     fn metadata(&self, file_id: FileId) -> Result<Metadata, Error> {
         if file_id == ROOT_FILE_ID {
             Ok(Metadata {

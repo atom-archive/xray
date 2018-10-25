@@ -574,17 +574,25 @@ impl Future for SwitchEpoch {
 
             for (buffer_id, file_id) in buffers.iter() {
                 let path = cur_epoch.path(*file_id);
-                let should_load = if let Some(request) = self.base_text_requests.get(&buffer_id) {
-                    path.as_ref() == request.as_ref().map(|r| &r.path)
-                } else {
-                    true
-                };
+                let request_is_outdated =
+                    if let Some(request) = self.base_text_requests.get(&buffer_id) {
+                        path.as_ref() == request.as_ref().map(|r| &r.path)
+                    } else {
+                        true
+                    };
 
-                if should_load {
-                    if path
-                        .as_ref()
-                        .map_or(false, |path| to_assign.file_id(path).is_ok())
-                    {
+                if request_is_outdated {
+                    let will_be_untitled = path.as_ref().map_or(true, |path| {
+                        if let Ok(file_id) = to_assign.file_id(path) {
+                            to_assign.file_type(file_id).unwrap() != FileType::Text
+                        } else {
+                            true
+                        }
+                    });
+
+                    if will_be_untitled {
+                        self.base_text_requests.insert(*buffer_id, None);
+                    } else {
                         let path = path.unwrap();
                         let base_text = self.git.base_text(to_assign.head.unwrap(), &path);
                         self.base_text_requests.insert(
@@ -594,8 +602,6 @@ impl Future for SwitchEpoch {
                                 path,
                             }),
                         );
-                    } else {
-                        self.base_text_requests.insert(*buffer_id, None);
                     }
                 }
             }
