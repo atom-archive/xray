@@ -713,7 +713,7 @@ mod tests {
     fn test_random() {
         use crate::tests::Network;
 
-        const PEERS: usize = 2;
+        const PEERS: usize = 5;
 
         for seed in 0..100 {
             println!("SEED: {:?}", seed);
