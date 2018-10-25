@@ -148,11 +148,15 @@ impl WorkTree {
         if let Some(epoch) = self.epoch.clone() {
             let mut epoch = epoch.borrow_mut();
 
-            let prev_version = epoch.version();
+            let mut prev_versions = HashMap::new();
+            for file_id in self.buffers.borrow().values() {
+                prev_versions.insert(*file_id, epoch.buffer_version(*file_id));
+            }
+
             let fixup_ops = epoch.apply_ops(cur_epoch_ops, &mut self.lamport_clock.borrow_mut())?;
             for (buffer_id, file_id) in self.buffers.borrow().iter() {
                 let mut changes = epoch
-                    .changes_since(*file_id, prev_version.clone())?
+                    .changes_since(*file_id, prev_versions.remove(file_id).unwrap().unwrap())?
                     .peekable();
                 if changes.peek().is_some() {
                     if let Some(observer) = self.observer.as_ref() {

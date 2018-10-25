@@ -197,6 +197,14 @@ impl Epoch {
         }
     }
 
+    pub fn buffer_version(&self, file_id: FileId) -> Option<time::Global> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            Some(buffer.version.clone())
+        } else {
+            None
+        }
+    }
+
     pub fn version(&self) -> time::Global {
         self.version.clone()
     }
