@@ -35,6 +35,11 @@ export async function init() {
 
 export type Version = Tagged<string, "Version">;
 export type Operation = Tagged<string, "Operation">;
+export type OperationEnvelope = {
+  epochTimestamp: number;
+  epochReplicaId: number;
+  operation: Operation;
+};
 
 export enum FileStatus {
   New = "New",
@@ -63,7 +68,7 @@ export class WorkTree {
     base: Oid | null,
     startOps: ReadonlyArray<Operation>,
     git: GitProvider
-  ): [WorkTree, AsyncIterable<Operation>] {
+  ): [WorkTree, AsyncIterable<OperationEnvelope>] {
     const observer = new ChangeObserver();
     const result = memo.WorkTree.new(
       new GitProviderWrapper(git),
@@ -80,23 +85,23 @@ export class WorkTree {
     this.observer = observer;
   }
 
-  reset(base: Oid | null): AsyncIterable<Operation> {
+  reset(base: Oid | null): AsyncIterable<OperationEnvelope> {
     return this.tree.reset(base);
   }
 
-  applyOps(ops: Operation[]): AsyncIterable<Operation> {
+  applyOps(ops: Operation[]): AsyncIterable<OperationEnvelope> {
     return this.tree.apply_ops(ops);
   }
 
-  createFile(path: Path, fileType: FileType): Operation {
+  createFile(path: Path, fileType: FileType): OperationEnvelope {
     return this.tree.create_file(path, fileType);
   }
 
-  rename(oldPath: Path, newPath: Path): Operation {
+  rename(oldPath: Path, newPath: Path): OperationEnvelope {
     return this.tree.rename(oldPath, newPath);
   }
 
-  remove(path: Path): Operation {
+  remove(path: Path): OperationEnvelope {
     return this.tree.remove(path);
   }
 
@@ -127,7 +132,7 @@ export class Buffer {
     this.observer = observer;
   }
 
-  edit(oldRanges: Range[], newText: string): Operation {
+  edit(oldRanges: Range[], newText: string): OperationEnvelope {
     return this.tree.edit(this.id, oldRanges, newText);
   }
 

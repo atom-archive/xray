@@ -35,14 +35,18 @@ struct AsyncIteratorToStream<T, E> {
 #[wasm_bindgen]
 pub struct StreamToAsyncIterator(Rc<Cell<Option<Box<Stream<Item = JsValue, Error = JsValue>>>>>);
 
-pub struct HexOid(memo::Oid);
-
-pub struct Base64<T>(T);
-
 #[wasm_bindgen]
 pub struct WorkTreeNewResult {
     tree: Option<WorkTree>,
     operations: Option<StreamToAsyncIterator>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationEnvelope {
+    epoch_timestamp: u64,
+    epoch_replica_id: memo::ReplicaId,
+    operation: Base64<memo::Operation>,
 }
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
@@ -68,6 +72,10 @@ struct Entry {
     status: memo::FileStatus,
     visible: bool,
 }
+
+pub struct HexOid(memo::Oid);
+
+pub struct Base64<T>(T);
 
 #[wasm_bindgen(module = "./support")]
 extern "C" {
@@ -116,7 +124,7 @@ impl WorkTree {
             tree: Some(WorkTree(tree)),
             operations: Some(StreamToAsyncIterator::new(
                 operations
-                    .map(|op| Base64(op))
+                    .map(|op| OperationEnvelope::new(op))
                     .map_err(|err| err.to_string()),
             )),
         })
@@ -130,7 +138,7 @@ impl WorkTree {
         Ok(StreamToAsyncIterator::new(
             self.0
                 .reset(base)
-                .map(|op| Base64(op))
+                .map(|op| OperationEnvelope::new(op))
                 .map_err(|err| err.to_string()),
         ))
     }
@@ -146,7 +154,7 @@ impl WorkTree {
             .map(|fixup_ops| {
                 StreamToAsyncIterator::new(
                     fixup_ops
-                        .map(|op| Base64(op))
+                        .map(|op| OperationEnvelope::new(op))
                         .map_err(|err| err.to_string()),
                 )
             })
@@ -157,21 +165,21 @@ impl WorkTree {
         let file_type = file_type.into_serde().map_js_err()?;
         self.0
             .create_file(&path, file_type)
-            .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
+            .map(|operation| JsValue::from_serde(&OperationEnvelope::new(operation)).unwrap())
             .map_js_err()
     }
 
     pub fn rename(&self, old_path: String, new_path: String) -> Result<JsValue, JsValue> {
         self.0
             .rename(&old_path, &new_path)
-            .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
+            .map(|operation| JsValue::from_serde(&OperationEnvelope::new(operation)).unwrap())
             .map_js_err()
     }
 
     pub fn remove(&self, path: String) -> Result<JsValue, JsValue> {
         self.0
             .remove(&path)
-            .map(|operation| JsValue::from_serde(&Base64(operation)).unwrap())
+            .map(|operation| JsValue::from_serde(&OperationEnvelope::new(operation)).unwrap())
             .map_js_err()
     }
 
@@ -206,7 +214,7 @@ impl WorkTree {
 
         self.0
             .edit_2d(buffer_id, old_ranges, new_text)
-            .map(|op| JsValue::from_serde(&Base64(op)).unwrap())
+            .map(|op| JsValue::from_serde(&OperationEnvelope::new(op)).unwrap())
             .map_js_err()
     }
 
@@ -245,6 +253,17 @@ impl WorkTreeNewResult {
 
     pub fn operations(&mut self) -> StreamToAsyncIterator {
         self.operations.take().unwrap()
+    }
+}
+
+impl OperationEnvelope {
+    fn new(operation: memo::Operation) -> Self {
+        let epoch_id = operation.epoch_id();
+        Self {
+            epoch_timestamp: epoch_id.value,
+            epoch_replica_id: epoch_id.replica_id,
+            operation: Base64(operation),
+        }
     }
 }
 

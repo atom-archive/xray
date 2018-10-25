@@ -530,6 +530,13 @@ impl Operation {
                 operation,
             })
     }
+
+    pub fn epoch_id(&self) -> epoch::Id {
+        match self {
+            Operation::StartEpoch { epoch_id, .. } => *epoch_id,
+            Operation::EpochOperation { epoch_id, .. } => *epoch_id,
+        }
+    }
 }
 
 impl SwitchEpoch {

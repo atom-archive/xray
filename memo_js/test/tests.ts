@@ -29,20 +29,20 @@ suite("WorkTree", () => {
     const [tree2, initOps2] = WorkTree.create(
       2,
       OID_0,
-      await collect(initOps1),
+      await collectOps(initOps1),
       git
     );
-    assert.strictEqual((await collect(initOps2)).length, 0);
+    assert.strictEqual((await collectOps(initOps2)).length, 0);
 
     const ops1 = [];
     const ops2 = [];
-    ops1.push(tree1.createFile("e", memo.FileType.Text));
-    ops2.push(tree2.createFile("f", memo.FileType.Text));
+    ops1.push(tree1.createFile("e", memo.FileType.Text).operation);
+    ops2.push(tree2.createFile("f", memo.FileType.Text).operation);
 
     await assert.rejects(() => tree2.openTextFile("e"));
 
-    ops1.push(...(await collect(tree1.applyOps(ops2.splice(0, Infinity)))));
-    ops2.push(...(await collect(tree2.applyOps(ops1.splice(0, Infinity)))));
+    ops1.push(...(await collectOps(tree1.applyOps(ops2.splice(0, Infinity)))));
+    ops2.push(...(await collectOps(tree2.applyOps(ops1.splice(0, Infinity)))));
     assert.strictEqual(ops1.length, 0);
     assert.strictEqual(ops2.length, 0);
 
@@ -60,13 +60,13 @@ suite("WorkTree", () => {
           { start: point(0, 9), end: point(0, 10) }
         ],
         "-"
-      )
+      ).operation
     );
     assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
 
     const tree2BufferChanges: memo.Change[] = [];
     tree2BufferC.onChange(c => tree2BufferChanges.push(...c));
-    assert.deepStrictEqual(await collect(tree2.applyOps(ops1)), []);
+    assert.deepStrictEqual(await collectOps(tree2.applyOps(ops1)), []);
     assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
     assert.deepStrictEqual(tree1BufferChanges, []);
     assert.deepStrictEqual(tree2BufferChanges, [
@@ -75,12 +75,12 @@ suite("WorkTree", () => {
     ]);
     ops1.length = 0;
 
-    ops1.push(tree1.createFile("x", memo.FileType.Directory));
-    ops1.push(tree1.createFile("x/y", memo.FileType.Directory));
-    ops1.push(tree1.rename("x", "a/b/x"));
-    ops1.push(tree1.remove("a/b/d"));
-    assert.deepStrictEqual(await collect(tree2.applyOps(ops1)), []);
-    assert.deepStrictEqual(await collect(tree1.applyOps(ops2)), []);
+    ops1.push(tree1.createFile("x", memo.FileType.Directory).operation);
+    ops1.push(tree1.createFile("x/y", memo.FileType.Directory).operation);
+    ops1.push(tree1.rename("x", "a/b/x").operation);
+    ops1.push(tree1.remove("a/b/d").operation);
+    assert.deepStrictEqual(await collectOps(tree2.applyOps(ops1)), []);
+    assert.deepStrictEqual(await collectOps(tree1.applyOps(ops2)), []);
     ops1.length = 0;
     ops2.length = 0;
 
@@ -175,7 +175,7 @@ suite("WorkTree", () => {
 
     tree1BufferChanges.length = 0;
     tree2BufferChanges.length = 0;
-    ops1.push(...(await collect(tree1.reset(OID_1))));
+    ops1.push(...(await collectOps(tree1.reset(OID_1))));
     assert.deepStrictEqual(await collect(tree2.applyOps(ops1)), []);
     assert.strictEqual(tree1BufferC.getText(), "oid1 base text");
     assert.strictEqual(tree2BufferC.getText(), "oid1 base text");
@@ -200,6 +200,13 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
     items.push(item);
   }
   return items;
+}
+
+async function collectOps(
+  ops: AsyncIterable<memo.OperationEnvelope>
+): Promise<memo.Operation[]> {
+  const envelopes = await collect(ops);
+  return envelopes.map(({ operation }) => operation);
 }
 
 function point(row: number, column: number): memo.Point {
