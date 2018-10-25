@@ -578,7 +578,7 @@ impl Future for SwitchEpoch {
                 let path = cur_epoch.path(*file_id);
                 let request_is_outdated =
                     if let Some(request) = self.base_text_requests.get(&buffer_id) {
-                        path.as_ref() == request.as_ref().map(|r| &r.path)
+                        path.as_ref() != request.as_ref().map(|r| &r.path)
                     } else {
                         true
                     };
