@@ -623,28 +623,36 @@ impl Future for SwitchEpoch {
 
                 let mut buffer_mappings = Vec::with_capacity(self.base_text_requests.len());
                 for (buffer_id, request) in self.base_text_requests.drain() {
-                    let new_file_id;
-                    let base_text;
                     if let Some(request) = request {
-                        base_text = request.future.take_result().unwrap()?;
-                        new_file_id = to_assign.file_id(request.path).unwrap();
+                        let base_text = request.future.take_result().unwrap()?;
+                        let new_file_id = to_assign.file_id(request.path).unwrap();
+                        to_assign.open_text_file(new_file_id, base_text, &mut lamport_clock)?;
+                        buffer_mappings.push((buffer_id, new_file_id));
                     } else {
                         // TODO: This may be okay for now, but I think we should take a smarter
-                        // approach, where the site which initiates the reset transmits a mapping of
-                        // previous file ids to new file ids. Then, when receiving a new epoch, we will
-                        // check if we can map the open buffer to a file id and, only if we can't, we
-                        // will resort to path-based mapping or to creating a completely new file id
-                        // for untitled buffers.
-                        let (file_id, operation) = to_assign.new_text_file(&mut lamport_clock);
-                        new_file_id = file_id;
-                        base_text = String::new();
+                        // approach, where the site which initiates the reset transmits a mapping
+                        // of previous file ids to new file ids. Then, when receiving a new epoch,
+                        // we will check if we can map the open buffer to a file id and, only if we
+                        // can't, we will resort to path-based mapping or to creating a completely
+                        // new file id for untitled buffers.
+                        let (new_file_id, operation) = to_assign.new_text_file(&mut lamport_clock);
                         fixup_ops.push(Operation::EpochOperation {
                             epoch_id: to_assign.id,
                             operation,
                         });
+                        to_assign.open_text_file(new_file_id, "", &mut lamport_clock)?;
+                        let operation = to_assign.edit(
+                            new_file_id,
+                            Some(0..0),
+                            cur_epoch.text(buffers[&buffer_id])?.into_string().as_str(),
+                            &mut lamport_clock,
+                        )?;
+                        fixup_ops.push(Operation::EpochOperation {
+                            epoch_id: to_assign.id,
+                            operation,
+                        });
+                        buffer_mappings.push((buffer_id, new_file_id));
                     }
-                    to_assign.open_text_file(new_file_id, base_text, &mut lamport_clock)?;
-                    buffer_mappings.push((buffer_id, new_file_id));
                 }
 
                 if let Some(ops) = deferred_ops.remove(&to_assign.id) {
