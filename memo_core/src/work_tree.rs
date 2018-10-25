@@ -596,11 +596,13 @@ impl Future for SwitchEpoch {
                         self.base_text_requests.insert(*buffer_id, None);
                     } else {
                         let path = path.unwrap();
-                        let base_text = self.git.base_text(to_assign.head.unwrap(), &path);
+                        let head = to_assign
+                            .head
+                            .expect("If we found a path, destination epoch must have a head");
                         self.base_text_requests.insert(
                             *buffer_id,
                             Some(BaseTextRequest {
-                                future: MaybeDone::Pending(base_text),
+                                future: MaybeDone::Pending(self.git.base_text(head, &path)),
                                 path,
                             }),
                         );
