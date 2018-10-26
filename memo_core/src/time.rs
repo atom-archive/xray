@@ -1,11 +1,14 @@
+use crate::ReplicaId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_derive::{Deserialize, Serialize};
 use std::cmp::{self, Ordering};
 use std::collections::HashMap;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
-use ReplicaId;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize,
+)]
 pub struct Local {
     pub replica_id: ReplicaId,
     pub seq: u64,
@@ -20,14 +23,16 @@ pub struct Global(
     Arc<HashMap<ReplicaId, u64>>,
 );
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
 pub struct Lamport {
     pub value: u64,
     pub replica_id: ReplicaId,
 }
 
 impl Local {
-    pub fn new(replica_id: u64) -> Self {
+    pub fn new(replica_id: ReplicaId) -> Self {
         Self { replica_id, seq: 1 }
     }
 
@@ -40,15 +45,6 @@ impl Local {
     pub fn observe(&mut self, timestamp: Self) {
         if timestamp.replica_id == self.replica_id {
             self.seq = cmp::max(self.seq, timestamp.seq + 1);
-        }
-    }
-}
-
-impl Default for Local {
-    fn default() -> Self {
-        Local {
-            replica_id: 0,
-            seq: 0,
         }
     }
 }
@@ -145,20 +141,6 @@ impl Lamport {
         Self {
             value: 1,
             replica_id,
-        }
-    }
-
-    pub fn max_value() -> Self {
-        Self {
-            value: u64::max_value(),
-            replica_id: ReplicaId::max_value(),
-        }
-    }
-
-    pub fn min_value() -> Self {
-        Self {
-            value: u64::min_value(),
-            replica_id: ReplicaId::min_value(),
         }
     }
 

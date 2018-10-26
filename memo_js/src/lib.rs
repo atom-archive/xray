@@ -1,426 +1,418 @@
-extern crate bincode;
-extern crate memo_core;
-#[macro_use]
-extern crate serde_derive;
-extern crate base64;
-extern crate serde;
-extern crate wasm_bindgen;
+#![feature(macros_in_extern)]
 
-use memo_core::*;
+use futures::{Async, Future, Poll, Stream};
+use memo_core as memo;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::char;
-use std::collections::HashMap;
+use serde_derive::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::HashSet;
-use std::path::Path;
+use std::io;
+use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
-pub type WorkTreeId = u32;
+trait MapJsError<T> {
+    fn map_js_err(self) -> Result<T, JsValue>;
+}
 
 #[wasm_bindgen]
-pub struct Server {
-    work_trees: HashMap<WorkTreeId, WorkTree>,
-    next_work_tree_id: WorkTreeId,
+pub struct WorkTree(memo::WorkTree);
+
+#[derive(Serialize, Deserialize)]
+struct AsyncResult<T> {
+    value: Option<T>,
+    done: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum Request {
-    GetRootFileId,
-    CreateWorkTree {
-        replica_id: ReplicaId,
-    },
-    GetVersion {
-        tree_id: WorkTreeId,
-    },
-    AppendBaseEntries {
-        tree_id: WorkTreeId,
-        entries: Vec<DirEntry>,
-    },
-    ApplyOperations {
-        tree_id: WorkTreeId,
-        operations: Vec<Base64<Operation>>,
-    },
-    NewTextFile {
-        tree_id: WorkTreeId,
-    },
-    CreateDirectory {
-        tree_id: WorkTreeId,
-        parent_id: Base64<FileId>,
-        name: String,
-    },
-    OpenTextFile {
-        tree_id: WorkTreeId,
-        file_id: Base64<FileId>,
-        base_text: String,
-    },
-    Rename {
-        tree_id: WorkTreeId,
-        file_id: Base64<FileId>,
-        new_parent_id: Base64<FileId>,
-        new_name: String,
-    },
-    Remove {
-        tree_id: WorkTreeId,
-        file_id: Base64<FileId>,
-    },
-    Edit {
-        tree_id: WorkTreeId,
-        buffer_id: Base64<BufferId>,
-        ranges: Vec<EditRange>,
-        new_text: String,
-    },
-    ChangesSince {
-        tree_id: WorkTreeId,
-        buffer_id: Base64<BufferId>,
-        version: Base64<time::Global>,
-    },
-    GetText {
-        tree_id: WorkTreeId,
-        buffer_id: Base64<BufferId>,
-    },
-    FileIdForPath {
-        tree_id: WorkTreeId,
-        path: String,
-    },
-    PathForFileId {
-        tree_id: WorkTreeId,
-        file_id: Base64<FileId>,
-    },
-    BasePathForFileId {
-        tree_id: WorkTreeId,
-        file_id: Base64<FileId>,
-    },
-    Entries {
-        tree_id: WorkTreeId,
-        show_deleted: bool,
-        descend_into: Option<HashSet<Base64<FileId>>>,
-    },
+struct AsyncIteratorToStream<T, E> {
+    next_value: JsFuture,
+    iterator: AsyncIteratorWrapper,
+    _phantom: PhantomData<(T, E)>,
 }
 
-#[derive(Serialize)]
-#[serde(tag = "type")]
-enum Response {
-    Error {
-        message: String,
-    },
-    GetRootFileId {
-        file_id: Base64<FileId>,
-    },
-    CreateWorkTree {
-        tree_id: WorkTreeId,
-    },
-    GetVersion {
-        version: Base64<time::Global>,
-    },
-    AppendBaseEntries {
-        operations: Vec<Base64<Operation>>,
-    },
-    NewTextFile {
-        file_id: Base64<FileId>,
-        operation: Base64<Operation>,
-    },
-    CreateDirectory {
-        file_id: Base64<FileId>,
-        operation: Base64<Operation>,
-    },
-    OpenTextFile {
-        buffer_id: Base64<BufferId>,
-    },
-    ApplyOperations {
-        operations: Vec<Base64<Operation>>,
-    },
-    Rename {
-        operation: Base64<Operation>,
-    },
-    Remove {
-        operation: Base64<Operation>,
-    },
-    Edit {
-        operation: Base64<Operation>,
-    },
-    ChangesSince {
-        changes: Vec<Change>,
-    },
-    GetText {
-        text: String,
-    },
-    FileIdForPath {
-        file_id: Option<Base64<FileId>>,
-    },
-    PathForFileId {
-        path: Option<String>,
-    },
-    BasePathForFileId {
-        path: Option<String>,
-    },
-    Entries {
-        entries: Vec<Entry>,
-    },
+#[wasm_bindgen]
+pub struct StreamToAsyncIterator(Rc<Cell<Option<Box<Stream<Item = JsValue, Error = JsValue>>>>>);
+
+#[wasm_bindgen]
+pub struct WorkTreeNewResult {
+    tree: Option<WorkTree>,
+    operations: Option<StreamToAsyncIterator>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationEnvelope {
+    epoch_timestamp: u64,
+    epoch_replica_id: memo::ReplicaId,
+    operation: Base64<memo::Operation>,
 }
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 struct EditRange {
-    start: Point,
-    end: Point,
+    start: memo::Point,
+    end: memo::Point,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct Change {
-    start: Point,
-    end: Point,
+    start: memo::Point,
+    end: memo::Point,
     text: String,
 }
 
 #[derive(Serialize)]
 struct Entry {
-    #[serde(rename = "fileId")]
-    file_id: Base64<FileId>,
     #[serde(rename = "type")]
-    file_type: FileType,
+    file_type: memo::FileType,
     depth: usize,
     name: String,
     path: String,
-    status: FileStatus,
+    status: memo::FileStatus,
     visible: bool,
 }
 
-#[derive(Eq, Hash, PartialEq)]
-struct Base64<T>(T);
+pub struct HexOid(memo::Oid);
+
+pub struct Base64<T>(T);
+
+#[wasm_bindgen(module = "./support")]
+extern "C" {
+    pub type AsyncIteratorWrapper;
+
+    #[wasm_bindgen(method)]
+    fn next(this: &AsyncIteratorWrapper) -> js_sys::Promise;
+
+    pub type GitProviderWrapper;
+
+    #[wasm_bindgen(method, js_name = baseEntries)]
+    fn base_entries(this: &GitProviderWrapper, head: &str) -> AsyncIteratorWrapper;
+
+    #[wasm_bindgen(method, js_name = baseText)]
+    fn base_text(this: &GitProviderWrapper, head: &str, path: &str) -> js_sys::Promise;
+
+    pub type ChangeObserver;
+
+    #[wasm_bindgen(method, js_name = textChanged)]
+    fn text_changed(this: &ChangeObserver, buffer_id: JsValue, changes: JsValue);
+}
 
 #[wasm_bindgen]
-impl Server {
-    pub fn new() -> Self {
-        Self {
-            work_trees: HashMap::new(),
-            next_work_tree_id: 0,
-        }
+impl WorkTree {
+    pub fn new(
+        git: GitProviderWrapper,
+        observer: ChangeObserver,
+        replica_id_bytes_slice: &[u8],
+        base: JsValue,
+        start_ops: JsValue,
+    ) -> Result<WorkTreeNewResult, JsValue> {
+        let base = base
+            .into_serde::<Option<HexOid>>()
+            .map_js_err()?
+            .map(|b| b.0);
+        let start_ops: Vec<Base64<memo::Operation>> = start_ops.into_serde().map_js_err()?;
+        let mut replica_id_bytes = [0; 16];
+        replica_id_bytes.copy_from_slice(replica_id_bytes_slice);
+        let replica_id = memo::ReplicaId::from_random_bytes(replica_id_bytes);
+        let (tree, operations) = memo::WorkTree::new(
+            replica_id,
+            base,
+            start_ops.into_iter().map(|op| op.0),
+            Rc::new(git),
+            Some(Rc::new(observer)),
+        )
+        .map_js_err()?;
+        Ok(WorkTreeNewResult {
+            tree: Some(WorkTree(tree)),
+            operations: Some(StreamToAsyncIterator::new(
+                operations
+                    .map(|op| OperationEnvelope::new(op))
+                    .map_err(|err| err.to_string()),
+            )),
+        })
     }
 
-    pub fn request(&mut self, request: JsValue) -> JsValue {
-        let response = match request.into_serde::<Request>() {
-            Ok(request) => match self.request_internal(request) {
-                Ok(response) => response,
-                Err(message) => Response::Error {
-                    message: message.into(),
-                },
-            },
-            Err(error) => Response::Error {
-                message: error.to_string(),
-            },
-        };
-        JsValue::from_serde(&response).unwrap()
+    pub fn reset(&mut self, base: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
+        let base = base
+            .into_serde::<Option<HexOid>>()
+            .map_js_err()?
+            .map(|b| b.0);
+        Ok(StreamToAsyncIterator::new(
+            self.0
+                .reset(base)
+                .map(|op| OperationEnvelope::new(op))
+                .map_err(|err| err.to_string()),
+        ))
+    }
+
+    pub fn apply_ops(&mut self, ops: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
+        let ops = ops
+            .into_serde::<Vec<Base64<memo::Operation>>>()
+            .map(|ops| ops.into_iter().map(|Base64(op)| op.clone()))
+            .map_js_err()?;
+
+        self.0
+            .apply_ops(ops)
+            .map(|fixup_ops| {
+                StreamToAsyncIterator::new(
+                    fixup_ops
+                        .map(|op| OperationEnvelope::new(op))
+                        .map_err(|err| err.to_string()),
+                )
+            })
+            .map_js_err()
+    }
+
+    pub fn create_file(&self, path: String, file_type: JsValue) -> Result<JsValue, JsValue> {
+        let file_type = file_type.into_serde().map_js_err()?;
+        self.0
+            .create_file(&path, file_type)
+            .map(|operation| JsValue::from_serde(&OperationEnvelope::new(operation)).unwrap())
+            .map_js_err()
+    }
+
+    pub fn rename(&self, old_path: String, new_path: String) -> Result<JsValue, JsValue> {
+        self.0
+            .rename(&old_path, &new_path)
+            .map(|operation| JsValue::from_serde(&OperationEnvelope::new(operation)).unwrap())
+            .map_js_err()
+    }
+
+    pub fn remove(&self, path: String) -> Result<JsValue, JsValue> {
+        self.0
+            .remove(&path)
+            .map(|operation| JsValue::from_serde(&OperationEnvelope::new(operation)).unwrap())
+            .map_js_err()
+    }
+
+    pub fn open_text_file(&mut self, path: String) -> js_sys::Promise {
+        future_to_promise(
+            self.0
+                .open_text_file(path)
+                .map(|buffer_id| JsValue::from_serde(&buffer_id).unwrap())
+                .map_err(|error| JsValue::from_str(&error.to_string())),
+        )
+    }
+
+    pub fn text(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
+        self.0
+            .text(buffer_id.into_serde().map_js_err()?)
+            .map(|text| JsValue::from_str(&text.into_string()))
+            .map_js_err()
+    }
+
+    pub fn edit(
+        &self,
+        buffer_id: JsValue,
+        old_ranges: JsValue,
+        new_text: &str,
+    ) -> Result<JsValue, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_js_err()?;
+        let old_ranges = old_ranges
+            .into_serde::<Vec<EditRange>>()
+            .map_js_err()?
+            .into_iter()
+            .map(|EditRange { start, end }| start..end);
+
+        self.0
+            .edit_2d(buffer_id, old_ranges, new_text)
+            .map(|op| JsValue::from_serde(&OperationEnvelope::new(op)).unwrap())
+            .map_js_err()
+    }
+
+    pub fn entries(&self, descend_into: JsValue, show_deleted: bool) -> Result<JsValue, JsValue> {
+        let descend_into: Option<HashSet<PathBuf>> = descend_into.into_serde().map_js_err()?;
+        let mut entries = Vec::new();
+        self.0.with_cursor(|cursor| loop {
+            let entry = cursor.entry().unwrap();
+            let mut descend = false;
+            if show_deleted || entry.status != memo::FileStatus::Removed {
+                let path = cursor.path().unwrap();
+                entries.push(Entry {
+                    file_type: entry.file_type,
+                    depth: entry.depth,
+                    name: entry.name.to_string_lossy().into_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    status: entry.status,
+                    visible: entry.visible,
+                });
+                descend = descend_into.as_ref().map_or(true, |d| d.contains(path));
+            }
+
+            if !cursor.next(descend) {
+                break;
+            }
+        });
+        JsValue::from_serde(&entries).map_js_err()
     }
 }
 
-impl Server {
-    fn request_internal(&mut self, request: Request) -> Result<Response, String> {
-        match request {
-            Request::GetRootFileId => Ok(Response::GetRootFileId {
-                file_id: Base64(ROOT_FILE_ID),
-            }),
-            Request::CreateWorkTree { replica_id } => {
-                let tree_id = self.next_work_tree_id;
-                self.next_work_tree_id += 1;
-                self.work_trees.insert(tree_id, WorkTree::new(replica_id));
-                Ok(Response::CreateWorkTree { tree_id })
-            }
-            Request::GetVersion { tree_id } => Ok(Response::GetVersion {
-                version: Base64(self.get_work_tree(tree_id)?.version()),
-            }),
-            Request::AppendBaseEntries { tree_id, entries } => {
-                let fixup_ops = self
-                    .get_work_tree(tree_id)?
-                    .append_base_entries(entries)
-                    .map_err(|e| e.to_string())?;
-                Ok(Response::AppendBaseEntries {
-                    operations: fixup_ops.into_iter().map(|op| Base64(op)).collect(),
-                })
-            }
-            Request::ApplyOperations {
-                tree_id,
-                operations,
-            } => {
-                let fixup_ops = self
-                    .get_work_tree(tree_id)?
-                    .apply_ops(operations.into_iter().map(|op| op.0))
-                    .map_err(|e| e.to_string())?;
-                Ok(Response::ApplyOperations {
-                    operations: fixup_ops.into_iter().map(|op| Base64(op)).collect(),
-                })
-            }
-            Request::NewTextFile { tree_id } => {
-                let (file_id, operation) = self.get_work_tree(tree_id)?.new_text_file();
-                Ok(Response::NewTextFile {
-                    file_id: Base64(file_id),
-                    operation: Base64(operation),
-                })
-            }
-            Request::CreateDirectory {
-                tree_id,
-                parent_id: Base64(parent_id),
-                name,
-            } => {
-                let (file_id, operation) = self
-                    .get_work_tree(tree_id)?
-                    .create_dir(parent_id, name)
-                    .map_err(|e| e.to_string())?;
-                Ok(Response::CreateDirectory {
-                    file_id: Base64(file_id),
-                    operation: Base64(operation),
-                })
-            }
-            Request::OpenTextFile {
-                tree_id,
-                file_id: Base64(file_id),
-                base_text,
-            } => {
-                let buffer_id = self
-                    .get_work_tree(tree_id)?
-                    .open_text_file(file_id, base_text.as_str())
-                    .map_err(|e| e.to_string())?;
-                Ok(Response::OpenTextFile {
-                    buffer_id: Base64(buffer_id),
-                })
-            }
-            Request::Rename {
-                tree_id,
-                file_id: Base64(file_id),
-                new_parent_id: Base64(new_parent_id),
-                new_name,
-            } => {
-                let tree = self.get_work_tree(tree_id)?;
-                let op = tree
-                    .rename(file_id, new_parent_id, new_name)
-                    .map_err(|e| e.to_string())?;
-                Ok(Response::Rename {
-                    operation: Base64(op),
-                })
-            }
-            Request::Remove {
-                tree_id,
-                file_id: Base64(file_id),
-            } => {
-                let tree = self.get_work_tree(tree_id)?;
-                let op = tree.remove(file_id).map_err(|e| e.to_string())?;
-                Ok(Response::Remove {
-                    operation: Base64(op),
-                })
-            }
-            Request::Edit {
-                tree_id,
-                buffer_id: Base64(buffer_id),
-                ranges,
-                new_text,
-            } => {
-                let tree = self.get_work_tree(tree_id)?;
-                let op = tree
-                    .edit_2d(
-                        buffer_id,
-                        ranges.into_iter().map(|range| range.start..range.end),
-                        new_text.as_str(),
-                    )
-                    .map_err(|e| e.to_string())?;
-                Ok(Response::Edit {
-                    operation: Base64(op),
-                })
-            }
-            Request::ChangesSince {
-                tree_id,
-                buffer_id: Base64(buffer_id),
-                version: Base64(version),
-            } => {
-                let tree = self.get_work_tree(tree_id)?;
-                let changes = tree
-                    .changes_since(buffer_id, version)
-                    .map_err(|e| e.to_string())?
-                    .map(|change| Change {
-                        start: change.range.start,
-                        end: change.range.end,
-                        text: String::from_utf16_lossy(&change.code_units),
-                    })
-                    .collect();
-                Ok(Response::ChangesSince { changes })
-            }
-            Request::GetText {
-                tree_id,
-                buffer_id: Base64(buffer_id),
-            } => {
-                let tree = self.get_work_tree(tree_id)?;
-                let text_iter = tree.text(buffer_id).map_err(|err| err.to_string())?;
-                let mut text = String::new();
-                for ch in char::decode_utf16(text_iter) {
-                    text.push(ch.unwrap_or(char::REPLACEMENT_CHARACTER));
-                }
-                Ok(Response::GetText { text })
-            }
-            Request::FileIdForPath { tree_id, path } => {
-                let tree = self.get_work_tree(tree_id)?;
-                let path = Path::new(&path);
-                Ok(Response::FileIdForPath {
-                    file_id: tree.file_id(path).ok().map(|id| Base64(id)),
-                })
-            }
-            Request::PathForFileId {
-                tree_id,
-                file_id: Base64(file_id),
-            } => {
-                let tree = self.get_work_tree(tree_id)?;
-                let path = tree.path(file_id);
-                Ok(Response::PathForFileId {
-                    path: path.map(|p| p.to_string_lossy().into_owned()),
-                })
-            }
-            Request::BasePathForFileId {
-                tree_id,
-                file_id: Base64(file_id),
-            } => {
-                let tree = self.get_work_tree(tree_id)?;
-                let path = tree.base_path(file_id);
-                Ok(Response::BasePathForFileId {
-                    path: path.map(|p| p.to_string_lossy().into_owned()),
-                })
-            }
-            Request::Entries {
-                tree_id,
-                show_deleted,
-                descend_into,
-            } => {
-                let tree = self.get_work_tree(tree_id)?;
-                let mut entries = Vec::new();
-                if let Some(mut cursor) = tree.cursor() {
-                    loop {
-                        let entry = cursor.entry().unwrap();
-                        let mut descend = false;
-                        if show_deleted || entry.status != FileStatus::Removed {
-                            entries.push(Entry {
-                                file_id: Base64(entry.file_id),
-                                file_type: entry.file_type,
-                                depth: entry.depth,
-                                name: entry.name.to_string_lossy().into_owned(),
-                                path: cursor.path().unwrap().to_string_lossy().into_owned(),
-                                status: entry.status,
-                                visible: entry.visible,
-                            });
-                            descend = descend_into
-                                .as_ref()
-                                .map_or(true, |d| d.contains(&Base64(entry.file_id)));
-                        }
-
-                        if !cursor.next(descend) {
-                            break;
-                        }
-                    }
-                }
-
-                Ok(Response::Entries { entries })
-            }
-        }
+#[wasm_bindgen]
+impl WorkTreeNewResult {
+    pub fn tree(&mut self) -> WorkTree {
+        self.tree.take().unwrap()
     }
 
-    fn get_work_tree(&mut self, tree_id: WorkTreeId) -> Result<&mut WorkTree, String> {
-        self.work_trees
-            .get_mut(&tree_id)
-            .ok_or_else(|| "WorkTree not found".into())
+    pub fn operations(&mut self) -> StreamToAsyncIterator {
+        self.operations.take().unwrap()
+    }
+}
+
+impl OperationEnvelope {
+    fn new(operation: memo::Operation) -> Self {
+        let epoch_id = operation.epoch_id();
+        Self {
+            epoch_timestamp: epoch_id.value,
+            epoch_replica_id: epoch_id.replica_id,
+            operation: Base64(operation),
+        }
+    }
+}
+
+impl<T, E> AsyncIteratorToStream<T, E> {
+    fn new(iterator: AsyncIteratorWrapper) -> Self {
+        AsyncIteratorToStream {
+            next_value: JsFuture::from(iterator.next()),
+            iterator,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, E> Stream for AsyncIteratorToStream<T, E>
+where
+    E: for<'de> Deserialize<'de>,
+    T: for<'de> Deserialize<'de>,
+{
+    type Item = T;
+    type Error = E;
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        match self.next_value.poll() {
+            Ok(Async::Ready(result)) => {
+                let result: AsyncResult<T> = result.into_serde().unwrap();
+                if result.done {
+                    Ok(Async::Ready(None))
+                } else {
+                    self.next_value = JsFuture::from(self.iterator.next());
+                    Ok(Async::Ready(result.value))
+                }
+            }
+            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Err(error) => Err(error.into_serde().unwrap()),
+        }
+    }
+}
+
+impl StreamToAsyncIterator {
+    fn new<E, S, T>(stream: S) -> Self
+    where
+        E: Serialize,
+        S: 'static + Stream<Item = T, Error = E>,
+        T: Serialize,
+    {
+        let js_value_stream = stream
+            .map(|value| {
+                JsValue::from_serde(&AsyncResult {
+                    value: Some(value),
+                    done: false,
+                })
+                .unwrap()
+            })
+            .map_err(|error| JsValue::from_serde(&error).unwrap());
+
+        StreamToAsyncIterator(Rc::new(Cell::new(Some(Box::new(js_value_stream)))))
+    }
+}
+
+#[wasm_bindgen]
+impl StreamToAsyncIterator {
+    pub fn next(&mut self) -> Option<js_sys::Promise> {
+        let stream_rc = self.0.clone();
+        self.0.take().map(|stream| {
+            future_to_promise(stream.into_future().then(move |result| match result {
+                Ok((next, rest)) => {
+                    stream_rc.set(Some(rest));
+                    Ok(next.unwrap_or(
+                        JsValue::from_serde(&AsyncResult::<()> {
+                            value: None,
+                            done: true,
+                        })
+                        .unwrap(),
+                    ))
+                }
+                Err((error, _)) => Err(error),
+            }))
+        })
+    }
+}
+
+impl memo::GitProvider for GitProviderWrapper {
+    fn base_entries(
+        &self,
+        oid: memo::Oid,
+    ) -> Box<Stream<Item = memo::DirEntry, Error = io::Error>> {
+        let iterator = GitProviderWrapper::base_entries(self, &hex::encode(oid));
+        Box::new(
+            AsyncIteratorToStream::new(iterator)
+                .map_err(|error: String| io::Error::new(io::ErrorKind::Other, error)),
+        )
+    }
+
+    fn base_text(
+        &self,
+        oid: memo::Oid,
+        path: &Path,
+    ) -> Box<Future<Item = String, Error = io::Error>> {
+        Box::new(
+            JsFuture::from(GitProviderWrapper::base_text(
+                self,
+                &hex::encode(oid),
+                path.to_string_lossy().as_ref(),
+            ))
+            .map(|value| value.as_string().unwrap())
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.as_string().unwrap())),
+        )
+    }
+}
+
+impl memo::ChangeObserver for ChangeObserver {
+    fn text_changed(&self, buffer_id: memo::BufferId, changes: Box<Iterator<Item = memo::Change>>) {
+        let changes = changes
+            .map(|change| Change {
+                start: change.range.start,
+                end: change.range.end,
+                text: String::from_utf16_lossy(&change.code_units),
+            })
+            .collect::<Vec<_>>();
+        ChangeObserver::text_changed(
+            self,
+            JsValue::from_serde(&buffer_id).unwrap(),
+            JsValue::from_serde(&changes).unwrap(),
+        );
+    }
+}
+
+impl Serialize for HexOid {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        hex::encode(self.0).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HexOid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let bytes = hex::decode(&String::deserialize(deserializer)?).map_err(Error::custom)?;
+        let mut oid = memo::Oid::default();
+        oid.copy_from_slice(&bytes);
+        Ok(HexOid(oid))
     }
 }
 
@@ -443,5 +435,14 @@ impl<'de1, T: for<'de2> Deserialize<'de2>> Deserialize<'de1> for Base64<T> {
         let bytes = base64::decode(&String::deserialize(deserializer)?).map_err(Error::custom)?;
         let inner = bincode::deserialize::<T>(&bytes).map_err(D::Error::custom)?;
         Ok(Base64(inner))
+    }
+}
+
+impl<T, E> MapJsError<T> for Result<T, E>
+where
+    E: ToString,
+{
+    fn map_js_err(self) -> Result<T, JsValue> {
+        self.map_err(|err| JsValue::from(err.to_string()))
     }
 }

@@ -2,203 +2,220 @@
 
 This library enables real-time collaborative coding by providing a conflict-free replicated state machine that models the state of a Git working tree. The core of the library is written in Rust for efficiency and reusability in other contexts. This library exposes the capabilities of the Rust core via WebAssembly and wraps them in an idiomatic JavaScript API.
 
-## Initialize
+## Initialization
 
 Because WebAssembly compilation is asynchronous, to use this library, you must call the `init` function, which returns a promise. This function returns all remaining exports in an object.
 
-```js
-const memo = require("@atom/memo"); // alternatively: `import * as memo from "@atom/memo";`
+```ts
+import * as memo from "@atom/memo";
 
 async function main() {
   const { WorkTree } = await memo.init();
-  // ... your code here
+  // ...your code here...
 }
 ```
 
-## Populate the work tree's base entries
+## Creating a WorkTree
 
-In order to build a work tree, you need access to the Git repository on which the tree is based. After constructing a `WorkTree` with a non-zero replica id, you need to populate it with the paths from the Git commit on which this work tree is based via `appendBaseEntries`.
+`WorkTree` is the fundamental abstraction provided by this library. To create one, you need to supply a (possibly `null`) base commit OID, an array of initial operations and a `GitProvider`:
 
-```js
-const replicaId = 1;
-const tree = new WorkTree(replicaId);
-tree.appendBaseEntries([
-  { depth: 1, name: "a", type: "Directory" },
-  { depth: 2, name: "b.txt", type: "Text" },
-  { depth: 1, name: "c.txt", type: "Text" }
-])
+```ts
+const base = "8251a3c491b3884d7f828d2a1c5c565855171a2c";
+const startOps = await fetchInitialOps();
+const [tree, ops] = WorkTree.create(base, startOps, gitProvider);
+broadcast(ops);
 ```
 
-The array of entries passed to `appendBaseEntries` should express a depth-first traversal of the directory hierarchy. When the depth of an entry increases by 1 from the previous entry, the entry is assumed to be the previous entry's child. For example, the entries passed above express the following paths:
+In the example above, `base` and `startOps` will be used in a mutually exclusive way. That is, if `startOps` is empty, the work tree will be automatically reset to `base`. Vice versa, the active base will be inferred based on the content of `startOps`. You can ignore how `fetchInitialOps` works for now, as it will be covered later in the guide.
 
+The third required parameter, `gitProvider`, is an object that implements the `GitProvider` interface:
+
+```ts
+export interface GitProvider {
+  baseEntries(oid: Oid): AsyncIterable<BaseEntry>;
+  baseText(oid: Oid, path: Path): Promise<string>;
+}
+
+// This is a provider that reads Git data from github.com.
+class GitHubProvider implements GitProvider {
+  baseEntries(oid: Oid): AsyncIterable<BaseEntry> {
+    const entries = await fetch(
+      `/repos/rust-lang/rust/git/trees/${oid}?recursive=1"`
+    );
+    for (const entry of entries) {
+      yield fromGitHubEntryToBaseEntry(entry);
+    }
+  }
+
+  baseText(oid: Oid, path: Path): Promise<string> {
+    const file = await fetch(
+      `/repos/rust-lang/rust/contents/${path}?ref=${oid}`
+    );
+    return fromBase64ToString(file.content);
+  }
+}
 ```
-a/
-a/b
-c
+
+The `baseEntries` method must return a collection that can be asynchronously iterated over and that yields `memo.BaseEntry` elements, like the following:
+
+```ts
+{ depth: 1, name: "a", type: memo.FileType.Directory }
+{ depth: 2, name: "b.txt", type: memo.FileType.Text }
+{ depth: 1, name: "c.txt", type: memo.FileType.Text }
 ```
-
-Since the application may need to perform I/O in order to fetch the base entries, you are free to start using the work tree before they are fully populated. You can also populate the base entries in a streaming fashion by calling `appendBaseEntries` multiple times and ensuring that the entries passed to each call pick up from the last entry passed in the previous call.
-
-For now, Memo has no internal concept of commits. Application code will need to arrange for all replicas to build on top of the same commit state and see the exact same base entries. When a participant wishes to commit, you'll need to coordinate building up a new work tree on top of the new state. We plan to handle more commit-related logic directly within the library in the future.
-
-## Apply outstanding operations
-
-If collaboration is already in progress, you can apply any outstanding operations with `applyOps`. We'll cover the details of generating and applying operations later.
-
-```js
-const fixupOps = tree.applyOps(operations)
-// broadcast fixupOps to peers
-```
-
-If you have not finished populating the base entries via `appendBaseEntries`, some of these operations may be deferred until the entries that they reference are available.
 
 ## List the work tree's current entries
 
-To list the work tree's current paths, call `entries`. This will return an array of entries arranged in a depth-first order, similar to the argument to `appendBaseEntries`. For example, the base entries populated above could be retrieved as follows:
+To list the work tree's current paths, call `entries`. This will return an array of entries arranged in a depth-first order, similar to the entries returned by `GitProvider.prototype.baseEntries`. For example, the base entries populated above could be retrieved as follows:
 
-```js
-for (entry of tree.entries()) {
+```ts
+for (const entry of tree.entries()) {
   console.log(entry.depth, entry.name, entry.type);
 }
 
 // Prints:
 // 1 a Directory
-// 2 b File
-// 1 c File
+// 2 b.txt File
+// 1 c.txt File
 ```
 
 Each returned entry has the following fields:
 
-* `depth`: The length of the path leading to this entry.
-* `name`: The entry's name.
-* `fileId`: An opaque, base64 encoded binary value that can be passed to other methods on `WorkTree` to interact with this file.
-* `type`: The type of this file (`"File"` or `"Directory"`)
-* `status`: How this path has changed since the base commit (`"New"`, `"Renamed"`, `"Removed"`, `"Modified"`, `"RenamedAndModified"`, or `"Unchanged"`)
-* `visible`: Whether or not this file is currently visible (not deleted).
+- `depth`: The length of the path leading to this entry.
+- `name`: The entry's name.
+- `path`: The entry's path.
+- `type`: The type of this file (`"File"` or `"Directory"`)
+- `status`: How this path has changed since the base commit (`"New"`, `"Renamed"`, `"Removed"`, `"Modified"`, `"RenamedAndModified"`, or `"Unchanged"`)
+- `visible`: Whether or not this file is currently visible (not deleted).
 
 The `entries` method accepts two options as fields in an optional object passed to the method.
 
-* `showDeleted`: If `true`, returns entries for deleted files and directories, but marks them as `visible: false`.
-* `descendInto`: An optional array of `FileId`s. If provided, the traversal will skip descending into any directory not present in this whitelist. You can use this option to limit the number of entries you need to process if you are rendering a UI with collapsed directories.
+- `showDeleted`: If `true`, returns entries for deleted files and directories, but marks them as `visible: false`.
+- `descendInto`: An optional array of paths. If provided, the traversal will skip descending into any directory not present in this whitelist. You can use this option to limit the number of entries you need to process if you are rendering a UI with collapsed directories.
 
-## Create new files and directories
+## Creating, renaming and removing files
 
-File system operations on the work tree all function in terms of *file ids*, which are base64 encoded strings that can be obtained in various ways from the work tree. One way to access a file id is to create a new text file:
+`WorkTree` APIs all function in terms of paths and allow you to manipulate files exactly as you would expect from a typical file system:
 
-```js
-const { fileId, operation } = tree.newTextFile();
-// Send the operation to peers...
+```ts
+const op1 = tree.createFile("foo", memo.FileType.Directory);
+const op2 = tree.createFile("foo/bar", memo.FileType.Text);
+const op3 = tree.createFile("foo/baz", memo.FileType.Text);
+const op4 = tree.rename("foo/bar", "foo/qux");
+const op5 = tree.remove("foo/baz");
+await broadcast([op1, op2, op3, op4, op5]);
 ```
 
-This returns a `fileId` and an `operation`, both of which are base64 encoded strings. The `operation` should be transmitted to all other collaborators and applied via `applyOps`, discussed in more detail later. After calling `newTextFile`, the created file exists in an "unsaved" form. To give it a name, pass the returned file id to the `rename` method.
+## Buffers
 
-```js
-const operation = tree.rename(fileId, WorkTree.getRootFileId(), "foo.txt");
-// Send the operation to peers...
-```
+To manipulate text files you'll need to call `openTextFile` with the path you want to open. This method will return a `Buffer` object that you can interact with:
 
-The `rename` method takes a file id to rename, the id of a parent directory, and the file's new name. In the example above, we access the id of the root directory via `getRootFileId()`. If you attempt to rename the file to a name that conflicts with an existing entry in the specified parent directory, an exception will be thrown.
-
-Unlike files, directories cannot be created in a detached state. You'll need to specify a parent id and name at the time of creation.
-
-```js
-const { fileId, operation } = tree.createDirectory(tree.getRootFileId(), "a");
-// Send the operation to peers...
-```
-
-## Renaming or deleting existing files
-
-To rename or delete a file, you need access to its file id. You saw how to obtain the file id for a new file or directory above. There are a couple ways to obtain the id of an existing file. First, it's available in the `fileId` field in each of the objects returned by the `entries` method, described above. If you're rendering a UI based on this information, you could potentially associated this file id with a rendered UI element in some way. If you want to get the file id for a path, you can call `fileIdForPath`.
-
-```js
-const ops = []
-const fileId1 = tree.fileIdForPath("a/b.txt");
-const newParentId = tree.fileIdForPath("d/e");
-ops.push(tree.rename(fileId1, newParentId, "b.txt"));
-const fileId2 = tree.fileIdForPath("a/c.txt");
-ops.push(tree.remove(fileId2));
-// Send ops to peers...
-```
-
-You can also get the path for any file id by calling `pathForFileId`.
-
-```js
-console.log(tree.pathForFileId(fileId1)); // => "d/e/b.txt"
-```
-
-To retrieve a file's original path as it existed in the base commit before any rename operations were applied you can call `basePathForFileId`. This method returns `null` if the file did not exist in the base commit.
-
-```js
-console.log(tree.basePathForFileId(fileId1)); // => "a/b.txt"
-console.log(tree.basePathForFileId(newFileId)); // => null
-```
-
-## Working with text files
-
-As a prerequisite to interacting with the contents of any text file in the work tree, you'll need to call `openTextFile` and supply the text file's id along with its *base content*, representing the state of the file in the work tree's underlying Git commit.
-
-```js
-const baseText = await git.getText(head, tree.basePathForFileId(fileId1));
-const bufferId = tree.openTextFile(fileId1, baseText);
-```
-
-In the example above, we retrieved the contents of the file as it existed in the tree's base commit. If the file did not exist or was empty, you can pass an empty string. Again, just like with base entries, it's imperative that you supply the same content for all files on all replicas by ensuring that all work tree's build on the same commit in application code.
-
-Once you have obtained a buffer id, you can get the text of the file, which might be different than the base text you supplied due to the application of remote operations. Remember to pass a *buffer id* obtained via `openTextFile` rather than a raw file id.
-
-```js
-console.log(tree.getText(bufferId)); // ==> "Hello, wonderful world!"
-```
-
-To edit a text file, call `edit` with the buffer id, an array of ranges to replace, and the new text.
-
-```js
-const operation = tree.edit(
-  bufferId,
-  [{ start: { row: 0, column: 0 }, end: { row: 0, column: 16 } }],
-  "cruel"
+```ts
+const buffer = await tree.openTextFile("foo/qux");
+const editOp1 = buffer.edit(
+  [{ start: { row: 0, column: 0 }, end: { row: 0, column: 0 } }],
+  "Hello, world!"
 );
-console.log(tree.getText(bufferId)); // ==> "Hello, cruel world!"
-// Send the operation to peers...
+const editOp2 = buffer.edit(
+  [{ start: { row: 0, column: 10 }, end: { row: 0, column: 12 } }],
+  "ms"
+);
+await broadcast([editOp1, editOp2]);
+console.log(buffer.getText()); // ==> "Hello worms"
 ```
 
-To obtain a diff containing just the changes that occurred since a specific point in time, use the `getVersion` and `changesSince` methods.
+As you incorporate operations received from other peers, you may want to use `Buffer.prototype.onChange` to keep an external representation of the buffer up-to-date:
 
-```js
-const startVersion = tree.getVersion();
-tree.applyOps(remoteOperations);
-console.log(tree.changesSince(bufferId, startVersion));
-// => [{ start: { row: 0, column: 7 }, end: { row: 0, column: 12 }, text: "happy"}]
+```ts
+buffer.onChange(changes => {
+  for (const change of changes) {
+    console.log(change); // => { start: { row: 0, column: 0 }, end: { row: 0, column: 5 }, text: "Goodbye" }
+    externalBuffer.edit(change.start, change.end, change.text);
+  }
+});
 ```
 
-Each change in the returned diff has a `start` and `end` based on the current state of the document along with the text that was inserted. You can iterate these changes in order and use the supplied coordinates to apply them to another document.
+## Resetting to a different base
+
+If you want to reset the work tree to a different (possibly `null`) base (e.g. after a commit or a `git reset`), you can use the `reset` method:
+
+```ts
+const commitOid = await githubProvider.commit(tree.entries());
+const resetOps = tree.reset(commitOid);
+await broadcast(resetOps);
+// tree now points to the new commit. Peers will be reset to the same commit
+// upon receiving `resetOps`.
+```
+
+After switching to a new base all open buffers will still be valid and you can continue using them normally.
 
 ## Working with operations
 
-All methods that update the state of the tree return *operations*, and you'll need to transmit and apply these operations in order to synchronize with other replicas. To apply remote operations, use the `applyOps` method.
+All methods that update the state of the tree return _operations_, the fundamental primitive this library uses to synchronize with other peers. Sometimes operations are returned synchronously, sometimes they are async iterators instead. Make sure you handle both cases, as illustrated in the `broadcast` function later in this section.
 
-```js
-const remoteOps = await receiveOps();
-const fixupOps = tree.applyOps(remoteOps);
-broadcastOps(fixupOps);
+In either case, operations are wrapped in an `OperationEnvelope`. An operation envelope is defined as follows:
+
+```ts
+export type OperationEnvelope = {
+  epochTimestamp: number;
+  epochReplicaId: string;
+  operation: Operation;
+};
 ```
 
-Whenever you call `applyOps`, there is a chance that additional "fixup" operations could be generated to deal with cycles and name conflicts in the tree. Be sure to broadcast these operations to peers to ensure convergence.
+Technically, to synchronize with other peers, you only need to transmit the Base64-encoded operation that is stored inside of the envelope; so, why including those extra timestamp and replica id fields?
 
-If you're integrating with a text editor, you should capture the work tree's version vector before applying remote operations, then obtain and apply any changes to open buffers via `changesSince` method. Here is a sketch of how this would work.
+You may recall the `fetchInitialOps` function that we called when [creating a new `WorkTree`](#creating-a-work-tree). It turns out that, in order to instantiate a new `WorkTree`, you only need operations associated with the _latest_ epoch. By exposing the epoch timestamp and replica id, we allow you to store operations such that they can be efficiently queried later when instantiating new work trees:
 
-```js
-function applyOps(tree, ops, openEditors) {
-  // Perform these steps synchronously:
-  const baseVersion = tree.getVersion();
-  const fixupOps = tree.applyOps(ops);
-  for (editor of openEditors) {
-    applyChanges(editor, tree.changesSince(editor.bufferId, baseVersion));
+```ts
+// Here we simulate having a database that stores every operation that has been
+// generated.
+
+async function fetchInitialOps(): Operation[] {
+  // Note that this is very inefficient. In a production system, you should
+  // perform the computation contained in this function on the database, using
+  // an index on the (timestamp, replicaId) tuple.
+  const allEnvelopes = await database.getAllOperationEnvelopes();
+
+  // First we sort by timestamp, then by replica id.
+  const sortedEnvelopes = database
+    .getAllOperationEnvelopes()
+    .sort(
+      (a, b) =>
+        a.epochTimestamp - b.epochTimestamp ||
+        a.epochReplicaId - b.epochReplicaId
+    );
+
+  // Then, we only retrieve operations for the latest epoch.
+  const lastEnvelope = sortedEnvelopes[sortedEnvelopes.length - 1];
+  const latestEpochEnvelopes = sortedEnvelopes.filter(
+    e =>
+      e.epochTimestamp == lastEnvelope.epochTimestamp &&
+      e.epochReplicaId == lastEnvelope.epochReplicaId
+  );
+
+  // Finally, we unwrap the envelopes and just return the operations inside.
+  return latestEpochEnvelopes.map(envelope => envelope.operation);
+}
+
+async function broadcast(
+  envelopes: OperationEnvelope[] | AsyncIterable<OperationEnvelope>
+) {
+  for await (const envelope of envelopes) {
+    // Note how we store the full envelope in the database, but we only transmit
+    // the operation inside of it to peers.
+    database.store(envelope);
+    network.broadcast(envelope.operation);
   }
-
-  // Broadcasting fixup ops can happen at any time:
-  broadcastOps(fixupOps);
 }
 ```
 
-It's important that you don't allow any local edits to be performed in between applying remote operations and updating the state of local editors, since local edits could cause the results of `changesSince` to be invalid for the current local editor state.
+So far we have covered storing and trasmitting operations sent by the local replica. To apply remote operations, you should use the `applyOps` method:
+
+```ts
+const remoteOps = await receiveOps();
+const fixupOps = tree.applyOps(remoteOps);
+await broadcast(fixupOps);
+```
+
+Whenever you call `applyOps`, there is a chance that additional "fixup" operations could be generated to deal with cycles and name conflicts in the tree. Be sure to broadcast these operations to peers to ensure convergence.

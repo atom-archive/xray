@@ -1,33 +1,47 @@
-let server: any;
+export {
+  BaseEntry,
+  Change,
+  GitProvider,
+  FileType,
+  Oid,
+  Path,
+  Point,
+  Range
+} from "./support";
+import {
+  BufferId,
+  Change,
+  ChangeObserver,
+  ChangeObserverCallback,
+  GitProvider,
+  GitProviderWrapper,
+  FileType,
+  Oid,
+  Path,
+  Point,
+  Range,
+  Tagged
+} from "./support";
+import { randomBytes } from "crypto";
+
+let memo: any;
 
 export async function init() {
-  const memo = await import("../dist/memo_js");
-  if (!server) {
-    server = memo.Server.new();
-  }
+  memo = await import("../dist/memo_js");
+  memo.StreamToAsyncIterator.prototype[Symbol.asyncIterator] = function() {
+    return this;
+  };
   return { WorkTree };
 }
 
-function request(req: any) {
-  const response = server.request(req);
-  if (response.type == "Error") {
-    throw new Error(response.message);
-  } else {
-    return response;
-  }
-}
-
-type Tagged<BaseType, TagName> = BaseType & { __tag: TagName };
-
-export type FileId = Tagged<string, "FileId">;
-export type BufferId = Tagged<string, "BufferId">;
-export type Version = Tagged<object, "Version">;
+export type Version = Tagged<string, "Version">;
 export type Operation = Tagged<string, "Operation">;
-
-export enum FileType {
-  Directory = "Directory",
-  Text = "Text"
-}
+export type ReplicaId = Tagged<string, "ReplicaId">;
+export type OperationEnvelope = {
+  epochTimestamp: number;
+  epochReplicaId: string;
+  operation: Operation;
+};
 
 export enum FileStatus {
   New = "New",
@@ -38,15 +52,8 @@ export enum FileStatus {
   Unchanged = "Unchanged"
 }
 
-export interface BaseEntry {
-  readonly depth: number;
-  readonly name: string;
-  readonly type: FileType;
-}
-
 export interface Entry {
   readonly depth: number;
-  readonly fileId: FileId;
   readonly type: FileType;
   readonly name: string;
   readonly path: string;
@@ -54,192 +61,87 @@ export interface Entry {
   readonly visible: boolean;
 }
 
-export interface Point {
-  readonly row: number;
-  readonly column: number;
-}
-
-export interface Range {
-  readonly start: Point;
-  readonly end: Point;
-}
-
-export interface RangeWithText extends Range {
-  readonly text: string;
-}
-
 export class WorkTree {
-  private static rootFileId: FileId;
-  private id: number;
+  private tree: any;
+  private observer: ChangeObserver;
 
-  static getRootFileId(): FileId {
-    if (!WorkTree.rootFileId) {
-      WorkTree.rootFileId = request({ type: "GetRootFileId" }).file_id;
-    }
-    return WorkTree.rootFileId;
+  static create(
+    base: Oid | null,
+    startOps: ReadonlyArray<Operation>,
+    git: GitProvider
+  ): [WorkTree, AsyncIterable<OperationEnvelope>] {
+    const observer = new ChangeObserver();
+    const result = memo.WorkTree.new(
+      new GitProviderWrapper(git),
+      observer,
+      randomBytes(16),
+      base,
+      startOps
+    );
+    return [new WorkTree(result.tree(), observer), result.operations()];
   }
 
-  constructor(replicaId: number) {
-    if (replicaId <= 0) {
-      throw new Error("Replica id must be positive");
-    }
-
-    this.id = request({
-      type: "CreateWorkTree",
-      replica_id: replicaId
-    }).tree_id;
+  private constructor(tree: any, observer: ChangeObserver) {
+    this.tree = tree;
+    this.observer = observer;
   }
 
-  getVersion(): Version {
-    return request({ tree_id: this.id, type: "GetVersion" }).version;
+  reset(base: Oid | null): AsyncIterable<OperationEnvelope> {
+    return this.tree.reset(base);
   }
 
-  appendBaseEntries(
-    baseEntries: ReadonlyArray<BaseEntry>
-  ): ReadonlyArray<Operation> {
-    return request({
-      type: "AppendBaseEntries",
-      tree_id: this.id,
-      entries: baseEntries
-    }).operations;
+  applyOps(ops: Operation[]): AsyncIterable<OperationEnvelope> {
+    return this.tree.apply_ops(ops);
   }
 
-  applyOps(operations: ReadonlyArray<Operation>): ReadonlyArray<Operation> {
-    const response = request({
-      type: "ApplyOperations",
-      tree_id: this.id,
-      operations
-    });
-    return response.operations;
+  createFile(path: Path, fileType: FileType): OperationEnvelope {
+    return this.tree.create_file(path, fileType);
   }
 
-  newTextFile(): { fileId: FileId; operation: Operation } {
-    const { file_id, operation } = request({
-      type: "NewTextFile",
-      tree_id: this.id
-    });
-    return { fileId: file_id, operation };
+  rename(oldPath: Path, newPath: Path): OperationEnvelope {
+    return this.tree.rename(oldPath, newPath);
   }
 
-  createDirectory(
-    parentId: FileId,
-    name: string
-  ): { fileId: FileId; operation: Operation } {
-    const { file_id, operation } = request({
-      type: "CreateDirectory",
-      tree_id: this.id,
-      parent_id: parentId,
-      name
-    });
-
-    return { fileId: file_id, operation };
+  remove(path: Path): OperationEnvelope {
+    return this.tree.remove(path);
   }
 
-  rename(fileId: FileId, newParentId: FileId, newName: string): Operation {
-    return request({
-      type: "Rename",
-      tree_id: this.id,
-      file_id: fileId,
-      new_parent_id: newParentId,
-      new_name: newName
-    }).operation;
-  }
-
-  remove(fileId: FileId): Operation {
-    return request({
-      type: "Remove",
-      tree_id: this.id,
-      file_id: fileId
-    }).operation;
-  }
-
-  fileIdForPath(path: string): FileId {
-    return request({
-      type: "FileIdForPath",
-      tree_id: this.id,
-      path
-    }).file_id;
-  }
-
-  pathForFileId(id: FileId): null | string {
-    return request({
-      type: "PathForFileId",
-      tree_id: this.id,
-      file_id: id
-    }).path;
-  }
-
-  basePathForFileId(id: FileId): null | string {
-    return request({
-      type: "BasePathForFileId",
-      tree_id: this.id,
-      file_id: id
-    }).path;
-  }
-
-  entries(options?: {
-    showDeleted?: boolean;
-    descendInto?: ReadonlyArray<FileId>;
-  }): ReadonlyArray<Entry> {
-    let showDeleted, descendInto;
+  entries(options?: { descendInto?: Path[]; showDeleted?: boolean }): Entry[] {
+    let descendInto = null;
+    let showDeleted = false;
     if (options) {
-      showDeleted = options.showDeleted || false;
-      descendInto = options.descendInto || null;
-    } else {
-      showDeleted = false;
-      descendInto = null;
+      if (options.descendInto) descendInto = options.descendInto;
+      if (options.showDeleted) showDeleted = options.showDeleted;
     }
-
-    return request({
-      type: "Entries",
-      tree_id: this.id,
-      show_deleted: showDeleted,
-      descend_into: descendInto
-    }).entries;
+    return this.tree.entries(descendInto, showDeleted);
   }
 
-  openTextFile(fileId: FileId, baseText: string): BufferId {
-    const response = request({
-      type: "OpenTextFile",
-      tree_id: this.id,
-      file_id: fileId,
-      base_text: baseText
-    });
-    return response.buffer_id;
+  async openTextFile(path: Path): Promise<Buffer> {
+    const bufferId = await this.tree.open_text_file(path);
+    return new Buffer(bufferId, this.tree, this.observer);
+  }
+}
+
+export class Buffer {
+  private id: BufferId;
+  private tree: any;
+  private observer: ChangeObserver;
+
+  constructor(id: BufferId, tree: any, observer: ChangeObserver) {
+    this.id = id;
+    this.tree = tree;
+    this.observer = observer;
   }
 
-  getText(bufferId: BufferId): string {
-    return request({
-      type: "GetText",
-      tree_id: this.id,
-      buffer_id: bufferId
-    }).text;
+  edit(oldRanges: Range[], newText: string): OperationEnvelope {
+    return this.tree.edit(this.id, oldRanges, newText);
   }
 
-  edit(
-    bufferId: BufferId,
-    ranges: ReadonlyArray<Range>,
-    newText: string
-  ): Operation {
-    const response = request({
-      type: "Edit",
-      tree_id: this.id,
-      buffer_id: bufferId,
-      ranges,
-      new_text: newText
-    });
-    return response.operation;
+  getText(): string {
+    return this.tree.text(this.id);
   }
 
-  changesSince(
-    bufferId: BufferId,
-    version: Version
-  ): ReadonlyArray<RangeWithText> {
-    return request({
-      type: "ChangesSince",
-      tree_id: this.id,
-      buffer_id: bufferId,
-      version
-    }).changes;
+  onChange(callback: ChangeObserverCallback) {
+    this.observer.onChange(this.id, callback);
   }
 }

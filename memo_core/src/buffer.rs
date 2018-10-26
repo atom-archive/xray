@@ -1,6 +1,12 @@
-use btree::{self, SeekBias};
-use operation_queue::{self, OperationQueue};
+use crate::btree::{self, SeekBias};
+use crate::operation_queue::{self, OperationQueue};
+use crate::time;
+use crate::ReplicaId;
+use crate::UserId;
+use difference::{Changeset, Difference};
+use lazy_static::lazy_static;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
@@ -9,9 +15,7 @@ use std::iter;
 use std::mem;
 use std::ops::{Add, AddAssign, Range, Sub};
 use std::sync::Arc;
-use time;
-use ReplicaId;
-use UserId;
+use std::vec;
 
 type SelectionSetVersion = usize;
 
@@ -85,6 +89,11 @@ pub struct Iter {
 struct ChangesIter<F: Fn(&FragmentSummary) -> bool> {
     cursor: btree::FilterCursor<F, Fragment>,
     since: time::Global,
+}
+
+struct DiffIter {
+    position: Point,
+    diff: vec::IntoIter<Difference>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1369,7 +1378,6 @@ impl Iter {
         self
     }
 
-    #[cfg(test)]
     pub fn into_string(self) -> String {
         String::from_utf16_lossy(&self.collect::<Vec<u16>>())
     }
@@ -1467,6 +1475,78 @@ impl<F: Fn(&FragmentSummary) -> bool> Iterator for ChangesIter<F> {
             }
 
             self.cursor.next();
+        }
+
+        change
+    }
+}
+
+pub fn diff(a: &str, b: &str) -> impl Iterator<Item = Change> {
+    DiffIter {
+        position: Point::zero(),
+        diff: Changeset::new(a, b, "").diffs.into_iter(),
+    }
+}
+
+impl Iterator for DiffIter {
+    type Item = Change;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut change: Option<Change> = None;
+
+        while let Some(diff) = self.diff.next() {
+            let code_units;
+            let extent;
+            match &diff {
+                Difference::Same(text) | Difference::Rem(text) | Difference::Add(text) => {
+                    code_units = text.encode_utf16().collect::<Vec<_>>();
+
+                    let mut rows = 0;
+                    let mut last_row_len = 0;
+                    for ch in &code_units {
+                        if *ch == b'\n' as u16 {
+                            rows += 1;
+                            last_row_len = 0;
+                        } else {
+                            last_row_len += 1;
+                        }
+                    }
+                    extent = Point::new(rows, last_row_len);
+                }
+            }
+
+            match diff {
+                Difference::Same(_) => {
+                    self.position += &extent;
+                    if change.is_some() {
+                        break;
+                    }
+                }
+                Difference::Rem(_) => {
+                    if let Some(change) = change.as_mut() {
+                        change.range.end += &extent;
+                    } else {
+                        change = Some(Change {
+                            range: self.position..self.position + &extent,
+                            code_units: Vec::new(),
+                            new_extent: Point::zero(),
+                        });
+                    }
+                }
+                Difference::Add(_) => {
+                    if let Some(change) = change.as_mut() {
+                        change.code_units.extend(code_units);
+                        change.new_extent += &extent;
+                    } else {
+                        change = Some(Change {
+                            range: self.position..self.position,
+                            code_units,
+                            new_extent: extent,
+                        });
+                    }
+                    self.position += &extent;
+                }
+            }
         }
 
         change
@@ -1767,6 +1847,12 @@ impl<'a> From<&'a str> for Text {
     }
 }
 
+impl From<String> for Text {
+    fn from(s: String) -> Self {
+        Self::from(s.as_str())
+    }
+}
+
 impl<'a> From<Vec<u16>> for Text {
     fn from(s: Vec<u16>) -> Self {
         Self::new(s)
@@ -2051,15 +2137,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    extern crate rand;
-
-    use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
+    use rand::{Rng, SeedableRng, StdRng};
+    use uuid::Uuid;
 
     #[test]
     fn test_edit() {
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         let mut buffer = Buffer::new("abc");
         assert_eq!(buffer.to_string(), "abc");
         buffer.edit(vec![3..3], "def", &mut local_clock, &mut lamport_clock);
@@ -2085,8 +2171,9 @@ mod tests {
                 .collect::<String>();
             let mut buffer = Buffer::new(reference_string.as_str());
             let mut buffer_versions = Vec::new();
-            let mut local_clock = time::Local::new(1);
-            let mut lamport_clock = time::Lamport::new(1);
+            let replica_id = Uuid::from_u128(1);
+            let mut local_clock = time::Local::new(replica_id);
+            let mut lamport_clock = time::Lamport::new(replica_id);
 
             for _i in 0..10 {
                 let mut old_ranges: Vec<Range<usize>> = Vec::new();
@@ -2115,7 +2202,7 @@ mod tests {
                         new_text.as_str(),
                         &reference_string[old_range.end..],
                     ]
-                        .concat();
+                    .concat();
                 }
                 assert_eq!(buffer.to_string(), reference_string);
 
@@ -2141,8 +2228,9 @@ mod tests {
     #[test]
     fn test_len_for_row() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         buffer.edit(
             vec![0..0],
             "abcd\nefg\nhij",
@@ -2175,8 +2263,9 @@ mod tests {
     #[test]
     fn test_longest_row() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         assert_eq!(buffer.longest_row(), 0);
         buffer.edit(
             vec![0..0],
@@ -2203,8 +2292,9 @@ mod tests {
     #[test]
     fn test_iter_starting_at_point() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         buffer.edit(
             vec![0..0],
             "abcd\nefgh\nij",
@@ -2258,8 +2348,9 @@ mod tests {
 
         // Regression test:
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         buffer.edit(vec![0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n", &mut local_clock, &mut lamport_clock);
         buffer.edit(vec![60..60], "\n", &mut local_clock, &mut lamport_clock);
 
@@ -2369,7 +2460,7 @@ mod tests {
     #[test]
     fn test_fragment_ids() {
         for seed in 0..10 {
-            use self::rand::{Rng, SeedableRng, StdRng};
+            use rand::{Rng, SeedableRng, StdRng};
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut ids = vec![FragmentId(Arc::new(vec![0])), FragmentId(Arc::new(vec![4]))];
@@ -2390,8 +2481,9 @@ mod tests {
     #[test]
     fn test_anchors() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         buffer.edit(vec![0..0], "abc", &mut local_clock, &mut lamport_clock);
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
@@ -2534,8 +2626,9 @@ mod tests {
     #[test]
     fn test_anchors_at_start_and_end() {
         let mut buffer = Buffer::new("");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
@@ -2559,8 +2652,9 @@ mod tests {
     #[test]
     fn test_is_modified() {
         let mut buffer = Buffer::new("abc");
-        let mut local_clock = time::Local::new(1);
-        let mut lamport_clock = time::Lamport::new(1);
+        let replica_id = Uuid::from_u128(1);
+        let mut local_clock = time::Local::new(replica_id);
+        let mut lamport_clock = time::Lamport::new(replica_id);
 
         assert!(!buffer.is_modified());
         buffer.edit(vec![1..2], "", &mut local_clock, &mut lamport_clock);
@@ -2569,29 +2663,36 @@ mod tests {
 
     #[test]
     fn test_random_concurrent_edits() {
-        for seed in 0..100 {
+        use crate::tests::Network;
+
+        const PEERS: usize = 3;
+
+        for seed in 0..50 {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let site_range = 0..5;
             let base_text = RandomCharIter(rng)
                 .take(rng.gen_range(0, 10))
                 .collect::<String>();
+            let mut replica_ids = Vec::new();
             let mut buffers = Vec::new();
             let mut local_clocks = Vec::new();
             let mut lamport_clocks = Vec::new();
-            let mut queues: Vec<Vec<Operation>> = Vec::new();
-            for i in site_range.clone() {
-                let mut buffer = Buffer::new(base_text.as_str());
+            let mut network = Network::new();
+            for i in 0..PEERS {
+                let buffer = Buffer::new(base_text.as_str());
                 buffers.push(buffer);
-                local_clocks.push(time::Local::new(i + 1));
-                lamport_clocks.push(time::Lamport::new(i + 1));
-                queues.push(Vec::new());
+                let replica_id = Uuid::from_u128((i + 1) as u128);
+                replica_ids.push(replica_id);
+                local_clocks.push(time::Local::new(replica_id));
+                lamport_clocks.push(time::Lamport::new(replica_id));
+                network.add_peer(replica_id);
             }
 
             let mut edit_count = 10;
             loop {
-                let replica_index = rng.gen_range(site_range.start, site_range.end) as usize;
+                let replica_index = rng.gen_range(0, PEERS);
+                let replica_id = replica_ids[replica_index];
                 let buffer = &mut buffers[replica_index];
                 let local_clock = &mut local_clocks[replica_index];
                 let lamport_clock = &mut lamport_clocks[replica_index];
@@ -2614,44 +2715,21 @@ mod tests {
                         local_clock.tick();
                     }
 
-                    for op in buffer.edit(old_ranges, new_text.as_str(), local_clock, lamport_clock)
-                    {
-                        for (index, queue) in queues.iter_mut().enumerate() {
-                            if index != replica_index {
-                                let min_index = queue
-                                    .iter()
-                                    .enumerate()
-                                    .rev()
-                                    .find_map(|(index, existing_op)| {
-                                        if existing_op.id.replica_id == op.id.replica_id {
-                                            Some(index + 1)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap_or(0);
-
-                                for _ in 0..rng.gen_range(1, 4) {
-                                    let insertion_index = rng.gen_range(min_index, queue.len() + 1);
-                                    queue.insert(insertion_index, op.clone());
-                                }
-                            }
-                        }
-                    }
-
+                    let ops =
+                        buffer.edit(old_ranges, new_text.as_str(), local_clock, lamport_clock);
+                    network.broadcast(replica_id, ops, &mut rng);
                     edit_count -= 1;
-                } else if !queues[replica_index].is_empty() {
-                    let count = rng.gen_range(1, queues[replica_index].len() + 1);
+                } else if network.has_unreceived(replica_id) {
                     buffer
                         .apply_ops(
-                            queues[replica_index].drain(0..count),
+                            network.receive(replica_id, &mut rng),
                             local_clock,
                             lamport_clock,
                         )
                         .unwrap();
                 }
 
-                if edit_count == 0 && queues.iter().all(|q| q.is_empty()) {
+                if edit_count == 0 && network.is_idle() {
                     break;
                 }
             }

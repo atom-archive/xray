@@ -1,618 +1,419 @@
-use btree::{self, SeekBias};
-use buffer::{self, Buffer, Point, Text};
-use operation_queue::{self, OperationQueue};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use smallvec::SmallVec;
+use crate::buffer::{self, Change, Point, Text};
+use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId, FileType};
+use crate::{time, Error, Oid, ReplicaId};
+use futures::{future, stream, Async, Future, Poll, Stream};
+use serde_derive::{Deserialize, Serialize};
+use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
-use std::fmt;
-use std::ops::{Add, AddAssign, Range};
-use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
-use time;
-use ReplicaId;
+use std::collections::HashMap;
+use std::io;
+use std::mem;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-pub const ROOT_FILE_ID: FileId = FileId::Base(0);
+pub trait GitProvider {
+    fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>>;
+    fn base_text(&self, oid: Oid, path: &Path) -> Box<Future<Item = String, Error = io::Error>>;
+}
 
-#[derive(Clone)]
+pub trait ChangeObserver {
+    fn text_changed(&self, buffer_id: BufferId, changes: Box<Iterator<Item = Change>>);
+}
+
 pub struct WorkTree {
-    base_entries_next_id: u64,
-    base_entries_stack: Vec<FileId>,
-    metadata: btree::Tree<Metadata>,
-    parent_refs: btree::Tree<ParentRefValue>,
-    child_refs: btree::Tree<ChildRefValue>,
-    version: time::Global,
-    local_clock: time::Local,
-    lamport_clock: time::Lamport,
-    text_files: HashMap<FileId, TextFile>,
-    deferred_ops: OperationQueue<Operation>,
-}
-
-pub struct Cursor<'a> {
-    text_files: &'a HashMap<FileId, TextFile>,
-    metadata_cursor: btree::Cursor<Metadata>,
-    parent_ref_cursor: btree::Cursor<ParentRefValue>,
-    child_ref_cursor: btree::Cursor<ChildRefValue>,
-    stack: Vec<CursorStackEntry>,
-    path: PathBuf,
-}
-
-struct CursorStackEntry {
-    cursor: btree::Cursor<ChildRefValue>,
-    visible: bool,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct CursorEntry {
-    pub file_id: FileId,
-    pub file_type: FileType,
-    pub depth: usize,
-    pub name: Arc<OsString>,
-    pub status: FileStatus,
-    pub visible: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DirEntry {
-    pub depth: usize,
-    #[serde(
-        serialize_with = "serialize_os_string",
-        deserialize_with = "deserialize_os_string"
-    )]
-    pub name: OsString,
-    #[serde(rename = "type")]
-    pub file_type: FileType,
+    epoch: Option<Rc<RefCell<Epoch>>>,
+    buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+    next_buffer_id: Rc<RefCell<BufferId>>,
+    deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
+    lamport_clock: Rc<RefCell<time::Lamport>>,
+    git: Rc<GitProvider>,
+    observer: Option<Rc<ChangeObserver>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Operation {
-    InsertMetadata {
-        file_id: FileId,
-        file_type: FileType,
-        #[serde(
-            serialize_with = "serialize_parent",
-            deserialize_with = "deserialize_parent"
-        )]
-        parent: Option<(FileId, Arc<OsString>)>,
-        local_timestamp: time::Local,
-        lamport_timestamp: time::Lamport,
+    StartEpoch {
+        epoch_id: epoch::Id,
+        head: Option<Oid>,
     },
-    UpdateParent {
-        child_id: FileId,
-        #[serde(
-            serialize_with = "serialize_parent",
-            deserialize_with = "deserialize_parent"
-        )]
-        new_parent: Option<(FileId, Arc<OsString>)>,
-        local_timestamp: time::Local,
-        lamport_timestamp: time::Lamport,
-    },
-    EditText {
-        file_id: FileId,
-        edits: Vec<buffer::Operation>,
-        local_timestamp: time::Local,
-        lamport_timestamp: time::Lamport,
+    EpochOperation {
+        epoch_id: epoch::Id,
+        operation: epoch::Operation,
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Error {
-    InvalidPath,
-    InvalidFileId,
-    InvalidBufferId,
-    InvalidDirEntry,
-    InvalidOperation,
-    CursorExhausted,
+#[derive(Copy, Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct BufferId(u32);
+
+enum MaybeDone<F: Future> {
+    Pending(F),
+    Done(Result<F::Item, F::Error>),
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub enum FileId {
-    Base(u64),
-    New(time::Local),
+struct BaseTextRequest {
+    future: MaybeDone<Box<Future<Item = String, Error = io::Error>>>,
+    path: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BufferId(FileId);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub enum FileStatus {
-    New,
-    Renamed,
-    Removed,
-    Modified,
-    RenamedAndModified,
-    Unchanged,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum FileType {
-    Directory,
-    Text,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Metadata {
-    file_id: FileId,
-    file_type: FileType,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ParentRefValue {
-    child_id: FileId,
-    timestamp: time::Lamport,
-    parent: Option<(FileId, Arc<OsString>)>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ParentRefValueKey {
-    child_id: FileId,
-    timestamp: time::Lamport,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ChildRefValue {
-    parent_id: FileId,
-    name: Arc<OsString>,
-    timestamp: time::Lamport,
-    child_id: FileId,
-    visible: bool,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ChildRefValueSummary {
-    parent_id: FileId,
-    name: Arc<OsString>,
-    visible: bool,
-    timestamp: time::Lamport,
-    visible_count: usize,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ChildRefValueKey {
-    parent_id: FileId,
-    name: Arc<OsString>,
-    visible: bool,
-    timestamp: time::Lamport,
-}
-
-#[derive(Clone, Debug, Default, Ord, Eq, PartialEq, PartialOrd)]
-pub struct ChildRefKey {
-    parent_id: FileId,
-    name: Arc<OsString>,
-}
-
-#[derive(Clone)]
-enum TextFile {
-    Deferred(Vec<buffer::Operation>),
-    Buffered(Buffer),
+struct SwitchEpoch {
+    to_assign: Rc<RefCell<Epoch>>,
+    cur_epoch: Rc<RefCell<Epoch>>,
+    last_seen: epoch::Id,
+    base_text_requests: HashMap<BufferId, Option<BaseTextRequest>>,
+    buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+    deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
+    lamport_clock: Rc<RefCell<time::Lamport>>,
+    git: Rc<GitProvider>,
+    observer: Option<Rc<ChangeObserver>>,
 }
 
 impl WorkTree {
-    pub fn new(replica_id: ReplicaId) -> Self {
-        Self {
-            base_entries_next_id: 1,
-            base_entries_stack: Vec::new(),
-            metadata: btree::Tree::new(),
-            parent_refs: btree::Tree::new(),
-            child_refs: btree::Tree::new(),
-            version: time::Global::new(),
-            local_clock: time::Local::new(replica_id),
-            lamport_clock: time::Lamport::new(replica_id),
-            text_files: HashMap::new(),
-            deferred_ops: OperationQueue::new(),
+    pub fn new<I>(
+        replica_id: ReplicaId,
+        base: Option<Oid>,
+        ops: I,
+        git: Rc<GitProvider>,
+        observer: Option<Rc<ChangeObserver>>,
+    ) -> Result<(WorkTree, Box<Stream<Item = Operation, Error = Error>>), Error>
+    where
+        I: 'static + IntoIterator<Item = Operation>,
+    {
+        let mut ops = ops.into_iter().peekable();
+        let mut tree = WorkTree {
+            epoch: None,
+            buffers: Rc::new(RefCell::new(HashMap::new())),
+            next_buffer_id: Rc::new(RefCell::new(BufferId(0))),
+            deferred_ops: Rc::new(RefCell::new(HashMap::new())),
+            lamport_clock: Rc::new(RefCell::new(time::Lamport::new(replica_id))),
+            git,
+            observer,
+        };
+
+        let ops = if ops.peek().is_none() {
+            Box::new(tree.reset(base)) as Box<Stream<Item = Operation, Error = Error>>
+        } else {
+            Box::new(tree.apply_ops(ops)?) as Box<Stream<Item = Operation, Error = Error>>
+        };
+
+        Ok((tree, ops))
+    }
+
+    pub fn reset(&mut self, head: Option<Oid>) -> impl Stream<Item = Operation, Error = Error> {
+        let epoch_id = self.lamport_clock.borrow_mut().tick();
+        stream::once(Ok(Operation::StartEpoch { epoch_id, head }))
+            .chain(self.start_epoch(epoch_id, head))
+    }
+
+    pub fn apply_ops<I>(
+        &mut self,
+        ops: I,
+    ) -> Result<impl Stream<Item = Operation, Error = Error>, Error>
+    where
+        I: IntoIterator<Item = Operation>,
+    {
+        let mut cur_epoch_ops = Vec::new();
+        let mut epoch_streams = Vec::new();
+
+        for op in ops {
+            match op {
+                Operation::StartEpoch { epoch_id, head } => {
+                    epoch_streams.push(self.start_epoch(epoch_id, head));
+                }
+                Operation::EpochOperation {
+                    epoch_id,
+                    operation,
+                } => {
+                    if let Some(epoch) = self.epoch.clone() {
+                        match epoch_id.cmp(&epoch.borrow().id) {
+                            Ordering::Less => {}
+                            Ordering::Equal => cur_epoch_ops.push(operation),
+                            Ordering::Greater => self.defer_epoch_op(epoch_id, operation),
+                        }
+                    } else {
+                        self.defer_epoch_op(epoch_id, operation);
+                    }
+                }
+            }
+        }
+
+        if let Some(epoch) = self.epoch.clone() {
+            let mut epoch = epoch.borrow_mut();
+
+            let mut prev_versions = HashMap::new();
+            for file_id in self.buffers.borrow().values() {
+                prev_versions.insert(*file_id, epoch.buffer_version(*file_id));
+            }
+
+            let fixup_ops = epoch.apply_ops(cur_epoch_ops, &mut self.lamport_clock.borrow_mut())?;
+            for (buffer_id, file_id) in self.buffers.borrow().iter() {
+                let mut changes = epoch
+                    .changes_since(*file_id, prev_versions.remove(file_id).unwrap().unwrap())?
+                    .peekable();
+                if changes.peek().is_some() {
+                    if let Some(observer) = self.observer.as_ref() {
+                        observer.text_changed(*buffer_id, Box::new(changes));
+                    }
+                }
+            }
+
+            let fixup_ops_stream = Box::new(stream::iter_ok(Operation::stamp(epoch.id, fixup_ops)));
+            Ok(epoch_streams.into_iter().fold(
+                fixup_ops_stream as Box<Stream<Item = Operation, Error = Error>>,
+                |acc, stream| Box::new(acc.chain(stream)),
+            ))
+        } else {
+            Err(Error::InvalidOperations)
+        }
+    }
+
+    fn start_epoch(
+        &mut self,
+        new_epoch_id: epoch::Id,
+        new_head: Option<Oid>,
+    ) -> Box<Stream<Item = Operation, Error = Error>> {
+        if self
+            .epoch
+            .as_ref()
+            .map_or(true, |e| new_epoch_id > e.borrow().id)
+        {
+            let new_epoch = Rc::new(RefCell::new(Epoch::new(
+                self.replica_id(),
+                new_epoch_id,
+                new_head,
+            )));
+
+            let lamport_clock = self.lamport_clock.clone();
+            let new_epoch_clone = new_epoch.clone();
+            let load_base_entries = if let Some(new_head) = new_head {
+                Box::new(
+                    self.git
+                        .base_entries(new_head)
+                        .map_err(|err| Error::IoError(err))
+                        .chunks(500)
+                        .and_then(move |base_entries| {
+                            let fixup_ops = new_epoch_clone.borrow_mut().append_base_entries(
+                                base_entries,
+                                &mut lamport_clock.borrow_mut(),
+                            )?;
+                            Ok(stream::iter_ok(Operation::stamp(new_epoch_id, fixup_ops)))
+                        })
+                        .flatten(),
+                ) as Box<Stream<Item = Operation, Error = Error>>
+            } else {
+                Box::new(stream::empty())
+            };
+
+            if let Some(cur_epoch) = self.epoch.clone() {
+                let switch_epoch = SwitchEpoch::new(
+                    new_epoch,
+                    cur_epoch,
+                    self.buffers.clone(),
+                    self.deferred_ops.clone(),
+                    self.lamport_clock.clone(),
+                    self.git.clone(),
+                    self.observer.clone(),
+                )
+                .then(|fixup_ops| Ok(stream::iter_ok(fixup_ops?)))
+                .flatten_stream();
+                Box::new(load_base_entries.chain(switch_epoch))
+            } else {
+                self.epoch = Some(new_epoch.clone());
+                load_base_entries
+            }
+        } else {
+            Box::new(stream::empty())
         }
     }
 
     pub fn version(&self) -> time::Global {
-        self.version.clone()
+        self.cur_epoch().version()
     }
 
-    pub fn cursor(&self) -> Option<Cursor> {
-        let metadata_cursor = self.metadata.cursor();
-        let parent_ref_cursor = self.parent_refs.cursor();
-        let child_ref_cursor = self.child_refs.cursor();
-        let mut cursor = Cursor {
-            text_files: &self.text_files,
-            metadata_cursor,
-            parent_ref_cursor,
-            child_ref_cursor,
-            stack: Vec::new(),
-            path: PathBuf::new(),
-        };
-        if cursor.descend_into(true, ROOT_FILE_ID) {
-            Some(cursor)
+    pub fn with_cursor<F>(&self, mut f: F)
+    where
+        F: FnMut(&mut Cursor),
+    {
+        if let Some(mut cursor) = self.cur_epoch().cursor() {
+            f(&mut cursor);
+        }
+    }
+
+    pub fn create_file<P>(&self, path: P, file_type: FileType) -> Result<Operation, Error>
+    where
+        P: AsRef<Path>,
+    {
+        let path = path.as_ref();
+        let name = path
+            .file_name()
+            .ok_or(Error::InvalidPath("path has no file name".into()))?;
+        let mut cur_epoch = self.cur_epoch_mut();
+        let parent_id = if let Some(parent_path) = path.parent() {
+            cur_epoch.file_id(parent_path)?
         } else {
-            None
-        }
+            epoch::ROOT_FILE_ID
+        };
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch.create_file(
+            parent_id,
+            name,
+            file_type,
+            &mut self.lamport_clock.borrow_mut(),
+        )?;
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
     }
 
-    pub fn append_base_entries<I>(&mut self, entries: I) -> Result<Vec<Operation>, Error>
+    pub fn rename<P1, P2>(&self, old_path: P1, new_path: P2) -> Result<Operation, Error>
     where
-        I: IntoIterator<Item = DirEntry>,
+        P1: AsRef<Path>,
+        P2: AsRef<Path>,
     {
-        let mut metadata_edits = Vec::new();
-        let mut parent_ref_edits = Vec::new();
-        let mut child_ref_edits = Vec::new();
+        let old_path = old_path.as_ref();
+        let new_path = new_path.as_ref();
 
-        let mut child_ref_cursor = self.child_refs.cursor();
-        let mut name_conflicts = HashSet::new();
+        let mut cur_epoch = self.cur_epoch_mut();
+        let file_id = cur_epoch.file_id(old_path)?;
+        let new_name = new_path
+            .file_name()
+            .ok_or(Error::InvalidPath("new path has no file name".into()))?;
+        let new_parent_id = if let Some(parent_path) = new_path.parent() {
+            cur_epoch.file_id(parent_path)?
+        } else {
+            epoch::ROOT_FILE_ID
+        };
 
-        for entry in entries {
-            let stack_depth = self.base_entries_stack.len();
-            if entry.depth == 0 || entry.depth > stack_depth + 1 {
-                return Err(Error::InvalidDirEntry);
-            }
-            self.base_entries_stack.truncate(entry.depth - 1);
-
-            let parent_id = self
-                .base_entries_stack
-                .last()
-                .cloned()
-                .unwrap_or(ROOT_FILE_ID);
-            let name = Arc::new(entry.name);
-            let file_id = FileId::Base(self.base_entries_next_id);
-            metadata_edits.push(btree::Edit::Insert(Metadata {
-                file_id,
-                file_type: entry.file_type,
-            }));
-            parent_ref_edits.push(btree::Edit::Insert(ParentRefValue {
-                child_id: file_id,
-                timestamp: time::Lamport::min_value(),
-                parent: Some((parent_id, name.clone())),
-            }));
-            child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
-                parent_id,
-                name: name.clone(),
-                timestamp: time::Lamport::min_value(),
-                child_id: file_id,
-                visible: true,
-            }));
-
-            // In the rare case we already have a child ref with this name, remember to fix the
-            // name conflict later.
-            if child_ref_cursor.seek(&ChildRefKey { parent_id, name }, SeekBias::Left) {
-                name_conflicts.insert(file_id);
-            }
-
-            self.base_entries_next_id += 1;
-            if entry.file_type == FileType::Directory {
-                self.base_entries_stack.push(file_id);
-            }
-        }
-
-        self.metadata.edit(&mut metadata_edits);
-        self.parent_refs.edit(&mut parent_ref_edits);
-        self.child_refs.edit(&mut child_ref_edits);
-
-        let mut fixup_ops = Vec::new();
-        for file_id in name_conflicts {
-            fixup_ops.extend(self.fix_name_conflicts(file_id));
-        }
-        let deferred_ops = self.deferred_ops.drain();
-        fixup_ops.extend(self.apply_ops_internal(deferred_ops)?);
-
-        Ok(fixup_ops)
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch.rename(
+            file_id,
+            new_parent_id,
+            new_name,
+            &mut self.lamport_clock.borrow_mut(),
+        )?;
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
     }
 
-    pub fn apply_ops<I>(&mut self, ops: I) -> Result<Vec<Operation>, Error>
+    pub fn remove<P>(&self, path: P) -> Result<Operation, Error>
     where
-        I: IntoIterator<Item = Operation>,
+        P: AsRef<Path>,
     {
-        let mut fixup_ops = Vec::new();
-        fixup_ops.extend(self.apply_ops_internal(ops)?);
-        let deferred_ops = self.deferred_ops.drain();
-        fixup_ops.extend(self.apply_ops_internal(deferred_ops)?);
-        Ok(fixup_ops)
+        let mut cur_epoch = self.cur_epoch_mut();
+        let file_id = cur_epoch.file_id(path.as_ref())?;
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch.remove(file_id, &mut self.lamport_clock.borrow_mut())?;
+
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
     }
 
-    fn apply_ops_internal<I>(&mut self, ops: I) -> Result<Vec<Operation>, Error>
+    pub fn open_text_file<P>(&self, path: P) -> Box<Future<Item = BufferId, Error = Error>>
     where
-        I: IntoIterator<Item = Operation>,
+        P: Into<PathBuf>,
     {
-        let mut ops = ops.into_iter().peekable();
-        if ops.peek().is_none() {
-            return Ok(Vec::new());
-        }
-
-        let mut new_tree = self.clone();
-        let mut deferred_ops = Vec::new();
-        let mut potential_conflicts = HashSet::new();
-
-        for op in ops {
-            if new_tree.can_apply_op(&op) {
-                match &op {
-                    Operation::InsertMetadata {
-                        file_id, parent, ..
-                    } => {
-                        if parent.is_some() {
-                            potential_conflicts.insert(*file_id);
-                        }
-                    }
-                    Operation::UpdateParent { child_id, .. } => {
-                        potential_conflicts.insert(*child_id);
-                    }
-                    _ => {}
-                }
-                new_tree.apply_op(op)?;
-            } else {
-                deferred_ops.push(op);
-            }
-        }
-        new_tree.deferred_ops.insert(deferred_ops);
-
-        let mut fixup_ops = Vec::new();
-        for file_id in &potential_conflicts {
-            fixup_ops.extend(new_tree.fix_conflicts(*file_id));
-        }
-
-        *self = new_tree;
-        Ok(fixup_ops)
+        Self::open_text_file_internal(
+            path.into(),
+            self.epoch.clone().unwrap(),
+            self.git.clone(),
+            self.buffers.clone(),
+            self.next_buffer_id.clone(),
+            self.lamport_clock.clone(),
+        )
     }
 
-    pub fn apply_op(&mut self, op: Operation) -> Result<(), Error> {
-        self.version.observe(op.local_timestamp());
-        self.local_clock.observe(op.local_timestamp());
-        self.lamport_clock.observe(op.lamport_timestamp());
-
-        match op {
-            Operation::InsertMetadata {
-                file_id,
-                file_type,
-                parent,
-                lamport_timestamp,
-                ..
-            } => {
-                if !self.metadata.cursor().seek(&file_id, SeekBias::Left) {
-                    self.metadata.insert(Metadata { file_id, file_type });
-                    if let Some((parent_id, name)) = parent {
-                        self.parent_refs.insert(ParentRefValue {
-                            child_id: file_id,
-                            parent: Some((parent_id, name.clone())),
-                            timestamp: lamport_timestamp,
-                        });
-                        self.child_refs.insert(ChildRefValue {
-                            parent_id,
-                            name,
-                            timestamp: lamport_timestamp,
-                            child_id: file_id,
-                            visible: true,
-                        });
-                    }
-                }
-            }
-            Operation::UpdateParent {
-                child_id,
-                new_parent,
-                lamport_timestamp,
-                ..
-            } => {
-                let mut child_ref_edits: SmallVec<[_; 3]> = SmallVec::new();
-
-                let mut parent_ref_cursor = self.parent_refs.cursor();
-                if parent_ref_cursor.seek(&child_id, SeekBias::Left) {
-                    let latest_parent_ref = parent_ref_cursor.item().unwrap();
-                    let mut latest_visible_parent_ref = None;
-                    while let Some(parent_ref) = parent_ref_cursor.item() {
-                        if parent_ref.child_id != child_id {
-                            break;
-                        } else if parent_ref.parent.is_some() {
-                            latest_visible_parent_ref = Some(parent_ref);
-                            break;
+    fn open_text_file_internal(
+        path: PathBuf,
+        epoch: Rc<RefCell<Epoch>>,
+        git: Rc<GitProvider>,
+        buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+        next_buffer_id: Rc<RefCell<BufferId>>,
+        lamport_clock: Rc<RefCell<time::Lamport>>,
+    ) -> Box<Future<Item = BufferId, Error = Error>> {
+        if let Some(buffer_id) = Self::existing_buffer(&epoch, &buffers, &path) {
+            Box::new(future::ok(buffer_id))
+        } else {
+            let epoch_id = epoch.borrow().id;
+            Box::new(
+                Self::base_text(&path, epoch.as_ref(), git.as_ref()).and_then(
+                    move |(file_id, base_text)| {
+                        if let Some(buffer_id) = Self::existing_buffer(&epoch, &buffers, &path) {
+                            Box::new(future::ok(buffer_id))
+                        } else if epoch.borrow().id == epoch_id {
+                            match epoch.borrow_mut().open_text_file(
+                                file_id,
+                                base_text,
+                                &mut lamport_clock.borrow_mut(),
+                            ) {
+                                Ok(()) => {
+                                    let buffer_id = *next_buffer_id.borrow();
+                                    next_buffer_id.borrow_mut().0 += 1;
+                                    buffers.borrow_mut().insert(buffer_id, file_id);
+                                    Box::new(future::ok(buffer_id))
+                                }
+                                Err(error) => Box::new(future::err(error)),
+                            }
                         } else {
-                            parent_ref_cursor.next();
+                            Self::open_text_file_internal(
+                                path,
+                                epoch,
+                                git,
+                                buffers,
+                                next_buffer_id,
+                                lamport_clock,
+                            )
                         }
-                    }
+                    },
+                ),
+            )
+        }
+    }
 
-                    let mut child_ref = None;
-                    if let Some(ref latest_visible_parent_ref) = latest_visible_parent_ref {
-                        let mut child_ref_cursor = self.child_refs.cursor();
-                        let (parent_id, name) = latest_visible_parent_ref.parent.clone().unwrap();
-                        child_ref_cursor.seek(
-                            &ChildRefValueKey {
-                                parent_id,
-                                name,
-                                visible: latest_parent_ref.parent.is_some(),
-                                timestamp: latest_visible_parent_ref.timestamp,
-                            },
-                            SeekBias::Left,
-                        );
-                        child_ref = child_ref_cursor.item();
-                    }
-
-                    if lamport_timestamp > latest_parent_ref.timestamp {
-                        if let Some(ref child_ref) = child_ref {
-                            child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
-                        }
-
-                        if let Some((parent_id, name)) = new_parent.clone() {
-                            child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
-                                parent_id,
-                                name,
-                                timestamp: lamport_timestamp,
-                                child_id,
-                                visible: true,
-                            }));
-                        } else if let Some(mut child_ref) = child_ref {
-                            child_ref.visible = false;
-                            child_ref_edits.push(btree::Edit::Insert(child_ref));
-                        }
-                    } else if latest_visible_parent_ref
-                        .map_or(true, |r| lamport_timestamp > r.timestamp)
-                        && latest_parent_ref.parent.is_none()
-                        && new_parent.is_some()
-                    {
-                        let (parent_id, name) = new_parent.clone().unwrap();
-                        if let Some(child_ref) = child_ref {
-                            child_ref_edits.push(btree::Edit::Remove(child_ref.clone()));
-                        }
-                        child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
-                            parent_id,
-                            name,
-                            timestamp: lamport_timestamp,
-                            child_id,
-                            visible: false,
-                        }));
-                    }
-                } else if let Some((parent_id, name)) = new_parent.clone() {
-                    child_ref_edits.push(btree::Edit::Insert(ChildRefValue {
-                        parent_id,
-                        name,
-                        timestamp: lamport_timestamp,
-                        child_id,
-                        visible: true,
-                    }));
+    fn existing_buffer(
+        epoch: &Rc<RefCell<Epoch>>,
+        buffers: &Rc<RefCell<HashMap<BufferId, FileId>>>,
+        path: &Path,
+    ) -> Option<BufferId> {
+        let epoch = epoch.borrow();
+        for (buffer_id, file_id) in buffers.borrow().iter() {
+            if let Some(existing_path) = epoch.path(*file_id) {
+                if path == existing_path {
+                    return Some(*buffer_id);
                 }
-
-                self.parent_refs
-                    .edit(&mut [btree::Edit::Insert(ParentRefValue {
-                        child_id,
-                        timestamp: lamport_timestamp,
-                        parent: new_parent,
-                    })]);
-                self.child_refs.edit(&mut child_ref_edits);
             }
-            Operation::EditText { file_id, edits, .. } => match self
-                .text_files
-                .entry(file_id)
-                .or_insert_with(|| TextFile::Deferred(Vec::new()))
-            {
-                TextFile::Deferred(operations) => {
-                    operations.extend(edits);
+        }
+        None
+    }
+
+    fn base_text(
+        path: &Path,
+        epoch: &RefCell<Epoch>,
+        git: &GitProvider,
+    ) -> Box<Future<Item = (FileId, String), Error = Error>> {
+        let epoch = epoch.borrow();
+        match epoch.file_id(&path) {
+            Ok(file_id) => {
+                if let (Some(head), Some(base_path)) = (epoch.head, epoch.base_path(file_id)) {
+                    Box::new(
+                        git.base_text(head, &base_path)
+                            .map_err(|err| Error::IoError(err))
+                            .map(move |text| (file_id, text)),
+                    )
+                } else {
+                    Box::new(future::ok((file_id, String::new())))
                 }
-                TextFile::Buffered(buffer) => {
-                    buffer
-                        .apply_ops(edits, &mut self.local_clock, &mut self.lamport_clock)
-                        .map_err(|_| Error::InvalidOperation)?;
-                }
-            },
-        }
-
-        Ok(())
-    }
-
-    fn can_apply_op(&self, op: &Operation) -> bool {
-        match op {
-            Operation::InsertMetadata { .. } => true,
-            Operation::UpdateParent { child_id, .. } => self.metadata(*child_id).is_ok(),
-            Operation::EditText { file_id, .. } => self.metadata(*file_id).is_ok(),
-        }
-    }
-
-    pub fn new_text_file(&mut self) -> (FileId, Operation) {
-        let file_id = FileId::New(self.local_clock.tick());
-        let operation = Operation::InsertMetadata {
-            file_id,
-            file_type: FileType::Text,
-            parent: None,
-            local_timestamp: self.local_clock.tick(),
-            lamport_timestamp: self.lamport_clock.tick(),
-        };
-        self.apply_op(operation.clone()).unwrap();
-        (file_id, operation)
-    }
-
-    pub fn create_dir<N>(
-        &mut self,
-        parent_id: FileId,
-        name: N,
-    ) -> Result<(FileId, Operation), Error>
-    where
-        N: AsRef<OsStr>,
-    {
-        self.check_file_id(parent_id, Some(FileType::Directory))?;
-
-        let mut new_tree = self.clone();
-        let file_id = FileId::New(new_tree.local_clock.tick());
-        let operation = Operation::InsertMetadata {
-            file_id,
-            file_type: FileType::Directory,
-            parent: Some((parent_id, Arc::new(name.as_ref().into()))),
-            local_timestamp: new_tree.local_clock.tick(),
-            lamport_timestamp: new_tree.lamport_clock.tick(),
-        };
-        let fixup_ops = new_tree
-            .apply_ops_internal(Some(operation.clone()))
-            .unwrap();
-        if fixup_ops.is_empty() {
-            *self = new_tree;
-            Ok((file_id, operation))
-        } else {
-            Err(Error::InvalidOperation)
-        }
-    }
-
-    pub fn open_text_file<T>(&mut self, file_id: FileId, base_text: T) -> Result<BufferId, Error>
-    where
-        T: Into<Text>,
-    {
-        self.check_file_id(file_id, Some(FileType::Text))?;
-
-        match self.text_files.remove(&file_id) {
-            Some(TextFile::Deferred(operations)) => {
-                let mut buffer = Buffer::new(base_text);
-                buffer
-                    .apply_ops(operations, &mut self.local_clock, &mut self.lamport_clock)
-                    .map_err(|_| Error::InvalidOperation)?;
-                self.text_files.insert(file_id, TextFile::Buffered(buffer));
             }
-            Some(text_file) => {
-                self.text_files.insert(file_id, text_file);
-            }
-            None => {
-                self.text_files
-                    .insert(file_id, TextFile::Buffered(Buffer::new(base_text)));
-            }
+            Err(error) => Box::new(future::err(error)),
         }
-
-        Ok(BufferId(file_id))
-    }
-
-    pub fn rename<N>(
-        &mut self,
-        file_id: FileId,
-        new_parent_id: FileId,
-        new_name: N,
-    ) -> Result<Operation, Error>
-    where
-        N: AsRef<OsStr>,
-    {
-        self.check_file_id(file_id, None)?;
-        self.check_file_id(new_parent_id, Some(FileType::Directory))?;
-
-        let mut new_tree = self.clone();
-        let operation = Operation::UpdateParent {
-            child_id: file_id,
-            new_parent: Some((new_parent_id, Arc::new(new_name.as_ref().into()))),
-            local_timestamp: new_tree.local_clock.tick(),
-            lamport_timestamp: new_tree.lamport_clock.tick(),
-        };
-        let fixup_ops = new_tree
-            .apply_ops_internal(Some(operation.clone()))
-            .unwrap();
-        if fixup_ops.is_empty() {
-            *self = new_tree;
-            Ok(operation)
-        } else {
-            Err(Error::InvalidOperation)
-        }
-    }
-
-    pub fn remove(&mut self, file_id: FileId) -> Result<Operation, Error> {
-        self.check_file_id(file_id, None)?;
-
-        let operation = Operation::UpdateParent {
-            child_id: file_id,
-            new_parent: None,
-            local_timestamp: self.local_clock.tick(),
-            lamport_timestamp: self.lamport_clock.tick(),
-        };
-        self.apply_op(operation.clone()).unwrap();
-        Ok(operation)
     }
 
     pub fn edit<I, T>(
-        &mut self,
+        &self,
         buffer_id: BufferId,
         old_ranges: I,
         new_text: T,
@@ -621,28 +422,26 @@ impl WorkTree {
         I: IntoIterator<Item = Range<usize>>,
         T: Into<Text>,
     {
-        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
-            let edits = buffer.edit(
+        let file_id = self.buffer_file_id(buffer_id)?;
+        let mut cur_epoch = self.cur_epoch_mut();
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch
+            .edit(
+                file_id,
                 old_ranges,
                 new_text,
-                &mut self.local_clock,
-                &mut self.lamport_clock,
-            );
-            let local_timestamp = self.local_clock.tick();
-            self.version.observe(local_timestamp);
-            Ok(Operation::EditText {
-                file_id: buffer_id.0,
-                edits,
-                local_timestamp,
-                lamport_timestamp: self.lamport_clock.tick(),
-            })
-        } else {
-            Err(Error::InvalidBufferId)
-        }
+                &mut self.lamport_clock.borrow_mut(),
+            )
+            .unwrap();
+
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
     }
 
     pub fn edit_2d<I, T>(
-        &mut self,
+        &self,
         buffer_id: BufferId,
         old_ranges: I,
         new_text: T,
@@ -651,103 +450,34 @@ impl WorkTree {
         I: IntoIterator<Item = Range<Point>>,
         T: Into<Text>,
     {
-        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&buffer_id.0) {
-            let edits = buffer.edit_2d(
+        let file_id = self.buffer_file_id(buffer_id)?;
+        let mut cur_epoch = self.cur_epoch_mut();
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch
+            .edit_2d(
+                file_id,
                 old_ranges,
                 new_text,
-                &mut self.local_clock,
-                &mut self.lamport_clock,
-            );
-            let local_timestamp = self.local_clock.tick();
-            self.version.observe(local_timestamp);
-            Ok(Operation::EditText {
-                file_id: buffer_id.0,
-                edits,
-                local_timestamp,
-                lamport_timestamp: self.lamport_clock.tick(),
-            })
-        } else {
-            Err(Error::InvalidBufferId)
-        }
+                &mut self.lamport_clock.borrow_mut(),
+            )
+            .unwrap();
+
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
     }
 
-    pub fn file_id<P>(&self, path: P) -> Result<FileId, Error>
-    where
-        P: AsRef<Path>,
-    {
-        let mut cursor = self.child_refs.cursor();
-        let mut parent_id = ROOT_FILE_ID;
-        for component in path.as_ref().components() {
-            match component {
-                Component::Normal(name) => {
-                    let name = Arc::new(name.into());
-                    if cursor.seek(&ChildRefKey { parent_id, name }, SeekBias::Left) {
-                        let child_ref = cursor.item().unwrap();
-                        if child_ref.visible {
-                            parent_id = child_ref.child_id;
-                        } else {
-                            return Err(Error::InvalidPath);
-                        }
-                    } else {
-                        return Err(Error::InvalidPath);
-                    }
-                }
-                _ => return Err(Error::InvalidPath),
-            }
-        }
-
-        Ok(parent_id)
-    }
-
-    pub fn base_path(&self, mut file_id: FileId) -> Option<PathBuf> {
-        let mut cursor = self.parent_refs.cursor();
-        let mut path_components = Vec::new();
-
-        loop {
-            if file_id == ROOT_FILE_ID {
-                break;
-            } else if file_id.is_base() {
-                cursor.seek(
-                    &ParentRefValueKey {
-                        child_id: file_id,
-                        timestamp: time::Lamport::min_value(),
-                    },
-                    SeekBias::Left,
-                );
-                let (parent_id, name) = cursor.item().unwrap().parent.unwrap();
-                file_id = parent_id;
-                path_components.push(name);
-            } else {
-                return None;
-            }
-        }
-
-        let mut path = PathBuf::new();
-        for component in path_components.into_iter().rev() {
-            path.push(component.as_ref());
-        }
-        Some(path)
-    }
-
-    pub fn path(&self, file_id: FileId) -> Option<PathBuf> {
-        let mut path_components = Vec::new();
-        if self.visit_ancestors(file_id, |name| path_components.push(name)) {
-            let mut path = PathBuf::new();
-            for component in path_components.into_iter().rev() {
-                path.push(component.as_ref());
-            }
-            Some(path)
-        } else {
-            None
-        }
+    pub fn path(&self, buffer_id: BufferId) -> Option<PathBuf> {
+        self.buffers
+            .borrow()
+            .get(&buffer_id)
+            .and_then(|file_id| self.cur_epoch().path(*file_id))
     }
 
     pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
-        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&buffer_id.0) {
-            Ok(buffer.iter())
-        } else {
-            Err(Error::InvalidBufferId)
-        }
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().text(file_id)
     }
 
     pub fn changes_since(
@@ -755,1307 +485,640 @@ impl WorkTree {
         buffer_id: BufferId,
         version: time::Global,
     ) -> Result<impl Iterator<Item = buffer::Change>, Error> {
-        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&buffer_id.0) {
-            Ok(buffer.changes_since(version))
-        } else {
-            Err(Error::InvalidBufferId)
-        }
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().changes_since(file_id, version)
     }
 
-    fn metadata(&self, file_id: FileId) -> Result<Metadata, Error> {
-        if file_id == ROOT_FILE_ID {
-            Ok(Metadata {
-                file_id: ROOT_FILE_ID,
-                file_type: FileType::Directory,
-            })
-        } else {
-            let mut cursor = self.metadata.cursor();
-            if cursor.seek(&file_id, SeekBias::Left) {
-                Ok(cursor.item().unwrap())
-            } else {
-                Err(Error::InvalidFileId)
-            }
-        }
+    fn cur_epoch(&self) -> Ref<Epoch> {
+        self.epoch.as_ref().unwrap().borrow()
     }
 
-    fn check_file_id(&self, file_id: FileId, expected_type: Option<FileType>) -> Result<(), Error> {
-        let metadata = self.metadata(file_id)?;
-        if expected_type.map_or(true, |expected_type| expected_type == metadata.file_type) {
-            Ok(())
-        } else {
-            Err(Error::InvalidFileId)
-        }
+    fn cur_epoch_mut(&self) -> RefMut<Epoch> {
+        self.epoch.as_ref().unwrap().borrow_mut()
     }
 
-    fn visit_ancestors<F>(&self, file_id: FileId, mut f: F) -> bool
-    where
-        F: FnMut(Arc<OsString>),
-    {
-        let mut visited = HashSet::new();
-        let mut cursor = self.parent_refs.cursor();
-        if file_id == ROOT_FILE_ID {
-            true
-        } else if cursor.seek(&file_id, SeekBias::Left) {
-            loop {
-                if let Some((parent_id, name)) = cursor.item().and_then(|r| r.parent) {
-                    // TODO: Only check for cycles in debug mode
-                    if visited.contains(&parent_id) {
-                        panic!("Cycle detected when visiting ancestors");
-                    } else {
-                        visited.insert(parent_id);
-                    }
-
-                    f(name);
-                    if parent_id == ROOT_FILE_ID {
-                        break;
-                    } else if !cursor.seek(&parent_id, SeekBias::Left) {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            }
-
-            true
-        } else {
-            false
-        }
+    fn defer_epoch_op(&self, epoch_id: epoch::Id, operation: epoch::Operation) {
+        self.deferred_ops
+            .borrow_mut()
+            .entry(epoch_id)
+            .or_insert(Vec::new())
+            .push(operation);
     }
 
-    fn fix_conflicts(&mut self, file_id: FileId) -> Vec<Operation> {
-        use btree::KeyedItem;
-
-        let mut fixup_ops = Vec::new();
-        let mut reverted_moves: HashMap<FileId, time::Lamport> = HashMap::new();
-
-        // TODO: Only check for cycles if the child was moved and is a directory.
-        let mut visited = HashSet::new();
-        let mut latest_move: Option<ParentRefValue> = None;
-        let mut cursor = self.parent_refs.cursor();
-        cursor.seek(&file_id, SeekBias::Left);
-
-        loop {
-            let mut parent_ref = cursor.item().unwrap();
-            if visited.contains(&parent_ref.child_id) {
-                // Cycle detected. Revert the most recent move contributing to the cycle.
-                cursor.seek(&latest_move.as_ref().unwrap().key(), SeekBias::Right);
-
-                // Find the previous value for this parent ref that isn't a deletion and store
-                // its timestamp in our reverted_moves map.
-                loop {
-                    let parent_ref = cursor.item().unwrap();
-                    if parent_ref.parent.is_some() {
-                        reverted_moves.insert(parent_ref.child_id, parent_ref.timestamp);
-                        break;
-                    } else {
-                        cursor.next();
-                    }
-                }
-
-                // Reverting this move may not have been enough to break the cycle. We clear
-                // the visited set but continue looping, potentially reverting multiple moves.
-                latest_move = None;
-                visited.clear();
-            } else {
-                visited.insert(parent_ref.child_id);
-
-                // If we have already reverted this parent ref to a previous value, interpret
-                // it as having the value we reverted to.
-                if let Some(prev_timestamp) = reverted_moves.get(&parent_ref.child_id) {
-                    while parent_ref.timestamp > *prev_timestamp {
-                        cursor.next();
-                        parent_ref = cursor.item().unwrap();
-                    }
-                }
-
-                // Check if this parent ref is a move and has the latest timestamp of any move
-                // we have seen so far. If so, it is a candidate to be reverted.
-                if latest_move
-                    .as_ref()
-                    .map_or(true, |m| parent_ref.timestamp > m.timestamp)
-                {
-                    cursor.next();
-                    if cursor.item().map_or(false, |next_parent_ref| {
-                        next_parent_ref.child_id == parent_ref.child_id
-                    }) {
-                        latest_move = Some(parent_ref.clone());
-                    }
-                }
-
-                // Walk up to the next parent or break if none exists or the parent is the root
-                if let Some((parent_id, _)) = parent_ref.parent {
-                    if parent_id == ROOT_FILE_ID {
-                        break;
-                    } else {
-                        if !cursor.seek(&parent_id, SeekBias::Left) {
-                            break;
-                        }
-                    }
-                } else {
-                    break;
-                }
-            }
-        }
-
-        // Convert the reverted moves into new move operations.
-        let mut moved_file_ids = Vec::new();
-        for (child_id, timestamp) in &reverted_moves {
-            cursor.seek(
-                &ParentRefValueKey {
-                    child_id: *child_id,
-                    timestamp: *timestamp,
-                },
-                SeekBias::Left,
-            );
-            fixup_ops.push(Operation::UpdateParent {
-                child_id: *child_id,
-                new_parent: cursor.item().unwrap().parent,
-                local_timestamp: self.local_clock.tick(),
-                lamport_timestamp: self.lamport_clock.tick(),
-            });
-            moved_file_ids.push(*child_id);
-        }
-
-        for op in &fixup_ops {
-            self.apply_op(op.clone()).unwrap();
-        }
-        for file_id in moved_file_ids {
-            fixup_ops.extend(self.fix_name_conflicts(file_id));
-        }
-
-        if !reverted_moves.contains_key(&file_id) {
-            fixup_ops.extend(self.fix_name_conflicts(file_id));
-        }
-
-        fixup_ops
+    fn replica_id(&self) -> ReplicaId {
+        self.lamport_clock.borrow().replica_id
     }
 
-    fn fix_name_conflicts(&mut self, file_id: FileId) -> Vec<Operation> {
-        let mut fixup_ops = Vec::new();
-
-        let mut parent_ref_cursor = self.parent_refs.cursor();
-        parent_ref_cursor.seek(&file_id, SeekBias::Left);
-        if let Some((parent_id, name)) = parent_ref_cursor.item().unwrap().parent {
-            let mut cursor_1 = self.child_refs.cursor();
-            cursor_1.seek(
-                &ChildRefKey {
-                    parent_id,
-                    name: name.clone(),
-                },
-                SeekBias::Left,
-            );
-            cursor_1.next();
-
-            let mut cursor_2 = cursor_1.clone();
-            let mut unique_name = name.clone();
-
-            while let Some(child_ref) = cursor_1.item() {
-                if child_ref.visible && child_ref.parent_id == parent_id && child_ref.name == name {
-                    loop {
-                        Arc::make_mut(&mut unique_name).push("~");
-                        cursor_2.seek_forward(
-                            &ChildRefKey {
-                                parent_id,
-                                name: unique_name.clone(),
-                            },
-                            SeekBias::Left,
-                        );
-                        if let Some(conflicting_child_ref) = cursor_2.item() {
-                            if !conflicting_child_ref.visible
-                                || conflicting_child_ref.parent_id != parent_id
-                                || conflicting_child_ref.name != unique_name
-                            {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-
-                    let fixup_op = Operation::UpdateParent {
-                        child_id: file_id,
-                        new_parent: Some((parent_id, unique_name.clone())),
-                        local_timestamp: self.local_clock.tick(),
-                        lamport_timestamp: self.lamport_clock.tick(),
-                    };
-                    self.apply_op(fixup_op.clone()).unwrap();
-                    fixup_ops.push(fixup_op);
-
-                    let visible_index = cursor_1.end::<usize>();
-                    cursor_1.seek_forward(&visible_index, SeekBias::Right);
-                } else {
-                    break;
-                }
-            }
-        }
-
-        fixup_ops
-    }
-}
-
-impl<'a> Cursor<'a> {
-    pub fn next(&mut self, can_descend: bool) -> bool {
-        if !self.stack.is_empty() {
-            let entry = self.entry().unwrap();
-            if !can_descend
-                || entry.file_type != FileType::Directory
-                || !self.descend_into(entry.visible, entry.file_id)
-            {
-                while !self.stack.is_empty() && !self.next_sibling() {
-                    self.stack.pop();
-                    self.path.pop();
-                }
-            }
-        }
-
-        !self.stack.is_empty()
-    }
-
-    pub fn entry(&self) -> Result<CursorEntry, Error> {
-        let CursorStackEntry {
-            cursor: child_ref_cursor,
-            visible: parent_visible,
-        } = self.stack.last().ok_or(Error::CursorExhausted)?;
-        let metadata = self.metadata_cursor.item().unwrap();
-        let child_ref = child_ref_cursor.item().unwrap();
-
-        let mut parent_ref_cursor = self.parent_ref_cursor.clone();
-        parent_ref_cursor.seek(&metadata.file_id, SeekBias::Left);
-        let newest_parent_ref_value = parent_ref_cursor.item().unwrap();
-        parent_ref_cursor.seek(&metadata.file_id, SeekBias::Right);
-        parent_ref_cursor.prev();
-        let oldest_parent_ref_value = parent_ref_cursor.item().unwrap();
-        let (status, visible) = match metadata.file_id {
-            FileId::Base(_) => {
-                if newest_parent_ref_value.parent == oldest_parent_ref_value.parent {
-                    if self.is_modified_file(metadata.file_id) {
-                        (FileStatus::Modified, true)
-                    } else {
-                        (FileStatus::Unchanged, true)
-                    }
-                } else if newest_parent_ref_value.parent.is_some() {
-                    if self.is_modified_file(metadata.file_id) {
-                        (FileStatus::RenamedAndModified, true)
-                    } else {
-                        (FileStatus::Renamed, true)
-                    }
-                } else {
-                    (FileStatus::Removed, false)
-                }
-            }
-            FileId::New(_) => (FileStatus::New, newest_parent_ref_value.parent.is_some()),
-        };
-
-        Ok(CursorEntry {
-            file_id: metadata.file_id,
-            file_type: metadata.file_type,
-            name: child_ref.name,
-            depth: self.stack.len(),
-            status,
-            visible: *parent_visible && visible,
-        })
-    }
-
-    pub fn path(&self) -> Result<&Path, Error> {
-        if self.stack.is_empty() {
-            Err(Error::CursorExhausted)
-        } else {
-            Ok(&self.path)
-        }
-    }
-
-    fn descend_into(&mut self, parent_visible: bool, dir_id: FileId) -> bool {
-        let mut child_ref_cursor = self.child_ref_cursor.clone();
-        child_ref_cursor.seek(&dir_id, SeekBias::Left);
-        if let Some(child_ref) = child_ref_cursor.item() {
-            if child_ref.parent_id == dir_id {
-                self.stack.push(CursorStackEntry {
-                    cursor: child_ref_cursor,
-                    visible: parent_visible,
-                });
-                self.path.push(child_ref.name.as_ref());
-                self.metadata_cursor
-                    .seek(&child_ref.child_id, SeekBias::Left);
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
-    pub fn next_sibling(&mut self) -> bool {
-        let CursorStackEntry { cursor, .. } = self.stack.last_mut().unwrap();
-        let parent_id = cursor.item().unwrap().parent_id;
-        cursor.next();
-        if let Some(child_ref) = cursor.item() {
-            if child_ref.parent_id == parent_id {
-                self.metadata_cursor
-                    .seek(&child_ref.child_id, SeekBias::Left);
-                self.path.pop();
-                self.path.push(child_ref.name.as_ref());
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_modified_file(&self, file_id: FileId) -> bool {
-        self.text_files
-            .get(&file_id)
-            .map_or(false, |f| f.is_modified())
+    fn buffer_file_id(&self, buffer_id: BufferId) -> Result<FileId, Error> {
+        self.buffers
+            .borrow()
+            .get(&buffer_id)
+            .cloned()
+            .ok_or(Error::InvalidBufferId)
     }
 }
 
 impl Operation {
-    fn local_timestamp(&self) -> time::Local {
-        match self {
-            Operation::InsertMetadata {
-                local_timestamp, ..
-            } => *local_timestamp,
-            Operation::UpdateParent {
-                local_timestamp, ..
-            } => *local_timestamp,
-            Operation::EditText {
-                local_timestamp, ..
-            } => *local_timestamp,
-        }
+    fn stamp<T>(epoch_id: epoch::Id, operations: T) -> impl Iterator<Item = Operation>
+    where
+        T: IntoIterator<Item = epoch::Operation>,
+    {
+        operations
+            .into_iter()
+            .map(move |operation| Operation::EpochOperation {
+                epoch_id,
+                operation,
+            })
     }
 
-    fn lamport_timestamp(&self) -> time::Lamport {
+    pub fn epoch_id(&self) -> epoch::Id {
         match self {
-            Operation::InsertMetadata {
-                lamport_timestamp, ..
-            } => *lamport_timestamp,
-            Operation::UpdateParent {
-                lamport_timestamp, ..
-            } => *lamport_timestamp,
-            Operation::EditText {
-                lamport_timestamp, ..
-            } => *lamport_timestamp,
+            Operation::StartEpoch { epoch_id, .. } => *epoch_id,
+            Operation::EpochOperation { epoch_id, .. } => *epoch_id,
         }
     }
 }
 
-impl operation_queue::Operation for Operation {
-    fn timestamp(&self) -> time::Lamport {
-        self.lamport_timestamp()
+impl SwitchEpoch {
+    fn new(
+        to_assign: Rc<RefCell<Epoch>>,
+        cur_epoch: Rc<RefCell<Epoch>>,
+        buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+        deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
+        lamport_clock: Rc<RefCell<time::Lamport>>,
+        git: Rc<GitProvider>,
+        observer: Option<Rc<ChangeObserver>>,
+    ) -> Self {
+        let last_seen = cur_epoch.borrow().id;
+        Self {
+            to_assign,
+            cur_epoch,
+            last_seen,
+            base_text_requests: HashMap::new(),
+            buffers,
+            deferred_ops,
+            lamport_clock,
+            git,
+            observer,
+        }
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
-    }
-}
+impl Future for SwitchEpoch {
+    type Item = Vec<Operation>;
+    type Error = Error;
 
-impl FileId {
-    fn is_base(&self) -> bool {
-        if let FileId::Base(_) = self {
-            true
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        let mut buffers = self.buffers.borrow_mut();
+        let mut cur_epoch = self.cur_epoch.borrow_mut();
+        let mut to_assign = self.to_assign.borrow_mut();
+        let mut deferred_ops = self.deferred_ops.borrow_mut();
+        let mut lamport_clock = self.lamport_clock.borrow_mut();
+
+        if to_assign.id > cur_epoch.id {
+            if self.last_seen != cur_epoch.id {
+                self.last_seen = cur_epoch.id;
+                self.base_text_requests.clear();
+            }
+
+            for (buffer_id, file_id) in buffers.iter() {
+                let path = cur_epoch.path(*file_id);
+                let request_is_outdated =
+                    if let Some(request) = self.base_text_requests.get(&buffer_id) {
+                        path.as_ref() != request.as_ref().map(|r| &r.path)
+                    } else {
+                        true
+                    };
+
+                if request_is_outdated {
+                    let will_be_untitled = path.as_ref().map_or(true, |path| {
+                        if let Ok(file_id) = to_assign.file_id(path) {
+                            to_assign.file_type(file_id).unwrap() != FileType::Text
+                        } else {
+                            true
+                        }
+                    });
+
+                    if will_be_untitled {
+                        self.base_text_requests.insert(*buffer_id, None);
+                    } else {
+                        let path = path.unwrap();
+                        let head = to_assign
+                            .head
+                            .expect("If we found a path, destination epoch must have a head");
+                        self.base_text_requests.insert(
+                            *buffer_id,
+                            Some(BaseTextRequest {
+                                future: MaybeDone::Pending(self.git.base_text(head, &path)),
+                                path,
+                            }),
+                        );
+                    }
+                }
+            }
+
+            let mut is_done = true;
+            for request in self.base_text_requests.values_mut() {
+                if let Some(request) = request {
+                    request.future.poll();
+                    is_done = is_done && request.future.is_done();
+                }
+            }
+
+            if is_done {
+                let mut fixup_ops = Vec::new();
+
+                let mut buffer_mappings = Vec::with_capacity(self.base_text_requests.len());
+                for (buffer_id, request) in self.base_text_requests.drain() {
+                    if let Some(request) = request {
+                        let base_text = request.future.take_result().unwrap()?;
+                        let new_file_id = to_assign.file_id(request.path).unwrap();
+                        to_assign.open_text_file(new_file_id, base_text, &mut lamport_clock)?;
+                        buffer_mappings.push((buffer_id, new_file_id));
+                    } else {
+                        // TODO: This may be okay for now, but I think we should take a smarter
+                        // approach, where the site which initiates the reset transmits a mapping
+                        // of previous file ids to new file ids. Then, when receiving a new epoch,
+                        // we will check if we can map the open buffer to a file id and, only if we
+                        // can't, we will resort to path-based mapping or to creating a completely
+                        // new file id for untitled buffers.
+                        let (new_file_id, operation) = to_assign.new_text_file(&mut lamport_clock);
+                        fixup_ops.push(Operation::EpochOperation {
+                            epoch_id: to_assign.id,
+                            operation,
+                        });
+                        to_assign.open_text_file(new_file_id, "", &mut lamport_clock)?;
+                        let operation = to_assign.edit(
+                            new_file_id,
+                            Some(0..0),
+                            cur_epoch.text(buffers[&buffer_id])?.into_string().as_str(),
+                            &mut lamport_clock,
+                        )?;
+                        fixup_ops.push(Operation::EpochOperation {
+                            epoch_id: to_assign.id,
+                            operation,
+                        });
+                        buffer_mappings.push((buffer_id, new_file_id));
+                    }
+                }
+
+                if let Some(ops) = deferred_ops.remove(&to_assign.id) {
+                    fixup_ops.extend(Operation::stamp(
+                        to_assign.id,
+                        to_assign.apply_ops(ops, &mut lamport_clock)?,
+                    ));
+                }
+                deferred_ops.retain(|id, _| *id > to_assign.id);
+
+                for (buffer_id, new_file_id) in buffer_mappings {
+                    let old_text = cur_epoch.text(buffers[&buffer_id])?.into_string();
+                    let new_text = to_assign.text(new_file_id)?.into_string();
+                    let mut changes = buffer::diff(&old_text, &new_text).peekable();
+                    if changes.peek().is_some() {
+                        if let Some(observer) = self.observer.as_ref() {
+                            observer.text_changed(buffer_id, Box::new(changes));
+                        }
+                    }
+                    buffers.insert(buffer_id, new_file_id);
+                }
+
+                mem::swap(&mut *cur_epoch, &mut *to_assign);
+                Ok(Async::Ready(fixup_ops))
+            } else {
+                Ok(Async::NotReady)
+            }
         } else {
-            false
+            // Cancel future prematurely if the current epoch is newer than the one we wanted to
+            // assign.
+            Ok(Async::Ready(Vec::new()))
         }
     }
 }
 
-impl btree::Dimension<FileId> for FileId {
-    fn from_summary(summary: &Self) -> Self {
-        *summary
-    }
-}
-
-impl Default for FileId {
-    fn default() -> Self {
-        FileId::Base(0)
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for FileId {
-    fn add_assign(&mut self, other: &Self) {
-        assert!(*self <= *other);
-        *self = other.clone();
-    }
-}
-
-impl<'a> Add<&'a Self> for FileId {
-    type Output = Self;
-
-    fn add(self, other: &Self) -> Self {
-        assert!(self <= *other);
-        other.clone()
-    }
-}
-
-impl btree::Item for Metadata {
-    type Summary = FileId;
-
-    fn summarize(&self) -> Self::Summary {
-        use btree::KeyedItem;
-        self.key()
-    }
-}
-
-impl btree::KeyedItem for Metadata {
-    type Key = FileId;
-
-    fn key(&self) -> Self::Key {
-        self.file_id
-    }
-}
-
-impl btree::Item for ParentRefValue {
-    type Summary = ParentRefValueKey;
-
-    fn summarize(&self) -> Self::Summary {
-        use btree::KeyedItem;
-        self.key()
-    }
-}
-
-impl btree::KeyedItem for ParentRefValue {
-    type Key = ParentRefValueKey;
-
-    fn key(&self) -> Self::Key {
-        ParentRefValueKey {
-            child_id: self.child_id,
-            timestamp: self.timestamp,
-        }
-    }
-}
-
-impl btree::Dimension<ParentRefValueKey> for ParentRefValueKey {
-    fn from_summary(summary: &ParentRefValueKey) -> ParentRefValueKey {
-        summary.clone()
-    }
-}
-
-impl Ord for ParentRefValueKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.child_id
-            .cmp(&other.child_id)
-            .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
-    }
-}
-
-impl PartialOrd for ParentRefValueKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for ParentRefValueKey {
-    fn add_assign(&mut self, other: &Self) {
-        assert!(*self < *other);
-        *self = other.clone();
-    }
-}
-
-impl<'a> Add<&'a Self> for ParentRefValueKey {
-    type Output = Self;
-
-    fn add(self, other: &Self) -> Self {
-        assert!(self < *other);
-        other.clone()
-    }
-}
-
-impl btree::Dimension<ParentRefValueKey> for FileId {
-    fn from_summary(summary: &ParentRefValueKey) -> Self {
-        summary.child_id
-    }
-}
-
-impl btree::Item for ChildRefValue {
-    type Summary = ChildRefValueSummary;
-
-    fn summarize(&self) -> Self::Summary {
-        ChildRefValueSummary {
-            parent_id: self.parent_id,
-            name: self.name.clone(),
-            visible: self.visible,
-            timestamp: self.timestamp,
-            visible_count: if self.visible { 1 } else { 0 },
-        }
-    }
-}
-
-impl btree::KeyedItem for ChildRefValue {
-    type Key = ChildRefValueKey;
-
-    fn key(&self) -> Self::Key {
-        ChildRefValueKey {
-            parent_id: self.parent_id,
-            name: self.name.clone(),
-            visible: self.visible,
-            timestamp: self.timestamp,
-        }
-    }
-}
-
-impl Ord for ChildRefValueSummary {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.parent_id
-            .cmp(&other.parent_id)
-            .then_with(|| self.name.cmp(&other.name))
-            .then_with(|| self.visible.cmp(&other.visible).reverse())
-            .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
-    }
-}
-
-impl PartialOrd for ChildRefValueSummary {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for ChildRefValueSummary {
-    fn add_assign(&mut self, other: &Self) {
-        assert!(*self < *other, "{:?} < {:?}", self, other);
-
-        self.parent_id = other.parent_id;
-        self.name = other.name.clone();
-        self.visible = other.visible;
-        self.timestamp = other.timestamp;
-        self.visible_count += other.visible_count;
-    }
-}
-
-impl btree::Dimension<ChildRefValueSummary> for FileId {
-    fn from_summary(summary: &ChildRefValueSummary) -> Self {
-        summary.parent_id
-    }
-}
-
-impl btree::Dimension<ChildRefValueSummary> for ChildRefValueKey {
-    fn from_summary(summary: &ChildRefValueSummary) -> ChildRefValueKey {
-        ChildRefValueKey {
-            parent_id: summary.parent_id,
-            name: summary.name.clone(),
-            visible: summary.visible,
-            timestamp: summary.timestamp,
-        }
-    }
-}
-
-impl Ord for ChildRefValueKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.parent_id
-            .cmp(&other.parent_id)
-            .then_with(|| self.name.cmp(&other.name))
-            .then_with(|| self.visible.cmp(&other.visible).reverse())
-            .then_with(|| self.timestamp.cmp(&other.timestamp).reverse())
-    }
-}
-
-impl PartialOrd for ChildRefValueKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for ChildRefValueKey {
-    fn add_assign(&mut self, other: &Self) {
-        assert!(*self < *other);
-        *self = other.clone();
-    }
-}
-
-impl<'a> Add<&'a Self> for ChildRefValueKey {
-    type Output = Self;
-
-    fn add(self, other: &Self) -> Self {
-        assert!(self < *other);
-        other.clone()
-    }
-}
-
-impl btree::Dimension<ChildRefValueSummary> for ChildRefKey {
-    fn from_summary(summary: &ChildRefValueSummary) -> Self {
-        ChildRefKey {
-            parent_id: summary.parent_id,
-            name: summary.name.clone(),
-        }
-    }
-}
-
-impl<'a> AddAssign<&'a Self> for ChildRefKey {
-    fn add_assign(&mut self, other: &Self) {
-        assert!(*self <= *other);
-        *self = other.clone();
-    }
-}
-
-impl<'a> Add<&'a Self> for ChildRefKey {
-    type Output = Self;
-
-    fn add(self, other: &Self) -> Self {
-        assert!(self <= *other);
-        other.clone()
-    }
-}
-
-impl btree::Dimension<ChildRefValueSummary> for usize {
-    fn from_summary(summary: &ChildRefValueSummary) -> Self {
-        summary.visible_count
-    }
-}
-
-impl TextFile {
-    fn is_modified(&self) -> bool {
+impl<F: Future> MaybeDone<F> {
+    fn is_done(&self) -> bool {
         match self {
-            TextFile::Deferred(ops) => !ops.is_empty(),
-            TextFile::Buffered(buffer) => buffer.is_modified(),
+            MaybeDone::Pending(_) => false,
+            MaybeDone::Done(_) => true,
         }
     }
-}
 
-fn serialize_os_string<S>(os_string: &OsString, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    os_string.to_string_lossy().serialize(serializer)
-}
+    fn poll(&mut self) {
+        match self {
+            MaybeDone::Pending(f) => match f.poll() {
+                Ok(Async::Ready(value)) => *self = MaybeDone::Done(Ok(value)),
+                Ok(Async::NotReady) => {}
+                Err(error) => *self = MaybeDone::Done(Err(error)),
+            },
+            MaybeDone::Done(_) => {}
+        }
+    }
 
-fn deserialize_os_string<'de, D>(deserializer: D) -> Result<OsString, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(OsString::from(String::deserialize(deserializer)?))
-}
-
-fn serialize_parent<S>(
-    parent: &Option<(FileId, Arc<OsString>)>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    parent
-        .as_ref()
-        .map(|(parent_id, name)| (parent_id, name.to_string_lossy()))
-        .serialize(serializer)
-}
-
-fn deserialize_parent<'de, D>(deserializer: D) -> Result<Option<(FileId, Arc<OsString>)>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let parent = <Option<(FileId, String)>>::deserialize(deserializer)?;
-    Ok(parent.map(|(parent_id, name)| (parent_id, Arc::new(OsString::from(name)))))
+    fn take_result(self) -> Option<Result<F::Item, F::Error>> {
+        match self {
+            MaybeDone::Pending(_) => None,
+            MaybeDone::Done(result) => Some(result),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buffer::Point;
+    use crate::epoch::CursorEntry;
     use rand::{Rng, SeedableRng, StdRng};
-    use std::iter::FromIterator;
+    use uuid::Uuid;
 
     #[test]
-    fn test_append_base_entries() {
-        let mut tree = WorkTree::new(1);
-        assert!(tree.paths().is_empty());
+    fn test_random() {
+        use crate::tests::Network;
 
-        let fixup_ops = tree
-            .append_base_entries(vec![
-                DirEntry {
-                    depth: 1,
-                    name: OsString::from("a"),
-                    file_type: FileType::Directory,
-                },
-                DirEntry {
-                    depth: 2,
-                    name: OsString::from("b"),
-                    file_type: FileType::Directory,
-                },
-                DirEntry {
-                    depth: 3,
-                    name: OsString::from("c"),
-                    file_type: FileType::Text,
-                },
-                DirEntry {
-                    depth: 2,
-                    name: OsString::from("d"),
-                    file_type: FileType::Directory,
-                },
-            ])
-            .unwrap();
-        assert_eq!(tree.paths(), vec!["a", "a/b", "a/b/c", "a/d"]);
-        assert_eq!(fixup_ops.len(), 0);
-
-        let a = tree.file_id("a").unwrap();
-        let (file_1, _) = tree.new_text_file();
-        tree.rename(file_1, a, "e").unwrap();
-        tree.create_dir(a, "z").unwrap();
-
-        let fixup_ops = tree
-            .append_base_entries(vec![
-                DirEntry {
-                    depth: 2,
-                    name: OsString::from("e"),
-                    file_type: FileType::Directory,
-                },
-                DirEntry {
-                    depth: 1,
-                    name: OsString::from("f"),
-                    file_type: FileType::Text,
-                },
-            ])
-            .unwrap();
-        assert_eq!(
-            tree.paths(),
-            vec!["a", "a/b", "a/b/c", "a/d", "a/e", "a/e~", "a/z", "f"]
-        );
-        assert_eq!(fixup_ops.len(), 1);
-    }
-
-    #[test]
-    fn test_cursor() {
-        let mut tree = WorkTree::new(1);
-        tree.append_base_entries(vec![
-            DirEntry {
-                depth: 1,
-                name: OsString::from("a"),
-                file_type: FileType::Directory,
-            },
-            DirEntry {
-                depth: 2,
-                name: OsString::from("b"),
-                file_type: FileType::Directory,
-            },
-            DirEntry {
-                depth: 3,
-                name: OsString::from("c"),
-                file_type: FileType::Text,
-            },
-            DirEntry {
-                depth: 2,
-                name: OsString::from("d"),
-                file_type: FileType::Directory,
-            },
-            DirEntry {
-                depth: 2,
-                name: OsString::from("e"),
-                file_type: FileType::Directory,
-            },
-            DirEntry {
-                depth: 1,
-                name: OsString::from("f"),
-                file_type: FileType::Directory,
-            },
-            DirEntry {
-                depth: 2,
-                name: OsString::from("g"),
-                file_type: FileType::Text,
-            },
-        ])
-        .unwrap();
-
-        let a = tree.file_id("a").unwrap();
-        let b = tree.file_id("a/b").unwrap();
-        let c = tree.file_id("a/b/c").unwrap();
-        let d = tree.file_id("a/d").unwrap();
-        let e = tree.file_id("a/e").unwrap();
-        let f = tree.file_id("f").unwrap();
-        let g = tree.file_id("f/g").unwrap();
-
-        tree.remove(b).unwrap();
-
-        let (new_file, _) = tree.new_text_file();
-        tree.rename(new_file, a, "x").unwrap();
-
-        let (new_file_that_got_removed, _) = tree.new_text_file();
-        tree.rename(new_file_that_got_removed, e, "y").unwrap();
-        tree.remove(new_file_that_got_removed).unwrap();
-
-        tree.rename(e, a, "z").unwrap();
-
-        let c_buffer = tree.open_text_file(c, "123").unwrap();
-        tree.edit(c_buffer, Some(0..0), "x").unwrap();
-
-        tree.rename(g, ROOT_FILE_ID, "g").unwrap();
-        let g_buffer = tree.open_text_file(g, "456").unwrap();
-        tree.edit(g_buffer, Some(0..0), "y").unwrap();
-
-        let mut cursor = tree.cursor().unwrap();
-        assert_eq!(
-            cursor.entry().unwrap(),
-            CursorEntry {
-                file_id: a,
-                file_type: FileType::Directory,
-                depth: 1,
-                name: Arc::new(OsString::from("a")),
-                status: FileStatus::Unchanged,
-                visible: true,
-            }
-        );
-
-        assert!(cursor.next(true));
-        assert_eq!(
-            cursor.entry().unwrap(),
-            CursorEntry {
-                file_id: b,
-                file_type: FileType::Directory,
-                depth: 2,
-                name: Arc::new(OsString::from("b")),
-                status: FileStatus::Removed,
-                visible: false,
-            }
-        );
-
-        assert!(cursor.next(true));
-        assert_eq!(
-            cursor.entry().unwrap(),
-            CursorEntry {
-                file_id: c,
-                file_type: FileType::Text,
-                depth: 3,
-                name: Arc::new(OsString::from("c")),
-                status: FileStatus::Modified,
-                visible: false,
-            }
-        );
-
-        assert!(cursor.next(true));
-        assert_eq!(
-            cursor.entry().unwrap(),
-            CursorEntry {
-                file_id: d,
-                file_type: FileType::Directory,
-                depth: 2,
-                name: Arc::new(OsString::from("d")),
-                status: FileStatus::Unchanged,
-                visible: true,
-            }
-        );
-
-        assert!(cursor.next(true));
-        assert_eq!(
-            cursor.entry().unwrap(),
-            CursorEntry {
-                file_id: new_file,
-                file_type: FileType::Text,
-                depth: 2,
-                name: Arc::new(OsString::from("x")),
-                status: FileStatus::New,
-                visible: true,
-            }
-        );
-
-        assert!(cursor.next(true));
-        assert_eq!(
-            cursor.entry().unwrap(),
-            CursorEntry {
-                file_id: e,
-                file_type: FileType::Directory,
-                depth: 2,
-                name: Arc::new(OsString::from("z")),
-                status: FileStatus::Renamed,
-                visible: true,
-            }
-        );
-
-        assert!(cursor.next(true));
-        assert_eq!(
-            cursor.entry().unwrap(),
-            CursorEntry {
-                file_id: new_file_that_got_removed,
-                file_type: FileType::Text,
-                depth: 3,
-                name: Arc::new(OsString::from("y")),
-                status: FileStatus::New,
-                visible: false,
-            }
-        );
-
-        assert!(cursor.next(true));
-        assert_eq!(
-            cursor.entry().unwrap(),
-            CursorEntry {
-                file_id: f,
-                file_type: FileType::Directory,
-                depth: 1,
-                name: Arc::new(OsString::from("f")),
-                status: FileStatus::Unchanged,
-                visible: true,
-            }
-        );
-
-        assert!(cursor.next(true));
-        assert_eq!(
-            cursor.entry().unwrap(),
-            CursorEntry {
-                file_id: g,
-                file_type: FileType::Text,
-                depth: 1,
-                name: Arc::new(OsString::from("g")),
-                status: FileStatus::RenamedAndModified,
-                visible: true,
-            }
-        );
-
-        assert!(!cursor.next(true));
-        assert_eq!(cursor.entry(), Err(Error::CursorExhausted));
-    }
-
-    #[test]
-    fn test_buffers() {
-        let base_entries = vec![
-            DirEntry {
-                depth: 1,
-                name: OsString::from("dir"),
-                file_type: FileType::Directory,
-            },
-            DirEntry {
-                depth: 1,
-                name: OsString::from("file"),
-                file_type: FileType::Text,
-            },
-        ];
-        let base_text = Text::from("abc");
-
-        let mut tree_1 = WorkTree::new(1);
-        tree_1.append_base_entries(base_entries.clone()).unwrap();
-        let mut tree_2 = WorkTree::new(2);
-        tree_2.append_base_entries(base_entries).unwrap();
-
-        let file_id = tree_1.file_id("file").unwrap();
-        let buffer_id = tree_2.open_text_file(file_id, base_text.clone()).unwrap();
-        let ops = tree_2.edit(buffer_id, vec![1..2, 3..3], "x");
-        tree_1.apply_ops(ops).unwrap();
-
-        // Must call open_text_file on any given replica first before interacting with a buffer.
-        assert_eq!(tree_1.text(buffer_id).err(), Some(Error::InvalidBufferId));
-        tree_1.open_text_file(file_id, base_text).unwrap();
-        assert_eq!(tree_1.text(buffer_id).unwrap().into_string(), "axcx");
-        assert_eq!(tree_2.text(buffer_id).unwrap().into_string(), "axcx");
-
-        let ops = tree_1.edit(buffer_id, vec![1..2, 4..4], "y");
-        let base_version = tree_2.version();
-
-        tree_2.apply_ops(ops).unwrap();
-
-        assert_eq!(tree_1.text(buffer_id).unwrap().into_string(), "aycxy");
-        assert_eq!(tree_2.text(buffer_id).unwrap().into_string(), "aycxy");
-
-        let changes = tree_2
-            .changes_since(buffer_id, base_version.clone())
-            .unwrap()
-            .collect::<Vec<_>>();
-        assert_eq!(changes.len(), 2);
-        assert_eq!(changes[0].range, Point::new(0, 1)..Point::new(0, 2));
-        assert_eq!(changes[0].code_units, [b'y' as u16]);
-        assert_eq!(changes[1].range, Point::new(0, 4)..Point::new(0, 4));
-        assert_eq!(changes[1].code_units, [b'y' as u16]);
-
-        let dir_id = tree_1.file_id("dir").unwrap();
-        assert_eq!(
-            tree_1.open_text_file(dir_id, Text::from("")),
-            Err(Error::InvalidFileId)
-        );
-    }
-
-    #[test]
-    fn test_replication_random() {
         const PEERS: usize = 5;
 
         for seed in 0..100 {
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
+            let git = Rc::new(TestGitProvider::new());
 
-            let mut base_tree = WorkTree::new(999);
-            base_tree.mutate(&mut rng, 20);
-            let base_entries = base_tree.entries();
-            let base_entries = base_entries
-                .iter()
-                .filter(|entry| entry.visible)
-                .map(|entry| DirEntry {
-                    depth: entry.depth,
-                    name: entry.name.as_ref().clone(),
-                    file_type: entry.file_type,
-                })
-                .collect::<Vec<_>>();
+            let mut commits = vec![None];
+            let base_tree = WorkTree::empty();
+            for _ in 0..rng.gen_range(1, 10) {
+                base_tree.mutate(&mut rng, 5);
+                commits.push(Some(git.commit(&base_tree)));
+            }
 
-            let mut base_tree = WorkTree::new(999);
-            base_tree.append_base_entries(base_entries.clone()).unwrap();
+            let mut observers = Vec::new();
+            let mut trees = Vec::new();
+            let mut network = Network::new();
+            for i in 0..PEERS {
+                let observer = Rc::new(TestChangeObserver::new());
+                observers.push(observer.clone());
+                let (tree, ops) = WorkTree::new(
+                    Uuid::from_u128((i + 1) as u128),
+                    *rng.choose(&commits).unwrap(),
+                    None,
+                    git.clone(),
+                    Some(observer),
+                )
+                .unwrap();
+                network.add_peer(tree.replica_id());
+                network.broadcast(tree.replica_id(), ops.collect().wait().unwrap(), &mut rng);
+                trees.push(tree);
+            }
 
-            let mut trees = Vec::from_iter((0..PEERS).map(|i| WorkTree::new(i as u64 + 1)));
-            let mut base_entries_to_append =
-                Vec::from_iter((0..PEERS).map(|_| base_entries.clone()));
-            let mut inboxes = Vec::from_iter((0..PEERS).map(|_| Vec::new()));
-            let mut all_ops = Vec::new();
-
-            // Generate and deliver random mutations
-            for _ in 0..10 {
-                let k = rng.gen_range(0, 10);
+            for _ in 0..5 {
                 let replica_index = rng.gen_range(0, PEERS);
                 let tree = &mut trees[replica_index];
-                let base_entries_to_append = &mut base_entries_to_append[replica_index];
+                let replica_id = tree.replica_id();
+                let observer = &mut observers[replica_index];
+                let k = rng.gen_range(0, 4);
 
-                if k < 3 && !base_entries_to_append.is_empty() {
-                    let count = rng.gen_range(0, base_entries_to_append.len());
-                    let fixup_ops = tree
-                        .append_base_entries(base_entries_to_append.drain(0..count))
-                        .unwrap();
-                    deliver_ops(
-                        &mut rng,
-                        replica_index,
-                        &mut inboxes,
-                        &mut all_ops,
-                        fixup_ops,
-                    );
-                } else if k < 6 && !inboxes[replica_index].is_empty() {
-                    let count = rng.gen_range(1, inboxes[replica_index].len() + 1);
-                    let fixup_ops = tree
-                        .apply_ops(inboxes[replica_index].drain(0..count))
-                        .unwrap();
-                    deliver_ops(
-                        &mut rng,
-                        replica_index,
-                        &mut inboxes,
-                        &mut all_ops,
-                        fixup_ops,
-                    );
-                } else if k < 7 && !all_ops.is_empty() {
-                    inboxes[replica_index].clear();
-                    *base_entries_to_append = base_entries.clone();
-                    *tree = WorkTree::new(tree.local_clock.replica_id);
-                    let fixup_ops = tree.apply_ops(all_ops.iter().cloned()).unwrap();
-                    deliver_ops(
-                        &mut rng,
-                        replica_index,
-                        &mut inboxes,
-                        &mut all_ops,
-                        fixup_ops,
-                    );
-                } else {
+                if k == 0 {
                     let ops = tree.mutate(&mut rng, 5);
-                    deliver_ops(&mut rng, replica_index, &mut inboxes, &mut all_ops, ops);
+                    network.broadcast(replica_id, ops, &mut rng);
+                } else if k == 1 {
+                    let head = *rng.choose(&commits).unwrap();
+                    let ops = tree.reset(head).collect().wait().unwrap();
+                    network.broadcast(replica_id, ops, &mut rng);
+                } else if k == 2 {
+                    let fixup_ops = tree
+                        .apply_ops(network.receive(replica_id, &mut rng))
+                        .unwrap();
+                    network.broadcast(replica_id, fixup_ops.collect().wait().unwrap(), &mut rng);
+                } else if k == 3 {
+                    let buffer_id = if tree.open_buffers().is_empty() || rng.gen() {
+                        tree.select_path(FileType::Text, &mut rng).map(|path| {
+                            let id = tree.open_text_file(path).wait().unwrap();
+                            observer.opened_buffer(id, tree);
+                            id
+                        })
+                    } else {
+                        rng.choose(&tree.open_buffers()).cloned()
+                    };
+
+                    if let Some(buffer_id) = buffer_id {
+                        let end = rng.gen_range(0, tree.text(buffer_id).unwrap().count() + 1);
+                        let start = rng.gen_range(0, end + 1);
+                        let text = gen_text(&mut rng);
+                        observer.edit(buffer_id, start..end, text.as_str());
+                        let op = tree.edit(buffer_id, Some(start..end), text).unwrap();
+                        network.broadcast(replica_id, vec![op], &mut rng);
+                    }
                 }
             }
 
-            // Allow system to quiesce
-            loop {
-                let mut done = true;
+            while !network.is_idle() {
                 for replica_index in 0..PEERS {
                     let tree = &mut trees[replica_index];
-                    let base_entries_to_append = &mut base_entries_to_append[replica_index];
-                    if !base_entries_to_append.is_empty() {
-                        let fixup_ops = tree
-                            .append_base_entries(base_entries_to_append.drain(..))
-                            .unwrap();
-                        deliver_ops(
-                            &mut rng,
-                            replica_index,
-                            &mut inboxes,
-                            &mut all_ops,
-                            fixup_ops,
-                        );
-                    }
-
-                    if !inboxes[replica_index].is_empty() {
-                        let count = rng.gen_range(1, inboxes[replica_index].len() + 1);
-                        let fixup_ops = tree
-                            .apply_ops(inboxes[replica_index].drain(0..count))
-                            .unwrap();
-                        deliver_ops(
-                            &mut rng,
-                            replica_index,
-                            &mut inboxes,
-                            &mut all_ops,
-                            fixup_ops,
-                        );
-                        done = false;
-                    }
-                }
-
-                if done {
-                    break;
+                    let replica_id = tree.replica_id();
+                    let fixup_ops = tree
+                        .apply_ops(network.receive(replica_id, &mut rng))
+                        .unwrap();
+                    network.broadcast(replica_id, fixup_ops.collect().wait().unwrap(), &mut rng);
                 }
             }
 
-            for i in 0..PEERS {
-                assert!(trees[i].deferred_ops.is_empty());
+            for replica_index in 0..PEERS - 1 {
+                let tree_1 = &trees[replica_index];
+                let tree_2 = &trees[replica_index + 1];
+                assert_eq!(tree_1.cur_epoch().id, tree_2.cur_epoch().id);
+                assert_eq!(tree_1.cur_epoch().head, tree_2.cur_epoch().head);
+                assert_eq!(tree_1.entries(), tree_2.entries());
             }
 
-            for i in 0..PEERS - 1 {
-                assert_eq!(trees[i].entries(), trees[i + 1].entries());
-            }
-
-            for i in 0..PEERS {
-                for _ in 0..rng.gen_range(0, 5) {
-                    let base_file_id =
-                        FileId::Base(rng.gen_range(0, base_entries.len() as u64 + 1));
+            for replica_index in 0..PEERS {
+                let tree = &trees[replica_index];
+                let observer = &observers[replica_index];
+                for buffer_id in tree.open_buffers() {
                     assert_eq!(
-                        trees[i].base_path(base_file_id).unwrap(),
-                        base_tree.path(base_file_id).unwrap()
+                        observer.text(buffer_id),
+                        tree.text(buffer_id).unwrap().into_string()
                     );
                 }
             }
-
-            fn deliver_ops<T: Rng>(
-                rng: &mut T,
-                sender: usize,
-                inboxes: &mut Vec<Vec<Operation>>,
-                all_ops: &mut Vec<Operation>,
-                ops: Vec<Operation>,
-            ) {
-                for (i, inbox) in inboxes.iter_mut().enumerate() {
-                    if i != sender {
-                        for op in &ops {
-                            let min_index = inbox
-                                .iter()
-                                .enumerate()
-                                .rev()
-                                .find_map(|(index, existing_op)| {
-                                    if existing_op.lamport_timestamp().replica_id
-                                        == op.lamport_timestamp().replica_id
-                                    {
-                                        Some(index + 1)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or(0);
-
-                            // Insert one or more duplicates of this operation *after* the previous
-                            // operation delivered by this replica.
-                            for _ in 0..rng.gen_range(1, 4) {
-                                let insertion_index = rng.gen_range(min_index, inbox.len() + 1);
-                                inbox.insert(insertion_index, op.clone());
-                            }
-                        }
-                    }
-                }
-                all_ops.extend(ops);
-            }
         }
+    }
+
+    #[test]
+    fn test_reset() {
+        let git = Rc::new(TestGitProvider::new());
+        let base_tree = WorkTree::empty();
+        base_tree.create_file("a", FileType::Text).unwrap();
+        let a_base = base_tree.open_text_file("a").wait().unwrap();
+        base_tree.edit(a_base, Some(0..0), "abc").unwrap();
+        let commit_0 = git.commit(&base_tree);
+
+        base_tree.edit(a_base, Some(1..2), "def").unwrap();
+        base_tree.create_file("b", FileType::Directory).unwrap();
+        let commit_1 = git.commit(&base_tree);
+
+        base_tree.edit(a_base, Some(2..3), "ghi").unwrap();
+        base_tree.create_file("b/c", FileType::Text).unwrap();
+        let commit_2 = git.commit(&base_tree);
+
+        let observer_1 = Rc::new(TestChangeObserver::new());
+        let observer_2 = Rc::new(TestChangeObserver::new());
+        let (mut tree_1, ops_1) = WorkTree::new(
+            Uuid::from_u128(1),
+            Some(commit_0),
+            vec![],
+            git.clone(),
+            Some(observer_1.clone()),
+        )
+        .unwrap();
+        let (mut tree_2, ops_2) = WorkTree::new(
+            Uuid::from_u128(2),
+            Some(commit_0),
+            ops_1.collect().wait().unwrap(),
+            git.clone(),
+            Some(observer_2.clone()),
+        )
+        .unwrap();
+        assert!(ops_2.wait().next().is_none());
+
+        assert_eq!(tree_1.dir_entries(), git.tree(commit_0).dir_entries());
+        assert_eq!(tree_2.dir_entries(), git.tree(commit_0).dir_entries());
+
+        let a_1 = tree_1.open_text_file("a").wait().unwrap();
+        let a_2 = tree_2.open_text_file("a").wait().unwrap();
+        observer_1.opened_buffer(a_1, &tree_1);
+        observer_2.opened_buffer(a_2, &tree_2);
+        assert_eq!(tree_1.text_str(a_1), git.tree(commit_0).text_str(a_base));
+        assert_eq!(tree_2.text_str(a_2), git.tree(commit_0).text_str(a_base));
+
+        let ops_1 = tree_1.reset(Some(commit_1)).collect().wait().unwrap();
+        assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
+        assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));
+        assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
+
+        let ops_2 = tree_2.reset(Some(commit_2)).collect().wait().unwrap();
+        assert_eq!(tree_2.dir_entries(), git.tree(commit_2).dir_entries());
+        assert_eq!(tree_2.text_str(a_2), git.tree(commit_2).text_str(a_2));
+        assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
+
+        let fixup_ops_1 = tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
+        let fixup_ops_2 = tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
+        assert!(fixup_ops_1.is_empty());
+        assert!(fixup_ops_2.is_empty());
+        assert_eq!(tree_1.entries(), tree_2.entries());
+        assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
+        assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));
+        assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
+        assert_eq!(tree_2.text_str(a_2), git.tree(commit_1).text_str(a_2));
+        assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
     }
 
     impl WorkTree {
+        fn empty() -> Self {
+            let (tree, _) = Self::new(
+                Uuid::from_u128(999 as u128),
+                None,
+                Vec::new(),
+                Rc::new(TestGitProvider::new()),
+                None,
+            )
+            .unwrap();
+            tree
+        }
+
         fn entries(&self) -> Vec<CursorEntry> {
-            let mut entries = Vec::new();
-            if let Some(mut cursor) = self.cursor() {
-                loop {
-                    entries.push(cursor.entry().unwrap());
-                    if !cursor.next(true) {
-                        break;
-                    }
-                }
-            }
-            entries
+            self.cur_epoch().entries()
         }
 
-        fn paths(&self) -> Vec<String> {
-            let mut paths = Vec::new();
-            if let Some(mut cursor) = self.cursor() {
-                loop {
-                    paths.push(cursor.path().unwrap().to_string_lossy().into_owned());
-                    if !cursor.next(true) {
-                        break;
-                    }
-                }
-            }
-            paths
+        fn dir_entries(&self) -> Vec<DirEntry> {
+            self.cur_epoch().dir_entries()
         }
 
-        fn mutate<T: Rng>(&mut self, rng: &mut T, count: usize) -> Vec<Operation> {
-            let mut ops = Vec::new();
-            for _ in 0..count {
-                let k = rng.gen_range(0, 3);
-                if self.child_refs.is_empty() || k == 0 {
-                    // println!("Random mutation: Creating file");
-                    let parent_id = self
-                        .select_file(rng, Some(FileType::Directory), true)
-                        .unwrap();
+        fn open_buffers(&self) -> Vec<BufferId> {
+            self.buffers.borrow().keys().cloned().collect()
+        }
 
-                    if rng.gen() {
-                        loop {
-                            match self.create_dir(parent_id, gen_name(rng)) {
-                                Ok((_, op)) => {
-                                    ops.push(op);
-                                    break;
-                                }
-                                Err(error) => assert_eq!(error, Error::InvalidOperation),
-                            }
-                        }
-                    } else {
-                        let (file_id, op) = self.new_text_file();
-                        ops.push(op);
-                        loop {
-                            match self.rename(file_id, parent_id, gen_name(rng)) {
-                                Ok(op) => {
-                                    ops.push(op);
-                                    break;
-                                }
-                                Err(error) => assert_eq!(error, Error::InvalidOperation),
-                            }
-                        }
+        fn text_str(&self, buffer_id: BufferId) -> String {
+            self.text(buffer_id).unwrap().into_string()
+        }
+
+        fn mutate<T: Rng>(&self, rng: &mut T, count: usize) -> Vec<Operation> {
+            let mut epoch = self.cur_epoch_mut();
+            Operation::stamp(
+                epoch.id,
+                epoch.mutate(rng, &mut self.lamport_clock.borrow_mut(), count),
+            )
+            .collect()
+        }
+
+        fn select_path<T: Rng>(&self, file_type: FileType, rng: &mut T) -> Option<PathBuf> {
+            let mut visible_paths = Vec::new();
+            self.with_cursor(|cursor| loop {
+                let entry = cursor.entry().unwrap();
+                let advanced = if entry.visible {
+                    if file_type == entry.file_type {
+                        visible_paths.push(cursor.path().unwrap().to_path_buf());
                     }
-                } else if k == 1 {
-                    let file_id = self.select_file(rng, None, false).unwrap();
-                    // println!("Random mutation: Removing {:?}", file_id);
-                    ops.push(self.remove(file_id).unwrap());
+                    cursor.next(true)
                 } else {
-                    let file_id = self.select_file(rng, None, false).unwrap();
-                    loop {
-                        let new_parent_id = self
-                            .select_file(rng, Some(FileType::Directory), true)
-                            .unwrap();
-                        let new_name = gen_name(rng);
-                        // println!(
-                        //     "Random mutation: Attempting to move {:?} to ({:?}, {:?})",
-                        //     file_id, new_parent_id, new_name
-                        // );
-                        match self.rename(file_id, new_parent_id, new_name) {
-                            Ok(op) => {
-                                ops.push(op);
-                                break;
-                            }
-                            Err(error) => assert_eq!(error, Error::InvalidOperation),
-                        }
-                    }
-                }
-            }
-            ops
-        }
+                    cursor.next(false)
+                };
 
-        fn select_file<T: Rng>(
-            &self,
-            rng: &mut T,
-            file_type: Option<FileType>,
-            allow_root: bool,
-        ) -> Option<FileId> {
-            let metadata = self
-                .metadata
-                .cursor()
-                .filter(|metadata| file_type.is_none() || file_type.unwrap() == metadata.file_type)
-                .collect::<Vec<_>>();
-            if allow_root
-                && file_type.map_or(true, |file_type| file_type == FileType::Directory)
-                && rng.gen_weighted_bool(metadata.len() as u32 + 1)
-            {
-                Some(ROOT_FILE_ID)
+                if !advanced {
+                    break;
+                }
+            });
+
+            if visible_paths.is_empty() {
+                None
             } else {
-                rng.choose(&metadata).map(|metadata| metadata.file_id)
+                Some(visible_paths.swap_remove(rng.gen_range(0, visible_paths.len())))
             }
         }
     }
 
-    fn gen_name<T: Rng>(rng: &mut T) -> String {
-        let mut name = String::new();
-        for _ in 0..rng.gen_range(1, 4) {
-            name.push(rng.gen_range(b'a', b'z' + 1).into());
-        }
-        if rng.gen_weighted_bool(5) {
-            for _ in 0..rng.gen_range(1, 2) {
-                name.push('~');
+    struct TestGitProvider {
+        commits: RefCell<HashMap<Oid, WorkTree>>,
+        next_oid: RefCell<u64>,
+    }
+
+    struct TestChangeObserver {
+        buffers: RefCell<HashMap<BufferId, buffer::Buffer>>,
+        local_clock: RefCell<time::Local>,
+        lamport_clock: RefCell<time::Lamport>,
+    }
+
+    impl TestGitProvider {
+        fn new() -> Self {
+            TestGitProvider {
+                commits: RefCell::new(HashMap::new()),
+                next_oid: RefCell::new(0),
             }
         }
 
-        name
+        fn commit(&self, tree: &WorkTree) -> Oid {
+            let mut tree_clone = WorkTree::empty();
+            tree_clone.epoch = tree
+                .epoch
+                .as_ref()
+                .map(|e| Rc::new(RefCell::new(e.borrow().clone())));
+            tree_clone.buffers = Rc::new(RefCell::new(tree.buffers.borrow().clone()));
+
+            let oid = self.gen_oid();
+            self.commits.borrow_mut().insert(oid, tree_clone);
+            oid
+        }
+
+        fn tree(&self, oid: Oid) -> Ref<WorkTree> {
+            Ref::map(self.commits.borrow(), |commits| commits.get(&oid).unwrap())
+        }
+
+        fn gen_oid(&self) -> Oid {
+            let mut next_oid = self.next_oid.borrow_mut();
+            let mut oid = [0; 20];
+            oid[0] = (*next_oid >> 0) as u8;
+            oid[1] = (*next_oid >> 8) as u8;
+            oid[2] = (*next_oid >> 16) as u8;
+            oid[3] = (*next_oid >> 24) as u8;
+            oid[4] = (*next_oid >> 32) as u8;
+            oid[5] = (*next_oid >> 40) as u8;
+            oid[6] = (*next_oid >> 48) as u8;
+            oid[7] = (*next_oid >> 56) as u8;
+            *next_oid += 1;
+            oid
+        }
+    }
+
+    impl GitProvider for TestGitProvider {
+        fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>> {
+            match self.commits.borrow().get(&oid) {
+                Some(tree) => Box::new(stream::iter_ok(tree.dir_entries().into_iter())),
+                None => Box::new(stream::once(Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Commit does not exist",
+                )))),
+            }
+        }
+
+        fn base_text(
+            &self,
+            oid: Oid,
+            path: &Path,
+        ) -> Box<Future<Item = String, Error = io::Error>> {
+            use futures::IntoFuture;
+
+            Box::new(
+                self.commits
+                    .borrow_mut()
+                    .get_mut(&oid)
+                    .ok_or(io::Error::new(
+                        io::ErrorKind::Other,
+                        "Commit does not exist",
+                    ))
+                    .and_then(|tree| {
+                        tree.open_text_file(path)
+                            .wait()
+                            .map_err(|_| {
+                                io::Error::new(io::ErrorKind::Other, "Path does not exist")
+                            })
+                            .map(|buffer_id| tree.text(buffer_id).unwrap().into_string())
+                    })
+                    .into_future(),
+            )
+        }
+    }
+
+    impl TestChangeObserver {
+        fn new() -> Self {
+            Self {
+                buffers: RefCell::new(HashMap::new()),
+                local_clock: RefCell::new(time::Local::default()),
+                lamport_clock: RefCell::new(time::Lamport::default()),
+            }
+        }
+
+        fn opened_buffer(&self, buffer_id: BufferId, tree: &WorkTree) {
+            let text = tree.text(buffer_id).unwrap().collect::<Vec<u16>>();
+            self.buffers
+                .borrow_mut()
+                .insert(buffer_id, buffer::Buffer::new(text));
+        }
+
+        fn edit<T>(&self, buffer_id: BufferId, range: Range<usize>, text: T)
+        where
+            T: Into<Text>,
+        {
+            let mut buffers = self.buffers.borrow_mut();
+            buffers.get_mut(&buffer_id).unwrap().edit(
+                Some(range),
+                text,
+                &mut self.local_clock.borrow_mut(),
+                &mut self.lamport_clock.borrow_mut(),
+            );
+        }
+
+        fn text(&self, buffer_id: BufferId) -> String {
+            self.buffers.borrow().get(&buffer_id).unwrap().to_string()
+        }
+    }
+
+    impl ChangeObserver for TestChangeObserver {
+        fn text_changed(&self, buffer_id: BufferId, changes: Box<Iterator<Item = Change>>) {
+            if let Some(buffer) = self.buffers.borrow_mut().get_mut(&buffer_id) {
+                for change in changes {
+                    buffer.edit_2d(
+                        Some(change.range),
+                        change.code_units,
+                        &mut self.local_clock.borrow_mut(),
+                        &mut self.lamport_clock.borrow_mut(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn gen_text<T: Rng>(rng: &mut T) -> String {
+        let text_len = rng.gen_range(0, 50);
+        let mut text: String = rng.gen_ascii_chars().take(text_len).collect();
+        for _ in 0..rng.gen_range(0, 5) {
+            let index = rng.gen_range(0, text.len() + 1);
+            text.insert(index, '\n');
+        }
+        text
     }
 }
