@@ -1,6 +1,6 @@
 # Memo JS
 
-This library enables real-time collaborative coding by providing a conflict-free replicated state machine that models the state of a Git working tree. The core of the library is written in Rust for efficiency and reusability in other contexts. This library exposes the capabilities of the Rust core via WebAssembly and wraps them in an idiomatic JavaScript API.
+Memo allows multiple remote collaborators to share the state of a single Git working copy. The core of the library is written in Rust for efficiency and reusability in other contexts. This library exposes the capabilities of the Rust core via WebAssembly and wraps them in an idiomatic JavaScript API.
 
 ## Initialization
 
@@ -17,28 +17,38 @@ async function main() {
 
 ## Creating a WorkTree
 
-`WorkTree` is the fundamental abstraction provided by this library. To create one, you need to supply a (possibly `null`) base commit OID, an array of initial operations and a `GitProvider`:
+`WorkTree` is the fundamental abstraction provided by this library. The state of a `WorkTree` is expressed as a sequence of fine-grained _operations_ applied on top of a a _base commit_. There are two possible cases when constructing a new `WorkTree`:
+
+- We are the first collaborator, and we want to build future operations on top of a given base commit.
+- We are joining an existing collaborative session, and we want to construct the `WorkTree` from a sequence of existing operations.
+
+Both scenarios are automatically handled when you call `WorkTree.create`:
 
 ```ts
-const base = "8251a3c491b3884d7f828d2a1c5c565855171a2c";
-const startOps = await fetchInitialOps();
-const [tree, ops] = WorkTree.create(base, startOps, gitProvider);
+const baseCommitOID = "8251a3c491b3884d7f828d2a1c5c565855171a2c";
+const startOps = await fetchInitialOperations();
+const [tree, ops] = WorkTree.create(baseCommitOID, startOps, gitProvider);
 broadcast(ops);
 ```
 
-In the example above, `base` and `startOps` will be used in a mutually exclusive way. That is, if `startOps` is empty, the work tree will be automatically reset to `base`. Vice versa, the active base will be inferred based on the content of `startOps`. You can ignore how `fetchInitialOps` works for now, as it will be covered later in the guide.
+In the example above, `WorkTree.create` is called with a base commit (`baseCommitOID`) and an array of existing operations (`startOps`). If the existing operations array is _empty_, we assume this is the first collaborator and initialize the tree at the provided base commit. If operations are provided, the `baseCommitOID` argument is ignored and the current base commit is determined from the given operations.
 
-The third required parameter, `gitProvider`, is an object that implements the `GitProvider` interface:
+You can ignore how `fetchInitialOperations` works for now. It is not included as part of this library, and a reference implementation will be covered later in the guide.
+
+The third parameter to `WorkTree.create` is an object that implements the `GitProvider` interface:
 
 ```ts
 export interface GitProvider {
   baseEntries(oid: Oid): AsyncIterable<BaseEntry>;
   baseText(oid: Oid, path: Path): Promise<string>;
 }
+```
 
-// This is a provider that reads Git data from github.com.
+This provider allows the `WorkTree` to retrieve information from the underlying Git repository. Here's a potential implementation that reads data from GitHub:
+
+```ts
 class GitHubProvider implements GitProvider {
-  baseEntries(oid: Oid): AsyncIterable<BaseEntry> {
+  async *baseEntries(oid: Oid): AsyncIterable<BaseEntry> {
     const entries = await fetch(
       `/repos/rust-lang/rust/git/trees/${oid}?recursive=1"`
     );
@@ -47,7 +57,7 @@ class GitHubProvider implements GitProvider {
     }
   }
 
-  baseText(oid: Oid, path: Path): Promise<string> {
+  async baseText(oid: Oid, path: Path): Promise<string> {
     const file = await fetch(
       `/repos/rust-lang/rust/contents/${path}?ref=${oid}`
     );
@@ -64,7 +74,7 @@ The `baseEntries` method must return a collection that can be asynchronously ite
 { depth: 1, name: "c.txt", type: memo.FileType.Text }
 ```
 
-## List the work tree's current entries
+## Listing the work tree's current entries
 
 To list the work tree's current paths, call `entries`. This will return an array of entries arranged in a depth-first order, similar to the entries returned by `GitProvider.prototype.baseEntries`. For example, the base entries populated above could be retrieved as follows:
 
@@ -103,10 +113,10 @@ const op2 = tree.createFile("foo/bar", memo.FileType.Text);
 const op3 = tree.createFile("foo/baz", memo.FileType.Text);
 const op4 = tree.rename("foo/bar", "foo/qux");
 const op5 = tree.remove("foo/baz");
-await broadcast([op1, op2, op3, op4, op5]);
+broadcast([op1, op2, op3, op4, op5]);
 ```
 
-## Buffers
+## Reading and manipulating text files
 
 To manipulate text files you'll need to call `openTextFile` with the path you want to open. This method will return a `Buffer` object that you can interact with:
 
@@ -120,7 +130,7 @@ const editOp2 = buffer.edit(
   [{ start: { row: 0, column: 10 }, end: { row: 0, column: 12 } }],
   "ms"
 );
-await broadcast([editOp1, editOp2]);
+broadcast([editOp1, editOp2]);
 console.log(buffer.getText()); // ==> "Hello worms"
 ```
 
@@ -135,17 +145,17 @@ buffer.onChange(changes => {
 });
 ```
 
-## Resetting to a different base
+## Resetting to a different base commit
 
 If you want to reset the work tree to a different (possibly `null`) base (e.g. after a commit or a `git reset`), you can use the `reset` method:
 
 ```ts
-const commitOid = await githubProvider.commit(tree.entries());
+const commitOid = "70403cdf91c2e6fbf76167f725935e6b0993eeb1";
 const resetOps = tree.reset(commitOid);
-await broadcast(resetOps);
-// tree now points to the new commit. Peers will be reset to the same commit
-// upon receiving `resetOps`.
+broadcast(resetOps);
 ```
+
+This resets you and all the other peers to the new commit. Note that this is an asynchronous action, as the tree needs to perform I/O in order to retrieve the new base entries.
 
 After switching to a new base all open buffers will still be valid and you can continue using them normally.
 
@@ -165,13 +175,13 @@ export type OperationEnvelope = {
 
 Technically, to synchronize with other peers, you only need to transmit the Base64-encoded operation that is stored inside of the envelope; so, why including those extra timestamp and replica id fields?
 
-You may recall the `fetchInitialOps` function that we called when [creating a new `WorkTree`](#creating-a-worktree). It turns out that, in order to instantiate a new `WorkTree`, you only need operations associated with the _latest_ epoch. By exposing the epoch timestamp and replica id, we allow you to store operations such that they can be efficiently queried later when instantiating new work trees:
+You may recall the `fetchInitialOperations` function that we called when [creating a new `WorkTree`](#creating-a-worktree). It turns out that, in order to instantiate a new `WorkTree`, you only need operations associated with the _latest_ epoch. By exposing the epoch timestamp and replica id, we allow you to store operations such that they can be efficiently queried later when instantiating new work trees:
 
 ```ts
 // Here we simulate having a database that stores every operation that has been
 // generated.
 
-async function fetchInitialOps(): Operation[] {
+async function fetchInitialOperations(): Operation[] {
   // Note that this is very inefficient. In a production system, you should
   // perform the computation contained in this function on the database, using
   // an index on the (timestamp, replicaId) tuple.
@@ -215,7 +225,7 @@ So far we have covered storing and trasmitting operations sent by the local repl
 ```ts
 const remoteOps = await receiveOps();
 const fixupOps = tree.applyOps(remoteOps);
-await broadcast(fixupOps);
+broadcast(fixupOps);
 ```
 
 Whenever you call `applyOps`, there is a chance that additional "fixup" operations could be generated to deal with cycles and name conflicts in the tree. Be sure to broadcast these operations to peers to ensure convergence.
