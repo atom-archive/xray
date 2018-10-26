@@ -165,7 +165,7 @@ export type OperationEnvelope = {
 
 Technically, to synchronize with other peers, you only need to transmit the Base64-encoded operation that is stored inside of the envelope; so, why including those extra timestamp and replica id fields?
 
-You may recall the `fetchInitialOps` function that we called when [creating a new `WorkTree`](#creating-a-work-tree). It turns out that, in order to instantiate a new `WorkTree`, you only need operations associated with the _latest_ epoch. By exposing the epoch timestamp and replica id, we allow you to store operations such that they can be efficiently queried later when instantiating new work trees:
+You may recall the `fetchInitialOps` function that we called when [creating a new `WorkTree`](#creating-a-worktree). It turns out that, in order to instantiate a new `WorkTree`, you only need operations associated with the _latest_ epoch. By exposing the epoch timestamp and replica id, we allow you to store operations such that they can be efficiently queried later when instantiating new work trees:
 
 ```ts
 // Here we simulate having a database that stores every operation that has been
