@@ -35,8 +35,8 @@ suite("WorkTree", () => {
 
     const ops1 = [];
     const ops2 = [];
-    ops1.push(tree1.createFile("e", memo.FileType.Text).operation);
-    ops2.push(tree2.createFile("f", memo.FileType.Text).operation);
+    ops1.push(tree1.createFile("e", memo.FileType.Text).operation());
+    ops2.push(tree2.createFile("f", memo.FileType.Text).operation());
 
     await assert.rejects(() => tree2.openTextFile("e"));
 
@@ -59,7 +59,7 @@ suite("WorkTree", () => {
           { start: point(0, 9), end: point(0, 10) }
         ],
         "-"
-      ).operation
+      ).operation()
     );
     assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
 
@@ -74,10 +74,10 @@ suite("WorkTree", () => {
     ]);
     ops1.length = 0;
 
-    ops1.push(tree1.createFile("x", memo.FileType.Directory).operation);
-    ops1.push(tree1.createFile("x/y", memo.FileType.Directory).operation);
-    ops1.push(tree1.rename("x", "a/b/x").operation);
-    ops1.push(tree1.remove("a/b/d").operation);
+    ops1.push(tree1.createFile("x", memo.FileType.Directory).operation());
+    ops1.push(tree1.createFile("x/y", memo.FileType.Directory).operation());
+    ops1.push(tree1.rename("x", "a/b/x").operation());
+    ops1.push(tree1.remove("a/b/d").operation());
     assert.deepStrictEqual(await collectOps(tree2.applyOps(ops1)), []);
     assert.deepStrictEqual(await collectOps(tree1.applyOps(ops2)), []);
     ops1.length = 0;
@@ -205,7 +205,7 @@ async function collectOps(
   ops: AsyncIterable<memo.OperationEnvelope>
 ): Promise<memo.Operation[]> {
   const envelopes = await collect(ops);
-  return envelopes.map(({ operation }) => operation);
+  return envelopes.map(envelope => envelope.operation());
 }
 
 function point(row: number, column: number): memo.Point {
