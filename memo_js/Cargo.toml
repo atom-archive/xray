@@ -8,7 +8,6 @@ edition = "2018"
 crate-type = ["cdylib"]
 
 [dependencies]
-base64 = "0.9"
 bincode = "1.0"
 futures = "0.1"
 hex = "0.3"
