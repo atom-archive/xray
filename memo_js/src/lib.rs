@@ -10,8 +10,12 @@ use std::io;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{future_to_promise, JsFuture};
+
+trait JsValueExt {
+    fn into_operation(self) -> Result<memo::Operation, JsValue>;
+}
 
 trait MapJsError<T> {
     fn map_js_err(self) -> Result<T, JsValue>;
@@ -20,7 +24,7 @@ trait MapJsError<T> {
 #[wasm_bindgen]
 pub struct WorkTree(memo::WorkTree);
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct AsyncResult<T> {
     value: Option<T>,
     done: bool,
@@ -41,13 +45,8 @@ pub struct WorkTreeNewResult {
     operations: Option<StreamToAsyncIterator>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OperationEnvelope {
-    epoch_timestamp: u64,
-    epoch_replica_id: memo::ReplicaId,
-    operation: Base64<memo::Operation>,
-}
+#[wasm_bindgen]
+pub struct OperationEnvelope(memo::Operation);
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 struct EditRange {
@@ -74,8 +73,6 @@ struct Entry {
 }
 
 pub struct HexOid(memo::Oid);
-
-pub struct Base64<T>(T);
 
 #[wasm_bindgen(module = "./support")]
 extern "C" {
@@ -105,20 +102,25 @@ impl WorkTree {
         observer: ChangeObserver,
         replica_id_bytes_slice: &[u8],
         base: JsValue,
-        start_ops: JsValue,
+        js_start_ops: js_sys::Array,
     ) -> Result<WorkTreeNewResult, JsValue> {
         let base = base
             .into_serde::<Option<HexOid>>()
             .map_js_err()?
             .map(|b| b.0);
-        let start_ops: Vec<Base64<memo::Operation>> = start_ops.into_serde().map_js_err()?;
+
+        let mut start_ops = Vec::new();
+        for js_op in js_start_ops.values() {
+            start_ops.push(js_op?.into_operation()?);
+        }
+
         let mut replica_id_bytes = [0; 16];
         replica_id_bytes.copy_from_slice(replica_id_bytes_slice);
         let replica_id = memo::ReplicaId::from_random_bytes(replica_id_bytes);
         let (tree, operations) = memo::WorkTree::new(
             replica_id,
             base,
-            start_ops.into_iter().map(|op| op.0),
+            start_ops,
             Rc::new(git),
             Some(Rc::new(observer)),
         )
@@ -127,7 +129,7 @@ impl WorkTree {
             tree: Some(WorkTree(tree)),
             operations: Some(StreamToAsyncIterator::new(
                 operations
-                    .map(|op| OperationEnvelope::new(op))
+                    .map(|op| JsValue::from(OperationEnvelope::new(op)))
                     .map_err(|err| err.to_string()),
             )),
         })
@@ -141,48 +143,52 @@ impl WorkTree {
         Ok(StreamToAsyncIterator::new(
             self.0
                 .reset(base)
-                .map(|op| OperationEnvelope::new(op))
+                .map(|op| JsValue::from(OperationEnvelope::new(op)))
                 .map_err(|err| err.to_string()),
         ))
     }
 
-    pub fn apply_ops(&mut self, ops: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
-        let ops = ops
-            .into_serde::<Vec<Base64<memo::Operation>>>()
-            .map(|ops| ops.into_iter().map(|Base64(op)| op.clone()))
-            .map_js_err()?;
+    pub fn apply_ops(&mut self, js_ops: js_sys::Array) -> Result<StreamToAsyncIterator, JsValue> {
+        let mut ops = Vec::new();
+        for js_op in js_ops.values() {
+            ops.push(js_op?.into_operation()?);
+        }
 
         self.0
             .apply_ops(ops)
             .map(|fixup_ops| {
                 StreamToAsyncIterator::new(
                     fixup_ops
-                        .map(|op| OperationEnvelope::new(op))
+                        .map(|op| JsValue::from(OperationEnvelope::new(op)))
                         .map_err(|err| err.to_string()),
                 )
             })
             .map_js_err()
     }
 
-    pub fn create_file(&self, path: String, file_type: JsValue) -> Result<JsValue, JsValue> {
+    pub fn create_file(
+        &self,
+        path: String,
+        file_type: JsValue,
+    ) -> Result<OperationEnvelope, JsValue> {
         let file_type = file_type.into_serde().map_js_err()?;
         self.0
             .create_file(&path, file_type)
-            .map(|operation| JsValue::from_serde(&OperationEnvelope::new(operation)).unwrap())
+            .map(|operation| OperationEnvelope::new(operation))
             .map_js_err()
     }
 
-    pub fn rename(&self, old_path: String, new_path: String) -> Result<JsValue, JsValue> {
+    pub fn rename(&self, old_path: String, new_path: String) -> Result<OperationEnvelope, JsValue> {
         self.0
             .rename(&old_path, &new_path)
-            .map(|operation| JsValue::from_serde(&OperationEnvelope::new(operation)).unwrap())
+            .map(|operation| OperationEnvelope::new(operation))
             .map_js_err()
     }
 
-    pub fn remove(&self, path: String) -> Result<JsValue, JsValue> {
+    pub fn remove(&self, path: String) -> Result<OperationEnvelope, JsValue> {
         self.0
             .remove(&path)
-            .map(|operation| JsValue::from_serde(&OperationEnvelope::new(operation)).unwrap())
+            .map(|operation| OperationEnvelope::new(operation))
             .map_js_err()
     }
 
@@ -207,7 +213,7 @@ impl WorkTree {
         buffer_id: JsValue,
         old_ranges: JsValue,
         new_text: &str,
-    ) -> Result<JsValue, JsValue> {
+    ) -> Result<OperationEnvelope, JsValue> {
         let buffer_id = buffer_id.into_serde().map_js_err()?;
         let old_ranges = old_ranges
             .into_serde::<Vec<EditRange>>()
@@ -217,7 +223,7 @@ impl WorkTree {
 
         self.0
             .edit_2d(buffer_id, old_ranges, new_text)
-            .map(|op| JsValue::from_serde(&OperationEnvelope::new(op)).unwrap())
+            .map(|op| OperationEnvelope::new(op))
             .map_js_err()
     }
 
@@ -259,14 +265,24 @@ impl WorkTreeNewResult {
     }
 }
 
+#[wasm_bindgen]
 impl OperationEnvelope {
     fn new(operation: memo::Operation) -> Self {
-        let epoch_id = operation.epoch_id();
-        Self {
-            epoch_timestamp: epoch_id.value,
-            epoch_replica_id: epoch_id.replica_id,
-            operation: Base64(operation),
-        }
+        OperationEnvelope(operation)
+    }
+
+    #[wasm_bindgen(js_name = epochReplicaId)]
+    pub fn epoch_replica_id(&self) -> JsValue {
+        JsValue::from_serde(&self.0.epoch_id().replica_id).unwrap()
+    }
+
+    #[wasm_bindgen(js_name = epochTimestamp)]
+    pub fn epoch_timestamp(&self) -> JsValue {
+        JsValue::from_serde(&self.0.epoch_id().value).unwrap()
+    }
+
+    pub fn operation(&self) -> Vec<u8> {
+        bincode::serialize(&self.0).unwrap()
     }
 }
 
@@ -306,19 +322,22 @@ where
 }
 
 impl StreamToAsyncIterator {
-    fn new<E, S, T>(stream: S) -> Self
+    fn new<E, S>(stream: S) -> Self
     where
         E: Serialize,
-        S: 'static + Stream<Item = T, Error = E>,
-        T: Serialize,
+        S: 'static + Stream<Item = JsValue, Error = E>,
     {
         let js_value_stream = stream
             .map(|value| {
-                JsValue::from_serde(&AsyncResult {
-                    value: Some(value),
-                    done: false,
-                })
-                .unwrap()
+                let result = JsValue::from(js_sys::Object::new());
+                js_sys::Reflect::set(&result, &JsValue::from_str("value"), &value).unwrap();
+                js_sys::Reflect::set(
+                    &result,
+                    &JsValue::from_str("done"),
+                    &JsValue::from_bool(false),
+                )
+                .unwrap();
+                result
             })
             .map_err(|error| JsValue::from_serde(&error).unwrap());
 
@@ -334,13 +353,16 @@ impl StreamToAsyncIterator {
             future_to_promise(stream.into_future().then(move |result| match result {
                 Ok((next, rest)) => {
                     stream_rc.set(Some(rest));
-                    Ok(next.unwrap_or(
-                        JsValue::from_serde(&AsyncResult::<()> {
-                            value: None,
-                            done: true,
-                        })
-                        .unwrap(),
-                    ))
+                    Ok(next.unwrap_or_else(|| {
+                        let result = JsValue::from(js_sys::Object::new());
+                        js_sys::Reflect::set(
+                            &result,
+                            &JsValue::from_str("done"),
+                            &JsValue::from_bool(true),
+                        )
+                        .unwrap();
+                        result
+                    }))
                 }
                 Err((error, _)) => Err(error),
             }))
@@ -416,33 +438,22 @@ impl<'de> Deserialize<'de> for HexOid {
     }
 }
 
-impl<T: Serialize> Serialize for Base64<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        use serde::ser::Error;
-        base64::encode(&bincode::serialize(&self.0).map_err(Error::custom)?).serialize(serializer)
-    }
-}
-
-impl<'de1, T: for<'de2> Deserialize<'de2>> Deserialize<'de1> for Base64<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de1>,
-    {
-        use serde::de::Error;
-        let bytes = base64::decode(&String::deserialize(deserializer)?).map_err(Error::custom)?;
-        let inner = bincode::deserialize::<T>(&bytes).map_err(D::Error::custom)?;
-        Ok(Base64(inner))
-    }
-}
-
 impl<T, E> MapJsError<T> for Result<T, E>
 where
     E: ToString,
 {
     fn map_js_err(self) -> Result<T, JsValue> {
         self.map_err(|err| JsValue::from(err.to_string()))
+    }
+}
+
+impl JsValueExt for JsValue {
+    fn into_operation(self) -> Result<memo::Operation, JsValue> {
+        let js_bytes = self
+            .dyn_into::<js_sys::Uint8Array>()
+            .map_err(|_| JsValue::from_str("Operation must be Uint8Array"))?;
+        let mut bytes = Vec::with_capacity(js_bytes.byte_length() as usize);
+        js_bytes.for_each(&mut |byte, _, _| bytes.push(byte));
+        bincode::deserialize(&bytes).map_js_err()
     }
 }

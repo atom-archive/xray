@@ -35,13 +35,13 @@ export async function init() {
 }
 
 export type Version = Tagged<string, "Version">;
-export type Operation = Tagged<string, "Operation">;
+export type Operation = Tagged<Uint8Array, "Operation">;
 export type ReplicaId = Tagged<string, "ReplicaId">;
-export type OperationEnvelope = {
-  epochTimestamp: number;
-  epochReplicaId: string;
-  operation: Operation;
-};
+export interface OperationEnvelope {
+  epochTimestamp(): number;
+  epochReplicaId(): ReplicaId;
+  operation(): Operation;
+}
 
 export enum FileStatus {
   New = "New",
