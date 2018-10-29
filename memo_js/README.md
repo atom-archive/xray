@@ -166,14 +166,14 @@ All methods that update the state of the tree return _operations_, the fundament
 In either case, operations are wrapped in an `OperationEnvelope`. An operation envelope is defined as follows:
 
 ```ts
-export type OperationEnvelope = {
-  epochTimestamp: number;
-  epochReplicaId: string;
-  operation: Operation;
-};
+export interface OperationEnvelope {
+  epochTimestamp(): number;
+  epochReplicaId(): string;
+  operation(): Operation;
+}
 ```
 
-Technically, to synchronize with other peers, you only need to transmit the Base64-encoded operation that is stored inside of the envelope; so, why including those extra timestamp and replica id fields?
+Technically, to synchronize with other peers, you only need to transmit the  operation that is stored inside of the envelope; so, why including those extra timestamp and replica id fields?
 
 You may recall the `fetchInitialOperations` function that we called when [creating a new `WorkTree`](#creating-a-worktree). It turns out that, in order to instantiate a new `WorkTree`, you only need operations associated with the _latest_ epoch. By exposing the epoch timestamp and replica id, we allow you to store operations such that they can be efficiently queried later when instantiating new work trees:
 
@@ -192,20 +192,20 @@ async function fetchInitialOperations(): Operation[] {
     .getAllOperationEnvelopes()
     .sort(
       (a, b) =>
-        a.epochTimestamp - b.epochTimestamp ||
-        a.epochReplicaId - b.epochReplicaId
+        a.epochTimestamp() - b.epochTimestamp() ||
+        a.epochReplicaId() - b.epochReplicaId()
     );
 
   // Then, we only retrieve operations for the latest epoch.
   const lastEnvelope = sortedEnvelopes[sortedEnvelopes.length - 1];
   const latestEpochEnvelopes = sortedEnvelopes.filter(
     e =>
-      e.epochTimestamp == lastEnvelope.epochTimestamp &&
-      e.epochReplicaId == lastEnvelope.epochReplicaId
+      e.epochTimestamp() == lastEnvelope.epochTimestamp() &&
+      e.epochReplicaId() == lastEnvelope.epochReplicaId()
   );
 
   // Finally, we unwrap the envelopes and just return the operations inside.
-  return latestEpochEnvelopes.map(envelope => envelope.operation);
+  return latestEpochEnvelopes.map(envelope => envelope.operation());
 }
 
 async function broadcast(
@@ -215,7 +215,7 @@ async function broadcast(
     // Note how we store the full envelope in the database, but we only transmit
     // the operation inside of it to peers.
     database.store(envelope);
-    network.broadcast(envelope.operation);
+    network.broadcast(envelope.operation());
   }
 }
 ```
