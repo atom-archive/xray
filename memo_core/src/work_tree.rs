@@ -137,8 +137,8 @@ impl WorkTree {
             }
         }
 
-        if let Some(epoch) = self.epoch.clone() {
-            let mut epoch = epoch.borrow_mut();
+        if let Some(epoch_ref) = self.epoch.clone() {
+            let mut epoch = epoch_ref.borrow_mut();
 
             let mut prev_versions = HashMap::new();
             for file_id in self.buffers.borrow().values() {
@@ -152,7 +152,11 @@ impl WorkTree {
                     .peekable();
                 if changes.peek().is_some() {
                     if let Some(observer) = self.observer.as_ref() {
+                        // Temporarily drop outstanding borrow to allow for re-entrant calls from
+                        // the observer.
+                        drop(epoch);
                         observer.text_changed(*buffer_id, Box::new(changes));
+                        epoch = epoch_ref.borrow_mut();
                     }
                 }
             }
@@ -670,19 +674,31 @@ impl Future for SwitchEpoch {
                 }
                 deferred_ops.retain(|id, _| *id > to_assign.id);
 
+                let mut buffer_changes = Vec::new();
                 for (buffer_id, new_file_id) in buffer_mappings {
                     let old_text = cur_epoch.text(buffers[&buffer_id])?.into_string();
                     let new_text = to_assign.text(new_file_id)?.into_string();
                     let mut changes = buffer::diff(&old_text, &new_text).peekable();
                     if changes.peek().is_some() {
-                        if let Some(observer) = self.observer.as_ref() {
-                            observer.text_changed(buffer_id, Box::new(changes));
-                        }
+                        buffer_changes.push((buffer_id, changes));
                     }
                     buffers.insert(buffer_id, new_file_id);
                 }
 
                 mem::swap(&mut *cur_epoch, &mut *to_assign);
+
+                if let Some(observer) = self.observer.as_ref() {
+                    // Drop outstanding borrows to allow for re-entrant calls from the observer.
+                    drop(buffers);
+                    drop(cur_epoch);
+                    drop(to_assign);
+                    drop(deferred_ops);
+                    drop(lamport_clock);
+                    for (buffer_id, changes) in buffer_changes {
+                        observer.text_changed(buffer_id, Box::new(changes));
+                    }
+                }
+
                 Ok(Async::Ready(fixup_ops))
             } else {
                 Ok(Async::NotReady)
@@ -906,6 +922,73 @@ mod tests {
         assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
         assert_eq!(tree_2.text_str(a_2), git.tree(commit_1).text_str(a_2));
         assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
+    }
+
+    #[test]
+    fn test_reentrant_observer() {
+        struct ReentrantChangeObserver(Rc<RefCell<WorkTree>>);
+
+        impl ChangeObserver for ReentrantChangeObserver {
+            fn text_changed(&self, buffer_id: BufferId, _: Box<Iterator<Item = Change>>) {
+                // Assume that users of WorkTree can always acquire a mutable reference to it.
+                let tree = unsafe { self.0.as_ptr().as_mut().unwrap() };
+                tree.edit(buffer_id, Some(0..0), "!").unwrap();
+            }
+        }
+
+        let git = Rc::new(TestGitProvider::new());
+        let base_tree = WorkTree::empty();
+        base_tree.create_file("a", FileType::Text).unwrap();
+        let a_base = base_tree.open_text_file("a").wait().unwrap();
+
+        base_tree.edit(a_base, Some(0..0), "abc").unwrap();
+        let commit_0 = git.commit(&base_tree);
+
+        base_tree.edit(a_base, Some(3..3), "def").unwrap();
+        let commit_1 = git.commit(&base_tree);
+
+        let (tree_1, ops_1) = WorkTree::new(
+            Uuid::from_u128(1),
+            Some(commit_0),
+            vec![],
+            git.clone(),
+            None,
+        )
+        .unwrap();
+        let tree_1 = Rc::new(RefCell::new(tree_1));
+        let observer = Rc::new(ReentrantChangeObserver(tree_1.clone()));
+        tree_1.borrow_mut().observer = Some(observer.clone());
+
+        let (tree_2, ops_2) = WorkTree::new(
+            Uuid::from_u128(1),
+            Some(commit_0),
+            ops_1.collect().wait().unwrap(),
+            git.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(ops_2.collect().wait().unwrap().is_empty());
+
+        tree_1.borrow().open_text_file("a").wait().unwrap();
+        let buffer_id_2 = tree_2.open_text_file("a").wait().unwrap();
+
+        // Synchronous re-entrant calls from the observer don't throw errors.
+        let edit_op = tree_2.edit(buffer_id_2, Some(0..0), "x").unwrap();
+        tree_1
+            .borrow_mut()
+            .apply_ops(Some(edit_op))
+            .unwrap()
+            .collect()
+            .wait()
+            .unwrap();
+
+        // Asynchronous re-entrant calls from the observer don't throw errors.
+        tree_1
+            .borrow_mut()
+            .reset(Some(commit_1))
+            .collect()
+            .wait()
+            .unwrap();
     }
 
     impl WorkTree {
