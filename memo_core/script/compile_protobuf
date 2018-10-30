@@ -1,0 +1,8 @@
+#!/bin/bash
+
+if !(command -v pb-rs > /dev/null); then
+  cargo install pb-rs;
+fi
+
+pb-rs memo.proto --output src/message.rs
+rm src/mod.rs

@@ -1,6 +1,8 @@
 mod btree;
 mod buffer;
 mod epoch;
+#[allow(unused_imports)]
+mod message;
 mod operation_queue;
 pub mod time;
 mod work_tree;
@@ -27,6 +29,18 @@ pub enum Error {
     InvalidDirEntry,
     InvalidOperation,
     CursorExhausted,
+}
+
+trait ReplicaIdExt {
+    fn to_message<'a>(&'a self) -> message::ReplicaId<'a>;
+}
+
+impl ReplicaIdExt for ReplicaId {
+    fn to_message<'a>(&'a self) -> message::ReplicaId<'a> {
+        message::ReplicaId {
+            uuid: Some(Cow::Borrowed(self.as_bytes())),
+        }
+    }
 }
 
 impl From<Error> for String {

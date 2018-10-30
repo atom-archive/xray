@@ -1,4 +1,5 @@
 use crate::btree::{self, SeekBias};
+use crate::message;
 use crate::operation_queue::{self, OperationQueue};
 use crate::time;
 use crate::ReplicaId;
@@ -8,6 +9,7 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
@@ -545,7 +547,7 @@ impl Buffer {
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
-        if id.seq <= self.version.get(id.replica_id) {
+        if id.value <= self.version.get(id.replica_id) {
             return Ok(());
         }
 
@@ -1695,6 +1697,10 @@ impl Text {
         self.code_units.len()
     }
 
+    fn to_string_lossy(&self) -> String {
+        String::from_utf16_lossy(&self.code_units)
+    }
+
     fn longest_row_in_range(&self, target_range: Range<usize>) -> Result<(u32, u32), Error> {
         let mut longest_row = 0;
         let mut longest_row_len = 0;
@@ -2015,7 +2021,7 @@ impl btree::Item for Fragment {
             let (longest_row, longest_row_len) = self
                 .insertion
                 .text
-                .longest_row_in_range(self.start_offset..self.end_offset)
+                .longest_row_in_range(self.start_offset as usize..self.end_offset as usize)
                 .unwrap();
             FragmentSummary {
                 extent: self.len(),
@@ -2108,6 +2114,24 @@ impl Default for InsertionSplitSummary {
 impl btree::Dimension<InsertionSplitSummary> for usize {
     fn from_summary(summary: &InsertionSplitSummary) -> Self {
         summary.extent
+    }
+}
+
+impl Operation {
+    pub fn to_message<'a>(&'a self) -> message::BufferOperation<'a> {
+        message::BufferOperation {
+            start_id: Some(self.start_id.to_message()),
+            start_offset: Some(self.start_offset as u64),
+            end_id: Some(self.end_id.to_message()),
+            end_offset: Some(self.end_offset as u64),
+            version_in_range: Some(self.version_in_range.to_message()),
+            new_text: self
+                .new_text
+                .as_ref()
+                .map(|new_text| Cow::Owned(new_text.to_string_lossy())),
+            local_timestamp: Some(self.id.to_message()),
+            lamport_timestamp: Some(self.timestamp.to_message()),
+        }
     }
 }
 

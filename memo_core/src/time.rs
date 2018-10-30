@@ -1,4 +1,6 @@
+use crate::message;
 use crate::ReplicaId;
+use crate::ReplicaIdExt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::{self, Ordering};
@@ -11,7 +13,7 @@ use std::sync::Arc;
 )]
 pub struct Local {
     pub replica_id: ReplicaId,
-    pub seq: u64,
+    pub value: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -33,18 +35,28 @@ pub struct Lamport {
 
 impl Local {
     pub fn new(replica_id: ReplicaId) -> Self {
-        Self { replica_id, seq: 1 }
+        Self {
+            replica_id,
+            value: 1,
+        }
     }
 
     pub fn tick(&mut self) -> Self {
         let timestamp = *self;
-        self.seq += 1;
+        self.value += 1;
         timestamp
     }
 
     pub fn observe(&mut self, timestamp: Self) {
         if timestamp.replica_id == self.replica_id {
-            self.seq = cmp::max(self.seq, timestamp.seq + 1);
+            self.value = cmp::max(self.value, timestamp.value + 1);
+        }
+    }
+
+    pub fn to_message(&self) -> message::Timestamp {
+        message::Timestamp {
+            value: Some(self.value),
+            replica_id: Some(self.replica_id.to_message()),
         }
     }
 }
@@ -76,27 +88,27 @@ impl Global {
 
     pub fn observe(&mut self, timestamp: Local) {
         let map = Arc::make_mut(&mut self.0);
-        let seq = map.entry(timestamp.replica_id).or_insert(0);
-        *seq = cmp::max(*seq, timestamp.seq);
+        let value = map.entry(timestamp.replica_id).or_insert(0);
+        *value = cmp::max(*value, timestamp.value);
     }
 
     pub fn observe_all(&mut self, other: &Self) {
-        for (replica_id, seq) in other.0.as_ref() {
+        for (replica_id, value) in other.0.as_ref() {
             self.observe(Local {
                 replica_id: *replica_id,
-                seq: *seq,
+                value: *value,
             });
         }
     }
 
     pub fn observed(&self, timestamp: Local) -> bool {
-        self.get(timestamp.replica_id) >= timestamp.seq
+        self.get(timestamp.replica_id) >= timestamp.value
     }
 
     pub fn changed_since(&self, other: &Self) -> bool {
         self.0
             .iter()
-            .any(|(replica_id, seq)| *seq > other.get(*replica_id))
+            .any(|(replica_id, value)| *value > other.get(*replica_id))
     }
 
     fn serialize_inner<S>(
@@ -114,6 +126,20 @@ impl Global {
         D: Deserializer<'de>,
     {
         Ok(Arc::new(HashMap::deserialize(deserializer)?))
+    }
+
+    pub fn to_message(&self) -> message::GlobalTimestamp {
+        let mut message = message::GlobalTimestamp {
+            timestamps: Vec::new(),
+        };
+
+        for (replica_id, value) in self.0.as_ref() {
+            message.timestamps.push(message::Timestamp {
+                replica_id: Some(replica_id.to_message()),
+                value: Some(*value),
+            });
+        }
+        message
     }
 }
 
@@ -152,5 +178,12 @@ impl Lamport {
 
     pub fn observe(&mut self, timestamp: Self) {
         self.value = cmp::max(self.value, timestamp.value) + 1;
+    }
+
+    pub fn to_message(&self) -> message::Timestamp {
+        message::Timestamp {
+            value: Some(self.value),
+            replica_id: Some(self.replica_id.to_message()),
+        }
     }
 }
