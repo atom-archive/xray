@@ -32,8 +32,8 @@ message EpochOperation {
   }
 
   enum FileType {
-    Directory = 1;
-    Text = 2;
+    Directory = 0;
+    Text = 1;
   }
 }
 
