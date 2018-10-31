@@ -1,0 +1,6 @@
+#!/bin/bash
+
+flatc --rust -o src/serialization src/serialization/schema.fbs
+
+# Workaround for incorrect code generation by flatc
+echo "use flatbuffers::EndianScalar;" >> src/serialization/schema_generated.rs

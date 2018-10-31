@@ -4,6 +4,7 @@ mod epoch;
 #[allow(non_snake_case, unused_imports)]
 mod message;
 mod operation_queue;
+mod serialization;
 pub mod time;
 mod work_tree;
 
@@ -33,6 +34,8 @@ pub enum Error {
 
 trait ReplicaIdExt {
     fn to_message(&self) -> message::ReplicaId;
+
+    fn serialize(&self) -> serialization::ReplicaId;
 }
 
 impl ReplicaIdExt for ReplicaId {
@@ -40,6 +43,27 @@ impl ReplicaIdExt for ReplicaId {
         message::ReplicaId {
             uuid: Some(Cow::Borrowed(self.as_bytes())),
         }
+    }
+
+    fn serialize(&self) -> serialization::ReplicaId {
+        fn u64_from_bytes(bytes: &[u8]) -> u64 {
+            (bytes[0] as u64) << 0 * 8
+                | (bytes[1] as u64) << 1 * 8
+                | (bytes[2] as u64) << 2 * 8
+                | (bytes[3] as u64) << 3 * 8
+                | (bytes[4] as u64) << 4 * 8
+                | (bytes[5] as u64) << 5 * 8
+                | (bytes[6] as u64) << 6 * 8
+                | (bytes[7] as u64) << 7 * 8
+        }
+
+        let bytes = self.as_bytes();
+        serialization::ReplicaId::new(
+            u64_from_bytes(&bytes[0..4]),
+            u64_from_bytes(&bytes[4..8]),
+            u64_from_bytes(&bytes[8..12]),
+            u64_from_bytes(&bytes[12..16]),
+        )
     }
 }
 

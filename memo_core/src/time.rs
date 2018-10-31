@@ -1,7 +1,9 @@
 use crate::message;
+use crate::serialization;
 use crate::ReplicaId;
 use crate::ReplicaIdExt;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use flatbuffers::{FlatBufferBuilder, WIPOffset};
+use serde::{Deserializer, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::{self, Ordering};
 use std::collections::HashMap;
@@ -58,6 +60,10 @@ impl Local {
             value: Some(self.value),
             replica_id: Some(self.replica_id.to_message()),
         }
+    }
+
+    pub fn serialize(&self) -> serialization::Timestamp {
+        serialization::Timestamp::new(self.value, &self.replica_id.serialize())
     }
 }
 
@@ -118,6 +124,7 @@ impl Global {
     where
         S: Serializer,
     {
+        use serde::Serialize;
         inner.serialize(serializer)
     }
 
@@ -125,6 +132,7 @@ impl Global {
     where
         D: Deserializer<'de>,
     {
+        use serde::Deserialize;
         Ok(Arc::new(HashMap::deserialize(deserializer)?))
     }
 
@@ -140,6 +148,24 @@ impl Global {
             });
         }
         message
+    }
+
+    pub fn serialize<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::GlobalTimestamp<'fbb>> {
+        builder.start_vector::<serialization::Timestamp>(self.0.len());
+        for (replica_id, value) in self.0.as_ref() {
+            builder.push(&serialization::Timestamp::new(
+                *value,
+                &replica_id.serialize(),
+            ));
+        }
+        let timestamps = Some(builder.end_vector(self.0.len()));
+        serialization::GlobalTimestamp::create(
+            builder,
+            &serialization::GlobalTimestampArgs { timestamps },
+        )
     }
 }
 
@@ -185,5 +211,9 @@ impl Lamport {
             value: Some(self.value),
             replica_id: Some(self.replica_id.to_message()),
         }
+    }
+
+    pub fn serialize(&self) -> serialization::Timestamp {
+        serialization::Timestamp::new(self.value, &self.replica_id.serialize())
     }
 }

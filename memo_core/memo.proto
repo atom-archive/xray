@@ -2,9 +2,9 @@ syntax = "proto3";
 
 message EpochOperation {
   oneof variant {
-    InsertMetadata InsertMetadata = 1;
-    UpdateParent UpdateParent = 2;
-    EditText EditText = 3;
+    InsertMetadata insert_metadata = 1;
+    UpdateParent update_parent = 2;
+    EditText edit_text = 3;
   }
 
   message InsertMetadata {

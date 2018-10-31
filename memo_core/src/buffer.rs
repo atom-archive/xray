@@ -1,10 +1,12 @@
 use crate::btree::{self, SeekBias};
 use crate::message;
 use crate::operation_queue::{self, OperationQueue};
+use crate::serialization;
 use crate::time;
 use crate::ReplicaId;
 use crate::UserId;
 use difference::{Changeset, Difference};
+use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
@@ -2130,6 +2132,30 @@ impl Operation {
             local_timestamp: Some(self.local_timestamp.to_message()),
             lamport_timestamp: Some(self.lamport_timestamp.to_message()),
         }
+    }
+
+    pub fn serialize<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::BufferOperation<'fbb>> {
+        let new_text = self.new_text.as_ref().map(|new_text| {
+            builder.create_string(String::from_utf16_lossy(&new_text.code_units).as_str())
+        });
+        let version_in_range = Some(self.version_in_range.serialize(builder));
+
+        serialization::BufferOperation::create(
+            builder,
+            &serialization::BufferOperationArgs {
+                start_id: Some(&self.start_id.serialize()),
+                start_offset: self.start_offset as u64,
+                end_id: Some(&self.end_id.serialize()),
+                end_offset: self.end_offset as u64,
+                version_in_range,
+                new_text,
+                local_timestamp: Some(&self.local_timestamp.serialize()),
+                lamport_timestamp: Some(&self.lamport_timestamp.serialize()),
+            },
+        )
     }
 }
 
