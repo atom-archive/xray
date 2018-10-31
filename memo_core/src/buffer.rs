@@ -2120,7 +2120,7 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
 }
 
 impl Operation {
-    pub fn to_message<'a>(&'a self) -> message::BufferOperation<'a> {
+    pub fn to_message(&self) -> message::BufferOperation {
         message::BufferOperation {
             start_id: Some(self.start_id.to_message()),
             start_offset: Some(self.start_offset as u64),

@@ -32,11 +32,11 @@ pub enum Error {
 }
 
 trait ReplicaIdExt {
-    fn to_message<'a>(&'a self) -> message::ReplicaId<'a>;
+    fn to_message(&self) -> message::ReplicaId;
 }
 
 impl ReplicaIdExt for ReplicaId {
-    fn to_message<'a>(&'a self) -> message::ReplicaId<'a> {
+    fn to_message(&self) -> message::ReplicaId {
         message::ReplicaId {
             uuid: Some(Cow::Borrowed(self.as_bytes())),
         }
