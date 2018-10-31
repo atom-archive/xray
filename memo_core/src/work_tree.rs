@@ -423,7 +423,7 @@ impl WorkTree {
         new_text: T,
     ) -> Result<Operation, Error>
     where
-        I: IntoIterator<Item = Range<usize>>,
+        I: IntoIterator<Item = Range<u64>>,
         T: Into<Text>,
     {
         let file_id = self.buffer_file_id(buffer_id)?;
@@ -813,7 +813,8 @@ mod tests {
                     };
 
                     if let Some(buffer_id) = buffer_id {
-                        let end = rng.gen_range(0, tree.text(buffer_id).unwrap().count() + 1);
+                        let end =
+                            rng.gen_range(0, (tree.text(buffer_id).unwrap().count() + 1) as u64);
                         let start = rng.gen_range(0, end + 1);
                         let text = gen_text(&mut rng);
                         observer.edit(buffer_id, start..end, text.as_str());
@@ -1162,7 +1163,7 @@ mod tests {
                 .insert(buffer_id, buffer::Buffer::new(text));
         }
 
-        fn edit<T>(&self, buffer_id: BufferId, range: Range<usize>, text: T)
+        fn edit<T>(&self, buffer_id: BufferId, range: Range<u64>, text: T)
         where
             T: Into<Text>,
         {

@@ -652,7 +652,7 @@ impl Epoch {
         lamport_clock: &mut time::Lamport,
     ) -> Result<Operation, Error>
     where
-        I: IntoIterator<Item = Range<usize>>,
+        I: IntoIterator<Item = Range<u64>>,
         T: Into<Text>,
     {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&file_id) {

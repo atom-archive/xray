@@ -19,7 +19,7 @@ use std::ops::{Add, AddAssign, Range, Sub};
 use std::sync::Arc;
 use std::vec;
 
-type SelectionSetVersion = usize;
+type SelectionSetVersion = u64;
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum Error {
@@ -33,8 +33,8 @@ pub enum Error {
 pub struct Buffer {
     fragments: btree::Tree<Fragment>,
     insertion_splits: HashMap<time::Local, btree::Tree<InsertionSplit>>,
-    anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
-    offset_cache: RefCell<HashMap<Point, usize>>,
+    anchor_cache: RefCell<HashMap<Anchor, (u64, Point)>>,
+    offset_cache: RefCell<HashMap<Point, u64>>,
     pub version: time::Global,
     selections: HashMap<time::Local, SelectionSet>,
     deferred_ops: OperationQueue<Operation>,
@@ -56,7 +56,7 @@ enum AnchorInner {
     End,
     Middle {
         insertion_id: time::Local,
-        offset: usize,
+        offset: u64,
         bias: AnchorBias,
     },
 }
@@ -84,7 +84,7 @@ struct SelectionSet {
 
 pub struct Iter {
     fragment_cursor: btree::Cursor<Fragment>,
-    fragment_offset: usize,
+    fragment_offset: u64,
     reversed: bool,
 }
 
@@ -109,7 +109,7 @@ pub struct Change {
 pub struct Insertion {
     id: time::Local,
     parent_id: time::Local,
-    offset_in_parent: usize,
+    offset_in_parent: u64,
     text: Arc<Text>,
     lamport_timestamp: time::Lamport,
 }
@@ -125,15 +125,15 @@ struct LineNode {
     len: u32,
     longest_row: u32,
     longest_row_len: u32,
-    offset: usize,
+    offset: u64,
     rows: u32,
 }
 
 struct LineNodeProbe<'a> {
-    offset_range: &'a Range<usize>,
+    offset_range: &'a Range<u64>,
     row: u32,
-    left_ancestor_end_offset: usize,
-    right_ancestor_start_offset: usize,
+    left_ancestor_end_offset: u64,
+    right_ancestor_start_offset: u64,
     node: &'a LineNode,
     left_child: Option<&'a LineNode>,
     right_child: Option<&'a LineNode>,
@@ -146,14 +146,14 @@ struct FragmentId(Arc<Vec<u16>>);
 struct Fragment {
     id: FragmentId,
     insertion: Insertion,
-    start_offset: usize,
-    end_offset: usize,
+    start_offset: u64,
+    end_offset: u64,
     deletions: HashSet<time::Local>,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub struct FragmentSummary {
-    extent: usize,
+    extent: u64,
     extent_2d: Point,
     max_fragment_id: FragmentId,
     first_row_len: u32,
@@ -164,21 +164,21 @@ pub struct FragmentSummary {
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct InsertionSplit {
-    extent: usize,
+    extent: u64,
     fragment_id: FragmentId,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct InsertionSplitSummary {
-    extent: usize,
+    extent: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Operation {
     start_id: time::Local,
-    start_offset: usize,
+    start_offset: u64,
     end_id: time::Local,
-    end_offset: usize,
+    end_offset: u64,
     version_in_range: time::Global,
     #[serde(
         serialize_with = "serialize_op_text",
@@ -256,8 +256,8 @@ impl Buffer {
         self.version > time::Global::new()
     }
 
-    pub fn len(&self) -> usize {
-        self.fragments.extent::<usize>()
+    pub fn len(&self) -> u64 {
+        self.fragments.extent::<u64>()
     }
 
     pub fn len_for_row(&self, row: u32) -> Result<u32, Error> {
@@ -321,7 +321,7 @@ impl Buffer {
         lamport_clock: &mut time::Lamport,
     ) -> Vec<Operation>
     where
-        I: IntoIterator<Item = Range<usize>>,
+        I: IntoIterator<Item = Range<u64>>,
         T: Into<Text>,
     {
         let new_text = new_text.into();
@@ -537,9 +537,9 @@ impl Buffer {
     fn apply_edit(
         &mut self,
         start_id: time::Local,
-        start_offset: usize,
+        start_offset: u64,
         end_id: time::Local,
-        end_offset: usize,
+        end_offset: u64,
         new_text: Option<Arc<Text>>,
         version_in_range: &time::Global,
         local_timestamp: time::Local,
@@ -647,7 +647,7 @@ impl Buffer {
             ));
         }
 
-        new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
+        new_fragments.push_tree(cursor.slice(&old_fragments.extent::<u64>(), SeekBias::Right));
         self.fragments = new_fragments;
         self.version.observe(local_timestamp);
         local_clock.observe(local_timestamp);
@@ -686,7 +686,7 @@ impl Buffer {
     fn resolve_fragment_id(
         &self,
         edit_id: time::Local,
-        offset: usize,
+        offset: u64,
     ) -> Result<FragmentId, Error> {
         let split_tree = self
             .insertion_splits
@@ -709,7 +709,7 @@ impl Buffer {
         lamport_clock: &mut time::Lamport,
     ) -> Vec<Operation>
     where
-        I: Iterator<Item = Range<usize>>,
+        I: Iterator<Item = Range<u64>>,
     {
         let mut cur_range = old_ranges.next();
         if cur_range.is_none() {
@@ -734,7 +734,7 @@ impl Buffer {
 
         while cur_range.is_some() && cursor.item().is_some() {
             let mut fragment = cursor.item().unwrap();
-            let mut fragment_start = cursor.start::<usize>();
+            let mut fragment_start = cursor.start::<u64>();
             let mut fragment_end = fragment_start + fragment.len();
 
             let old_split_tree = self
@@ -849,7 +849,7 @@ impl Buffer {
             });
             splits_cursor.next();
             new_split_tree
-                .push_tree(splits_cursor.slice(&old_split_tree.extent::<usize>(), SeekBias::Right));
+                .push_tree(splits_cursor.slice(&old_split_tree.extent::<u64>(), SeekBias::Right));
             self.insertion_splits
                 .insert(fragment.insertion.id, new_split_tree);
             new_fragments.push(fragment);
@@ -858,7 +858,7 @@ impl Buffer {
             cursor.next();
             if let Some(range) = cur_range.clone() {
                 while let Some(mut fragment) = cursor.item() {
-                    fragment_start = cursor.start::<usize>();
+                    fragment_start = cursor.start::<u64>();
                     fragment_end = fragment_start + fragment.len();
                     if range.start < fragment_start && range.end >= fragment_end {
                         if fragment.is_visible() {
@@ -938,7 +938,7 @@ impl Buffer {
             }
         } else {
             new_fragments
-                .push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
+                .push_tree(cursor.slice(&old_fragments.extent::<u64>(), SeekBias::Right));
         }
 
         self.fragments = new_fragments;
@@ -949,7 +949,7 @@ impl Buffer {
         &mut self,
         prev_fragment: &Fragment,
         fragment: &Fragment,
-        range: Range<usize>,
+        range: Range<u64>,
     ) -> (Option<Fragment>, Option<Fragment>, Option<Fragment>) {
         debug_assert!(range.start >= fragment.start_offset);
         debug_assert!(range.start <= fragment.end_offset);
@@ -1021,7 +1021,7 @@ impl Buffer {
 
             cursor.next();
             new_split_tree
-                .push_tree(cursor.slice(&old_split_tree.extent::<usize>(), SeekBias::Right));
+                .push_tree(cursor.slice(&old_split_tree.extent::<u64>(), SeekBias::Right));
 
             self.insertion_splits
                 .insert(fragment.insertion.id, new_split_tree);
@@ -1064,15 +1064,15 @@ impl Buffer {
         )
     }
 
-    pub fn anchor_before_offset(&self, offset: usize) -> Result<Anchor, Error> {
+    pub fn anchor_before_offset(&self, offset: u64) -> Result<Anchor, Error> {
         self.anchor_for_offset(offset, AnchorBias::Left)
     }
 
-    pub fn anchor_after_offset(&self, offset: usize) -> Result<Anchor, Error> {
+    pub fn anchor_after_offset(&self, offset: u64) -> Result<Anchor, Error> {
         self.anchor_for_offset(offset, AnchorBias::Right)
     }
 
-    fn anchor_for_offset(&self, offset: usize, bias: AnchorBias) -> Result<Anchor, Error> {
+    fn anchor_for_offset(&self, offset: u64, bias: AnchorBias) -> Result<Anchor, Error> {
         let max_offset = self.len();
         if offset > max_offset {
             return Err(Error::OffsetOutOfRange);
@@ -1099,7 +1099,7 @@ impl Buffer {
         let mut cursor = self.fragments.cursor();
         cursor.seek(&offset, seek_bias);
         let fragment = cursor.item().unwrap();
-        let offset_in_fragment = offset - cursor.start::<usize>();
+        let offset_in_fragment = offset - cursor.start::<u64>();
         let offset_in_insertion = fragment.start_offset + offset_in_fragment;
         let point = cursor.start::<Point>() + &fragment.point_for_offset(offset_in_fragment)?;
         let anchor = Anchor(AnchorInner::Middle {
@@ -1153,12 +1153,12 @@ impl Buffer {
             offset: offset_in_insertion,
             bias,
         });
-        let offset = cursor.start::<usize>() + offset_in_fragment;
+        let offset = cursor.start::<u64>() + offset_in_fragment;
         self.cache_position(Some(anchor.clone()), offset, point);
         Ok(anchor)
     }
 
-    pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<usize, Error> {
+    pub fn offset_for_anchor(&self, anchor: &Anchor) -> Result<u64, Error> {
         Ok(self.position_for_anchor(anchor)?.0)
     }
 
@@ -1166,7 +1166,7 @@ impl Buffer {
         Ok(self.position_for_anchor(anchor)?.1)
     }
 
-    fn position_for_anchor(&self, anchor: &Anchor) -> Result<(usize, Point), Error> {
+    fn position_for_anchor(&self, anchor: &Anchor) -> Result<(u64, Point), Error> {
         match &anchor.0 {
             &AnchorInner::Start => Ok((0, Point { row: 0, column: 0 })),
             &AnchorInner::End => Ok((self.len(), self.fragments.extent())),
@@ -1211,7 +1211,7 @@ impl Buffer {
                                     } else {
                                         0
                                     };
-                                    let offset = fragments_cursor.start::<usize>() + overshoot;
+                                    let offset = fragments_cursor.start::<u64>() + overshoot;
                                     let point = fragments_cursor.start::<Point>()
                                         + &fragment.point_for_offset(overshoot)?;
                                     self.cache_position(Some(anchor.clone()), offset, point);
@@ -1223,7 +1223,7 @@ impl Buffer {
         }
     }
 
-    fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
+    fn offset_for_point(&self, point: Point) -> Result<u64, Error> {
         let cached_offset = {
             let offset_cache = self.offset_cache.try_borrow().ok();
             offset_cache
@@ -1243,7 +1243,7 @@ impl Buffer {
                     let overshoot = fragment
                         .offset_for_point(point - &fragments_cursor.start::<Point>())
                         .unwrap();
-                    let offset = &fragments_cursor.start::<usize>() + &overshoot;
+                    let offset = &fragments_cursor.start::<u64>() + &overshoot;
                     self.cache_position(None, offset, point);
                     offset
                 })
@@ -1256,7 +1256,7 @@ impl Buffer {
         Ok(a_offset.cmp(&b_offset))
     }
 
-    fn cache_position(&self, anchor: Option<Anchor>, offset: usize, point: Point) {
+    fn cache_position(&self, anchor: Option<Anchor>, offset: u64, point: Point) {
         anchor.map(|anchor| {
             if let Ok(mut anchor_cache) = self.anchor_cache.try_borrow_mut() {
                 anchor_cache.insert(anchor, (offset, point));
@@ -1335,8 +1335,8 @@ impl PartialOrd for Point {
 impl Ord for Point {
     #[cfg(target_pointer_width = "64")]
     fn cmp(&self, other: &Point) -> Ordering {
-        let a = (self.row as usize) << 32 | self.column as usize;
-        let b = (other.row as usize) << 32 | other.column as usize;
+        let a = (self.row as u64) << 32 | self.column as u64;
+        let b = (other.row as u64) << 32 | other.column as u64;
         a.cmp(&b)
     }
 
@@ -1663,7 +1663,7 @@ impl Text {
                     len,
                     longest_row,
                     longest_row_len,
-                    offset: left_child_offset + len as usize + right_child_offset + 1,
+                    offset: left_child_offset + len as u64 + right_child_offset + 1,
                     rows: left_child_rows + right_child_rows + 1,
                 }
             };
@@ -1695,15 +1695,15 @@ impl Text {
         Self { code_units, nodes }
     }
 
-    fn len(&self) -> usize {
-        self.code_units.len()
+    fn len(&self) -> u64 {
+        self.code_units.len() as u64
     }
 
     fn to_string_lossy(&self) -> String {
         String::from_utf16_lossy(&self.code_units)
     }
 
-    fn longest_row_in_range(&self, target_range: Range<usize>) -> Result<(u32, u32), Error> {
+    fn longest_row_in_range(&self, target_range: Range<u64>) -> Result<(u32, u32), Error> {
         let mut longest_row = 0;
         let mut longest_row_len = 0;
 
@@ -1778,7 +1778,7 @@ impl Text {
         Ok((longest_row, longest_row_len))
     }
 
-    fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
+    fn point_for_offset(&self, offset: u64) -> Result<Point, Error> {
         let search_result = self.search(|probe| {
             if offset < probe.offset_range.start {
                 Ordering::Less
@@ -1795,10 +1795,10 @@ impl Text {
         }
     }
 
-    fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
+    fn offset_for_point(&self, point: Point) -> Result<u64, Error> {
         if let Some((offset_range, _, node)) = self.search(|probe| point.row.cmp(&probe.row)) {
             if point.column <= node.len {
-                Ok(offset_range.start + point.column as usize)
+                Ok(offset_range.start + point.column as u64)
             } else {
                 Err(Error::OffsetOutOfRange)
             }
@@ -1807,7 +1807,7 @@ impl Text {
         }
     }
 
-    fn search<F>(&self, mut f: F) -> Option<(Range<usize>, u32, &LineNode)>
+    fn search<F>(&self, mut f: F) -> Option<(Range<u64>, u32, &LineNode)>
     where
         F: FnMut(LineNodeProbe) -> Ordering,
     {
@@ -1820,7 +1820,7 @@ impl Text {
             let right_child = self.nodes.get(cur_node_index * 2 + 2);
             let cur_offset_range = {
                 let start = left_ancestor_end_offset + left_child.map_or(0, |node| node.offset);
-                let end = start + cur_node.len as usize;
+                let end = start + cur_node.len as u64;
                 start..end
             };
             let cur_row = left_ancestor_row + left_child.map_or(0, |node| node.rows);
@@ -1943,19 +1943,20 @@ impl Fragment {
         }
     }
 
-    fn code_unit(&self, offset: usize) -> Option<u16> {
+    fn code_unit(&self, offset: u64) -> Option<u16> {
         if offset < self.len() {
-            Some(self.insertion.text.code_units[self.start_offset + offset].clone())
+            let index = (self.start_offset + offset) as usize;
+            Some(self.insertion.text.code_units[index].clone())
         } else {
             None
         }
     }
 
     fn code_units(&self) -> &[u16] {
-        &self.insertion.text.code_units[self.start_offset..self.end_offset]
+        &self.insertion.text.code_units[(self.start_offset as usize)..(self.end_offset as usize)]
     }
 
-    fn len(&self) -> usize {
+    fn len(&self) -> u64 {
         if self.is_visible() {
             self.extent()
         } else {
@@ -1963,7 +1964,7 @@ impl Fragment {
         }
     }
 
-    fn extent(&self) -> usize {
+    fn extent(&self) -> u64 {
         self.end_offset - self.start_offset
     }
 
@@ -1979,14 +1980,14 @@ impl Fragment {
         version.observed(self.insertion.id) && self.deletions.iter().all(|d| !version.observed(*d))
     }
 
-    fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
+    fn point_for_offset(&self, offset: u64) -> Result<Point, Error> {
         let text = &self.insertion.text;
         let offset_in_insertion = self.start_offset + offset;
         Ok(text.point_for_offset(offset_in_insertion)?
             - &text.point_for_offset(self.start_offset)?)
     }
 
-    fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
+    fn offset_for_point(&self, point: Point) -> Result<u64, Error> {
         let text = &self.insertion.text;
         let point_in_insertion = text.point_for_offset(self.start_offset)? + &point;
         Ok(text.offset_for_point(point_in_insertion)? - self.start_offset)
@@ -2023,7 +2024,7 @@ impl btree::Item for Fragment {
             let (longest_row, longest_row_len) = self
                 .insertion
                 .text
-                .longest_row_in_range(self.start_offset as usize..self.end_offset as usize)
+                .longest_row_in_range(self.start_offset as u64..self.end_offset as u64)
                 .unwrap();
             FragmentSummary {
                 extent: self.len(),
@@ -2085,7 +2086,7 @@ impl Default for FragmentSummary {
     }
 }
 
-impl btree::Dimension<FragmentSummary> for usize {
+impl btree::Dimension<FragmentSummary> for u64 {
     fn from_summary(summary: &FragmentSummary) -> Self {
         summary.extent
     }
@@ -2113,7 +2114,7 @@ impl Default for InsertionSplitSummary {
     }
 }
 
-impl btree::Dimension<InsertionSplitSummary> for usize {
+impl btree::Dimension<InsertionSplitSummary> for u64 {
     fn from_summary(summary: &InsertionSplitSummary) -> Self {
         summary.extent
     }
@@ -2202,14 +2203,14 @@ mod tests {
             let mut lamport_clock = time::Lamport::new(replica_id);
 
             for _i in 0..10 {
-                let mut old_ranges: Vec<Range<usize>> = Vec::new();
+                let mut old_ranges: Vec<Range<u64>> = Vec::new();
                 for _ in 0..5 {
                     let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
                     if last_end > buffer.len() {
                         break;
                     }
-                    let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
-                    let start = rng.gen_range::<usize>(last_end, end + 1);
+                    let end = rng.gen_range::<u64>(last_end, buffer.len() + 1);
+                    let start = rng.gen_range::<u64>(last_end, end + 1);
                     old_ranges.push(start..end);
                 }
                 let new_text = RandomCharIter(rng)
@@ -2224,9 +2225,9 @@ mod tests {
                 );
                 for old_range in old_ranges.iter().rev() {
                     reference_string = [
-                        &reference_string[0..old_range.start],
+                        &reference_string[0..old_range.start as usize],
                         new_text.as_str(),
-                        &reference_string[old_range.end..],
+                        &reference_string[(old_range.end as usize)..],
                     ]
                     .concat();
                 }
@@ -2476,7 +2477,7 @@ mod tests {
                 }
 
                 assert_eq!(
-                    text.longest_row_in_range(start..end),
+                    text.longest_row_in_range((start as u64)..(end as u64)),
                     Ok((expected_longest_row, expected_longest_row_len))
                 );
             }
@@ -2723,14 +2724,14 @@ mod tests {
                 let local_clock = &mut local_clocks[replica_index];
                 let lamport_clock = &mut lamport_clocks[replica_index];
                 if edit_count > 0 && rng.gen() {
-                    let mut old_ranges: Vec<Range<usize>> = Vec::new();
+                    let mut old_ranges: Vec<Range<u64>> = Vec::new();
                     for _ in 0..5 {
                         let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
                         if last_end > buffer.len() {
                             break;
                         }
-                        let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
-                        let start = rng.gen_range::<usize>(last_end, end + 1);
+                        let end = rng.gen_range::<u64>(last_end, buffer.len() + 1);
+                        let start = rng.gen_range::<u64>(last_end, end + 1);
                         old_ranges.push(start..end);
                     }
                     let new_text = RandomCharIter(rng)
