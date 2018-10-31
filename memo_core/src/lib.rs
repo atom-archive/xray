@@ -1,7 +1,7 @@
 mod btree;
 mod buffer;
 mod epoch;
-#[allow(unused_imports)]
+#[allow(non_snake_case, unused_imports)]
 mod message;
 mod operation_queue;
 pub mod time;
