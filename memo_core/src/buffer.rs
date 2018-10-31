@@ -1699,10 +1699,6 @@ impl Text {
         self.code_units.len()
     }
 
-    fn to_string_lossy(&self) -> String {
-        String::from_utf16_lossy(&self.code_units)
-    }
-
     fn longest_row_in_range(&self, target_range: Range<usize>) -> Result<(u32, u32), Error> {
         let mut longest_row = 0;
         let mut longest_row_len = 0;
@@ -2130,7 +2126,7 @@ impl Operation {
             new_text: self
                 .new_text
                 .as_ref()
-                .map(|new_text| Cow::Owned(new_text.to_string_lossy())),
+                .map(|new_text| Cow::Owned(String::from_utf16_lossy(&new_text.code_units))),
             local_timestamp: Some(self.local_timestamp.to_message()),
             lamport_timestamp: Some(self.lamport_timestamp.to_message()),
         }
