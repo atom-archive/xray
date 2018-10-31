@@ -2157,6 +2157,19 @@ impl Operation {
             },
         )
     }
+
+    pub fn deserialize<'fbb>(message: &serialization::BufferOperation<'fbb>) -> Self {
+        Self {
+            start_id: time::Local::deserialize(message.start_id().unwrap()),
+            start_offset: message.start_offset() as usize,
+            end_id: time::Local::deserialize(message.end_id().unwrap()),
+            end_offset: message.end_offset() as usize,
+            version_in_range: time::Global::deserialize(message.version_in_range().unwrap()),
+            new_text: message.new_text().map(|new_text| Arc::new(new_text.into())),
+            local_timestamp: time::Local::deserialize(message.local_timestamp().unwrap()),
+            lamport_timestamp: time::Lamport::deserialize(message.lamport_timestamp().unwrap()),
+        }
+    }
 }
 
 impl operation_queue::Operation for Operation {

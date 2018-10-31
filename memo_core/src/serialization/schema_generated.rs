@@ -73,10 +73,8 @@ pub struct FileIdUnionTableOffset {}
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReplicaId {
-  a_: u64,
-  b_: u64,
-  c_: u64,
-  d_: u64,
+  first_8_bytes_: u64,
+  last_8_bytes_: u64,
 } // pub struct ReplicaId
 impl flatbuffers::SafeSliceAccess for ReplicaId {}
 impl<'a> flatbuffers::Follow<'a> for ReplicaId {
@@ -117,26 +115,18 @@ impl<'b> flatbuffers::Push for &'b ReplicaId {
 
 
 impl ReplicaId {
-  pub fn new<'a>(_a: u64, _b: u64, _c: u64, _d: u64) -> Self {
+  pub fn new<'a>(_first_8_bytes: u64, _last_8_bytes: u64) -> Self {
     ReplicaId {
-      a_: _a.to_little_endian(),
-      b_: _b.to_little_endian(),
-      c_: _c.to_little_endian(),
-      d_: _d.to_little_endian(),
+      first_8_bytes_: _first_8_bytes.to_little_endian(),
+      last_8_bytes_: _last_8_bytes.to_little_endian(),
 
     }
   }
-  pub fn a<'a>(&'a self) -> u64 {
-    self.a_.from_little_endian()
+  pub fn first_8_bytes<'a>(&'a self) -> u64 {
+    self.first_8_bytes_.from_little_endian()
   }
-  pub fn b<'a>(&'a self) -> u64 {
-    self.b_.from_little_endian()
-  }
-  pub fn c<'a>(&'a self) -> u64 {
-    self.c_.from_little_endian()
-  }
-  pub fn d<'a>(&'a self) -> u64 {
-    self.d_.from_little_endian()
+  pub fn last_8_bytes<'a>(&'a self) -> u64 {
+    self.last_8_bytes_.from_little_endian()
   }
 }
 

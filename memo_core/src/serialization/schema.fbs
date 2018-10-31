@@ -1,8 +1,6 @@
 struct ReplicaId {
-  a: uint64;
-  b: uint64;
-  c: uint64;
-  d: uint64;
+  first_8_bytes: uint64;
+  last_8_bytes: uint64;
 }
 
 struct Timestamp {

@@ -36,6 +36,7 @@ trait ReplicaIdExt {
     fn to_message(&self) -> message::ReplicaId;
 
     fn serialize(&self) -> serialization::ReplicaId;
+    fn deserialize(message: &serialization::ReplicaId) -> Self;
 }
 
 impl ReplicaIdExt for ReplicaId {
@@ -47,23 +48,31 @@ impl ReplicaIdExt for ReplicaId {
 
     fn serialize(&self) -> serialization::ReplicaId {
         fn u64_from_bytes(bytes: &[u8]) -> u64 {
-            (bytes[0] as u64) << 0 * 8
-                | (bytes[1] as u64) << 1 * 8
-                | (bytes[2] as u64) << 2 * 8
-                | (bytes[3] as u64) << 3 * 8
-                | (bytes[4] as u64) << 4 * 8
-                | (bytes[5] as u64) << 5 * 8
-                | (bytes[6] as u64) << 6 * 8
-                | (bytes[7] as u64) << 7 * 8
+            let mut n = 0;
+            for i in 0..8 {
+                n |= (bytes[i] as u64) << i * 8;
+            }
+            n
         }
 
         let bytes = self.as_bytes();
-        serialization::ReplicaId::new(
-            u64_from_bytes(&bytes[0..4]),
-            u64_from_bytes(&bytes[4..8]),
-            u64_from_bytes(&bytes[8..12]),
-            u64_from_bytes(&bytes[12..16]),
-        )
+        serialization::ReplicaId::new(u64_from_bytes(&bytes[0..8]), u64_from_bytes(&bytes[8..16]))
+    }
+
+    fn deserialize(message: &serialization::ReplicaId) -> Self {
+        fn bytes_from_u64(n: u64) -> [u8; 8] {
+            let mut bytes = [0; 8];
+            for i in 0..8 {
+                bytes[i] = (n >> i * 8) as u8;
+            }
+            bytes
+        }
+
+        let mut bytes = [0; 16];
+        bytes[0..8].copy_from_slice(&bytes_from_u64(message.first_8_bytes()));
+        bytes[8..16].copy_from_slice(&bytes_from_u64(message.last_8_bytes()));
+
+        Uuid::from_bytes(bytes)
     }
 }
 

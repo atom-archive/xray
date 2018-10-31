@@ -65,6 +65,13 @@ impl Local {
     pub fn serialize(&self) -> serialization::Timestamp {
         serialization::Timestamp::new(self.value, &self.replica_id.serialize())
     }
+
+    pub fn deserialize(message: &serialization::Timestamp) -> Self {
+        Self {
+            value: message.value(),
+            replica_id: ReplicaId::deserialize(message.replica_id()),
+        }
+    }
 }
 
 impl<'a> Add<&'a Self> for Local {
@@ -167,6 +174,16 @@ impl Global {
             &serialization::GlobalTimestampArgs { timestamps },
         )
     }
+
+    pub fn deserialize<'fbb>(message: serialization::GlobalTimestamp<'fbb>) -> Self {
+        let mut local_timestamps = HashMap::new();
+        for local_timestamp in message.timestamps().unwrap() {
+            let replica_id = ReplicaId::deserialize(local_timestamp.replica_id());
+            let value = local_timestamp.value();
+            local_timestamps.insert(replica_id, value);
+        }
+        Global(Arc::new(local_timestamps))
+    }
 }
 
 impl PartialOrd for Global {
@@ -215,5 +232,12 @@ impl Lamport {
 
     pub fn serialize(&self) -> serialization::Timestamp {
         serialization::Timestamp::new(self.value, &self.replica_id.serialize())
+    }
+
+    pub fn deserialize(message: &serialization::Timestamp) -> Self {
+        Self {
+            value: message.value(),
+            replica_id: ReplicaId::deserialize(message.replica_id()),
+        }
     }
 }
