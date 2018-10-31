@@ -53,13 +53,15 @@ suite("WorkTree", () => {
     const tree1BufferChanges: memo.Change[] = [];
     tree1BufferC.onChange(c => tree1BufferChanges.push(...c));
     ops1.push(
-      tree1BufferC.edit(
-        [
-          { start: point(0, 4), end: point(0, 5) },
-          { start: point(0, 9), end: point(0, 10) }
-        ],
-        "-"
-      ).operation()
+      tree1BufferC
+        .edit(
+          [
+            { start: point(0, 4), end: point(0, 5) },
+            { start: point(0, 9), end: point(0, 10) }
+          ],
+          "-"
+        )
+        .operation()
     );
     assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
 
@@ -186,6 +188,12 @@ suite("WorkTree", () => {
       { start: point(0, 3), end: point(0, 5), text: "1 " },
       { start: point(0, 9), end: point(0, 10), text: " " }
     ]);
+  });
+
+  test("incomplete base oids", async () => {
+    assert.throws(() => {
+      const [tree, fixupOps] = WorkTree.create("12345678", [], new TestGitProvider());
+    }, /12345678/);
   });
 });
 

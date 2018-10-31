@@ -431,10 +431,18 @@ impl<'de> Deserialize<'de> for HexOid {
         D: Deserializer<'de>,
     {
         use serde::de::Error;
-        let bytes = hex::decode(&String::deserialize(deserializer)?).map_err(Error::custom)?;
+        let hex_string = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&hex_string).map_err(Error::custom)?;
         let mut oid = memo::Oid::default();
-        oid.copy_from_slice(&bytes);
-        Ok(HexOid(oid))
+        if oid.len() == bytes.len() {
+            oid.copy_from_slice(&bytes);
+            Ok(HexOid(oid))
+        } else {
+            Err(D::Error::custom(format!(
+                "{} cannot be parsed as a valid object id. pass a full 40-character hex string.",
+                hex_string
+            )))
+        }
     }
 }
 
