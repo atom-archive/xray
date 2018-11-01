@@ -1302,6 +1302,84 @@ impl Operation {
             }
         }
     }
+
+    pub fn deserialize<'a>(
+        operation_type: serialization::epoch::Operation,
+        message: flatbuffers::Table<'a>,
+    ) -> Option<Self> {
+        fn deserialize_parent<'a>(
+            parent_id_type: serialization::epoch::FileId,
+            parent_id_message: Option<flatbuffers::Table<'a>>,
+            name: Option<&'a str>,
+        ) -> Option<(FileId, Arc<OsString>)> {
+            parent_id_message.map(|parent_id_message| {
+                let file_id = FileId::deserialize(parent_id_type, parent_id_message);
+                let name = Arc::new(OsString::from(name.unwrap()));
+                (file_id, name)
+            })
+        }
+
+        match operation_type {
+            serialization::epoch::Operation::InsertMetadata => {
+                let message = serialization::epoch::InsertMetadata::init_from_table(message);
+                Some(Operation::InsertMetadata {
+                    file_id: FileId::deserialize(
+                        message.file_id_type(),
+                        message.file_id().unwrap(),
+                    ),
+                    file_type: FileType::deserialize(&message.file_type()),
+                    parent: deserialize_parent(
+                        message.parent_id_type(),
+                        message.parent_id(),
+                        message.name_in_parent(),
+                    ),
+                    local_timestamp: time::Local::deserialize(&message.local_timestamp().unwrap()),
+                    lamport_timestamp: time::Lamport::deserialize(
+                        &message.lamport_timestamp().unwrap(),
+                    ),
+                })
+            }
+            serialization::epoch::Operation::UpdateParent => {
+                let message = serialization::epoch::UpdateParent::init_from_table(message);
+                Some(Operation::UpdateParent {
+                    child_id: FileId::deserialize(
+                        message.child_id_type(),
+                        message.child_id().unwrap(),
+                    ),
+                    new_parent: deserialize_parent(
+                        message.new_parent_id_type(),
+                        message.new_parent_id(),
+                        message.new_name_in_parent(),
+                    ),
+                    local_timestamp: time::Local::deserialize(&message.local_timestamp().unwrap()),
+                    lamport_timestamp: time::Lamport::deserialize(
+                        &message.lamport_timestamp().unwrap(),
+                    ),
+                })
+            }
+            serialization::epoch::Operation::EditText => {
+                let message = serialization::epoch::EditText::init_from_table(message);
+                let edit_messages = message.edits().unwrap();
+                let mut edits = Vec::with_capacity(edit_messages.len());
+                for i in 0..edit_messages.len() {
+                    edits.push(buffer::Operation::deserialize(&edit_messages.get(i)));
+                }
+
+                Some(Operation::EditText {
+                    file_id: FileId::deserialize(
+                        message.file_id_type(),
+                        message.file_id().unwrap(),
+                    ),
+                    edits,
+                    local_timestamp: time::Local::deserialize(&message.local_timestamp().unwrap()),
+                    lamport_timestamp: time::Lamport::deserialize(
+                        &message.lamport_timestamp().unwrap(),
+                    ),
+                })
+            }
+            serialization::epoch::Operation::NONE => None,
+        }
+    }
 }
 
 impl operation_queue::Operation for Operation {
@@ -1344,6 +1422,23 @@ impl FileId {
             ),
         }
     }
+
+    fn deserialize<'a>(
+        file_id_type: serialization::epoch::FileId,
+        message: flatbuffers::Table<'a>,
+    ) -> Self {
+        match file_id_type {
+            serialization::epoch::FileId::BaseFileId => {
+                let message = serialization::epoch::BaseFileId::init_from_table(message);
+                FileId::Base(message.index())
+            }
+            serialization::epoch::FileId::NewFileId => {
+                let message = serialization::epoch::NewFileId::init_from_table(message);
+                FileId::New(time::Local::deserialize(&message.id().unwrap()))
+            }
+            serialization::epoch::FileId::NONE => unreachable!(),
+        }
+    }
 }
 
 impl FileType {
@@ -1351,6 +1446,13 @@ impl FileType {
         match self {
             FileType::Directory => serialization::epoch::FileType::Directory,
             FileType::Text => serialization::epoch::FileType::Text,
+        }
+    }
+
+    fn deserialize(message: &serialization::epoch::FileType) -> Self {
+        match message {
+            serialization::epoch::FileType::Directory => FileType::Directory,
+            serialization::epoch::FileType::Text => FileType::Text,
         }
     }
 }
