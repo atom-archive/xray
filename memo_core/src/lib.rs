@@ -32,12 +32,12 @@ pub enum Error {
 }
 
 trait ReplicaIdExt {
-    fn serialize(&self) -> serialization::ReplicaId;
-    fn deserialize(message: &serialization::ReplicaId) -> Self;
+    fn to_flatbuf(&self) -> serialization::ReplicaId;
+    fn from_flatbuf(message: &serialization::ReplicaId) -> Self;
 }
 
 impl ReplicaIdExt for ReplicaId {
-    fn serialize(&self) -> serialization::ReplicaId {
+    fn to_flatbuf(&self) -> serialization::ReplicaId {
         fn u64_from_bytes(bytes: &[u8]) -> u64 {
             let mut n = 0;
             for i in 0..8 {
@@ -50,7 +50,7 @@ impl ReplicaIdExt for ReplicaId {
         serialization::ReplicaId::new(u64_from_bytes(&bytes[0..8]), u64_from_bytes(&bytes[8..16]))
     }
 
-    fn deserialize(message: &serialization::ReplicaId) -> Self {
+    fn from_flatbuf(message: &serialization::ReplicaId) -> Self {
         fn bytes_from_u64(n: u64) -> [u8; 8] {
             let mut bytes = [0; 8];
             for i in 0..8 {

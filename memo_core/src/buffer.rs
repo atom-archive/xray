@@ -2116,40 +2116,40 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
 }
 
 impl Operation {
-    pub fn serialize<'fbb>(
+    pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
     ) -> WIPOffset<serialization::buffer::Operation<'fbb>> {
         let new_text = self.new_text.as_ref().map(|new_text| {
             builder.create_string(String::from_utf16_lossy(&new_text.code_units).as_str())
         });
-        let version_in_range = Some(self.version_in_range.serialize(builder));
+        let version_in_range = Some(self.version_in_range.to_flatbuf(builder));
 
         serialization::buffer::Operation::create(
             builder,
             &serialization::buffer::OperationArgs {
-                start_id: Some(&self.start_id.serialize()),
+                start_id: Some(&self.start_id.to_flatbuf()),
                 start_offset: self.start_offset as u64,
-                end_id: Some(&self.end_id.serialize()),
+                end_id: Some(&self.end_id.to_flatbuf()),
                 end_offset: self.end_offset as u64,
                 version_in_range,
                 new_text,
-                local_timestamp: Some(&self.local_timestamp.serialize()),
-                lamport_timestamp: Some(&self.lamport_timestamp.serialize()),
+                local_timestamp: Some(&self.local_timestamp.to_flatbuf()),
+                lamport_timestamp: Some(&self.lamport_timestamp.to_flatbuf()),
             },
         )
     }
 
-    pub fn deserialize<'fbb>(message: &serialization::buffer::Operation<'fbb>) -> Self {
+    pub fn from_flatbuf<'fbb>(message: &serialization::buffer::Operation<'fbb>) -> Self {
         Self {
-            start_id: time::Local::deserialize(message.start_id().unwrap()),
+            start_id: time::Local::from_flatbuf(message.start_id().unwrap()),
             start_offset: message.start_offset() as usize,
-            end_id: time::Local::deserialize(message.end_id().unwrap()),
+            end_id: time::Local::from_flatbuf(message.end_id().unwrap()),
             end_offset: message.end_offset() as usize,
-            version_in_range: time::Global::deserialize(message.version_in_range().unwrap()),
+            version_in_range: time::Global::from_flatbuf(message.version_in_range().unwrap()),
             new_text: message.new_text().map(|new_text| Arc::new(new_text.into())),
-            local_timestamp: time::Local::deserialize(message.local_timestamp().unwrap()),
-            lamport_timestamp: time::Lamport::deserialize(message.lamport_timestamp().unwrap()),
+            local_timestamp: time::Local::from_flatbuf(message.local_timestamp().unwrap()),
+            lamport_timestamp: time::Lamport::from_flatbuf(message.lamport_timestamp().unwrap()),
         }
     }
 }

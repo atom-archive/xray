@@ -1662,6 +1662,27 @@ impl<'a: 'b, 'b> OperationEnvelopeBuilder<'a, 'b> {
   }
 }
 
+#[inline]
+pub fn get_root_as_operation_envelope<'a>(buf: &'a [u8]) -> OperationEnvelope<'a> {
+  flatbuffers::get_root::<OperationEnvelope<'a>>(buf)
+}
+
+#[inline]
+pub fn get_size_prefixed_root_as_operation_envelope<'a>(buf: &'a [u8]) -> OperationEnvelope<'a> {
+  flatbuffers::get_size_prefixed_root::<OperationEnvelope<'a>>(buf)
+}
+
+#[inline]
+pub fn finish_operation_envelope_buffer<'a, 'b>(
+    fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+    root: flatbuffers::WIPOffset<OperationEnvelope<'a>>) {
+  fbb.finish(root, None);
+}
+
+#[inline]
+pub fn finish_size_prefixed_operation_envelope_buffer<'a, 'b>(fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>, root: flatbuffers::WIPOffset<OperationEnvelope<'a>>) {
+  fbb.finish_size_prefixed(root, None);
+}
 }  // pub mod worktree
 
 use flatbuffers::EndianScalar;

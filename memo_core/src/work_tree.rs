@@ -544,7 +544,7 @@ impl Operation {
         }
     }
 
-    pub fn serialize<'fbb>(
+    pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
     ) -> WIPOffset<serialization::worktree::OperationEnvelope<'fbb>> {
@@ -563,7 +563,7 @@ impl Operation {
                 operation_table = StartEpoch::create(
                     builder,
                     &StartEpochArgs {
-                        epoch_id: Some(&epoch_id.serialize()),
+                        epoch_id: Some(&epoch_id.to_flatbuf()),
                         head,
                     },
                 )
@@ -574,11 +574,11 @@ impl Operation {
                 operation,
             } => {
                 operation_type = OperationType::EpochOperation;
-                let (epoch_operation_type, epoch_operation_table) = operation.serialize(builder);
+                let (epoch_operation_type, epoch_operation_table) = operation.to_flatbuf(builder);
                 operation_table = EpochOperation::create(
                     builder,
                     &EpochOperationArgs {
-                        epoch_id: Some(&epoch_id.serialize()),
+                        epoch_id: Some(&epoch_id.to_flatbuf()),
                         operation_type: epoch_operation_type,
                         operation: Some(epoch_operation_table),
                     },
@@ -596,7 +596,7 @@ impl Operation {
         )
     }
 
-    pub fn deserialize<'fbb>(
+    pub fn from_flatbuf<'fbb>(
         message: serialization::worktree::OperationEnvelope<'fbb>,
     ) -> Option<Self> {
         match message.operation_type() {
@@ -606,7 +606,7 @@ impl Operation {
                 );
 
                 Some(Operation::StartEpoch {
-                    epoch_id: time::Lamport::deserialize(message.epoch_id().unwrap()),
+                    epoch_id: time::Lamport::from_flatbuf(message.epoch_id().unwrap()),
                     head: message.head().map(|head| {
                         let mut oid = [0; 20];
                         oid.copy_from_slice(head);
@@ -619,12 +619,12 @@ impl Operation {
                     message.operation().unwrap(),
                 );
 
-                epoch::Operation::deserialize(
+                epoch::Operation::from_flatbuf(
                     message.operation_type(),
                     message.operation().unwrap(),
                 )
                 .map(|operation| Operation::EpochOperation {
-                    epoch_id: time::Lamport::deserialize(message.epoch_id().unwrap()),
+                    epoch_id: time::Lamport::from_flatbuf(message.epoch_id().unwrap()),
                     operation,
                 })
             }

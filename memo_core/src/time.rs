@@ -54,14 +54,14 @@ impl Local {
         }
     }
 
-    pub fn serialize(&self) -> serialization::Timestamp {
-        serialization::Timestamp::new(self.value, &self.replica_id.serialize())
+    pub fn to_flatbuf(&self) -> serialization::Timestamp {
+        serialization::Timestamp::new(self.value, &self.replica_id.to_flatbuf())
     }
 
-    pub fn deserialize(message: &serialization::Timestamp) -> Self {
+    pub fn from_flatbuf(message: &serialization::Timestamp) -> Self {
         Self {
             value: message.value(),
-            replica_id: ReplicaId::deserialize(message.replica_id()),
+            replica_id: ReplicaId::from_flatbuf(message.replica_id()),
         }
     }
 }
@@ -135,7 +135,7 @@ impl Global {
         Ok(Arc::new(HashMap::deserialize(deserializer)?))
     }
 
-    pub fn serialize<'fbb>(
+    pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
     ) -> WIPOffset<serialization::GlobalTimestamp<'fbb>> {
@@ -143,7 +143,7 @@ impl Global {
         for (replica_id, value) in self.0.as_ref() {
             builder.push(&serialization::Timestamp::new(
                 *value,
-                &replica_id.serialize(),
+                &replica_id.to_flatbuf(),
             ));
         }
         let timestamps = Some(builder.end_vector(self.0.len()));
@@ -153,10 +153,10 @@ impl Global {
         )
     }
 
-    pub fn deserialize<'fbb>(message: serialization::GlobalTimestamp<'fbb>) -> Self {
+    pub fn from_flatbuf<'fbb>(message: serialization::GlobalTimestamp<'fbb>) -> Self {
         let mut local_timestamps = HashMap::new();
         for local_timestamp in message.timestamps().unwrap() {
-            let replica_id = ReplicaId::deserialize(local_timestamp.replica_id());
+            let replica_id = ReplicaId::from_flatbuf(local_timestamp.replica_id());
             let value = local_timestamp.value();
             local_timestamps.insert(replica_id, value);
         }
@@ -201,14 +201,14 @@ impl Lamport {
         self.value = cmp::max(self.value, timestamp.value) + 1;
     }
 
-    pub fn serialize(&self) -> serialization::Timestamp {
-        serialization::Timestamp::new(self.value, &self.replica_id.serialize())
+    pub fn to_flatbuf(&self) -> serialization::Timestamp {
+        serialization::Timestamp::new(self.value, &self.replica_id.to_flatbuf())
     }
 
-    pub fn deserialize(message: &serialization::Timestamp) -> Self {
+    pub fn from_flatbuf(message: &serialization::Timestamp) -> Self {
         Self {
             value: message.value(),
-            replica_id: ReplicaId::deserialize(message.replica_id()),
+            replica_id: ReplicaId::from_flatbuf(message.replica_id()),
         }
     }
 }

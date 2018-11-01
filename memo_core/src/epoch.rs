@@ -1188,7 +1188,7 @@ impl Operation {
         }
     }
 
-    pub fn serialize<'fbb>(
+    pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
     ) -> (serialization::epoch::Operation, WIPOffset<UnionWIPOffset>) {
@@ -1197,7 +1197,7 @@ impl Operation {
             Operation as OperationType, UpdateParent, UpdateParentArgs,
         };
 
-        fn serialize_parent<'a, 'fbb>(
+        fn parent_to_flatbuf<'a, 'fbb>(
             parent: &'a Option<(FileId, Arc<OsString>)>,
             builder: &mut FlatBufferBuilder<'fbb>,
         ) -> (
@@ -1206,7 +1206,7 @@ impl Operation {
             Option<flatbuffers::WIPOffset<&'fbb str>>,
         ) {
             if let Some((file_id, name)) = parent.as_ref() {
-                let (file_id_type, file_id) = file_id.serialize(builder);
+                let (file_id_type, file_id) = file_id.to_flatbuf(builder);
                 (
                     file_id_type,
                     Some(file_id),
@@ -1225,8 +1225,9 @@ impl Operation {
                 local_timestamp,
                 lamport_timestamp,
             } => {
-                let (file_id_type, file_id) = file_id.serialize(builder);
-                let (parent_id_type, parent_id, name_in_parent) = serialize_parent(parent, builder);
+                let (file_id_type, file_id) = file_id.to_flatbuf(builder);
+                let (parent_id_type, parent_id, name_in_parent) =
+                    parent_to_flatbuf(parent, builder);
 
                 (
                     OperationType::InsertMetadata,
@@ -1235,12 +1236,12 @@ impl Operation {
                         &InsertMetadataArgs {
                             file_id_type,
                             file_id: Some(file_id),
-                            file_type: file_type.serialize(),
+                            file_type: file_type.to_flatbuf(),
                             parent_id_type,
                             parent_id,
                             name_in_parent,
-                            local_timestamp: Some(&local_timestamp.serialize()),
-                            lamport_timestamp: Some(&lamport_timestamp.serialize()),
+                            local_timestamp: Some(&local_timestamp.to_flatbuf()),
+                            lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
                         },
                     )
                     .as_union_value(),
@@ -1252,9 +1253,9 @@ impl Operation {
                 local_timestamp,
                 lamport_timestamp,
             } => {
-                let (child_id_type, child_id) = child_id.serialize(builder);
+                let (child_id_type, child_id) = child_id.to_flatbuf(builder);
                 let (new_parent_id_type, new_parent_id, new_name_in_parent) =
-                    serialize_parent(new_parent, builder);
+                    parent_to_flatbuf(new_parent, builder);
                 (
                     OperationType::UpdateParent,
                     UpdateParent::create(
@@ -1265,8 +1266,8 @@ impl Operation {
                             new_parent_id_type,
                             new_parent_id,
                             new_name_in_parent,
-                            local_timestamp: Some(&local_timestamp.serialize()),
-                            lamport_timestamp: Some(&lamport_timestamp.serialize()),
+                            local_timestamp: Some(&local_timestamp.to_flatbuf()),
+                            lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
                         },
                     )
                     .as_union_value(),
@@ -1278,10 +1279,10 @@ impl Operation {
                 local_timestamp,
                 lamport_timestamp,
             } => {
-                let (file_id_type, file_id) = file_id.serialize(builder);
+                let (file_id_type, file_id) = file_id.to_flatbuf(builder);
                 builder.start_vector::<WIPOffset<serialization::buffer::Operation>>(edits.len());
                 for edit in edits {
-                    let edit = edit.serialize(builder);
+                    let edit = edit.to_flatbuf(builder);
                     builder.push(edit);
                 }
                 let edits = builder.end_vector(edits.len());
@@ -1293,8 +1294,8 @@ impl Operation {
                             file_id_type,
                             file_id: Some(file_id),
                             edits: Some(edits),
-                            local_timestamp: Some(&local_timestamp.serialize()),
-                            lamport_timestamp: Some(&lamport_timestamp.serialize()),
+                            local_timestamp: Some(&local_timestamp.to_flatbuf()),
+                            lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
                         },
                     )
                     .as_union_value(),
@@ -1303,17 +1304,17 @@ impl Operation {
         }
     }
 
-    pub fn deserialize<'a>(
+    pub fn from_flatbuf<'a>(
         operation_type: serialization::epoch::Operation,
         message: flatbuffers::Table<'a>,
     ) -> Option<Self> {
-        fn deserialize_parent<'a>(
+        fn parent_from_flatbuf<'a>(
             parent_id_type: serialization::epoch::FileId,
             parent_id_message: Option<flatbuffers::Table<'a>>,
             name: Option<&'a str>,
         ) -> Option<(FileId, Arc<OsString>)> {
             parent_id_message.map(|parent_id_message| {
-                let file_id = FileId::deserialize(parent_id_type, parent_id_message);
+                let file_id = FileId::from_flatbuf(parent_id_type, parent_id_message);
                 let name = Arc::new(OsString::from(name.unwrap()));
                 (file_id, name)
             })
@@ -1323,18 +1324,18 @@ impl Operation {
             serialization::epoch::Operation::InsertMetadata => {
                 let message = serialization::epoch::InsertMetadata::init_from_table(message);
                 Some(Operation::InsertMetadata {
-                    file_id: FileId::deserialize(
+                    file_id: FileId::from_flatbuf(
                         message.file_id_type(),
                         message.file_id().unwrap(),
                     ),
-                    file_type: FileType::deserialize(&message.file_type()),
-                    parent: deserialize_parent(
+                    file_type: FileType::from_flatbuf(&message.file_type()),
+                    parent: parent_from_flatbuf(
                         message.parent_id_type(),
                         message.parent_id(),
                         message.name_in_parent(),
                     ),
-                    local_timestamp: time::Local::deserialize(&message.local_timestamp().unwrap()),
-                    lamport_timestamp: time::Lamport::deserialize(
+                    local_timestamp: time::Local::from_flatbuf(&message.local_timestamp().unwrap()),
+                    lamport_timestamp: time::Lamport::from_flatbuf(
                         &message.lamport_timestamp().unwrap(),
                     ),
                 })
@@ -1342,17 +1343,17 @@ impl Operation {
             serialization::epoch::Operation::UpdateParent => {
                 let message = serialization::epoch::UpdateParent::init_from_table(message);
                 Some(Operation::UpdateParent {
-                    child_id: FileId::deserialize(
+                    child_id: FileId::from_flatbuf(
                         message.child_id_type(),
                         message.child_id().unwrap(),
                     ),
-                    new_parent: deserialize_parent(
+                    new_parent: parent_from_flatbuf(
                         message.new_parent_id_type(),
                         message.new_parent_id(),
                         message.new_name_in_parent(),
                     ),
-                    local_timestamp: time::Local::deserialize(&message.local_timestamp().unwrap()),
-                    lamport_timestamp: time::Lamport::deserialize(
+                    local_timestamp: time::Local::from_flatbuf(&message.local_timestamp().unwrap()),
+                    lamport_timestamp: time::Lamport::from_flatbuf(
                         &message.lamport_timestamp().unwrap(),
                     ),
                 })
@@ -1362,17 +1363,17 @@ impl Operation {
                 let edit_messages = message.edits().unwrap();
                 let mut edits = Vec::with_capacity(edit_messages.len());
                 for i in 0..edit_messages.len() {
-                    edits.push(buffer::Operation::deserialize(&edit_messages.get(i)));
+                    edits.push(buffer::Operation::from_flatbuf(&edit_messages.get(i)));
                 }
 
                 Some(Operation::EditText {
-                    file_id: FileId::deserialize(
+                    file_id: FileId::from_flatbuf(
                         message.file_id_type(),
                         message.file_id().unwrap(),
                     ),
                     edits,
-                    local_timestamp: time::Local::deserialize(&message.local_timestamp().unwrap()),
-                    lamport_timestamp: time::Lamport::deserialize(
+                    local_timestamp: time::Local::from_flatbuf(&message.local_timestamp().unwrap()),
+                    lamport_timestamp: time::Lamport::from_flatbuf(
                         &message.lamport_timestamp().unwrap(),
                     ),
                 })
@@ -1397,7 +1398,7 @@ impl FileId {
         }
     }
 
-    fn serialize<'fbb>(
+    fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
     ) -> (serialization::epoch::FileId, WIPOffset<UnionWIPOffset>) {
@@ -1415,7 +1416,7 @@ impl FileId {
                 NewFileId::create(
                     builder,
                     &NewFileIdArgs {
-                        id: Some(&id.serialize()),
+                        id: Some(&id.to_flatbuf()),
                     },
                 )
                 .as_union_value(),
@@ -1423,7 +1424,7 @@ impl FileId {
         }
     }
 
-    fn deserialize<'a>(
+    fn from_flatbuf<'a>(
         file_id_type: serialization::epoch::FileId,
         message: flatbuffers::Table<'a>,
     ) -> Self {
@@ -1434,7 +1435,7 @@ impl FileId {
             }
             serialization::epoch::FileId::NewFileId => {
                 let message = serialization::epoch::NewFileId::init_from_table(message);
-                FileId::New(time::Local::deserialize(&message.id().unwrap()))
+                FileId::New(time::Local::from_flatbuf(&message.id().unwrap()))
             }
             serialization::epoch::FileId::NONE => unreachable!(),
         }
@@ -1442,14 +1443,14 @@ impl FileId {
 }
 
 impl FileType {
-    fn serialize(&self) -> serialization::epoch::FileType {
+    fn to_flatbuf(&self) -> serialization::epoch::FileType {
         match self {
             FileType::Directory => serialization::epoch::FileType::Directory,
             FileType::Text => serialization::epoch::FileType::Text,
         }
     }
 
-    fn deserialize(message: &serialization::epoch::FileType) -> Self {
+    fn from_flatbuf(message: &serialization::epoch::FileType) -> Self {
         match message {
             serialization::epoch::FileType::Directory => FileType::Directory,
             serialization::epoch::FileType::Text => FileType::Text,
