@@ -544,6 +544,19 @@ impl Operation {
         }
     }
 
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let root = self.to_flatbuf(&mut builder);
+        builder.finish(root, None);
+        builder.collapse().0
+    }
+
+    pub fn deserialize<'a>(buffer: &'a [u8]) -> Option<Self> {
+        use crate::serialization::worktree::OperationEnvelope;
+        let root = flatbuffers::get_root::<OperationEnvelope<'a>>(buffer);
+        Self::from_flatbuf(root)
+    }
+
     pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
