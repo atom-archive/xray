@@ -1,6 +1,8 @@
 use crate::buffer::{self, Change, Point, Text};
 use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId, FileType};
+use crate::serialization;
 use crate::{time, Error, Oid, ReplicaId};
+use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use futures::{future, stream, Async, Future, Poll, Stream};
 use serde_derive::{Deserialize, Serialize};
 use std::cell::{Ref, RefCell, RefMut};
@@ -540,6 +542,58 @@ impl Operation {
             Operation::StartEpoch { epoch_id, .. } => *epoch_id,
             Operation::EpochOperation { epoch_id, .. } => *epoch_id,
         }
+    }
+
+    pub fn serialize<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::worktree::OperationEnvelope<'fbb>> {
+        use crate::serialization::worktree::{
+            EpochOperation, EpochOperationArgs, Operation as OperationType, OperationEnvelope,
+            OperationEnvelopeArgs, StartEpoch, StartEpochArgs,
+        };
+
+        let operation_type;
+        let operation_table;
+
+        match self {
+            Operation::StartEpoch { epoch_id, head } => {
+                operation_type = OperationType::StartEpoch;
+                let head = head.map(|head| builder.create_vector(&head));
+                operation_table = StartEpoch::create(
+                    builder,
+                    &StartEpochArgs {
+                        epoch_id: Some(&epoch_id.serialize()),
+                        head,
+                    },
+                )
+                .as_union_value();
+            }
+            Operation::EpochOperation {
+                epoch_id,
+                operation,
+            } => {
+                operation_type = OperationType::EpochOperation;
+                let (epoch_operation_type, epoch_operation_table) = operation.serialize(builder);
+                operation_table = EpochOperation::create(
+                    builder,
+                    &EpochOperationArgs {
+                        epoch_id: Some(&epoch_id.serialize()),
+                        operation_type: epoch_operation_type,
+                        operation: Some(epoch_operation_table),
+                    },
+                )
+                .as_union_value();
+            }
+        }
+
+        OperationEnvelope::create(
+            builder,
+            &OperationEnvelopeArgs {
+                operation_type,
+                operation: Some(operation_table),
+            },
+        )
     }
 }
 

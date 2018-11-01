@@ -1260,6 +1260,300 @@ impl<'a: 'b, 'b> EditTextBuilder<'a, 'b> {
   }
 }
 
+}  // pub mod epoch
+
+pub mod worktree {
+  #![allow(dead_code)]
+  #![allow(unused_imports)]
+
+  use std::mem;
+  use std::cmp::Ordering;
+
+  extern crate flatbuffers;
+  use self::flatbuffers::EndianScalar;
+
+#[allow(non_camel_case_types)]
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Operation {
+  NONE = 0,
+  StartEpoch = 1,
+  EpochOperation = 2,
+
+}
+
+const ENUM_MIN_OPERATION: u8 = 0;
+const ENUM_MAX_OPERATION: u8 = 2;
+
+impl<'a> flatbuffers::Follow<'a> for Operation {
+  type Inner = Self;
+  #[inline]
+  fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    flatbuffers::read_scalar_at::<Self>(buf, loc)
+  }
+}
+
+impl flatbuffers::EndianScalar for Operation {
+  #[inline]
+  fn to_little_endian(self) -> Self {
+    let n = u8::to_le(self as u8);
+    let p = &n as *const u8 as *const Operation;
+    unsafe { *p }
+  }
+  #[inline]
+  fn from_little_endian(self) -> Self {
+    let n = u8::from_le(self as u8);
+    let p = &n as *const u8 as *const Operation;
+    unsafe { *p }
+  }
+}
+
+impl flatbuffers::Push for Operation {
+    type Output = Operation;
+    #[inline]
+    fn push(&self, dst: &mut [u8], _rest: &[u8]) {
+        flatbuffers::emplace_scalar::<Operation>(dst, *self);
+    }
+}
+
+#[allow(non_camel_case_types)]
+const ENUM_VALUES_OPERATION:[Operation; 3] = [
+  Operation::NONE,
+  Operation::StartEpoch,
+  Operation::EpochOperation
+];
+
+#[allow(non_camel_case_types)]
+const ENUM_NAMES_OPERATION:[&'static str; 3] = [
+    "NONE",
+    "StartEpoch",
+    "EpochOperation"
+];
+
+pub fn enum_name_operation(e: Operation) -> &'static str {
+  let index: usize = e as usize;
+  ENUM_NAMES_OPERATION[index]
+}
+
+pub struct OperationUnionTableOffset {}
+pub enum StartEpochOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct StartEpoch<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for StartEpoch<'a> {
+    type Inner = StartEpoch<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> StartEpoch<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        StartEpoch {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args StartEpochArgs<'args>) -> flatbuffers::WIPOffset<StartEpoch<'bldr>> {
+      let mut builder = StartEpochBuilder::new(_fbb);
+      if let Some(x) = args.head { builder.add_head(x); }
+      if let Some(x) = args.epoch_id { builder.add_epoch_id(x); }
+      builder.finish()
+    }
+
+    pub const VT_EPOCH_ID: flatbuffers::VOffsetT = 4;
+    pub const VT_HEAD: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub fn epoch_id(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(StartEpoch::VT_EPOCH_ID, None)
+  }
+  #[inline]
+  pub fn head(&self) -> Option<&'a [u8]> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(StartEpoch::VT_HEAD, None).map(|v| v.safe_slice())
+  }
+}
+
+pub struct StartEpochArgs<'a> {
+    pub epoch_id: Option<&'a  super::Timestamp>,
+    pub head: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a ,  u8>>>,
+}
+impl<'a> Default for StartEpochArgs<'a> {
+    #[inline]
+    fn default() -> Self {
+        StartEpochArgs {
+            epoch_id: None,
+            head: None,
+        }
+    }
+}
+pub struct StartEpochBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> StartEpochBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_epoch_id(&mut self, epoch_id: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(StartEpoch::VT_EPOCH_ID, epoch_id);
+  }
+  #[inline]
+  pub fn add_head(&mut self, head: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(StartEpoch::VT_HEAD, head);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> StartEpochBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    StartEpochBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<StartEpoch<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+pub enum EpochOperationOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct EpochOperation<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for EpochOperation<'a> {
+    type Inner = EpochOperation<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> EpochOperation<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        EpochOperation {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args EpochOperationArgs<'args>) -> flatbuffers::WIPOffset<EpochOperation<'bldr>> {
+      let mut builder = EpochOperationBuilder::new(_fbb);
+      if let Some(x) = args.operation { builder.add_operation(x); }
+      if let Some(x) = args.epoch_id { builder.add_epoch_id(x); }
+      builder.add_operation_type(args.operation_type);
+      builder.finish()
+    }
+
+    pub const VT_EPOCH_ID: flatbuffers::VOffsetT = 4;
+    pub const VT_OPERATION_TYPE: flatbuffers::VOffsetT = 6;
+    pub const VT_OPERATION: flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub fn epoch_id(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(EpochOperation::VT_EPOCH_ID, None)
+  }
+  #[inline]
+  pub fn operation_type(&self) -> super::epoch::Operation {
+    self._tab.get::<super::epoch::Operation>(EpochOperation::VT_OPERATION_TYPE, Some(super::epoch::Operation::NONE)).unwrap()
+  }
+  #[inline]
+  pub fn operation(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(EpochOperation::VT_OPERATION, None)
+  }
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn operation_as_insert_metadata(&'a self) -> Option<super::epoch::InsertMetadata> {
+    if self.operation_type() == super::epoch::Operation::InsertMetadata {
+      self.operation().map(|u| super::epoch::InsertMetadata::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn operation_as_update_parent(&'a self) -> Option<super::epoch::UpdateParent> {
+    if self.operation_type() == super::epoch::Operation::UpdateParent {
+      self.operation().map(|u| super::epoch::UpdateParent::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn operation_as_edit_text(&'a self) -> Option<super::epoch::EditText> {
+    if self.operation_type() == super::epoch::Operation::EditText {
+      self.operation().map(|u| super::epoch::EditText::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+}
+
+pub struct EpochOperationArgs<'a> {
+    pub epoch_id: Option<&'a  super::Timestamp>,
+    pub operation_type: super::epoch::Operation,
+    pub operation: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+}
+impl<'a> Default for EpochOperationArgs<'a> {
+    #[inline]
+    fn default() -> Self {
+        EpochOperationArgs {
+            epoch_id: None,
+            operation_type: super::epoch::Operation::NONE,
+            operation: None,
+        }
+    }
+}
+pub struct EpochOperationBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> EpochOperationBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_epoch_id(&mut self, epoch_id: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(EpochOperation::VT_EPOCH_ID, epoch_id);
+  }
+  #[inline]
+  pub fn add_operation_type(&mut self, operation_type: super::epoch::Operation) {
+    self.fbb_.push_slot::<super::epoch::Operation>(EpochOperation::VT_OPERATION_TYPE, operation_type, super::epoch::Operation::NONE);
+  }
+  #[inline]
+  pub fn add_operation(&mut self, operation: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EpochOperation::VT_OPERATION, operation);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> EpochOperationBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    EpochOperationBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<EpochOperation<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
 pub enum OperationEnvelopeOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
@@ -1307,9 +1601,9 @@ impl<'a> OperationEnvelope<'a> {
   }
   #[inline]
   #[allow(non_snake_case)]
-  pub fn operation_as_insert_metadata(&'a self) -> Option<InsertMetadata> {
-    if self.operation_type() == Operation::InsertMetadata {
-      self.operation().map(|u| InsertMetadata::init_from_table(u))
+  pub fn operation_as_start_epoch(&'a self) -> Option<StartEpoch> {
+    if self.operation_type() == Operation::StartEpoch {
+      self.operation().map(|u| StartEpoch::init_from_table(u))
     } else {
       None
     }
@@ -1317,19 +1611,9 @@ impl<'a> OperationEnvelope<'a> {
 
   #[inline]
   #[allow(non_snake_case)]
-  pub fn operation_as_update_parent(&'a self) -> Option<UpdateParent> {
-    if self.operation_type() == Operation::UpdateParent {
-      self.operation().map(|u| UpdateParent::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn operation_as_edit_text(&'a self) -> Option<EditText> {
-    if self.operation_type() == Operation::EditText {
-      self.operation().map(|u| EditText::init_from_table(u))
+  pub fn operation_as_epoch_operation(&'a self) -> Option<EpochOperation> {
+    if self.operation_type() == Operation::EpochOperation {
+      self.operation().map(|u| EpochOperation::init_from_table(u))
     } else {
       None
     }
@@ -1378,27 +1662,6 @@ impl<'a: 'b, 'b> OperationEnvelopeBuilder<'a, 'b> {
   }
 }
 
-#[inline]
-pub fn get_root_as_operation_envelope<'a>(buf: &'a [u8]) -> OperationEnvelope<'a> {
-  flatbuffers::get_root::<OperationEnvelope<'a>>(buf)
-}
-
-#[inline]
-pub fn get_size_prefixed_root_as_operation_envelope<'a>(buf: &'a [u8]) -> OperationEnvelope<'a> {
-  flatbuffers::get_size_prefixed_root::<OperationEnvelope<'a>>(buf)
-}
-
-#[inline]
-pub fn finish_operation_envelope_buffer<'a, 'b>(
-    fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>,
-    root: flatbuffers::WIPOffset<OperationEnvelope<'a>>) {
-  fbb.finish(root, None);
-}
-
-#[inline]
-pub fn finish_size_prefixed_operation_envelope_buffer<'a, 'b>(fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>, root: flatbuffers::WIPOffset<OperationEnvelope<'a>>) {
-  fbb.finish_size_prefixed(root, None);
-}
-}  // pub mod epoch
+}  // pub mod worktree
 
 use flatbuffers::EndianScalar;

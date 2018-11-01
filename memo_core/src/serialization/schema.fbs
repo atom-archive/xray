@@ -65,16 +65,20 @@ table EditText {
 
 union Operation { InsertMetadata, UpdateParent, EditText }
 
-// namespace worktree;
-//
-// table StartEpoch {}
-// table EpochOperation {}
-//
-// union Operation { StartEpoch, EpochOperation }
-//
+namespace worktree;
+
+table StartEpoch {
+  epoch_id:Timestamp;
+  head:[ubyte];
+}
+
+table EpochOperation {
+  epoch_id:Timestamp;
+  operation:epoch.Operation;
+}
+
+union Operation { StartEpoch, EpochOperation }
 
 table OperationEnvelope {
    operation:Operation;
 }
-
-root_type OperationEnvelope;
