@@ -1,5 +1,4 @@
 use crate::btree::{self, SeekBias};
-use crate::message;
 use crate::operation_queue::{self, OperationQueue};
 use crate::serialization;
 use crate::time;
@@ -11,7 +10,6 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, HashSet};
@@ -2118,22 +2116,6 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
 }
 
 impl Operation {
-    pub fn to_message(&self) -> message::BufferOperation {
-        message::BufferOperation {
-            start_id: Some(self.start_id.to_message()),
-            start_offset: Some(self.start_offset as u64),
-            end_id: Some(self.end_id.to_message()),
-            end_offset: Some(self.end_offset as u64),
-            version_in_range: Some(self.version_in_range.to_message()),
-            new_text: self
-                .new_text
-                .as_ref()
-                .map(|new_text| Cow::Owned(String::from_utf16_lossy(&new_text.code_units))),
-            local_timestamp: Some(self.local_timestamp.to_message()),
-            lamport_timestamp: Some(self.lamport_timestamp.to_message()),
-        }
-    }
-
     pub fn serialize<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,

@@ -1,4 +1,3 @@
-use crate::message;
 use crate::serialization;
 use crate::ReplicaId;
 use crate::ReplicaIdExt;
@@ -52,13 +51,6 @@ impl Local {
     pub fn observe(&mut self, timestamp: Self) {
         if timestamp.replica_id == self.replica_id {
             self.value = cmp::max(self.value, timestamp.value + 1);
-        }
-    }
-
-    pub fn to_message(&self) -> message::Timestamp {
-        message::Timestamp {
-            value: Some(self.value),
-            replica_id: Some(self.replica_id.to_message()),
         }
     }
 
@@ -143,20 +135,6 @@ impl Global {
         Ok(Arc::new(HashMap::deserialize(deserializer)?))
     }
 
-    pub fn to_message(&self) -> message::GlobalTimestamp {
-        let mut message = message::GlobalTimestamp {
-            timestamps: Vec::new(),
-        };
-
-        for (replica_id, value) in self.0.as_ref() {
-            message.timestamps.push(message::Timestamp {
-                replica_id: Some(replica_id.to_message()),
-                value: Some(*value),
-            });
-        }
-        message
-    }
-
     pub fn serialize<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
@@ -221,13 +199,6 @@ impl Lamport {
 
     pub fn observe(&mut self, timestamp: Self) {
         self.value = cmp::max(self.value, timestamp.value) + 1;
-    }
-
-    pub fn to_message(&self) -> message::Timestamp {
-        message::Timestamp {
-            value: Some(self.value),
-            replica_id: Some(self.replica_id.to_message()),
-        }
     }
 
     pub fn serialize(&self) -> serialization::Timestamp {

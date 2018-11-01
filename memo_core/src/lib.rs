@@ -2,7 +2,6 @@ mod btree;
 mod buffer;
 mod epoch;
 #[allow(non_snake_case, unused_imports)]
-mod message;
 mod operation_queue;
 mod serialization;
 pub mod time;
@@ -33,19 +32,11 @@ pub enum Error {
 }
 
 trait ReplicaIdExt {
-    fn to_message(&self) -> message::ReplicaId;
-
     fn serialize(&self) -> serialization::ReplicaId;
     fn deserialize(message: &serialization::ReplicaId) -> Self;
 }
 
 impl ReplicaIdExt for ReplicaId {
-    fn to_message(&self) -> message::ReplicaId {
-        message::ReplicaId {
-            uuid: Some(Cow::Borrowed(self.as_bytes())),
-        }
-    }
-
     fn serialize(&self) -> serialization::ReplicaId {
         fn u64_from_bytes(bytes: &[u8]) -> u64 {
             let mut n = 0;

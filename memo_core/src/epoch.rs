@@ -1,6 +1,5 @@
 use crate::btree::{self, SeekBias};
 use crate::buffer::{self, Buffer, Point, Text};
-use crate::message;
 use crate::operation_queue::{self, OperationQueue};
 use crate::serialization;
 use crate::time;
@@ -11,7 +10,6 @@ use flatbuffers::{FlatBufferBuilder, UnionWIPOffset, WIPOffset};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -1190,58 +1188,6 @@ impl Operation {
         }
     }
 
-    pub fn to_message(&self) -> message::EpochOperation {
-        message::EpochOperation {
-            variant: match self {
-                Operation::InsertMetadata {
-                    file_id,
-                    file_type,
-                    parent,
-                    local_timestamp,
-                    lamport_timestamp,
-                } => message::mod_EpochOperation::OneOfvariant::InsertMetadata(
-                    message::mod_EpochOperation::InsertMetadata {
-                        file_id: Some(file_id.to_message()),
-                        file_type: Some(file_type.to_message()),
-                        parent_id: parent.as_ref().map(|(id, _)| id.to_message()),
-                        name_in_parent: parent.as_ref().map(|(_, name)| name.to_string_lossy()),
-                        local_timestamp: Some(local_timestamp.to_message()),
-                        lamport_timestamp: Some(lamport_timestamp.to_message()),
-                    },
-                ),
-                Operation::UpdateParent {
-                    child_id,
-                    new_parent,
-                    local_timestamp,
-                    lamport_timestamp,
-                } => message::mod_EpochOperation::OneOfvariant::UpdateParent(
-                    message::mod_EpochOperation::UpdateParent {
-                        child_id: Some(child_id.to_message()),
-                        new_parent_id: new_parent.as_ref().map(|(id, _)| id.to_message()),
-                        new_name_in_parent: new_parent
-                            .as_ref()
-                            .map(|(_, name)| Cow::Owned(name.to_string_lossy().into_owned())),
-                        local_timestamp: Some(local_timestamp.to_message()),
-                        lamport_timestamp: Some(lamport_timestamp.to_message()),
-                    },
-                ),
-                Operation::EditText {
-                    file_id,
-                    edits,
-                    local_timestamp,
-                    lamport_timestamp,
-                } => message::mod_EpochOperation::OneOfvariant::EditText(
-                    message::mod_EpochOperation::EditText {
-                        file_id: Some(file_id.to_message()),
-                        edits: edits.iter().map(|edit| edit.to_message()).collect(),
-                        local_timestamp: Some(local_timestamp.to_message()),
-                        lamport_timestamp: Some(lamport_timestamp.to_message()),
-                    },
-                ),
-            },
-        }
-    }
-
     pub fn serialize<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
@@ -1373,15 +1319,6 @@ impl FileId {
         }
     }
 
-    fn to_message(&self) -> message::FileId {
-        message::FileId {
-            variant: match self {
-                FileId::Base(index) => message::mod_FileId::OneOfvariant::Base(*index),
-                FileId::New(id) => message::mod_FileId::OneOfvariant::New(id.to_message()),
-            },
-        }
-    }
-
     fn serialize<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
@@ -1410,13 +1347,6 @@ impl FileId {
 }
 
 impl FileType {
-    fn to_message(&self) -> message::mod_EpochOperation::FileType {
-        match self {
-            FileType::Directory => message::mod_EpochOperation::FileType::Directory,
-            FileType::Text => message::mod_EpochOperation::FileType::Text,
-        }
-    }
-
     fn serialize(&self) -> serialization::epoch::FileType {
         match self {
             FileType::Directory => serialization::epoch::FileType::Directory,
