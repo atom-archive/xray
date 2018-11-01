@@ -595,6 +595,42 @@ impl Operation {
             },
         )
     }
+
+    pub fn deserialize<'fbb>(
+        message: serialization::worktree::OperationEnvelope<'fbb>,
+    ) -> Option<Self> {
+        match message.operation_type() {
+            serialization::worktree::Operation::StartEpoch => {
+                let message = serialization::worktree::StartEpoch::init_from_table(
+                    message.operation().unwrap(),
+                );
+
+                Some(Operation::StartEpoch {
+                    epoch_id: time::Lamport::deserialize(message.epoch_id().unwrap()),
+                    head: message.head().map(|head| {
+                        let mut oid = [0; 20];
+                        oid.copy_from_slice(head);
+                        oid
+                    }),
+                })
+            }
+            serialization::worktree::Operation::EpochOperation => {
+                let message = serialization::worktree::EpochOperation::init_from_table(
+                    message.operation().unwrap(),
+                );
+
+                epoch::Operation::deserialize(
+                    message.operation_type(),
+                    message.operation().unwrap(),
+                )
+                .map(|operation| Operation::EpochOperation {
+                    epoch_id: time::Lamport::deserialize(message.epoch_id().unwrap()),
+                    operation,
+                })
+            }
+            serialization::worktree::Operation::NONE => None,
+        }
+    }
 }
 
 impl SwitchEpoch {
