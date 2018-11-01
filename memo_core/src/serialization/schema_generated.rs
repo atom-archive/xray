@@ -5,70 +5,6 @@
 #![allow(unused_imports)]
 extern crate flatbuffers;
 
-#[allow(non_camel_case_types)]
-#[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum FileId {
-  NONE = 0,
-  BaseFileId = 1,
-  NewFileId = 2,
-
-}
-
-const ENUM_MIN_FILE_ID: u8 = 0;
-const ENUM_MAX_FILE_ID: u8 = 2;
-
-impl<'a> flatbuffers::Follow<'a> for FileId {
-  type Inner = Self;
-  #[inline]
-  fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    flatbuffers::read_scalar_at::<Self>(buf, loc)
-  }
-}
-
-impl flatbuffers::EndianScalar for FileId {
-  #[inline]
-  fn to_little_endian(self) -> Self {
-    let n = u8::to_le(self as u8);
-    let p = &n as *const u8 as *const FileId;
-    unsafe { *p }
-  }
-  #[inline]
-  fn from_little_endian(self) -> Self {
-    let n = u8::from_le(self as u8);
-    let p = &n as *const u8 as *const FileId;
-    unsafe { *p }
-  }
-}
-
-impl flatbuffers::Push for FileId {
-    type Output = FileId;
-    #[inline]
-    fn push(&self, dst: &mut [u8], _rest: &[u8]) {
-        flatbuffers::emplace_scalar::<FileId>(dst, *self);
-    }
-}
-
-#[allow(non_camel_case_types)]
-const ENUM_VALUES_FILE_ID:[FileId; 3] = [
-  FileId::NONE,
-  FileId::BaseFileId,
-  FileId::NewFileId
-];
-
-#[allow(non_camel_case_types)]
-const ENUM_NAMES_FILE_ID:[&'static str; 3] = [
-    "NONE",
-    "BaseFileId",
-    "NewFileId"
-];
-
-pub fn enum_name_file_id(e: FileId) -> &'static str {
-  let index: usize = e as usize;
-  ENUM_NAMES_FILE_ID[index]
-}
-
-pub struct FileIdUnionTableOffset {}
 // struct ReplicaId, aligned to 8
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -267,6 +203,379 @@ impl<'a: 'b, 'b> GlobalTimestampBuilder<'a, 'b> {
   }
 }
 
+pub mod buffer {
+  #![allow(dead_code)]
+  #![allow(unused_imports)]
+
+  use std::mem;
+  use std::cmp::Ordering;
+
+  extern crate flatbuffers;
+  use self::flatbuffers::EndianScalar;
+
+pub enum OperationOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct Operation<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for Operation<'a> {
+    type Inner = Operation<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> Operation<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        Operation {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args OperationArgs<'args>) -> flatbuffers::WIPOffset<Operation<'bldr>> {
+      let mut builder = OperationBuilder::new(_fbb);
+      builder.add_end_offset(args.end_offset);
+      builder.add_start_offset(args.start_offset);
+      if let Some(x) = args.lamport_timestamp { builder.add_lamport_timestamp(x); }
+      if let Some(x) = args.local_timestamp { builder.add_local_timestamp(x); }
+      if let Some(x) = args.new_text { builder.add_new_text(x); }
+      if let Some(x) = args.version_in_range { builder.add_version_in_range(x); }
+      if let Some(x) = args.end_id { builder.add_end_id(x); }
+      if let Some(x) = args.start_id { builder.add_start_id(x); }
+      builder.finish()
+    }
+
+    pub const VT_START_ID: flatbuffers::VOffsetT = 4;
+    pub const VT_START_OFFSET: flatbuffers::VOffsetT = 6;
+    pub const VT_END_ID: flatbuffers::VOffsetT = 8;
+    pub const VT_END_OFFSET: flatbuffers::VOffsetT = 10;
+    pub const VT_VERSION_IN_RANGE: flatbuffers::VOffsetT = 12;
+    pub const VT_NEW_TEXT: flatbuffers::VOffsetT = 14;
+    pub const VT_LOCAL_TIMESTAMP: flatbuffers::VOffsetT = 16;
+    pub const VT_LAMPORT_TIMESTAMP: flatbuffers::VOffsetT = 18;
+
+  #[inline]
+  pub fn start_id(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(Operation::VT_START_ID, None)
+  }
+  #[inline]
+  pub fn start_offset(&self) -> u64 {
+    self._tab.get::<u64>(Operation::VT_START_OFFSET, Some(0)).unwrap()
+  }
+  #[inline]
+  pub fn end_id(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(Operation::VT_END_ID, None)
+  }
+  #[inline]
+  pub fn end_offset(&self) -> u64 {
+    self._tab.get::<u64>(Operation::VT_END_OFFSET, Some(0)).unwrap()
+  }
+  #[inline]
+  pub fn version_in_range(&self) -> Option<super::GlobalTimestamp<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<super::GlobalTimestamp<'a>>>(Operation::VT_VERSION_IN_RANGE, None)
+  }
+  #[inline]
+  pub fn new_text(&self) -> Option<&'a str> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(Operation::VT_NEW_TEXT, None)
+  }
+  #[inline]
+  pub fn local_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(Operation::VT_LOCAL_TIMESTAMP, None)
+  }
+  #[inline]
+  pub fn lamport_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(Operation::VT_LAMPORT_TIMESTAMP, None)
+  }
+}
+
+pub struct OperationArgs<'a> {
+    pub start_id: Option<&'a  super::Timestamp>,
+    pub start_offset: u64,
+    pub end_id: Option<&'a  super::Timestamp>,
+    pub end_offset: u64,
+    pub version_in_range: Option<flatbuffers::WIPOffset<super::GlobalTimestamp<'a >>>,
+    pub new_text: Option<flatbuffers::WIPOffset<&'a  str>>,
+    pub local_timestamp: Option<&'a  super::Timestamp>,
+    pub lamport_timestamp: Option<&'a  super::Timestamp>,
+}
+impl<'a> Default for OperationArgs<'a> {
+    #[inline]
+    fn default() -> Self {
+        OperationArgs {
+            start_id: None,
+            start_offset: 0,
+            end_id: None,
+            end_offset: 0,
+            version_in_range: None,
+            new_text: None,
+            local_timestamp: None,
+            lamport_timestamp: None,
+        }
+    }
+}
+pub struct OperationBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> OperationBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_start_id(&mut self, start_id: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(Operation::VT_START_ID, start_id);
+  }
+  #[inline]
+  pub fn add_start_offset(&mut self, start_offset: u64) {
+    self.fbb_.push_slot::<u64>(Operation::VT_START_OFFSET, start_offset, 0);
+  }
+  #[inline]
+  pub fn add_end_id(&mut self, end_id: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(Operation::VT_END_ID, end_id);
+  }
+  #[inline]
+  pub fn add_end_offset(&mut self, end_offset: u64) {
+    self.fbb_.push_slot::<u64>(Operation::VT_END_OFFSET, end_offset, 0);
+  }
+  #[inline]
+  pub fn add_version_in_range(&mut self, version_in_range: flatbuffers::WIPOffset<super::GlobalTimestamp<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<super::GlobalTimestamp>>(Operation::VT_VERSION_IN_RANGE, version_in_range);
+  }
+  #[inline]
+  pub fn add_new_text(&mut self, new_text: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Operation::VT_NEW_TEXT, new_text);
+  }
+  #[inline]
+  pub fn add_local_timestamp(&mut self, local_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(Operation::VT_LOCAL_TIMESTAMP, local_timestamp);
+  }
+  #[inline]
+  pub fn add_lamport_timestamp(&mut self, lamport_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(Operation::VT_LAMPORT_TIMESTAMP, lamport_timestamp);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> OperationBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    OperationBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<Operation<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+}  // pub mod buffer
+
+pub mod epoch {
+  #![allow(dead_code)]
+  #![allow(unused_imports)]
+
+  use std::mem;
+  use std::cmp::Ordering;
+
+  extern crate flatbuffers;
+  use self::flatbuffers::EndianScalar;
+
+#[allow(non_camel_case_types)]
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum FileId {
+  NONE = 0,
+  BaseFileId = 1,
+  NewFileId = 2,
+
+}
+
+const ENUM_MIN_FILE_ID: u8 = 0;
+const ENUM_MAX_FILE_ID: u8 = 2;
+
+impl<'a> flatbuffers::Follow<'a> for FileId {
+  type Inner = Self;
+  #[inline]
+  fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    flatbuffers::read_scalar_at::<Self>(buf, loc)
+  }
+}
+
+impl flatbuffers::EndianScalar for FileId {
+  #[inline]
+  fn to_little_endian(self) -> Self {
+    let n = u8::to_le(self as u8);
+    let p = &n as *const u8 as *const FileId;
+    unsafe { *p }
+  }
+  #[inline]
+  fn from_little_endian(self) -> Self {
+    let n = u8::from_le(self as u8);
+    let p = &n as *const u8 as *const FileId;
+    unsafe { *p }
+  }
+}
+
+impl flatbuffers::Push for FileId {
+    type Output = FileId;
+    #[inline]
+    fn push(&self, dst: &mut [u8], _rest: &[u8]) {
+        flatbuffers::emplace_scalar::<FileId>(dst, *self);
+    }
+}
+
+#[allow(non_camel_case_types)]
+const ENUM_VALUES_FILE_ID:[FileId; 3] = [
+  FileId::NONE,
+  FileId::BaseFileId,
+  FileId::NewFileId
+];
+
+#[allow(non_camel_case_types)]
+const ENUM_NAMES_FILE_ID:[&'static str; 3] = [
+    "NONE",
+    "BaseFileId",
+    "NewFileId"
+];
+
+pub fn enum_name_file_id(e: FileId) -> &'static str {
+  let index: usize = e as usize;
+  ENUM_NAMES_FILE_ID[index]
+}
+
+pub struct FileIdUnionTableOffset {}
+#[allow(non_camel_case_types)]
+#[repr(i8)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum FileType {
+  Directory = 0,
+  Text = 1,
+
+}
+
+const ENUM_MIN_FILE_TYPE: i8 = 0;
+const ENUM_MAX_FILE_TYPE: i8 = 1;
+
+impl<'a> flatbuffers::Follow<'a> for FileType {
+  type Inner = Self;
+  #[inline]
+  fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    flatbuffers::read_scalar_at::<Self>(buf, loc)
+  }
+}
+
+impl flatbuffers::EndianScalar for FileType {
+  #[inline]
+  fn to_little_endian(self) -> Self {
+    let n = i8::to_le(self as i8);
+    let p = &n as *const i8 as *const FileType;
+    unsafe { *p }
+  }
+  #[inline]
+  fn from_little_endian(self) -> Self {
+    let n = i8::from_le(self as i8);
+    let p = &n as *const i8 as *const FileType;
+    unsafe { *p }
+  }
+}
+
+impl flatbuffers::Push for FileType {
+    type Output = FileType;
+    #[inline]
+    fn push(&self, dst: &mut [u8], _rest: &[u8]) {
+        flatbuffers::emplace_scalar::<FileType>(dst, *self);
+    }
+}
+
+#[allow(non_camel_case_types)]
+const ENUM_VALUES_FILE_TYPE:[FileType; 2] = [
+  FileType::Directory,
+  FileType::Text
+];
+
+#[allow(non_camel_case_types)]
+const ENUM_NAMES_FILE_TYPE:[&'static str; 2] = [
+    "Directory",
+    "Text"
+];
+
+pub fn enum_name_file_type(e: FileType) -> &'static str {
+  let index: usize = e as usize;
+  ENUM_NAMES_FILE_TYPE[index]
+}
+
+#[allow(non_camel_case_types)]
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Operation {
+  NONE = 0,
+  InsertMetadata = 1,
+  UpdateParent = 2,
+  EditText = 3,
+
+}
+
+const ENUM_MIN_OPERATION: u8 = 0;
+const ENUM_MAX_OPERATION: u8 = 3;
+
+impl<'a> flatbuffers::Follow<'a> for Operation {
+  type Inner = Self;
+  #[inline]
+  fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    flatbuffers::read_scalar_at::<Self>(buf, loc)
+  }
+}
+
+impl flatbuffers::EndianScalar for Operation {
+  #[inline]
+  fn to_little_endian(self) -> Self {
+    let n = u8::to_le(self as u8);
+    let p = &n as *const u8 as *const Operation;
+    unsafe { *p }
+  }
+  #[inline]
+  fn from_little_endian(self) -> Self {
+    let n = u8::from_le(self as u8);
+    let p = &n as *const u8 as *const Operation;
+    unsafe { *p }
+  }
+}
+
+impl flatbuffers::Push for Operation {
+    type Output = Operation;
+    #[inline]
+    fn push(&self, dst: &mut [u8], _rest: &[u8]) {
+        flatbuffers::emplace_scalar::<Operation>(dst, *self);
+    }
+}
+
+#[allow(non_camel_case_types)]
+const ENUM_VALUES_OPERATION:[Operation; 4] = [
+  Operation::NONE,
+  Operation::InsertMetadata,
+  Operation::UpdateParent,
+  Operation::EditText
+];
+
+#[allow(non_camel_case_types)]
+const ENUM_NAMES_OPERATION:[&'static str; 4] = [
+    "NONE",
+    "InsertMetadata",
+    "UpdateParent",
+    "EditText"
+];
+
+pub fn enum_name_operation(e: Operation) -> &'static str {
+  let index: usize = e as usize;
+  ENUM_NAMES_OPERATION[index]
+}
+
+pub struct OperationUnionTableOffset {}
 pub enum BaseFileIdOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
@@ -379,13 +688,13 @@ impl<'a> NewFileId<'a> {
     pub const VT_ID: flatbuffers::VOffsetT = 4;
 
   #[inline]
-  pub fn id(&self) -> Option<&'a Timestamp> {
-    self._tab.get::<Timestamp>(NewFileId::VT_ID, None)
+  pub fn id(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(NewFileId::VT_ID, None)
   }
 }
 
 pub struct NewFileIdArgs<'a> {
-    pub id: Option<&'a  Timestamp>,
+    pub id: Option<&'a  super::Timestamp>,
 }
 impl<'a> Default for NewFileIdArgs<'a> {
     #[inline]
@@ -401,8 +710,8 @@ pub struct NewFileIdBuilder<'a: 'b, 'b> {
 }
 impl<'a: 'b, 'b> NewFileIdBuilder<'a, 'b> {
   #[inline]
-  pub fn add_id(&mut self, id: &'b  Timestamp) {
-    self.fbb_.push_slot_always::<&Timestamp>(NewFileId::VT_ID, id);
+  pub fn add_id(&mut self, id: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(NewFileId::VT_ID, id);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> NewFileIdBuilder<'a, 'b> {
@@ -419,15 +728,15 @@ impl<'a: 'b, 'b> NewFileIdBuilder<'a, 'b> {
   }
 }
 
-pub enum BufferOperationOffset {}
+pub enum InsertMetadataOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
-pub struct BufferOperation<'a> {
+pub struct InsertMetadata<'a> {
   pub _tab: flatbuffers::Table<'a>,
 }
 
-impl<'a> flatbuffers::Follow<'a> for BufferOperation<'a> {
-    type Inner = BufferOperation<'a>;
+impl<'a> flatbuffers::Follow<'a> for InsertMetadata<'a> {
+    type Inner = InsertMetadata<'a>;
     #[inline]
     fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
         Self {
@@ -436,168 +745,660 @@ impl<'a> flatbuffers::Follow<'a> for BufferOperation<'a> {
     }
 }
 
-impl<'a> BufferOperation<'a> {
+impl<'a> InsertMetadata<'a> {
     #[inline]
     pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-        BufferOperation {
+        InsertMetadata {
             _tab: table,
         }
     }
     #[allow(unused_mut)]
     pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
         _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
-        args: &'args BufferOperationArgs<'args>) -> flatbuffers::WIPOffset<BufferOperation<'bldr>> {
-      let mut builder = BufferOperationBuilder::new(_fbb);
-      builder.add_end_offset(args.end_offset);
-      builder.add_start_offset(args.start_offset);
+        args: &'args InsertMetadataArgs<'args>) -> flatbuffers::WIPOffset<InsertMetadata<'bldr>> {
+      let mut builder = InsertMetadataBuilder::new(_fbb);
       if let Some(x) = args.lamport_timestamp { builder.add_lamport_timestamp(x); }
       if let Some(x) = args.local_timestamp { builder.add_local_timestamp(x); }
-      if let Some(x) = args.new_text { builder.add_new_text(x); }
-      if let Some(x) = args.version_in_range { builder.add_version_in_range(x); }
-      if let Some(x) = args.end_id { builder.add_end_id(x); }
-      if let Some(x) = args.start_id { builder.add_start_id(x); }
+      if let Some(x) = args.name_in_parent { builder.add_name_in_parent(x); }
+      if let Some(x) = args.parent_id { builder.add_parent_id(x); }
+      if let Some(x) = args.file_id { builder.add_file_id(x); }
+      builder.add_parent_id_type(args.parent_id_type);
+      builder.add_file_type(args.file_type);
+      builder.add_file_id_type(args.file_id_type);
       builder.finish()
     }
 
-    pub const VT_START_ID: flatbuffers::VOffsetT = 4;
-    pub const VT_START_OFFSET: flatbuffers::VOffsetT = 6;
-    pub const VT_END_ID: flatbuffers::VOffsetT = 8;
-    pub const VT_END_OFFSET: flatbuffers::VOffsetT = 10;
-    pub const VT_VERSION_IN_RANGE: flatbuffers::VOffsetT = 12;
-    pub const VT_NEW_TEXT: flatbuffers::VOffsetT = 14;
+    pub const VT_FILE_ID_TYPE: flatbuffers::VOffsetT = 4;
+    pub const VT_FILE_ID: flatbuffers::VOffsetT = 6;
+    pub const VT_FILE_TYPE: flatbuffers::VOffsetT = 8;
+    pub const VT_PARENT_ID_TYPE: flatbuffers::VOffsetT = 10;
+    pub const VT_PARENT_ID: flatbuffers::VOffsetT = 12;
+    pub const VT_NAME_IN_PARENT: flatbuffers::VOffsetT = 14;
     pub const VT_LOCAL_TIMESTAMP: flatbuffers::VOffsetT = 16;
     pub const VT_LAMPORT_TIMESTAMP: flatbuffers::VOffsetT = 18;
 
   #[inline]
-  pub fn start_id(&self) -> Option<&'a Timestamp> {
-    self._tab.get::<Timestamp>(BufferOperation::VT_START_ID, None)
+  pub fn file_id_type(&self) -> FileId {
+    self._tab.get::<FileId>(InsertMetadata::VT_FILE_ID_TYPE, Some(FileId::NONE)).unwrap()
   }
   #[inline]
-  pub fn start_offset(&self) -> u64 {
-    self._tab.get::<u64>(BufferOperation::VT_START_OFFSET, Some(0)).unwrap()
+  pub fn file_id(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(InsertMetadata::VT_FILE_ID, None)
   }
   #[inline]
-  pub fn end_id(&self) -> Option<&'a Timestamp> {
-    self._tab.get::<Timestamp>(BufferOperation::VT_END_ID, None)
+  pub fn file_type(&self) -> FileType {
+    self._tab.get::<FileType>(InsertMetadata::VT_FILE_TYPE, Some(FileType::Directory)).unwrap()
   }
   #[inline]
-  pub fn end_offset(&self) -> u64 {
-    self._tab.get::<u64>(BufferOperation::VT_END_OFFSET, Some(0)).unwrap()
+  pub fn parent_id_type(&self) -> FileId {
+    self._tab.get::<FileId>(InsertMetadata::VT_PARENT_ID_TYPE, Some(FileId::NONE)).unwrap()
   }
   #[inline]
-  pub fn version_in_range(&self) -> Option<GlobalTimestamp<'a>> {
-    self._tab.get::<flatbuffers::ForwardsUOffset<GlobalTimestamp<'a>>>(BufferOperation::VT_VERSION_IN_RANGE, None)
+  pub fn parent_id(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(InsertMetadata::VT_PARENT_ID, None)
   }
   #[inline]
-  pub fn new_text(&self) -> Option<&'a str> {
-    self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(BufferOperation::VT_NEW_TEXT, None)
+  pub fn name_in_parent(&self) -> Option<&'a str> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(InsertMetadata::VT_NAME_IN_PARENT, None)
   }
   #[inline]
-  pub fn local_timestamp(&self) -> Option<&'a Timestamp> {
-    self._tab.get::<Timestamp>(BufferOperation::VT_LOCAL_TIMESTAMP, None)
+  pub fn local_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(InsertMetadata::VT_LOCAL_TIMESTAMP, None)
   }
   #[inline]
-  pub fn lamport_timestamp(&self) -> Option<&'a Timestamp> {
-    self._tab.get::<Timestamp>(BufferOperation::VT_LAMPORT_TIMESTAMP, None)
+  pub fn lamport_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(InsertMetadata::VT_LAMPORT_TIMESTAMP, None)
   }
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn file_id_as_base_file_id(&'a self) -> Option<BaseFileId> {
+    if self.file_id_type() == FileId::BaseFileId {
+      self.file_id().map(|u| BaseFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn file_id_as_new_file_id(&'a self) -> Option<NewFileId> {
+    if self.file_id_type() == FileId::NewFileId {
+      self.file_id().map(|u| NewFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn parent_id_as_base_file_id(&'a self) -> Option<BaseFileId> {
+    if self.parent_id_type() == FileId::BaseFileId {
+      self.parent_id().map(|u| BaseFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn parent_id_as_new_file_id(&'a self) -> Option<NewFileId> {
+    if self.parent_id_type() == FileId::NewFileId {
+      self.parent_id().map(|u| NewFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
 }
 
-pub struct BufferOperationArgs<'a> {
-    pub start_id: Option<&'a  Timestamp>,
-    pub start_offset: u64,
-    pub end_id: Option<&'a  Timestamp>,
-    pub end_offset: u64,
-    pub version_in_range: Option<flatbuffers::WIPOffset<GlobalTimestamp<'a >>>,
-    pub new_text: Option<flatbuffers::WIPOffset<&'a  str>>,
-    pub local_timestamp: Option<&'a  Timestamp>,
-    pub lamport_timestamp: Option<&'a  Timestamp>,
+pub struct InsertMetadataArgs<'a> {
+    pub file_id_type: FileId,
+    pub file_id: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub file_type: FileType,
+    pub parent_id_type: FileId,
+    pub parent_id: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub name_in_parent: Option<flatbuffers::WIPOffset<&'a  str>>,
+    pub local_timestamp: Option<&'a  super::Timestamp>,
+    pub lamport_timestamp: Option<&'a  super::Timestamp>,
 }
-impl<'a> Default for BufferOperationArgs<'a> {
+impl<'a> Default for InsertMetadataArgs<'a> {
     #[inline]
     fn default() -> Self {
-        BufferOperationArgs {
-            start_id: None,
-            start_offset: 0,
-            end_id: None,
-            end_offset: 0,
-            version_in_range: None,
-            new_text: None,
+        InsertMetadataArgs {
+            file_id_type: FileId::NONE,
+            file_id: None,
+            file_type: FileType::Directory,
+            parent_id_type: FileId::NONE,
+            parent_id: None,
+            name_in_parent: None,
             local_timestamp: None,
             lamport_timestamp: None,
         }
     }
 }
-pub struct BufferOperationBuilder<'a: 'b, 'b> {
+pub struct InsertMetadataBuilder<'a: 'b, 'b> {
   fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
   start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
 }
-impl<'a: 'b, 'b> BufferOperationBuilder<'a, 'b> {
+impl<'a: 'b, 'b> InsertMetadataBuilder<'a, 'b> {
   #[inline]
-  pub fn add_start_id(&mut self, start_id: &'b  Timestamp) {
-    self.fbb_.push_slot_always::<&Timestamp>(BufferOperation::VT_START_ID, start_id);
+  pub fn add_file_id_type(&mut self, file_id_type: FileId) {
+    self.fbb_.push_slot::<FileId>(InsertMetadata::VT_FILE_ID_TYPE, file_id_type, FileId::NONE);
   }
   #[inline]
-  pub fn add_start_offset(&mut self, start_offset: u64) {
-    self.fbb_.push_slot::<u64>(BufferOperation::VT_START_OFFSET, start_offset, 0);
+  pub fn add_file_id(&mut self, file_id: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(InsertMetadata::VT_FILE_ID, file_id);
   }
   #[inline]
-  pub fn add_end_id(&mut self, end_id: &'b  Timestamp) {
-    self.fbb_.push_slot_always::<&Timestamp>(BufferOperation::VT_END_ID, end_id);
+  pub fn add_file_type(&mut self, file_type: FileType) {
+    self.fbb_.push_slot::<FileType>(InsertMetadata::VT_FILE_TYPE, file_type, FileType::Directory);
   }
   #[inline]
-  pub fn add_end_offset(&mut self, end_offset: u64) {
-    self.fbb_.push_slot::<u64>(BufferOperation::VT_END_OFFSET, end_offset, 0);
+  pub fn add_parent_id_type(&mut self, parent_id_type: FileId) {
+    self.fbb_.push_slot::<FileId>(InsertMetadata::VT_PARENT_ID_TYPE, parent_id_type, FileId::NONE);
   }
   #[inline]
-  pub fn add_version_in_range(&mut self, version_in_range: flatbuffers::WIPOffset<GlobalTimestamp<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<GlobalTimestamp>>(BufferOperation::VT_VERSION_IN_RANGE, version_in_range);
+  pub fn add_parent_id(&mut self, parent_id: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(InsertMetadata::VT_PARENT_ID, parent_id);
   }
   #[inline]
-  pub fn add_new_text(&mut self, new_text: flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(BufferOperation::VT_NEW_TEXT, new_text);
+  pub fn add_name_in_parent(&mut self, name_in_parent: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(InsertMetadata::VT_NAME_IN_PARENT, name_in_parent);
   }
   #[inline]
-  pub fn add_local_timestamp(&mut self, local_timestamp: &'b  Timestamp) {
-    self.fbb_.push_slot_always::<&Timestamp>(BufferOperation::VT_LOCAL_TIMESTAMP, local_timestamp);
+  pub fn add_local_timestamp(&mut self, local_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(InsertMetadata::VT_LOCAL_TIMESTAMP, local_timestamp);
   }
   #[inline]
-  pub fn add_lamport_timestamp(&mut self, lamport_timestamp: &'b  Timestamp) {
-    self.fbb_.push_slot_always::<&Timestamp>(BufferOperation::VT_LAMPORT_TIMESTAMP, lamport_timestamp);
+  pub fn add_lamport_timestamp(&mut self, lamport_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(InsertMetadata::VT_LAMPORT_TIMESTAMP, lamport_timestamp);
   }
   #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> BufferOperationBuilder<'a, 'b> {
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> InsertMetadataBuilder<'a, 'b> {
     let start = _fbb.start_table();
-    BufferOperationBuilder {
+    InsertMetadataBuilder {
       fbb_: _fbb,
       start_: start,
     }
   }
   #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<BufferOperation<'a>> {
+  pub fn finish(self) -> flatbuffers::WIPOffset<InsertMetadata<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+pub enum UpdateParentOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct UpdateParent<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for UpdateParent<'a> {
+    type Inner = UpdateParent<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> UpdateParent<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        UpdateParent {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args UpdateParentArgs<'args>) -> flatbuffers::WIPOffset<UpdateParent<'bldr>> {
+      let mut builder = UpdateParentBuilder::new(_fbb);
+      if let Some(x) = args.lamport_timestamp { builder.add_lamport_timestamp(x); }
+      if let Some(x) = args.local_timestamp { builder.add_local_timestamp(x); }
+      if let Some(x) = args.new_name_in_parent { builder.add_new_name_in_parent(x); }
+      if let Some(x) = args.new_parent_id { builder.add_new_parent_id(x); }
+      if let Some(x) = args.child_id { builder.add_child_id(x); }
+      builder.add_new_parent_id_type(args.new_parent_id_type);
+      builder.add_child_id_type(args.child_id_type);
+      builder.finish()
+    }
+
+    pub const VT_CHILD_ID_TYPE: flatbuffers::VOffsetT = 4;
+    pub const VT_CHILD_ID: flatbuffers::VOffsetT = 6;
+    pub const VT_NEW_PARENT_ID_TYPE: flatbuffers::VOffsetT = 8;
+    pub const VT_NEW_PARENT_ID: flatbuffers::VOffsetT = 10;
+    pub const VT_NEW_NAME_IN_PARENT: flatbuffers::VOffsetT = 12;
+    pub const VT_LOCAL_TIMESTAMP: flatbuffers::VOffsetT = 14;
+    pub const VT_LAMPORT_TIMESTAMP: flatbuffers::VOffsetT = 16;
+
+  #[inline]
+  pub fn child_id_type(&self) -> FileId {
+    self._tab.get::<FileId>(UpdateParent::VT_CHILD_ID_TYPE, Some(FileId::NONE)).unwrap()
+  }
+  #[inline]
+  pub fn child_id(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(UpdateParent::VT_CHILD_ID, None)
+  }
+  #[inline]
+  pub fn new_parent_id_type(&self) -> FileId {
+    self._tab.get::<FileId>(UpdateParent::VT_NEW_PARENT_ID_TYPE, Some(FileId::NONE)).unwrap()
+  }
+  #[inline]
+  pub fn new_parent_id(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(UpdateParent::VT_NEW_PARENT_ID, None)
+  }
+  #[inline]
+  pub fn new_name_in_parent(&self) -> Option<&'a str> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(UpdateParent::VT_NEW_NAME_IN_PARENT, None)
+  }
+  #[inline]
+  pub fn local_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(UpdateParent::VT_LOCAL_TIMESTAMP, None)
+  }
+  #[inline]
+  pub fn lamport_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(UpdateParent::VT_LAMPORT_TIMESTAMP, None)
+  }
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn child_id_as_base_file_id(&'a self) -> Option<BaseFileId> {
+    if self.child_id_type() == FileId::BaseFileId {
+      self.child_id().map(|u| BaseFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn child_id_as_new_file_id(&'a self) -> Option<NewFileId> {
+    if self.child_id_type() == FileId::NewFileId {
+      self.child_id().map(|u| NewFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn new_parent_id_as_base_file_id(&'a self) -> Option<BaseFileId> {
+    if self.new_parent_id_type() == FileId::BaseFileId {
+      self.new_parent_id().map(|u| BaseFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn new_parent_id_as_new_file_id(&'a self) -> Option<NewFileId> {
+    if self.new_parent_id_type() == FileId::NewFileId {
+      self.new_parent_id().map(|u| NewFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+}
+
+pub struct UpdateParentArgs<'a> {
+    pub child_id_type: FileId,
+    pub child_id: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub new_parent_id_type: FileId,
+    pub new_parent_id: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub new_name_in_parent: Option<flatbuffers::WIPOffset<&'a  str>>,
+    pub local_timestamp: Option<&'a  super::Timestamp>,
+    pub lamport_timestamp: Option<&'a  super::Timestamp>,
+}
+impl<'a> Default for UpdateParentArgs<'a> {
+    #[inline]
+    fn default() -> Self {
+        UpdateParentArgs {
+            child_id_type: FileId::NONE,
+            child_id: None,
+            new_parent_id_type: FileId::NONE,
+            new_parent_id: None,
+            new_name_in_parent: None,
+            local_timestamp: None,
+            lamport_timestamp: None,
+        }
+    }
+}
+pub struct UpdateParentBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> UpdateParentBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_child_id_type(&mut self, child_id_type: FileId) {
+    self.fbb_.push_slot::<FileId>(UpdateParent::VT_CHILD_ID_TYPE, child_id_type, FileId::NONE);
+  }
+  #[inline]
+  pub fn add_child_id(&mut self, child_id: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(UpdateParent::VT_CHILD_ID, child_id);
+  }
+  #[inline]
+  pub fn add_new_parent_id_type(&mut self, new_parent_id_type: FileId) {
+    self.fbb_.push_slot::<FileId>(UpdateParent::VT_NEW_PARENT_ID_TYPE, new_parent_id_type, FileId::NONE);
+  }
+  #[inline]
+  pub fn add_new_parent_id(&mut self, new_parent_id: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(UpdateParent::VT_NEW_PARENT_ID, new_parent_id);
+  }
+  #[inline]
+  pub fn add_new_name_in_parent(&mut self, new_name_in_parent: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(UpdateParent::VT_NEW_NAME_IN_PARENT, new_name_in_parent);
+  }
+  #[inline]
+  pub fn add_local_timestamp(&mut self, local_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(UpdateParent::VT_LOCAL_TIMESTAMP, local_timestamp);
+  }
+  #[inline]
+  pub fn add_lamport_timestamp(&mut self, lamport_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(UpdateParent::VT_LAMPORT_TIMESTAMP, lamport_timestamp);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> UpdateParentBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    UpdateParentBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<UpdateParent<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+pub enum EditTextOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct EditText<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for EditText<'a> {
+    type Inner = EditText<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> EditText<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        EditText {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args EditTextArgs<'args>) -> flatbuffers::WIPOffset<EditText<'bldr>> {
+      let mut builder = EditTextBuilder::new(_fbb);
+      if let Some(x) = args.lamport_timestamp { builder.add_lamport_timestamp(x); }
+      if let Some(x) = args.local_timestamp { builder.add_local_timestamp(x); }
+      if let Some(x) = args.edits { builder.add_edits(x); }
+      if let Some(x) = args.file_id { builder.add_file_id(x); }
+      builder.add_file_id_type(args.file_id_type);
+      builder.finish()
+    }
+
+    pub const VT_FILE_ID_TYPE: flatbuffers::VOffsetT = 4;
+    pub const VT_FILE_ID: flatbuffers::VOffsetT = 6;
+    pub const VT_EDITS: flatbuffers::VOffsetT = 8;
+    pub const VT_LOCAL_TIMESTAMP: flatbuffers::VOffsetT = 10;
+    pub const VT_LAMPORT_TIMESTAMP: flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub fn file_id_type(&self) -> FileId {
+    self._tab.get::<FileId>(EditText::VT_FILE_ID_TYPE, Some(FileId::NONE)).unwrap()
+  }
+  #[inline]
+  pub fn file_id(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(EditText::VT_FILE_ID, None)
+  }
+  #[inline]
+  pub fn edits(&self) -> Option<flatbuffers::Vector<flatbuffers::ForwardsUOffset<super::buffer::Operation<'a>>>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<flatbuffers::ForwardsUOffset<super::buffer::Operation<'a>>>>>(EditText::VT_EDITS, None)
+  }
+  #[inline]
+  pub fn local_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(EditText::VT_LOCAL_TIMESTAMP, None)
+  }
+  #[inline]
+  pub fn lamport_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(EditText::VT_LAMPORT_TIMESTAMP, None)
+  }
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn file_id_as_base_file_id(&'a self) -> Option<BaseFileId> {
+    if self.file_id_type() == FileId::BaseFileId {
+      self.file_id().map(|u| BaseFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn file_id_as_new_file_id(&'a self) -> Option<NewFileId> {
+    if self.file_id_type() == FileId::NewFileId {
+      self.file_id().map(|u| NewFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+}
+
+pub struct EditTextArgs<'a> {
+    pub file_id_type: FileId,
+    pub file_id: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub edits: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a , flatbuffers::ForwardsUOffset<super::buffer::Operation<'a >>>>>,
+    pub local_timestamp: Option<&'a  super::Timestamp>,
+    pub lamport_timestamp: Option<&'a  super::Timestamp>,
+}
+impl<'a> Default for EditTextArgs<'a> {
+    #[inline]
+    fn default() -> Self {
+        EditTextArgs {
+            file_id_type: FileId::NONE,
+            file_id: None,
+            edits: None,
+            local_timestamp: None,
+            lamport_timestamp: None,
+        }
+    }
+}
+pub struct EditTextBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> EditTextBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_file_id_type(&mut self, file_id_type: FileId) {
+    self.fbb_.push_slot::<FileId>(EditText::VT_FILE_ID_TYPE, file_id_type, FileId::NONE);
+  }
+  #[inline]
+  pub fn add_file_id(&mut self, file_id: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EditText::VT_FILE_ID, file_id);
+  }
+  #[inline]
+  pub fn add_edits(&mut self, edits: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<super::buffer::Operation<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EditText::VT_EDITS, edits);
+  }
+  #[inline]
+  pub fn add_local_timestamp(&mut self, local_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(EditText::VT_LOCAL_TIMESTAMP, local_timestamp);
+  }
+  #[inline]
+  pub fn add_lamport_timestamp(&mut self, lamport_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(EditText::VT_LAMPORT_TIMESTAMP, lamport_timestamp);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> EditTextBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    EditTextBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<EditText<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+pub enum OperationEnvelopeOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct OperationEnvelope<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for OperationEnvelope<'a> {
+    type Inner = OperationEnvelope<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> OperationEnvelope<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        OperationEnvelope {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args OperationEnvelopeArgs) -> flatbuffers::WIPOffset<OperationEnvelope<'bldr>> {
+      let mut builder = OperationEnvelopeBuilder::new(_fbb);
+      if let Some(x) = args.operation { builder.add_operation(x); }
+      builder.add_operation_type(args.operation_type);
+      builder.finish()
+    }
+
+    pub const VT_OPERATION_TYPE: flatbuffers::VOffsetT = 4;
+    pub const VT_OPERATION: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub fn operation_type(&self) -> Operation {
+    self._tab.get::<Operation>(OperationEnvelope::VT_OPERATION_TYPE, Some(Operation::NONE)).unwrap()
+  }
+  #[inline]
+  pub fn operation(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(OperationEnvelope::VT_OPERATION, None)
+  }
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn operation_as_insert_metadata(&'a self) -> Option<InsertMetadata> {
+    if self.operation_type() == Operation::InsertMetadata {
+      self.operation().map(|u| InsertMetadata::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn operation_as_update_parent(&'a self) -> Option<UpdateParent> {
+    if self.operation_type() == Operation::UpdateParent {
+      self.operation().map(|u| UpdateParent::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn operation_as_edit_text(&'a self) -> Option<EditText> {
+    if self.operation_type() == Operation::EditText {
+      self.operation().map(|u| EditText::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+}
+
+pub struct OperationEnvelopeArgs {
+    pub operation_type: Operation,
+    pub operation: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+}
+impl<'a> Default for OperationEnvelopeArgs {
+    #[inline]
+    fn default() -> Self {
+        OperationEnvelopeArgs {
+            operation_type: Operation::NONE,
+            operation: None,
+        }
+    }
+}
+pub struct OperationEnvelopeBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> OperationEnvelopeBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_operation_type(&mut self, operation_type: Operation) {
+    self.fbb_.push_slot::<Operation>(OperationEnvelope::VT_OPERATION_TYPE, operation_type, Operation::NONE);
+  }
+  #[inline]
+  pub fn add_operation(&mut self, operation: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(OperationEnvelope::VT_OPERATION, operation);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> OperationEnvelopeBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    OperationEnvelopeBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<OperationEnvelope<'a>> {
     let o = self.fbb_.end_table(self.start_);
     flatbuffers::WIPOffset::new(o.value())
   }
 }
 
 #[inline]
-pub fn get_root_as_buffer_operation<'a>(buf: &'a [u8]) -> BufferOperation<'a> {
-  flatbuffers::get_root::<BufferOperation<'a>>(buf)
+pub fn get_root_as_operation_envelope<'a>(buf: &'a [u8]) -> OperationEnvelope<'a> {
+  flatbuffers::get_root::<OperationEnvelope<'a>>(buf)
 }
 
 #[inline]
-pub fn get_size_prefixed_root_as_buffer_operation<'a>(buf: &'a [u8]) -> BufferOperation<'a> {
-  flatbuffers::get_size_prefixed_root::<BufferOperation<'a>>(buf)
+pub fn get_size_prefixed_root_as_operation_envelope<'a>(buf: &'a [u8]) -> OperationEnvelope<'a> {
+  flatbuffers::get_size_prefixed_root::<OperationEnvelope<'a>>(buf)
 }
 
 #[inline]
-pub fn finish_buffer_operation_buffer<'a, 'b>(
+pub fn finish_operation_envelope_buffer<'a, 'b>(
     fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>,
-    root: flatbuffers::WIPOffset<BufferOperation<'a>>) {
+    root: flatbuffers::WIPOffset<OperationEnvelope<'a>>) {
   fbb.finish(root, None);
 }
 
 #[inline]
-pub fn finish_size_prefixed_buffer_operation_buffer<'a, 'b>(fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>, root: flatbuffers::WIPOffset<BufferOperation<'a>>) {
+pub fn finish_size_prefixed_operation_envelope_buffer<'a, 'b>(fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>, root: flatbuffers::WIPOffset<OperationEnvelope<'a>>) {
   fbb.finish_size_prefixed(root, None);
 }
+}  // pub mod epoch
+
 use flatbuffers::EndianScalar;

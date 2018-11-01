@@ -2137,15 +2137,15 @@ impl Operation {
     pub fn serialize<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
-    ) -> WIPOffset<serialization::BufferOperation<'fbb>> {
+    ) -> WIPOffset<serialization::buffer::Operation<'fbb>> {
         let new_text = self.new_text.as_ref().map(|new_text| {
             builder.create_string(String::from_utf16_lossy(&new_text.code_units).as_str())
         });
         let version_in_range = Some(self.version_in_range.serialize(builder));
 
-        serialization::BufferOperation::create(
+        serialization::buffer::Operation::create(
             builder,
-            &serialization::BufferOperationArgs {
+            &serialization::buffer::OperationArgs {
                 start_id: Some(&self.start_id.serialize()),
                 start_offset: self.start_offset as u64,
                 end_id: Some(&self.end_id.serialize()),
@@ -2158,7 +2158,7 @@ impl Operation {
         )
     }
 
-    pub fn deserialize<'fbb>(message: &serialization::BufferOperation<'fbb>) -> Self {
+    pub fn deserialize<'fbb>(message: &serialization::buffer::Operation<'fbb>) -> Self {
         Self {
             start_id: time::Local::deserialize(message.start_id().unwrap()),
             start_offset: message.start_offset() as usize,

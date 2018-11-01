@@ -2,11 +2,12 @@ use crate::btree::{self, SeekBias};
 use crate::buffer::{self, Buffer, Point, Text};
 use crate::message;
 use crate::operation_queue::{self, OperationQueue};
-
+use crate::serialization;
 use crate::time;
 use crate::Error;
 use crate::Oid;
 use crate::ReplicaId;
+use flatbuffers::{FlatBufferBuilder, UnionWIPOffset, WIPOffset};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -1240,6 +1241,121 @@ impl Operation {
             },
         }
     }
+
+    pub fn serialize<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> (serialization::epoch::Operation, WIPOffset<UnionWIPOffset>) {
+        use crate::serialization::epoch::{
+            EditText, EditTextArgs, FileId as FileIdType, InsertMetadata, InsertMetadataArgs,
+            Operation as OperationType, UpdateParent, UpdateParentArgs,
+        };
+
+        fn serialize_parent<'a, 'fbb>(
+            parent: &'a Option<(FileId, Arc<OsString>)>,
+            builder: &mut FlatBufferBuilder<'fbb>,
+        ) -> (
+            FileIdType,
+            Option<WIPOffset<UnionWIPOffset>>,
+            Option<flatbuffers::WIPOffset<&'fbb str>>,
+        ) {
+            if let Some((file_id, name)) = parent.as_ref() {
+                let (file_id_type, file_id) = file_id.serialize(builder);
+                (
+                    file_id_type,
+                    Some(file_id),
+                    Some(builder.create_string(name.to_string_lossy().as_ref())),
+                )
+            } else {
+                (FileIdType::NONE, None, None)
+            }
+        }
+
+        match self {
+            Operation::InsertMetadata {
+                file_id,
+                file_type,
+                parent,
+                local_timestamp,
+                lamport_timestamp,
+            } => {
+                let (file_id_type, file_id) = file_id.serialize(builder);
+                let (parent_id_type, parent_id, name_in_parent) = serialize_parent(parent, builder);
+
+                (
+                    OperationType::InsertMetadata,
+                    InsertMetadata::create(
+                        builder,
+                        &InsertMetadataArgs {
+                            file_id_type,
+                            file_id: Some(file_id),
+                            file_type: file_type.serialize(),
+                            parent_id_type,
+                            parent_id,
+                            name_in_parent,
+                            local_timestamp: Some(&local_timestamp.serialize()),
+                            lamport_timestamp: Some(&lamport_timestamp.serialize()),
+                        },
+                    )
+                    .as_union_value(),
+                )
+            }
+            Operation::UpdateParent {
+                child_id,
+                new_parent,
+                local_timestamp,
+                lamport_timestamp,
+            } => {
+                let (child_id_type, child_id) = child_id.serialize(builder);
+                let (new_parent_id_type, new_parent_id, new_name_in_parent) =
+                    serialize_parent(new_parent, builder);
+                (
+                    OperationType::UpdateParent,
+                    UpdateParent::create(
+                        builder,
+                        &UpdateParentArgs {
+                            child_id_type,
+                            child_id: Some(child_id),
+                            new_parent_id_type,
+                            new_parent_id,
+                            new_name_in_parent,
+                            local_timestamp: Some(&local_timestamp.serialize()),
+                            lamport_timestamp: Some(&lamport_timestamp.serialize()),
+                        },
+                    )
+                    .as_union_value(),
+                )
+            }
+            Operation::EditText {
+                file_id,
+                edits,
+                local_timestamp,
+                lamport_timestamp,
+            } => {
+                let (file_id_type, file_id) = file_id.serialize(builder);
+                builder.start_vector::<WIPOffset<serialization::buffer::Operation>>(edits.len());
+                for edit in edits {
+                    let edit = edit.serialize(builder);
+                    builder.push(edit);
+                }
+                let edits = builder.end_vector(edits.len());
+                (
+                    OperationType::EditText,
+                    EditText::create(
+                        builder,
+                        &EditTextArgs {
+                            file_id_type,
+                            file_id: Some(file_id),
+                            edits: Some(edits),
+                            local_timestamp: Some(&local_timestamp.serialize()),
+                            lamport_timestamp: Some(&lamport_timestamp.serialize()),
+                        },
+                    )
+                    .as_union_value(),
+                )
+            }
+        }
+    }
 }
 
 impl operation_queue::Operation for Operation {
@@ -1265,6 +1381,32 @@ impl FileId {
             },
         }
     }
+
+    fn serialize<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> (serialization::epoch::FileId, WIPOffset<UnionWIPOffset>) {
+        use crate::serialization::epoch::{
+            BaseFileId, BaseFileIdArgs, FileId as FileIdType, NewFileId, NewFileIdArgs,
+        };
+
+        match self {
+            FileId::Base(index) => (
+                FileIdType::BaseFileId,
+                BaseFileId::create(builder, &BaseFileIdArgs { index: *index }).as_union_value(),
+            ),
+            FileId::New(id) => (
+                FileIdType::NewFileId,
+                NewFileId::create(
+                    builder,
+                    &NewFileIdArgs {
+                        id: Some(&id.serialize()),
+                    },
+                )
+                .as_union_value(),
+            ),
+        }
+    }
 }
 
 impl FileType {
@@ -1272,6 +1414,13 @@ impl FileType {
         match self {
             FileType::Directory => message::mod_EpochOperation::FileType::Directory,
             FileType::Text => message::mod_EpochOperation::FileType::Text,
+        }
+    }
+
+    fn serialize(&self) -> serialization::epoch::FileType {
+        match self {
+            FileType::Directory => serialization::epoch::FileType::Directory,
+            FileType::Text => serialization::epoch::FileType::Text,
         }
     }
 }

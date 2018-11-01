@@ -12,17 +12,9 @@ table GlobalTimestamp {
   timestamps:[Timestamp];
 }
 
-table BaseFileId {
-  index:uint64;
-}
+namespace buffer;
 
-table NewFileId {
-  id:Timestamp;
-}
-
-union FileId { BaseFileId, NewFileId }
-
-table BufferOperation {
+table Operation {
   start_id:Timestamp;
   start_offset:uint64;
   end_id:Timestamp;
@@ -33,4 +25,56 @@ table BufferOperation {
   lamport_timestamp:Timestamp;
 }
 
-root_type BufferOperation;
+namespace epoch;
+
+table BaseFileId {
+  index:uint64;
+}
+
+table NewFileId {
+  id:Timestamp;
+}
+
+union FileId { BaseFileId, NewFileId }
+
+enum FileType : byte { Directory, Text }
+
+table InsertMetadata {
+  file_id:FileId;
+  file_type:FileType;
+  parent_id:FileId;
+  name_in_parent:string;
+  local_timestamp:Timestamp;
+  lamport_timestamp:Timestamp;
+}
+
+table UpdateParent {
+  child_id:FileId;
+  new_parent_id:FileId;
+  new_name_in_parent:string;
+  local_timestamp:Timestamp;
+  lamport_timestamp:Timestamp;
+}
+
+table EditText {
+  file_id:FileId;
+  edits:[buffer.Operation];
+  local_timestamp:Timestamp;
+  lamport_timestamp:Timestamp;
+}
+
+union Operation { InsertMetadata, UpdateParent, EditText }
+
+// namespace worktree;
+//
+// table StartEpoch {}
+// table EpochOperation {}
+//
+// union Operation { StartEpoch, EpochOperation }
+//
+
+table OperationEnvelope {
+   operation:Operation;
+}
+
+root_type OperationEnvelope;
