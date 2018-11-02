@@ -1112,7 +1112,7 @@ mod tests {
 
     fn deserialize_ops<I: IntoIterator<Item = Vec<u8>>>(ops: I) -> Vec<Operation> {
         ops.into_iter()
-            .filter_map(|op| Operation::deserialize(&op).unwrap())
+            .map(|op| Operation::deserialize(&op).unwrap().unwrap())
             .collect()
     }
 
