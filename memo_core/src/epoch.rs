@@ -1308,7 +1308,7 @@ impl Operation {
     pub fn from_flatbuf<'a>(
         operation_type: serialization::epoch::Operation,
         message: flatbuffers::Table<'a>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Option<Self>, Error> {
         fn parent_from_flatbuf<'a>(
             parent_id_type: serialization::epoch::FileId,
             parent_id_message: Option<flatbuffers::Table<'a>>,
@@ -1324,7 +1324,7 @@ impl Operation {
         match operation_type {
             serialization::epoch::Operation::InsertMetadata => {
                 let message = serialization::epoch::InsertMetadata::init_from_table(message);
-                Ok(Operation::InsertMetadata {
+                Ok(Some(Operation::InsertMetadata {
                     file_id: FileId::from_flatbuf(
                         message.file_id_type(),
                         message.file_id().ok_or(Error::DeserializeError)?,
@@ -1339,11 +1339,11 @@ impl Operation {
                     lamport_timestamp: time::Lamport::from_flatbuf(
                         message.lamport_timestamp().ok_or(Error::DeserializeError)?,
                     ),
-                })
+                }))
             }
             serialization::epoch::Operation::UpdateParent => {
                 let message = serialization::epoch::UpdateParent::init_from_table(message);
-                Ok(Operation::UpdateParent {
+                Ok(Some(Operation::UpdateParent {
                     child_id: FileId::from_flatbuf(
                         message.child_id_type(),
                         message.child_id().ok_or(Error::DeserializeError)?,
@@ -1359,7 +1359,7 @@ impl Operation {
                     lamport_timestamp: time::Lamport::from_flatbuf(
                         message.lamport_timestamp().ok_or(Error::DeserializeError)?,
                     ),
-                })
+                }))
             }
             serialization::epoch::Operation::EditText => {
                 let message = serialization::epoch::EditText::init_from_table(message);
@@ -1369,7 +1369,7 @@ impl Operation {
                     edits.push(buffer::Operation::from_flatbuf(&edit_messages.get(i))?);
                 }
 
-                Ok(Operation::EditText {
+                Ok(Some(Operation::EditText {
                     file_id: FileId::from_flatbuf(
                         message.file_id_type(),
                         message.file_id().ok_or(Error::DeserializeError)?,
@@ -1381,9 +1381,9 @@ impl Operation {
                     lamport_timestamp: time::Lamport::from_flatbuf(
                         message.lamport_timestamp().ok_or(Error::DeserializeError)?,
                     ),
-                })
+                }))
             }
-            serialization::epoch::Operation::NONE => Err(Error::DeserializeError),
+            serialization::epoch::Operation::NONE => Ok(None),
         }
     }
 }
