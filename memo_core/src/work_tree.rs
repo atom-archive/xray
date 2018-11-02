@@ -883,7 +883,11 @@ mod tests {
                 )
                 .unwrap();
                 network.add_peer(tree.replica_id());
-                network.broadcast(tree.replica_id(), ops.collect().wait().unwrap(), &mut rng);
+                network.broadcast(
+                    tree.replica_id(),
+                    serialize_ops(ops.collect().wait().unwrap()),
+                    &mut rng,
+                );
                 trees.push(tree);
             }
 
@@ -896,16 +900,19 @@ mod tests {
 
                 if k == 0 {
                     let ops = tree.mutate(&mut rng, 5);
-                    network.broadcast(replica_id, ops, &mut rng);
+                    network.broadcast(replica_id, serialize_ops(ops), &mut rng);
                 } else if k == 1 {
                     let head = *rng.choose(&commits).unwrap();
                     let ops = tree.reset(head).collect().wait().unwrap();
-                    network.broadcast(replica_id, ops, &mut rng);
+                    network.broadcast(replica_id, serialize_ops(ops), &mut rng);
                 } else if k == 2 {
-                    let fixup_ops = tree
-                        .apply_ops(network.receive(replica_id, &mut rng))
-                        .unwrap();
-                    network.broadcast(replica_id, fixup_ops.collect().wait().unwrap(), &mut rng);
+                    let received_ops = network.receive(replica_id, &mut rng);
+                    let fixup_ops = tree.apply_ops(deserialize_ops(received_ops)).unwrap();
+                    network.broadcast(
+                        replica_id,
+                        serialize_ops(fixup_ops.collect().wait().unwrap()),
+                        &mut rng,
+                    );
                 } else if k == 3 {
                     let buffer_id = if tree.open_buffers().is_empty() || rng.gen() {
                         tree.select_path(FileType::Text, &mut rng).map(|path| {
@@ -923,7 +930,7 @@ mod tests {
                         let text = gen_text(&mut rng);
                         observer.edit(buffer_id, start..end, text.as_str());
                         let op = tree.edit(buffer_id, Some(start..end), text).unwrap();
-                        network.broadcast(replica_id, vec![op], &mut rng);
+                        network.broadcast(replica_id, serialize_ops(Some(op)), &mut rng);
                     }
                 }
             }
@@ -932,10 +939,13 @@ mod tests {
                 for replica_index in 0..PEERS {
                     let tree = &mut trees[replica_index];
                     let replica_id = tree.replica_id();
-                    let fixup_ops = tree
-                        .apply_ops(network.receive(replica_id, &mut rng))
-                        .unwrap();
-                    network.broadcast(replica_id, fixup_ops.collect().wait().unwrap(), &mut rng);
+                    let received_ops = network.receive(replica_id, &mut rng);
+                    let fixup_ops = tree.apply_ops(deserialize_ops(received_ops)).unwrap();
+                    network.broadcast(
+                        replica_id,
+                        serialize_ops(fixup_ops.collect().wait().unwrap()),
+                        &mut rng,
+                    );
                 }
             }
 
@@ -1094,6 +1104,16 @@ mod tests {
             .collect()
             .wait()
             .unwrap();
+    }
+
+    fn serialize_ops<I: IntoIterator<Item = Operation>>(ops: I) -> Vec<Vec<u8>> {
+        ops.into_iter().map(|op| op.serialize()).collect()
+    }
+
+    fn deserialize_ops<I: IntoIterator<Item = Vec<u8>>>(ops: I) -> Vec<Operation> {
+        ops.into_iter()
+            .map(|op| Operation::deserialize(&op).unwrap())
+            .collect()
     }
 
     impl WorkTree {
