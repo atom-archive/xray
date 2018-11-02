@@ -2140,17 +2140,35 @@ impl Operation {
         )
     }
 
-    pub fn from_flatbuf<'fbb>(message: &serialization::buffer::Operation<'fbb>) -> Self {
-        Self {
-            start_id: time::Local::from_flatbuf(message.start_id().unwrap()),
+    pub fn from_flatbuf<'fbb>(
+        message: &serialization::buffer::Operation<'fbb>,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            start_id: time::Local::from_flatbuf(
+                message.start_id().ok_or(crate::Error::DeserializeError)?,
+            ),
             start_offset: message.start_offset() as usize,
-            end_id: time::Local::from_flatbuf(message.end_id().unwrap()),
+            end_id: time::Local::from_flatbuf(
+                message.end_id().ok_or(crate::Error::DeserializeError)?,
+            ),
             end_offset: message.end_offset() as usize,
-            version_in_range: time::Global::from_flatbuf(message.version_in_range().unwrap()),
+            version_in_range: time::Global::from_flatbuf(
+                message
+                    .version_in_range()
+                    .ok_or(crate::Error::DeserializeError)?,
+            )?,
             new_text: message.new_text().map(|new_text| Arc::new(new_text.into())),
-            local_timestamp: time::Local::from_flatbuf(message.local_timestamp().unwrap()),
-            lamport_timestamp: time::Lamport::from_flatbuf(message.lamport_timestamp().unwrap()),
-        }
+            local_timestamp: time::Local::from_flatbuf(
+                message
+                    .local_timestamp()
+                    .ok_or(crate::Error::DeserializeError)?,
+            ),
+            lamport_timestamp: time::Lamport::from_flatbuf(
+                message
+                    .lamport_timestamp()
+                    .ok_or(crate::Error::DeserializeError)?,
+            ),
+        })
     }
 }
 

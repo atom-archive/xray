@@ -22,6 +22,7 @@ pub type Oid = [u8; 20];
 #[derive(Debug)]
 pub enum Error {
     IoError(io::Error),
+    DeserializeError,
     InvalidPath(Cow<'static, str>),
     InvalidOperations,
     InvalidFileId(Cow<'static, str>),

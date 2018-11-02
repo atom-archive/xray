@@ -1,4 +1,5 @@
 use crate::serialization;
+use crate::Error;
 use crate::ReplicaId;
 use crate::ReplicaIdExt;
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
@@ -153,14 +154,16 @@ impl Global {
         )
     }
 
-    pub fn from_flatbuf<'fbb>(message: serialization::GlobalTimestamp<'fbb>) -> Self {
+    pub fn from_flatbuf<'fbb>(
+        message: serialization::GlobalTimestamp<'fbb>,
+    ) -> Result<Self, Error> {
         let mut local_timestamps = HashMap::new();
-        for local_timestamp in message.timestamps().unwrap() {
+        for local_timestamp in message.timestamps().ok_or(Error::DeserializeError)? {
             let replica_id = ReplicaId::from_flatbuf(local_timestamp.replica_id());
             let value = local_timestamp.value();
             local_timestamps.insert(replica_id, value);
         }
-        Global(Arc::new(local_timestamps))
+        Ok(Global(Arc::new(local_timestamps)))
     }
 }
 

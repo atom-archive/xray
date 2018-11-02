@@ -1308,7 +1308,7 @@ impl Operation {
     pub fn from_flatbuf<'a>(
         operation_type: serialization::epoch::Operation,
         message: flatbuffers::Table<'a>,
-    ) -> Option<Self> {
+    ) -> Result<Self, Error> {
         fn parent_from_flatbuf<'a>(
             parent_id_type: serialization::epoch::FileId,
             parent_id_message: Option<flatbuffers::Table<'a>>,
@@ -1324,10 +1324,10 @@ impl Operation {
         match operation_type {
             serialization::epoch::Operation::InsertMetadata => {
                 let message = serialization::epoch::InsertMetadata::init_from_table(message);
-                Some(Operation::InsertMetadata {
+                Ok(Operation::InsertMetadata {
                     file_id: FileId::from_flatbuf(
                         message.file_id_type(),
-                        message.file_id().unwrap(),
+                        message.file_id().ok_or(Error::DeserializeError)?,
                     ),
                     file_type: FileType::from_flatbuf(&message.file_type()),
                     parent: parent_from_flatbuf(
@@ -1337,49 +1337,53 @@ impl Operation {
                     ),
                     local_timestamp: time::Local::from_flatbuf(&message.local_timestamp().unwrap()),
                     lamport_timestamp: time::Lamport::from_flatbuf(
-                        &message.lamport_timestamp().unwrap(),
+                        message.lamport_timestamp().ok_or(Error::DeserializeError)?,
                     ),
                 })
             }
             serialization::epoch::Operation::UpdateParent => {
                 let message = serialization::epoch::UpdateParent::init_from_table(message);
-                Some(Operation::UpdateParent {
+                Ok(Operation::UpdateParent {
                     child_id: FileId::from_flatbuf(
                         message.child_id_type(),
-                        message.child_id().unwrap(),
+                        message.child_id().ok_or(Error::DeserializeError)?,
                     ),
                     new_parent: parent_from_flatbuf(
                         message.new_parent_id_type(),
                         message.new_parent_id(),
                         message.new_name_in_parent(),
                     ),
-                    local_timestamp: time::Local::from_flatbuf(&message.local_timestamp().unwrap()),
+                    local_timestamp: time::Local::from_flatbuf(
+                        message.local_timestamp().ok_or(Error::DeserializeError)?,
+                    ),
                     lamport_timestamp: time::Lamport::from_flatbuf(
-                        &message.lamport_timestamp().unwrap(),
+                        message.lamport_timestamp().ok_or(Error::DeserializeError)?,
                     ),
                 })
             }
             serialization::epoch::Operation::EditText => {
                 let message = serialization::epoch::EditText::init_from_table(message);
-                let edit_messages = message.edits().unwrap();
+                let edit_messages = message.edits().ok_or(Error::DeserializeError)?;
                 let mut edits = Vec::with_capacity(edit_messages.len());
                 for i in 0..edit_messages.len() {
-                    edits.push(buffer::Operation::from_flatbuf(&edit_messages.get(i)));
+                    edits.push(buffer::Operation::from_flatbuf(&edit_messages.get(i))?);
                 }
 
-                Some(Operation::EditText {
+                Ok(Operation::EditText {
                     file_id: FileId::from_flatbuf(
                         message.file_id_type(),
-                        message.file_id().unwrap(),
+                        message.file_id().ok_or(Error::DeserializeError)?,
                     ),
                     edits,
-                    local_timestamp: time::Local::from_flatbuf(&message.local_timestamp().unwrap()),
+                    local_timestamp: time::Local::from_flatbuf(
+                        message.local_timestamp().ok_or(Error::DeserializeError)?,
+                    ),
                     lamport_timestamp: time::Lamport::from_flatbuf(
-                        &message.lamport_timestamp().unwrap(),
+                        message.lamport_timestamp().ok_or(Error::DeserializeError)?,
                     ),
                 })
             }
-            serialization::epoch::Operation::NONE => None,
+            serialization::epoch::Operation::NONE => Err(Error::DeserializeError),
         }
     }
 }

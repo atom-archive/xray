@@ -553,7 +553,7 @@ impl Operation {
         bytes
     }
 
-    pub fn deserialize<'a>(buffer: &'a [u8]) -> Option<Self> {
+    pub fn deserialize<'a>(buffer: &'a [u8]) -> Result<Self, Error> {
         use crate::serialization::worktree::OperationEnvelope;
         let root = flatbuffers::get_root::<OperationEnvelope<'a>>(buffer);
         Self::from_flatbuf(root)
@@ -613,15 +613,14 @@ impl Operation {
 
     pub fn from_flatbuf<'fbb>(
         message: serialization::worktree::OperationEnvelope<'fbb>,
-    ) -> Option<Self> {
+    ) -> Result<Self, Error> {
+        let operation = message.operation().ok_or(Error::DeserializeError)?;
         match message.operation_type() {
             serialization::worktree::Operation::StartEpoch => {
-                let message = serialization::worktree::StartEpoch::init_from_table(
-                    message.operation().unwrap(),
-                );
-
-                Some(Operation::StartEpoch {
-                    epoch_id: time::Lamport::from_flatbuf(message.epoch_id().unwrap()),
+                let message = serialization::worktree::StartEpoch::init_from_table(operation);
+                let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
+                Ok(Operation::StartEpoch {
+                    epoch_id: time::Lamport::from_flatbuf(epoch_id),
                     head: message.head().map(|head| {
                         let mut oid = [0; 20];
                         oid.copy_from_slice(head);
@@ -630,20 +629,16 @@ impl Operation {
                 })
             }
             serialization::worktree::Operation::EpochOperation => {
-                let message = serialization::worktree::EpochOperation::init_from_table(
-                    message.operation().unwrap(),
-                );
-
-                epoch::Operation::from_flatbuf(
-                    message.operation_type(),
-                    message.operation().unwrap(),
-                )
-                .map(|operation| Operation::EpochOperation {
-                    epoch_id: time::Lamport::from_flatbuf(message.epoch_id().unwrap()),
-                    operation,
+                let message = serialization::worktree::EpochOperation::init_from_table(operation);
+                let operation = message.operation().ok_or(Error::DeserializeError)?;
+                let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
+                let epoch_op = epoch::Operation::from_flatbuf(message.operation_type(), operation)?;
+                Ok(Operation::EpochOperation {
+                    epoch_id: time::Lamport::from_flatbuf(epoch_id),
+                    operation: epoch_op,
                 })
             }
-            serialization::worktree::Operation::NONE => None,
+            serialization::worktree::Operation::NONE => Err(Error::DeserializeError),
         }
     }
 }

@@ -465,9 +465,6 @@ impl JsValueExt for JsValue {
             .map_err(|_| JsValue::from_str("Operation must be Uint8Array"))?;
         let mut bytes = Vec::with_capacity(js_bytes.byte_length() as usize);
         js_bytes.for_each(&mut |byte, _, _| bytes.push(byte));
-
-        memo::Operation::deserialize(&bytes)
-            .ok_or("unknown operation type")
-            .map_js_err()
+        memo::Operation::deserialize(&bytes).map_js_err()
     }
 }
