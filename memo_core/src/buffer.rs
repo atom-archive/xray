@@ -2119,15 +2119,14 @@ impl Operation {
     pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
-    ) -> WIPOffset<serialization::buffer::Operation<'fbb>> {
+    ) -> WIPOffset<serialization::buffer::OperationEnvelope<'fbb>> {
         let new_text = self.new_text.as_ref().map(|new_text| {
             builder.create_string(String::from_utf16_lossy(&new_text.code_units).as_str())
         });
         let version_in_range = Some(self.version_in_range.to_flatbuf(builder));
-
-        serialization::buffer::Operation::create(
+        let edit = serialization::buffer::Edit::create(
             builder,
-            &serialization::buffer::OperationArgs {
+            &serialization::buffer::EditArgs {
                 start_id: Some(&self.start_id.to_flatbuf()),
                 start_offset: self.start_offset as u64,
                 end_id: Some(&self.end_id.to_flatbuf()),
@@ -2137,38 +2136,53 @@ impl Operation {
                 local_timestamp: Some(&self.local_timestamp.to_flatbuf()),
                 lamport_timestamp: Some(&self.lamport_timestamp.to_flatbuf()),
             },
+        );
+        serialization::buffer::OperationEnvelope::create(
+            builder,
+            &serialization::buffer::OperationEnvelopeArgs {
+                operation_type: serialization::buffer::Operation::Edit,
+                operation: Some(edit.as_union_value()),
+            },
         )
     }
 
     pub fn from_flatbuf<'fbb>(
-        message: &serialization::buffer::Operation<'fbb>,
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            start_id: time::Local::from_flatbuf(
-                message.start_id().ok_or(crate::Error::DeserializeError)?,
-            ),
-            start_offset: message.start_offset() as usize,
-            end_id: time::Local::from_flatbuf(
-                message.end_id().ok_or(crate::Error::DeserializeError)?,
-            ),
-            end_offset: message.end_offset() as usize,
-            version_in_range: time::Global::from_flatbuf(
-                message
-                    .version_in_range()
-                    .ok_or(crate::Error::DeserializeError)?,
-            )?,
-            new_text: message.new_text().map(|new_text| Arc::new(new_text.into())),
-            local_timestamp: time::Local::from_flatbuf(
-                message
-                    .local_timestamp()
-                    .ok_or(crate::Error::DeserializeError)?,
-            ),
-            lamport_timestamp: time::Lamport::from_flatbuf(
-                message
-                    .lamport_timestamp()
-                    .ok_or(crate::Error::DeserializeError)?,
-            ),
-        })
+        message: &serialization::buffer::OperationEnvelope<'fbb>,
+    ) -> Result<Option<Self>, crate::Error> {
+        match message.operation_type() {
+            serialization::buffer::Operation::Edit => {
+                let message = serialization::buffer::Edit::init_from_table(
+                    message.operation().ok_or(crate::Error::DeserializeError)?,
+                );
+                Ok(Some(Self {
+                    start_id: time::Local::from_flatbuf(
+                        message.start_id().ok_or(crate::Error::DeserializeError)?,
+                    ),
+                    start_offset: message.start_offset() as usize,
+                    end_id: time::Local::from_flatbuf(
+                        message.end_id().ok_or(crate::Error::DeserializeError)?,
+                    ),
+                    end_offset: message.end_offset() as usize,
+                    version_in_range: time::Global::from_flatbuf(
+                        message
+                            .version_in_range()
+                            .ok_or(crate::Error::DeserializeError)?,
+                    )?,
+                    new_text: message.new_text().map(|new_text| Arc::new(new_text.into())),
+                    local_timestamp: time::Local::from_flatbuf(
+                        message
+                            .local_timestamp()
+                            .ok_or(crate::Error::DeserializeError)?,
+                    ),
+                    lamport_timestamp: time::Lamport::from_flatbuf(
+                        message
+                            .lamport_timestamp()
+                            .ok_or(crate::Error::DeserializeError)?,
+                    ),
+                }))
+            }
+            serialization::buffer::Operation::NONE => Ok(None),
+        }
     }
 }
 

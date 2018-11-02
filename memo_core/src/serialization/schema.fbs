@@ -14,7 +14,7 @@ table GlobalTimestamp {
 
 namespace buffer;
 
-table Operation {
+table Edit {
   start_id:Timestamp;
   start_offset:uint64;
   end_id:Timestamp;
@@ -23,6 +23,12 @@ table Operation {
   new_text:string;
   local_timestamp:Timestamp;
   lamport_timestamp:Timestamp;
+}
+
+union Operation { Edit }
+
+table OperationEnvelope {
+  operation: Operation;
 }
 
 namespace epoch;
@@ -56,14 +62,14 @@ table UpdateParent {
   lamport_timestamp:Timestamp;
 }
 
-table EditText {
+table BufferOperation {
   file_id:FileId;
-  edits:[buffer.Operation];
+  operations:[buffer.OperationEnvelope];
   local_timestamp:Timestamp;
   lamport_timestamp:Timestamp;
 }
 
-union Operation { InsertMetadata, UpdateParent, EditText }
+union Operation { InsertMetadata, UpdateParent, BufferOperation }
 
 namespace worktree;
 

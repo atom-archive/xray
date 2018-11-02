@@ -95,9 +95,9 @@ pub enum Operation {
         local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
     },
-    EditText {
+    BufferOperation {
         file_id: FileId,
-        edits: Vec<buffer::Operation>,
+        operations: Vec<buffer::Operation>,
         local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
     },
@@ -491,17 +491,21 @@ impl Epoch {
                     })]);
                 self.child_refs.edit(&mut child_ref_edits);
             }
-            Operation::EditText { file_id, edits, .. } => match self
+            Operation::BufferOperation {
+                file_id,
+                operations,
+                ..
+            } => match self
                 .text_files
                 .entry(file_id)
                 .or_insert_with(|| TextFile::Deferred(Vec::new()))
             {
-                TextFile::Deferred(operations) => {
-                    operations.extend(edits);
+                TextFile::Deferred(deferred_operations) => {
+                    deferred_operations.extend(operations);
                 }
                 TextFile::Buffered(buffer) => {
                     buffer
-                        .apply_ops(edits, &mut self.local_clock, lamport_clock)
+                        .apply_ops(operations, &mut self.local_clock, lamport_clock)
                         .map_err(|_| Error::InvalidOperation)?;
                 }
             },
@@ -514,7 +518,7 @@ impl Epoch {
         match op {
             Operation::InsertMetadata { .. } => true,
             Operation::UpdateParent { child_id, .. } => self.metadata(*child_id).is_ok(),
-            Operation::EditText { file_id, .. } => self.metadata(*file_id).is_ok(),
+            Operation::BufferOperation { file_id, .. } => self.metadata(*file_id).is_ok(),
         }
     }
 
@@ -658,12 +662,13 @@ impl Epoch {
         T: Into<Text>,
     {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&file_id) {
-            let edits = buffer.edit(old_ranges, new_text, &mut self.local_clock, lamport_clock);
+            let operations =
+                buffer.edit(old_ranges, new_text, &mut self.local_clock, lamport_clock);
             let local_timestamp = self.local_clock.tick();
             self.version.observe(local_timestamp);
-            Ok(Operation::EditText {
+            Ok(Operation::BufferOperation {
                 file_id,
-                edits,
+                operations,
                 local_timestamp,
                 lamport_timestamp: lamport_clock.tick(),
             })
@@ -684,12 +689,13 @@ impl Epoch {
         T: Into<Text>,
     {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&file_id) {
-            let edits = buffer.edit_2d(old_ranges, new_text, &mut self.local_clock, lamport_clock);
+            let operations =
+                buffer.edit_2d(old_ranges, new_text, &mut self.local_clock, lamport_clock);
             let local_timestamp = self.local_clock.tick();
             self.version.observe(local_timestamp);
-            Ok(Operation::EditText {
+            Ok(Operation::BufferOperation {
                 file_id,
-                edits,
+                operations,
                 local_timestamp,
                 lamport_timestamp: lamport_clock.tick(),
             })
@@ -1168,7 +1174,7 @@ impl Operation {
             Operation::UpdateParent {
                 local_timestamp, ..
             } => *local_timestamp,
-            Operation::EditText {
+            Operation::BufferOperation {
                 local_timestamp, ..
             } => *local_timestamp,
         }
@@ -1182,7 +1188,7 @@ impl Operation {
             Operation::UpdateParent {
                 lamport_timestamp, ..
             } => *lamport_timestamp,
-            Operation::EditText {
+            Operation::BufferOperation {
                 lamport_timestamp, ..
             } => *lamport_timestamp,
         }
@@ -1193,8 +1199,8 @@ impl Operation {
         builder: &mut FlatBufferBuilder<'fbb>,
     ) -> (serialization::epoch::Operation, WIPOffset<UnionWIPOffset>) {
         use crate::serialization::epoch::{
-            EditText, EditTextArgs, FileId as FileIdType, InsertMetadata, InsertMetadataArgs,
-            Operation as OperationType, UpdateParent, UpdateParentArgs,
+            BufferOperation, BufferOperationArgs, FileId as FileIdType, InsertMetadata,
+            InsertMetadataArgs, Operation as OperationType, UpdateParent, UpdateParentArgs,
         };
 
         fn parent_to_flatbuf<'a, 'fbb>(
@@ -1273,28 +1279,27 @@ impl Operation {
                     .as_union_value(),
                 )
             }
-            Operation::EditText {
+            Operation::BufferOperation {
                 file_id,
-                edits,
+                operations,
                 local_timestamp,
                 lamport_timestamp,
             } => {
                 let (file_id_type, file_id) = file_id.to_flatbuf(builder);
-
-                let edit_flatbufs = edits
+                let op_flatbufs = &operations
                     .iter()
                     .map(|e| e.to_flatbuf(builder))
                     .collect::<Vec<_>>();
-                let edits = builder.create_vector(&edit_flatbufs);
+                let operations = builder.create_vector(op_flatbufs);
 
                 (
-                    OperationType::EditText,
-                    EditText::create(
+                    OperationType::BufferOperation,
+                    BufferOperation::create(
                         builder,
-                        &EditTextArgs {
+                        &BufferOperationArgs {
                             file_id_type,
                             file_id: Some(file_id),
-                            edits: Some(edits),
+                            operations: Some(operations),
                             local_timestamp: Some(&local_timestamp.to_flatbuf()),
                             lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
                         },
@@ -1361,20 +1366,22 @@ impl Operation {
                     ),
                 }))
             }
-            serialization::epoch::Operation::EditText => {
-                let message = serialization::epoch::EditText::init_from_table(message);
-                let edit_messages = message.edits().ok_or(Error::DeserializeError)?;
-                let mut edits = Vec::with_capacity(edit_messages.len());
-                for i in 0..edit_messages.len() {
-                    edits.push(buffer::Operation::from_flatbuf(&edit_messages.get(i))?);
+            serialization::epoch::Operation::BufferOperation => {
+                let message = serialization::epoch::BufferOperation::init_from_table(message);
+                let op_messages = message.operations().ok_or(Error::DeserializeError)?;
+                let mut operations = Vec::with_capacity(op_messages.len());
+                for i in 0..op_messages.len() {
+                    if let Some(op) = buffer::Operation::from_flatbuf(&op_messages.get(i))? {
+                        operations.push(op);
+                    }
                 }
 
-                Ok(Some(Operation::EditText {
+                Ok(Some(Operation::BufferOperation {
                     file_id: FileId::from_flatbuf(
                         message.file_id_type(),
                         message.file_id().ok_or(Error::DeserializeError)?,
                     ),
-                    edits,
+                    operations,
                     local_timestamp: time::Local::from_flatbuf(
                         message.local_timestamp().ok_or(Error::DeserializeError)?,
                     ),
