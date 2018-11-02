@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+message EpochOperation {
+  oneof variant {
+    InsertMetadata insert_metadata = 1;
+    UpdateParent update_parent = 2;
+    EditText edit_text = 3;
+  }
+
+  message InsertMetadata {
+    FileId file_id = 1;
+    FileType file_type = 2;
+    FileId parent_id = 3;
+    string name_in_parent = 4;
+    Timestamp local_timestamp = 5;
+    Timestamp lamport_timestamp = 6;
+  }
+
+  message UpdateParent {
+    FileId child_id = 1;
+    FileId new_parent_id = 2;
+    string new_name_in_parent = 3;
+    Timestamp local_timestamp = 4;
+    Timestamp lamport_timestamp = 5;
+  }
+
+  message EditText {
+    FileId file_id = 1;
+    repeated BufferOperation edits = 2;
+    Timestamp local_timestamp = 3;
+    Timestamp lamport_timestamp = 4;
+  }
+
+  enum FileType {
+    Directory = 0;
+    Text = 1;
+  }
+}
+
+message BufferOperation {
+  Timestamp start_id = 1;
+  uint64 start_offset = 2;
+  Timestamp end_id = 3;
+  uint64 end_offset = 4;
+  GlobalTimestamp version_in_range = 5;
+  string new_text = 6;
+  Timestamp local_timestamp = 7;
+  Timestamp lamport_timestamp = 8;
+}
+
+message FileId {
+  oneof variant {
+    uint64 Base = 1;
+    Timestamp New = 2;
+  }
+}
+
+message Timestamp {
+   ReplicaId replica_id = 1;
+   uint64 value = 2;
+}
+
+message GlobalTimestamp {
+  repeated Timestamp timestamps = 1;
+}
+
+message ReplicaId {
+  bytes uuid = 1;
+}

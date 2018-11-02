@@ -1,9 +1,11 @@
 use crate::btree::{self, SeekBias};
 use crate::operation_queue::{self, OperationQueue};
+use crate::serialization;
 use crate::time;
 use crate::ReplicaId;
 use crate::UserId;
 use difference::{Changeset, Difference};
+use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
@@ -109,7 +111,7 @@ pub struct Insertion {
     parent_id: time::Local,
     offset_in_parent: usize,
     text: Arc<Text>,
-    timestamp: time::Lamport,
+    lamport_timestamp: time::Lamport,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -173,18 +175,18 @@ struct InsertionSplitSummary {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Operation {
-    id: time::Local,
     start_id: time::Local,
     start_offset: usize,
     end_id: time::Local,
     end_offset: usize,
     version_in_range: time::Global,
-    timestamp: time::Lamport,
     #[serde(
         serialize_with = "serialize_op_text",
         deserialize_with = "deserialize_op_text"
     )]
     new_text: Option<Arc<Text>>,
+    local_timestamp: time::Local,
+    lamport_timestamp: time::Lamport,
 }
 
 impl Buffer {
@@ -200,7 +202,7 @@ impl Buffer {
             parent_id: time::Local::default(),
             offset_in_parent: 0,
             text: Arc::new(base_text.into()),
-            timestamp: time::Lamport::default(),
+            lamport_timestamp: time::Lamport::default(),
         };
 
         insertion_splits.insert(
@@ -340,7 +342,7 @@ impl Buffer {
             lamport_clock,
         );
         if let Some(op) = ops.last() {
-            self.version.observe(op.id);
+            self.version.observe(op.local_timestamp);
         }
         ops
     }
@@ -500,7 +502,7 @@ impl Buffer {
             if self.can_apply_op(&op) {
                 self.apply_op(op, local_clock, lamport_clock)?;
             } else {
-                self.deferred_replicas.insert(op.id.replica_id);
+                self.deferred_replicas.insert(op.local_timestamp.replica_id);
                 deferred_ops.push(op);
             }
         }
@@ -516,14 +518,14 @@ impl Buffer {
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
         self.apply_edit(
-            op.id,
             op.start_id,
             op.start_offset,
             op.end_id,
             op.end_offset,
             op.new_text.as_ref().cloned(),
             &op.version_in_range,
-            op.timestamp,
+            op.local_timestamp,
+            op.lamport_timestamp,
             local_clock,
             lamport_clock,
         )?;
@@ -534,18 +536,18 @@ impl Buffer {
 
     fn apply_edit(
         &mut self,
-        id: time::Local,
         start_id: time::Local,
         start_offset: usize,
         end_id: time::Local,
         end_offset: usize,
         new_text: Option<Arc<Text>>,
         version_in_range: &time::Global,
-        timestamp: time::Lamport,
+        local_timestamp: time::Local,
+        lamport_timestamp: time::Lamport,
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
-        if id.seq <= self.version.get(id.replica_id) {
+        if self.version.observed(local_timestamp) {
             return Ok(());
         }
 
@@ -586,14 +588,14 @@ impl Buffer {
                 let insertion = if let Some(new_text) = new_text.take() {
                     Some(
                         self.build_fragment_to_insert(
-                            id,
                             before_range
                                 .as_ref()
                                 .or(cursor.prev_item().as_ref())
                                 .unwrap(),
                             within_range.as_ref().or(after_range.as_ref()),
                             new_text,
-                            timestamp,
+                            local_timestamp,
+                            lamport_timestamp,
                         ),
                     )
                 } else {
@@ -607,7 +609,7 @@ impl Buffer {
                 }
                 if let Some(mut fragment) = within_range {
                     if version_in_range.observed(fragment.insertion.id) {
-                        fragment.deletions.insert(id);
+                        fragment.deletions.insert(local_timestamp);
                     }
                     new_fragments.push(fragment);
                 }
@@ -615,19 +617,19 @@ impl Buffer {
                     new_fragments.push(fragment);
                 }
             } else {
-                if new_text.is_some() && timestamp > fragment.insertion.timestamp {
+                if new_text.is_some() && lamport_timestamp > fragment.insertion.lamport_timestamp {
                     new_fragments.push(self.build_fragment_to_insert(
-                        id,
                         cursor.prev_item().as_ref().unwrap(),
                         Some(&fragment),
                         new_text.take().unwrap(),
-                        timestamp,
+                        local_timestamp,
+                        lamport_timestamp,
                     ));
                 }
 
                 if fragment.id < end_fragment_id && version_in_range.observed(fragment.insertion.id)
                 {
-                    fragment.deletions.insert(id);
+                    fragment.deletions.insert(local_timestamp);
                 }
                 new_fragments.push(fragment);
             }
@@ -637,19 +639,19 @@ impl Buffer {
 
         if let Some(new_text) = new_text {
             new_fragments.push(self.build_fragment_to_insert(
-                id,
                 cursor.prev_item().as_ref().unwrap(),
                 None,
                 new_text,
-                timestamp,
+                local_timestamp,
+                lamport_timestamp,
             ));
         }
 
         new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
-        self.version.observe(id);
-        local_clock.observe(id);
-        lamport_clock.observe(timestamp);
+        self.version.observe(local_timestamp);
+        local_clock.observe(local_timestamp);
+        lamport_clock.observe(lamport_timestamp);
         Ok(())
     }
 
@@ -664,7 +666,7 @@ impl Buffer {
             if self.can_apply_op(&op) {
                 self.apply_op(op, local_clock, lamport_clock)?;
             } else {
-                self.deferred_replicas.insert(op.id.replica_id);
+                self.deferred_replicas.insert(op.local_timestamp.replica_id);
                 deferred_ops.push(op);
             }
         }
@@ -673,7 +675,9 @@ impl Buffer {
     }
 
     fn can_apply_op(&self, op: &Operation) -> bool {
-        !self.deferred_replicas.contains(&op.id.replica_id)
+        !self
+            .deferred_replicas
+            .contains(&op.local_timestamp.replica_id)
             && self.version.observed(op.start_id)
             && self.version.observed(op.end_id)
             && op.version_in_range <= self.version
@@ -725,8 +729,8 @@ impl Buffer {
         let mut end_offset = None;
         let mut version_in_range = time::Global::new();
 
-        let mut op_id = local_clock.tick();
-        let mut op_timestamp = lamport_clock.tick();
+        let mut local_timestamp = local_clock.tick();
+        let mut lamport_timestamp = lamport_clock.tick();
 
         while cur_range.is_some() && cursor.item().is_some() {
             let mut fragment = cursor.item().unwrap();
@@ -773,11 +777,11 @@ impl Buffer {
 
                     if let Some(new_text) = new_text.clone() {
                         let new_fragment = self.build_fragment_to_insert(
-                            op_id,
                             &new_fragments.last().unwrap(),
                             Some(&fragment),
                             new_text,
-                            op_timestamp,
+                            local_timestamp,
+                            lamport_timestamp,
                         );
                         new_fragments.push(new_fragment);
                     }
@@ -790,7 +794,7 @@ impl Buffer {
                         prefix.id =
                             FragmentId::between(&new_fragments.last().unwrap().id, &fragment.id);
                         if fragment.is_visible() {
-                            prefix.deletions.insert(op_id);
+                            prefix.deletions.insert(local_timestamp);
                         }
                         fragment.start_offset = prefix.end_offset;
                         new_fragments.push(prefix.clone());
@@ -806,7 +810,7 @@ impl Buffer {
                 } else {
                     version_in_range.observe(fragment.insertion.id);
                     if fragment.is_visible() {
-                        fragment.deletions.insert(op_id);
+                        fragment.deletions.insert(local_timestamp);
                     }
                 }
 
@@ -815,14 +819,14 @@ impl Buffer {
                 // loop and find the first fragment that the splice does not contain fully.
                 if range.end <= fragment_end {
                     ops.push(Operation {
-                        id: op_id,
                         start_id: start_id.unwrap(),
                         start_offset: start_offset.unwrap(),
                         end_id: end_id.unwrap(),
                         end_offset: end_offset.unwrap(),
-                        new_text: new_text.clone(),
-                        timestamp: op_timestamp,
                         version_in_range,
+                        new_text: new_text.clone(),
+                        local_timestamp,
+                        lamport_timestamp,
                     });
 
                     start_id = None;
@@ -832,8 +836,8 @@ impl Buffer {
                     version_in_range = time::Global::new();
                     cur_range = old_ranges.next();
                     if cur_range.is_some() {
-                        op_id = local_clock.tick();
-                        op_timestamp = lamport_clock.tick();
+                        local_timestamp = local_clock.tick();
+                        lamport_timestamp = lamport_clock.tick();
                     }
                 } else {
                     break;
@@ -858,7 +862,7 @@ impl Buffer {
                     fragment_end = fragment_start + fragment.len();
                     if range.start < fragment_start && range.end >= fragment_end {
                         if fragment.is_visible() {
-                            fragment.deletions.insert(op_id);
+                            fragment.deletions.insert(local_timestamp);
                         }
                         version_in_range.observe(fragment.insertion.id);
                         new_fragments.push(fragment.clone());
@@ -868,14 +872,14 @@ impl Buffer {
                             end_id = Some(fragment.insertion.id);
                             end_offset = Some(fragment.end_offset);
                             ops.push(Operation {
-                                id: op_id,
                                 start_id: start_id.unwrap(),
                                 start_offset: start_offset.unwrap(),
                                 end_id: end_id.unwrap(),
                                 end_offset: end_offset.unwrap(),
-                                new_text: new_text.clone(),
-                                timestamp: op_timestamp,
                                 version_in_range,
+                                new_text: new_text.clone(),
+                                local_timestamp,
+                                lamport_timestamp,
                             });
 
                             start_id = None;
@@ -886,8 +890,8 @@ impl Buffer {
 
                             cur_range = old_ranges.next();
                             if cur_range.is_some() {
-                                op_id = local_clock.tick();
-                                op_timestamp = lamport_clock.tick();
+                                local_timestamp = local_clock.tick();
+                                lamport_timestamp = lamport_clock.tick();
                             }
                             break;
                         }
@@ -913,23 +917,23 @@ impl Buffer {
             debug_assert_eq!(old_ranges.next(), None);
             let last_fragment = new_fragments.last().unwrap();
             ops.push(Operation {
-                id: op_id,
                 start_id: last_fragment.insertion.id,
                 start_offset: last_fragment.end_offset,
                 end_id: last_fragment.insertion.id,
                 end_offset: last_fragment.end_offset,
-                new_text: new_text.clone(),
-                timestamp: op_timestamp,
                 version_in_range: time::Global::new(),
+                new_text: new_text.clone(),
+                local_timestamp,
+                lamport_timestamp,
             });
 
             if let Some(new_text) = new_text {
                 new_fragments.push(self.build_fragment_to_insert(
-                    op_id,
                     &last_fragment,
                     None,
                     new_text,
-                    op_timestamp,
+                    local_timestamp,
+                    lamport_timestamp,
                 ));
             }
         } else {
@@ -1028,11 +1032,11 @@ impl Buffer {
 
     fn build_fragment_to_insert(
         &mut self,
-        edit_id: time::Local,
         prev_fragment: &Fragment,
         next_fragment: Option<&Fragment>,
         text: Arc<Text>,
-        timestamp: time::Lamport,
+        local_timestamp: time::Local,
+        lamport_timestamp: time::Lamport,
     ) -> Fragment {
         let new_fragment_id = FragmentId::between(
             &prev_fragment.id,
@@ -1046,16 +1050,16 @@ impl Buffer {
             extent: text.len(),
             fragment_id: new_fragment_id.clone(),
         });
-        self.insertion_splits.insert(edit_id, split_tree);
+        self.insertion_splits.insert(local_timestamp, split_tree);
 
         Fragment::new(
             new_fragment_id,
             Insertion {
-                id: edit_id,
+                id: local_timestamp,
                 parent_id: prev_fragment.insertion.id,
                 offset_in_parent: prev_fragment.end_offset,
                 text,
-                timestamp,
+                lamport_timestamp,
             },
         )
     }
@@ -2015,7 +2019,7 @@ impl btree::Item for Fragment {
             let (longest_row, longest_row_len) = self
                 .insertion
                 .text
-                .longest_row_in_range(self.start_offset..self.end_offset)
+                .longest_row_in_range(self.start_offset as usize..self.end_offset as usize)
                 .unwrap();
             FragmentSummary {
                 extent: self.len(),
@@ -2111,9 +2115,66 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
     }
 }
 
+impl Operation {
+    pub fn to_flatbuf<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::buffer::Operation<'fbb>> {
+        let new_text = self.new_text.as_ref().map(|new_text| {
+            builder.create_string(String::from_utf16_lossy(&new_text.code_units).as_str())
+        });
+        let version_in_range = Some(self.version_in_range.to_flatbuf(builder));
+
+        serialization::buffer::Operation::create(
+            builder,
+            &serialization::buffer::OperationArgs {
+                start_id: Some(&self.start_id.to_flatbuf()),
+                start_offset: self.start_offset as u64,
+                end_id: Some(&self.end_id.to_flatbuf()),
+                end_offset: self.end_offset as u64,
+                version_in_range,
+                new_text,
+                local_timestamp: Some(&self.local_timestamp.to_flatbuf()),
+                lamport_timestamp: Some(&self.lamport_timestamp.to_flatbuf()),
+            },
+        )
+    }
+
+    pub fn from_flatbuf<'fbb>(
+        message: &serialization::buffer::Operation<'fbb>,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            start_id: time::Local::from_flatbuf(
+                message.start_id().ok_or(crate::Error::DeserializeError)?,
+            ),
+            start_offset: message.start_offset() as usize,
+            end_id: time::Local::from_flatbuf(
+                message.end_id().ok_or(crate::Error::DeserializeError)?,
+            ),
+            end_offset: message.end_offset() as usize,
+            version_in_range: time::Global::from_flatbuf(
+                message
+                    .version_in_range()
+                    .ok_or(crate::Error::DeserializeError)?,
+            )?,
+            new_text: message.new_text().map(|new_text| Arc::new(new_text.into())),
+            local_timestamp: time::Local::from_flatbuf(
+                message
+                    .local_timestamp()
+                    .ok_or(crate::Error::DeserializeError)?,
+            ),
+            lamport_timestamp: time::Lamport::from_flatbuf(
+                message
+                    .lamport_timestamp()
+                    .ok_or(crate::Error::DeserializeError)?,
+            ),
+        })
+    }
+}
+
 impl operation_queue::Operation for Operation {
     fn timestamp(&self) -> time::Lamport {
-        self.timestamp
+        self.lamport_timestamp
     }
 }
 

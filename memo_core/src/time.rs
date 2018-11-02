@@ -1,5 +1,9 @@
+use crate::serialization;
+use crate::Error;
 use crate::ReplicaId;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use crate::ReplicaIdExt;
+use flatbuffers::{FlatBufferBuilder, WIPOffset};
+use serde::{Deserializer, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::{self, Ordering};
 use std::collections::HashMap;
@@ -11,7 +15,7 @@ use std::sync::Arc;
 )]
 pub struct Local {
     pub replica_id: ReplicaId,
-    pub seq: u64,
+    pub value: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -33,18 +37,32 @@ pub struct Lamport {
 
 impl Local {
     pub fn new(replica_id: ReplicaId) -> Self {
-        Self { replica_id, seq: 1 }
+        Self {
+            replica_id,
+            value: 1,
+        }
     }
 
     pub fn tick(&mut self) -> Self {
         let timestamp = *self;
-        self.seq += 1;
+        self.value += 1;
         timestamp
     }
 
     pub fn observe(&mut self, timestamp: Self) {
         if timestamp.replica_id == self.replica_id {
-            self.seq = cmp::max(self.seq, timestamp.seq + 1);
+            self.value = cmp::max(self.value, timestamp.value + 1);
+        }
+    }
+
+    pub fn to_flatbuf(&self) -> serialization::Timestamp {
+        serialization::Timestamp::new(self.value, &self.replica_id.to_flatbuf())
+    }
+
+    pub fn from_flatbuf(message: &serialization::Timestamp) -> Self {
+        Self {
+            value: message.value(),
+            replica_id: ReplicaId::from_flatbuf(message.replica_id()),
         }
     }
 }
@@ -76,27 +94,27 @@ impl Global {
 
     pub fn observe(&mut self, timestamp: Local) {
         let map = Arc::make_mut(&mut self.0);
-        let seq = map.entry(timestamp.replica_id).or_insert(0);
-        *seq = cmp::max(*seq, timestamp.seq);
+        let value = map.entry(timestamp.replica_id).or_insert(0);
+        *value = cmp::max(*value, timestamp.value);
     }
 
     pub fn observe_all(&mut self, other: &Self) {
-        for (replica_id, seq) in other.0.as_ref() {
+        for (replica_id, value) in other.0.as_ref() {
             self.observe(Local {
                 replica_id: *replica_id,
-                seq: *seq,
+                value: *value,
             });
         }
     }
 
     pub fn observed(&self, timestamp: Local) -> bool {
-        self.get(timestamp.replica_id) >= timestamp.seq
+        self.get(timestamp.replica_id) >= timestamp.value
     }
 
     pub fn changed_since(&self, other: &Self) -> bool {
         self.0
             .iter()
-            .any(|(replica_id, seq)| *seq > other.get(*replica_id))
+            .any(|(replica_id, value)| *value > other.get(*replica_id))
     }
 
     fn serialize_inner<S>(
@@ -106,6 +124,7 @@ impl Global {
     where
         S: Serializer,
     {
+        use serde::Serialize;
         inner.serialize(serializer)
     }
 
@@ -113,7 +132,38 @@ impl Global {
     where
         D: Deserializer<'de>,
     {
+        use serde::Deserialize;
         Ok(Arc::new(HashMap::deserialize(deserializer)?))
+    }
+
+    pub fn to_flatbuf<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::GlobalTimestamp<'fbb>> {
+        builder.start_vector::<serialization::Timestamp>(self.0.len());
+        for (replica_id, value) in self.0.as_ref() {
+            builder.push(&serialization::Timestamp::new(
+                *value,
+                &replica_id.to_flatbuf(),
+            ));
+        }
+        let timestamps = Some(builder.end_vector(self.0.len()));
+        serialization::GlobalTimestamp::create(
+            builder,
+            &serialization::GlobalTimestampArgs { timestamps },
+        )
+    }
+
+    pub fn from_flatbuf<'fbb>(
+        message: serialization::GlobalTimestamp<'fbb>,
+    ) -> Result<Self, Error> {
+        let mut local_timestamps = HashMap::new();
+        for local_timestamp in message.timestamps().ok_or(Error::DeserializeError)? {
+            let replica_id = ReplicaId::from_flatbuf(local_timestamp.replica_id());
+            let value = local_timestamp.value();
+            local_timestamps.insert(replica_id, value);
+        }
+        Ok(Global(Arc::new(local_timestamps)))
     }
 }
 
@@ -152,5 +202,16 @@ impl Lamport {
 
     pub fn observe(&mut self, timestamp: Self) {
         self.value = cmp::max(self.value, timestamp.value) + 1;
+    }
+
+    pub fn to_flatbuf(&self) -> serialization::Timestamp {
+        serialization::Timestamp::new(self.value, &self.replica_id.to_flatbuf())
+    }
+
+    pub fn from_flatbuf(message: &serialization::Timestamp) -> Self {
+        Self {
+            value: message.value(),
+            replica_id: ReplicaId::from_flatbuf(message.replica_id()),
+        }
     }
 }

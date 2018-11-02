@@ -1,6 +1,8 @@
 use crate::buffer::{self, Change, Point, Text};
 use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId, FileType};
+use crate::serialization;
 use crate::{time, Error, Oid, ReplicaId};
+use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use futures::{future, stream, Async, Future, Poll, Stream};
 use serde_derive::{Deserialize, Serialize};
 use std::cell::{Ref, RefCell, RefMut};
@@ -541,6 +543,104 @@ impl Operation {
             Operation::EpochOperation { epoch_id, .. } => *epoch_id,
         }
     }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let root = self.to_flatbuf(&mut builder);
+        builder.finish(root, None);
+        let (mut bytes, first_valid_byte_index) = builder.collapse();
+        bytes.drain(0..first_valid_byte_index);
+        bytes
+    }
+
+    pub fn deserialize<'a>(buffer: &'a [u8]) -> Result<Self, Error> {
+        use crate::serialization::worktree::OperationEnvelope;
+        let root = flatbuffers::get_root::<OperationEnvelope<'a>>(buffer);
+        Self::from_flatbuf(root)
+    }
+
+    pub fn to_flatbuf<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::worktree::OperationEnvelope<'fbb>> {
+        use crate::serialization::worktree::{
+            EpochOperation, EpochOperationArgs, Operation as OperationType, OperationEnvelope,
+            OperationEnvelopeArgs, StartEpoch, StartEpochArgs,
+        };
+
+        let operation_type;
+        let operation_table;
+
+        match self {
+            Operation::StartEpoch { epoch_id, head } => {
+                operation_type = OperationType::StartEpoch;
+                let head = head.map(|head| builder.create_vector(&head));
+                operation_table = StartEpoch::create(
+                    builder,
+                    &StartEpochArgs {
+                        epoch_id: Some(&epoch_id.to_flatbuf()),
+                        head,
+                    },
+                )
+                .as_union_value();
+            }
+            Operation::EpochOperation {
+                epoch_id,
+                operation,
+            } => {
+                operation_type = OperationType::EpochOperation;
+                let (epoch_operation_type, epoch_operation_table) = operation.to_flatbuf(builder);
+                operation_table = EpochOperation::create(
+                    builder,
+                    &EpochOperationArgs {
+                        epoch_id: Some(&epoch_id.to_flatbuf()),
+                        operation_type: epoch_operation_type,
+                        operation: Some(epoch_operation_table),
+                    },
+                )
+                .as_union_value();
+            }
+        }
+
+        OperationEnvelope::create(
+            builder,
+            &OperationEnvelopeArgs {
+                operation_type,
+                operation: Some(operation_table),
+            },
+        )
+    }
+
+    pub fn from_flatbuf<'fbb>(
+        message: serialization::worktree::OperationEnvelope<'fbb>,
+    ) -> Result<Self, Error> {
+        let operation = message.operation().ok_or(Error::DeserializeError)?;
+        match message.operation_type() {
+            serialization::worktree::Operation::StartEpoch => {
+                let message = serialization::worktree::StartEpoch::init_from_table(operation);
+                let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
+                Ok(Operation::StartEpoch {
+                    epoch_id: time::Lamport::from_flatbuf(epoch_id),
+                    head: message.head().map(|head| {
+                        let mut oid = [0; 20];
+                        oid.copy_from_slice(head);
+                        oid
+                    }),
+                })
+            }
+            serialization::worktree::Operation::EpochOperation => {
+                let message = serialization::worktree::EpochOperation::init_from_table(operation);
+                let operation = message.operation().ok_or(Error::DeserializeError)?;
+                let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
+                let epoch_op = epoch::Operation::from_flatbuf(message.operation_type(), operation)?;
+                Ok(Operation::EpochOperation {
+                    epoch_id: time::Lamport::from_flatbuf(epoch_id),
+                    operation: epoch_op,
+                })
+            }
+            serialization::worktree::Operation::NONE => Err(Error::DeserializeError),
+        }
+    }
 }
 
 impl SwitchEpoch {
@@ -778,7 +878,11 @@ mod tests {
                 )
                 .unwrap();
                 network.add_peer(tree.replica_id());
-                network.broadcast(tree.replica_id(), ops.collect().wait().unwrap(), &mut rng);
+                network.broadcast(
+                    tree.replica_id(),
+                    serialize_ops(ops.collect().wait().unwrap()),
+                    &mut rng,
+                );
                 trees.push(tree);
             }
 
@@ -791,16 +895,19 @@ mod tests {
 
                 if k == 0 {
                     let ops = tree.mutate(&mut rng, 5);
-                    network.broadcast(replica_id, ops, &mut rng);
+                    network.broadcast(replica_id, serialize_ops(ops), &mut rng);
                 } else if k == 1 {
                     let head = *rng.choose(&commits).unwrap();
                     let ops = tree.reset(head).collect().wait().unwrap();
-                    network.broadcast(replica_id, ops, &mut rng);
+                    network.broadcast(replica_id, serialize_ops(ops), &mut rng);
                 } else if k == 2 {
-                    let fixup_ops = tree
-                        .apply_ops(network.receive(replica_id, &mut rng))
-                        .unwrap();
-                    network.broadcast(replica_id, fixup_ops.collect().wait().unwrap(), &mut rng);
+                    let received_ops = network.receive(replica_id, &mut rng);
+                    let fixup_ops = tree.apply_ops(deserialize_ops(received_ops)).unwrap();
+                    network.broadcast(
+                        replica_id,
+                        serialize_ops(fixup_ops.collect().wait().unwrap()),
+                        &mut rng,
+                    );
                 } else if k == 3 {
                     let buffer_id = if tree.open_buffers().is_empty() || rng.gen() {
                         tree.select_path(FileType::Text, &mut rng).map(|path| {
@@ -818,7 +925,7 @@ mod tests {
                         let text = gen_text(&mut rng);
                         observer.edit(buffer_id, start..end, text.as_str());
                         let op = tree.edit(buffer_id, Some(start..end), text).unwrap();
-                        network.broadcast(replica_id, vec![op], &mut rng);
+                        network.broadcast(replica_id, serialize_ops(Some(op)), &mut rng);
                     }
                 }
             }
@@ -827,10 +934,13 @@ mod tests {
                 for replica_index in 0..PEERS {
                     let tree = &mut trees[replica_index];
                     let replica_id = tree.replica_id();
-                    let fixup_ops = tree
-                        .apply_ops(network.receive(replica_id, &mut rng))
-                        .unwrap();
-                    network.broadcast(replica_id, fixup_ops.collect().wait().unwrap(), &mut rng);
+                    let received_ops = network.receive(replica_id, &mut rng);
+                    let fixup_ops = tree.apply_ops(deserialize_ops(received_ops)).unwrap();
+                    network.broadcast(
+                        replica_id,
+                        serialize_ops(fixup_ops.collect().wait().unwrap()),
+                        &mut rng,
+                    );
                 }
             }
 
@@ -989,6 +1099,16 @@ mod tests {
             .collect()
             .wait()
             .unwrap();
+    }
+
+    fn serialize_ops<I: IntoIterator<Item = Operation>>(ops: I) -> Vec<Vec<u8>> {
+        ops.into_iter().map(|op| op.serialize()).collect()
+    }
+
+    fn deserialize_ops<I: IntoIterator<Item = Vec<u8>>>(ops: I) -> Vec<Operation> {
+        ops.into_iter()
+            .map(|op| Operation::deserialize(&op).unwrap())
+            .collect()
     }
 
     impl WorkTree {

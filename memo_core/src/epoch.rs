@@ -1,10 +1,12 @@
 use crate::btree::{self, SeekBias};
 use crate::buffer::{self, Buffer, Point, Text};
 use crate::operation_queue::{self, OperationQueue};
+use crate::serialization;
 use crate::time;
 use crate::Error;
 use crate::Oid;
 use crate::ReplicaId;
+use flatbuffers::{FlatBufferBuilder, UnionWIPOffset, WIPOffset};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -1185,6 +1187,205 @@ impl Operation {
             } => *lamport_timestamp,
         }
     }
+
+    pub fn to_flatbuf<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> (serialization::epoch::Operation, WIPOffset<UnionWIPOffset>) {
+        use crate::serialization::epoch::{
+            EditText, EditTextArgs, FileId as FileIdType, InsertMetadata, InsertMetadataArgs,
+            Operation as OperationType, UpdateParent, UpdateParentArgs,
+        };
+
+        fn parent_to_flatbuf<'a, 'fbb>(
+            parent: &'a Option<(FileId, Arc<OsString>)>,
+            builder: &mut FlatBufferBuilder<'fbb>,
+        ) -> (
+            FileIdType,
+            Option<WIPOffset<UnionWIPOffset>>,
+            Option<flatbuffers::WIPOffset<&'fbb str>>,
+        ) {
+            if let Some((file_id, name)) = parent.as_ref() {
+                let (file_id_type, file_id) = file_id.to_flatbuf(builder);
+                (
+                    file_id_type,
+                    Some(file_id),
+                    Some(builder.create_string(name.to_string_lossy().as_ref())),
+                )
+            } else {
+                (FileIdType::NONE, None, None)
+            }
+        }
+
+        match self {
+            Operation::InsertMetadata {
+                file_id,
+                file_type,
+                parent,
+                local_timestamp,
+                lamport_timestamp,
+            } => {
+                let (file_id_type, file_id) = file_id.to_flatbuf(builder);
+                let (parent_id_type, parent_id, name_in_parent) =
+                    parent_to_flatbuf(parent, builder);
+
+                (
+                    OperationType::InsertMetadata,
+                    InsertMetadata::create(
+                        builder,
+                        &InsertMetadataArgs {
+                            file_id_type,
+                            file_id: Some(file_id),
+                            file_type: file_type.to_flatbuf(),
+                            parent_id_type,
+                            parent_id,
+                            name_in_parent,
+                            local_timestamp: Some(&local_timestamp.to_flatbuf()),
+                            lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
+                        },
+                    )
+                    .as_union_value(),
+                )
+            }
+            Operation::UpdateParent {
+                child_id,
+                new_parent,
+                local_timestamp,
+                lamport_timestamp,
+            } => {
+                let (child_id_type, child_id) = child_id.to_flatbuf(builder);
+                let (new_parent_id_type, new_parent_id, new_name_in_parent) =
+                    parent_to_flatbuf(new_parent, builder);
+                (
+                    OperationType::UpdateParent,
+                    UpdateParent::create(
+                        builder,
+                        &UpdateParentArgs {
+                            child_id_type,
+                            child_id: Some(child_id),
+                            new_parent_id_type,
+                            new_parent_id,
+                            new_name_in_parent,
+                            local_timestamp: Some(&local_timestamp.to_flatbuf()),
+                            lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
+                        },
+                    )
+                    .as_union_value(),
+                )
+            }
+            Operation::EditText {
+                file_id,
+                edits,
+                local_timestamp,
+                lamport_timestamp,
+            } => {
+                let (file_id_type, file_id) = file_id.to_flatbuf(builder);
+
+                let edit_flatbufs = edits
+                    .iter()
+                    .map(|e| e.to_flatbuf(builder))
+                    .collect::<Vec<_>>();
+                let edits = builder.create_vector(&edit_flatbufs);
+
+                (
+                    OperationType::EditText,
+                    EditText::create(
+                        builder,
+                        &EditTextArgs {
+                            file_id_type,
+                            file_id: Some(file_id),
+                            edits: Some(edits),
+                            local_timestamp: Some(&local_timestamp.to_flatbuf()),
+                            lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
+                        },
+                    )
+                    .as_union_value(),
+                )
+            }
+        }
+    }
+
+    pub fn from_flatbuf<'a>(
+        operation_type: serialization::epoch::Operation,
+        message: flatbuffers::Table<'a>,
+    ) -> Result<Self, Error> {
+        fn parent_from_flatbuf<'a>(
+            parent_id_type: serialization::epoch::FileId,
+            parent_id_message: Option<flatbuffers::Table<'a>>,
+            name: Option<&'a str>,
+        ) -> Option<(FileId, Arc<OsString>)> {
+            parent_id_message.map(|parent_id_message| {
+                let file_id = FileId::from_flatbuf(parent_id_type, parent_id_message);
+                let name = Arc::new(OsString::from(name.unwrap()));
+                (file_id, name)
+            })
+        }
+
+        match operation_type {
+            serialization::epoch::Operation::InsertMetadata => {
+                let message = serialization::epoch::InsertMetadata::init_from_table(message);
+                Ok(Operation::InsertMetadata {
+                    file_id: FileId::from_flatbuf(
+                        message.file_id_type(),
+                        message.file_id().ok_or(Error::DeserializeError)?,
+                    ),
+                    file_type: FileType::from_flatbuf(&message.file_type()),
+                    parent: parent_from_flatbuf(
+                        message.parent_id_type(),
+                        message.parent_id(),
+                        message.name_in_parent(),
+                    ),
+                    local_timestamp: time::Local::from_flatbuf(&message.local_timestamp().unwrap()),
+                    lamport_timestamp: time::Lamport::from_flatbuf(
+                        message.lamport_timestamp().ok_or(Error::DeserializeError)?,
+                    ),
+                })
+            }
+            serialization::epoch::Operation::UpdateParent => {
+                let message = serialization::epoch::UpdateParent::init_from_table(message);
+                Ok(Operation::UpdateParent {
+                    child_id: FileId::from_flatbuf(
+                        message.child_id_type(),
+                        message.child_id().ok_or(Error::DeserializeError)?,
+                    ),
+                    new_parent: parent_from_flatbuf(
+                        message.new_parent_id_type(),
+                        message.new_parent_id(),
+                        message.new_name_in_parent(),
+                    ),
+                    local_timestamp: time::Local::from_flatbuf(
+                        message.local_timestamp().ok_or(Error::DeserializeError)?,
+                    ),
+                    lamport_timestamp: time::Lamport::from_flatbuf(
+                        message.lamport_timestamp().ok_or(Error::DeserializeError)?,
+                    ),
+                })
+            }
+            serialization::epoch::Operation::EditText => {
+                let message = serialization::epoch::EditText::init_from_table(message);
+                let edit_messages = message.edits().ok_or(Error::DeserializeError)?;
+                let mut edits = Vec::with_capacity(edit_messages.len());
+                for i in 0..edit_messages.len() {
+                    edits.push(buffer::Operation::from_flatbuf(&edit_messages.get(i))?);
+                }
+
+                Ok(Operation::EditText {
+                    file_id: FileId::from_flatbuf(
+                        message.file_id_type(),
+                        message.file_id().ok_or(Error::DeserializeError)?,
+                    ),
+                    edits,
+                    local_timestamp: time::Local::from_flatbuf(
+                        message.local_timestamp().ok_or(Error::DeserializeError)?,
+                    ),
+                    lamport_timestamp: time::Lamport::from_flatbuf(
+                        message.lamport_timestamp().ok_or(Error::DeserializeError)?,
+                    ),
+                })
+            }
+            serialization::epoch::Operation::NONE => Err(Error::DeserializeError),
+        }
+    }
 }
 
 impl operation_queue::Operation for Operation {
@@ -1199,6 +1400,65 @@ impl FileId {
             true
         } else {
             false
+        }
+    }
+
+    fn to_flatbuf<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> (serialization::epoch::FileId, WIPOffset<UnionWIPOffset>) {
+        use crate::serialization::epoch::{
+            BaseFileId, BaseFileIdArgs, FileId as FileIdType, NewFileId, NewFileIdArgs,
+        };
+
+        match self {
+            FileId::Base(index) => (
+                FileIdType::BaseFileId,
+                BaseFileId::create(builder, &BaseFileIdArgs { index: *index }).as_union_value(),
+            ),
+            FileId::New(id) => (
+                FileIdType::NewFileId,
+                NewFileId::create(
+                    builder,
+                    &NewFileIdArgs {
+                        id: Some(&id.to_flatbuf()),
+                    },
+                )
+                .as_union_value(),
+            ),
+        }
+    }
+
+    fn from_flatbuf<'a>(
+        file_id_type: serialization::epoch::FileId,
+        message: flatbuffers::Table<'a>,
+    ) -> Self {
+        match file_id_type {
+            serialization::epoch::FileId::BaseFileId => {
+                let message = serialization::epoch::BaseFileId::init_from_table(message);
+                FileId::Base(message.index())
+            }
+            serialization::epoch::FileId::NewFileId => {
+                let message = serialization::epoch::NewFileId::init_from_table(message);
+                FileId::New(time::Local::from_flatbuf(&message.id().unwrap()))
+            }
+            serialization::epoch::FileId::NONE => unreachable!(),
+        }
+    }
+}
+
+impl FileType {
+    fn to_flatbuf(&self) -> serialization::epoch::FileType {
+        match self {
+            FileType::Directory => serialization::epoch::FileType::Directory,
+            FileType::Text => serialization::epoch::FileType::Text,
+        }
+    }
+
+    fn from_flatbuf(message: &serialization::epoch::FileType) -> Self {
+        match message {
+            serialization::epoch::FileType::Directory => FileType::Directory,
+            serialization::epoch::FileType::Text => FileType::Text,
         }
     }
 }

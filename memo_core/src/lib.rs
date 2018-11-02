@@ -1,7 +1,9 @@
 mod btree;
 mod buffer;
 mod epoch;
+#[allow(non_snake_case, unused_imports)]
 mod operation_queue;
+mod serialization;
 pub mod time;
 mod work_tree;
 
@@ -20,6 +22,7 @@ pub type Oid = [u8; 20];
 #[derive(Debug)]
 pub enum Error {
     IoError(io::Error),
+    DeserializeError,
     InvalidPath(Cow<'static, str>),
     InvalidOperations,
     InvalidFileId(Cow<'static, str>),
@@ -27,6 +30,42 @@ pub enum Error {
     InvalidDirEntry,
     InvalidOperation,
     CursorExhausted,
+}
+
+trait ReplicaIdExt {
+    fn to_flatbuf(&self) -> serialization::ReplicaId;
+    fn from_flatbuf(message: &serialization::ReplicaId) -> Self;
+}
+
+impl ReplicaIdExt for ReplicaId {
+    fn to_flatbuf(&self) -> serialization::ReplicaId {
+        fn u64_from_bytes(bytes: &[u8]) -> u64 {
+            let mut n = 0;
+            for i in 0..8 {
+                n |= (bytes[i] as u64) << i * 8;
+            }
+            n
+        }
+
+        let bytes = self.as_bytes();
+        serialization::ReplicaId::new(u64_from_bytes(&bytes[0..8]), u64_from_bytes(&bytes[8..16]))
+    }
+
+    fn from_flatbuf(message: &serialization::ReplicaId) -> Self {
+        fn bytes_from_u64(n: u64) -> [u8; 8] {
+            let mut bytes = [0; 8];
+            for i in 0..8 {
+                bytes[i] = (n >> i * 8) as u8;
+            }
+            bytes
+        }
+
+        let mut bytes = [0; 16];
+        bytes[0..8].copy_from_slice(&bytes_from_u64(message.first_8_bytes()));
+        bytes[8..16].copy_from_slice(&bytes_from_u64(message.last_8_bytes()));
+
+        Uuid::from_bytes(bytes)
+    }
 }
 
 impl From<Error> for String {

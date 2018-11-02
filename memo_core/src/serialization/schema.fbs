@@ -1,0 +1,86 @@
+struct ReplicaId {
+  first_8_bytes: uint64;
+  last_8_bytes: uint64;
+}
+
+struct Timestamp {
+  value:uint64;
+  replica_id:ReplicaId;
+}
+
+table GlobalTimestamp {
+  timestamps:[Timestamp];
+}
+
+namespace buffer;
+
+table Operation {
+  start_id:Timestamp;
+  start_offset:uint64;
+  end_id:Timestamp;
+  end_offset:uint64;
+  version_in_range:GlobalTimestamp;
+  new_text:string;
+  local_timestamp:Timestamp;
+  lamport_timestamp:Timestamp;
+}
+
+namespace epoch;
+
+table BaseFileId {
+  index:uint64;
+}
+
+table NewFileId {
+  id:Timestamp;
+}
+
+union FileId { BaseFileId, NewFileId }
+
+enum FileType : byte { Directory, Text }
+
+table InsertMetadata {
+  file_id:FileId;
+  file_type:FileType;
+  parent_id:FileId;
+  name_in_parent:string;
+  local_timestamp:Timestamp;
+  lamport_timestamp:Timestamp;
+}
+
+table UpdateParent {
+  child_id:FileId;
+  new_parent_id:FileId;
+  new_name_in_parent:string;
+  local_timestamp:Timestamp;
+  lamport_timestamp:Timestamp;
+}
+
+table EditText {
+  file_id:FileId;
+  edits:[buffer.Operation];
+  local_timestamp:Timestamp;
+  lamport_timestamp:Timestamp;
+}
+
+union Operation { InsertMetadata, UpdateParent, EditText }
+
+namespace worktree;
+
+table StartEpoch {
+  epoch_id:Timestamp;
+  head:[ubyte];
+}
+
+table EpochOperation {
+  epoch_id:Timestamp;
+  operation:epoch.Operation;
+}
+
+union Operation { StartEpoch, EpochOperation }
+
+table OperationEnvelope {
+   operation:Operation;
+}
+
+root_type OperationEnvelope;
