@@ -452,7 +452,6 @@ dependencies = [
 name = "memo_js"
 version = "0.1.0"
 dependencies = [
- "bincode 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.21 (registry+https://github.com/rust-lang/crates.io-index)",
  "hex 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "js-sys 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
