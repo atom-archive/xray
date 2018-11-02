@@ -548,7 +548,9 @@ impl Operation {
         let mut builder = FlatBufferBuilder::new();
         let root = self.to_flatbuf(&mut builder);
         builder.finish(root, None);
-        builder.collapse().0
+        let (mut bytes, first_valid_byte_index) = builder.collapse();
+        bytes.drain(0..first_valid_byte_index);
+        bytes
     }
 
     pub fn deserialize<'a>(buffer: &'a [u8]) -> Option<Self> {
