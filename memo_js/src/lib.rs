@@ -256,12 +256,16 @@ impl WorkTree {
 
 #[wasm_bindgen]
 impl WorkTreeNewResult {
-    pub fn tree(&mut self) -> WorkTree {
-        self.tree.take().unwrap()
+    pub fn tree(&mut self) -> Result<WorkTree, JsValue> {
+        self.tree
+            .take()
+            .ok_or(JsValue::from_str("Cannot take tree twice"))
     }
 
-    pub fn operations(&mut self) -> StreamToAsyncIterator {
-        self.operations.take().unwrap()
+    pub fn operations(&mut self) -> Result<StreamToAsyncIterator, JsValue> {
+        self.operations
+            .take()
+            .ok_or(JsValue::from_str("Cannot take operations twice"))
     }
 }
 
@@ -298,7 +302,7 @@ impl<T, E> AsyncIteratorToStream<T, E> {
 
 impl<T, E> Stream for AsyncIteratorToStream<T, E>
 where
-    E: for<'de> Deserialize<'de>,
+    E: for<'de> Deserialize<'de> + From<String>,
     T: for<'de> Deserialize<'de>,
 {
     type Item = T;
@@ -307,7 +311,7 @@ where
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         match self.next_value.poll() {
             Ok(Async::Ready(result)) => {
-                let result: AsyncResult<T> = result.into_serde().unwrap();
+                let result: AsyncResult<T> = result.into_serde().map_err(|err| err.to_string())?;
                 if result.done {
                     Ok(Async::Ready(None))
                 } else {
@@ -316,7 +320,7 @@ where
                 }
             }
             Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(error) => Err(error.into_serde().unwrap()),
+            Err(error) => Err(error.into_serde().map_err(|err| err.to_string())?),
         }
     }
 }
@@ -393,8 +397,15 @@ impl memo::GitProvider for GitProviderWrapper {
                 &hex::encode(oid),
                 path.to_string_lossy().as_ref(),
             ))
-            .map(|value| value.as_string().unwrap())
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.as_string().unwrap())),
+            .then(|value| match value {
+                Ok(value) => value
+                    .as_string()
+                    .ok_or_else(|| String::from("Text is not a string")),
+                Err(error) => error
+                    .as_string()
+                    .ok_or_else(|| String::from("Error is not a string")),
+            })
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error)),
         )
     }
 }
