@@ -33,7 +33,7 @@ pub struct WorkTree {
     observer: Option<Rc<ChangeObserver>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Operation {
     StartEpoch {
         epoch_id: epoch::Id,
@@ -553,7 +553,7 @@ impl Operation {
         bytes
     }
 
-    pub fn deserialize<'a>(buffer: &'a [u8]) -> Result<Self, Error> {
+    pub fn deserialize<'a>(buffer: &'a [u8]) -> Result<Option<Self>, Error> {
         use crate::serialization::worktree::OperationEnvelope;
         let root = flatbuffers::get_root::<OperationEnvelope<'a>>(buffer);
         Self::from_flatbuf(root)
@@ -613,32 +613,37 @@ impl Operation {
 
     pub fn from_flatbuf<'fbb>(
         message: serialization::worktree::OperationEnvelope<'fbb>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Option<Self>, Error> {
         let operation = message.operation().ok_or(Error::DeserializeError)?;
         match message.operation_type() {
             serialization::worktree::Operation::StartEpoch => {
                 let message = serialization::worktree::StartEpoch::init_from_table(operation);
                 let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
-                Ok(Operation::StartEpoch {
+                Ok(Some(Operation::StartEpoch {
                     epoch_id: time::Lamport::from_flatbuf(epoch_id),
                     head: message.head().map(|head| {
                         let mut oid = [0; 20];
                         oid.copy_from_slice(head);
                         oid
                     }),
-                })
+                }))
             }
             serialization::worktree::Operation::EpochOperation => {
                 let message = serialization::worktree::EpochOperation::init_from_table(operation);
                 let operation = message.operation().ok_or(Error::DeserializeError)?;
                 let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
-                let epoch_op = epoch::Operation::from_flatbuf(message.operation_type(), operation)?;
-                Ok(Operation::EpochOperation {
-                    epoch_id: time::Lamport::from_flatbuf(epoch_id),
-                    operation: epoch_op,
-                })
+                if let Some(epoch_op) =
+                    epoch::Operation::from_flatbuf(message.operation_type(), operation)?
+                {
+                    Ok(Some(Operation::EpochOperation {
+                        epoch_id: time::Lamport::from_flatbuf(epoch_id),
+                        operation: epoch_op,
+                    }))
+                } else {
+                    Ok(None)
+                }
             }
-            serialization::worktree::Operation::NONE => Err(Error::DeserializeError),
+            serialization::worktree::Operation::NONE => Ok(None),
         }
     }
 }
@@ -1107,7 +1112,7 @@ mod tests {
 
     fn deserialize_ops<I: IntoIterator<Item = Vec<u8>>>(ops: I) -> Vec<Operation> {
         ops.into_iter()
-            .map(|op| Operation::deserialize(&op).unwrap())
+            .map(|op| Operation::deserialize(&op).unwrap().unwrap())
             .collect()
     }
 

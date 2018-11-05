@@ -14,7 +14,7 @@ use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 trait JsValueExt {
-    fn into_operation(self) -> Result<memo::Operation, JsValue>;
+    fn into_operation(self) -> Result<Option<memo::Operation>, JsValue>;
 }
 
 trait MapJsError<T> {
@@ -111,7 +111,9 @@ impl WorkTree {
 
         let mut start_ops = Vec::new();
         for js_op in js_start_ops.values() {
-            start_ops.push(js_op?.into_operation()?);
+            if let Some(op) = js_op?.into_operation()? {
+                start_ops.push(op);
+            }
         }
 
         let mut replica_id_bytes = [0; 16];
@@ -151,7 +153,9 @@ impl WorkTree {
     pub fn apply_ops(&mut self, js_ops: js_sys::Array) -> Result<StreamToAsyncIterator, JsValue> {
         let mut ops = Vec::new();
         for js_op in js_ops.values() {
-            ops.push(js_op?.into_operation()?);
+            if let Some(op) = js_op?.into_operation()? {
+                ops.push(op);
+            }
         }
 
         self.0
@@ -467,7 +471,7 @@ where
 }
 
 impl JsValueExt for JsValue {
-    fn into_operation(self) -> Result<memo::Operation, JsValue> {
+    fn into_operation(self) -> Result<Option<memo::Operation>, JsValue> {
         let js_bytes = self
             .dyn_into::<js_sys::Uint8Array>()
             .map_err(|_| JsValue::from_str("Operation must be Uint8Array"))?;
