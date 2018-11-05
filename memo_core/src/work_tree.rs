@@ -33,7 +33,7 @@ pub struct WorkTree {
     observer: Option<Rc<ChangeObserver>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Operation {
     StartEpoch {
         epoch_id: epoch::Id,
