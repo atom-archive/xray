@@ -16,7 +16,6 @@ use std::io;
 use uuid::Uuid;
 
 pub type ReplicaId = Uuid;
-pub type UserId = u64;
 pub type Oid = [u8; 20];
 
 #[derive(Debug)]
