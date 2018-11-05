@@ -174,19 +174,21 @@ struct InsertionSplitSummary {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Operation {
-    start_id: time::Local,
-    start_offset: usize,
-    end_id: time::Local,
-    end_offset: usize,
-    version_in_range: time::Global,
-    #[serde(
-        serialize_with = "serialize_op_text",
-        deserialize_with = "deserialize_op_text"
-    )]
-    new_text: Option<Arc<Text>>,
-    local_timestamp: time::Local,
-    lamport_timestamp: time::Lamport,
+pub enum Operation {
+    Edit {
+        start_id: time::Local,
+        start_offset: usize,
+        end_id: time::Local,
+        end_offset: usize,
+        version_in_range: time::Global,
+        #[serde(
+            serialize_with = "serialize_op_text",
+            deserialize_with = "deserialize_op_text"
+        )]
+        new_text: Option<Arc<Text>>,
+        local_timestamp: time::Local,
+        lamport_timestamp: time::Lamport,
+    },
 }
 
 impl Buffer {
@@ -342,7 +344,7 @@ impl Buffer {
             lamport_clock,
         );
         if let Some(op) = ops.last() {
-            self.version.observe(op.local_timestamp);
+            self.version.observe(op.local_timestamp());
         }
         ops
     }
@@ -502,7 +504,8 @@ impl Buffer {
             if self.can_apply_op(&op) {
                 self.apply_op(op, local_clock, lamport_clock)?;
             } else {
-                self.deferred_replicas.insert(op.local_timestamp.replica_id);
+                self.deferred_replicas
+                    .insert(op.local_timestamp().replica_id);
                 deferred_ops.push(op);
             }
         }
@@ -517,20 +520,33 @@ impl Buffer {
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
-        self.apply_edit(
-            op.start_id,
-            op.start_offset,
-            op.end_id,
-            op.end_offset,
-            op.new_text.as_ref().cloned(),
-            &op.version_in_range,
-            op.local_timestamp,
-            op.lamport_timestamp,
-            local_clock,
-            lamport_clock,
-        )?;
-        self.anchor_cache.borrow_mut().clear();
-        self.offset_cache.borrow_mut().clear();
+        match op {
+            Operation::Edit {
+                start_id,
+                start_offset,
+                end_id,
+                end_offset,
+                new_text,
+                version_in_range,
+                local_timestamp,
+                lamport_timestamp,
+            } => {
+                self.apply_edit(
+                    start_id,
+                    start_offset,
+                    end_id,
+                    end_offset,
+                    new_text.as_ref().cloned(),
+                    &version_in_range,
+                    local_timestamp,
+                    lamport_timestamp,
+                    local_clock,
+                    lamport_clock,
+                )?;
+                self.anchor_cache.borrow_mut().clear();
+                self.offset_cache.borrow_mut().clear();
+            }
+        }
         Ok(())
     }
 
@@ -666,7 +682,8 @@ impl Buffer {
             if self.can_apply_op(&op) {
                 self.apply_op(op, local_clock, lamport_clock)?;
             } else {
-                self.deferred_replicas.insert(op.local_timestamp.replica_id);
+                self.deferred_replicas
+                    .insert(op.local_timestamp().replica_id);
                 deferred_ops.push(op);
             }
         }
@@ -675,12 +692,25 @@ impl Buffer {
     }
 
     fn can_apply_op(&self, op: &Operation) -> bool {
-        !self
+        if self
             .deferred_replicas
-            .contains(&op.local_timestamp.replica_id)
-            && self.version.observed(op.start_id)
-            && self.version.observed(op.end_id)
-            && op.version_in_range <= self.version
+            .contains(&op.local_timestamp().replica_id)
+        {
+            false
+        } else {
+            match op {
+                Operation::Edit {
+                    start_id,
+                    end_id,
+                    version_in_range,
+                    ..
+                } => {
+                    self.version.observed(*start_id)
+                        && self.version.observed(*end_id)
+                        && *version_in_range <= self.version
+                }
+            }
+        }
     }
 
     fn resolve_fragment_id(
@@ -818,7 +848,7 @@ impl Buffer {
                 // check if it also intersects the current fragment. Otherwise we break out of the
                 // loop and find the first fragment that the splice does not contain fully.
                 if range.end <= fragment_end {
-                    ops.push(Operation {
+                    ops.push(Operation::Edit {
                         start_id: start_id.unwrap(),
                         start_offset: start_offset.unwrap(),
                         end_id: end_id.unwrap(),
@@ -871,7 +901,7 @@ impl Buffer {
                         if range.end == fragment_end {
                             end_id = Some(fragment.insertion.id);
                             end_offset = Some(fragment.end_offset);
-                            ops.push(Operation {
+                            ops.push(Operation::Edit {
                                 start_id: start_id.unwrap(),
                                 start_offset: start_offset.unwrap(),
                                 end_id: end_id.unwrap(),
@@ -916,7 +946,7 @@ impl Buffer {
         if cur_range.is_some() {
             debug_assert_eq!(old_ranges.next(), None);
             let last_fragment = new_fragments.last().unwrap();
-            ops.push(Operation {
+            ops.push(Operation::Edit {
                 start_id: last_fragment.insertion.id,
                 start_offset: last_fragment.end_offset,
                 end_id: last_fragment.insertion.id,
@@ -2116,32 +2146,58 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
 }
 
 impl Operation {
+    fn local_timestamp(&self) -> time::Local {
+        match self {
+            Operation::Edit {
+                local_timestamp, ..
+            } => *local_timestamp,
+        }
+    }
+
     pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
     ) -> WIPOffset<serialization::buffer::OperationEnvelope<'fbb>> {
-        let new_text = self.new_text.as_ref().map(|new_text| {
-            builder.create_string(String::from_utf16_lossy(&new_text.code_units).as_str())
-        });
-        let version_in_range = Some(self.version_in_range.to_flatbuf(builder));
-        let edit = serialization::buffer::Edit::create(
-            builder,
-            &serialization::buffer::EditArgs {
-                start_id: Some(&self.start_id.to_flatbuf()),
-                start_offset: self.start_offset as u64,
-                end_id: Some(&self.end_id.to_flatbuf()),
-                end_offset: self.end_offset as u64,
+        let operation_type;
+        let operation;
+        match self {
+            Operation::Edit {
+                start_id,
+                start_offset,
+                end_id,
+                end_offset,
                 version_in_range,
                 new_text,
-                local_timestamp: Some(&self.local_timestamp.to_flatbuf()),
-                lamport_timestamp: Some(&self.lamport_timestamp.to_flatbuf()),
-            },
-        );
+                local_timestamp,
+                lamport_timestamp,
+            } => {
+                let new_text = new_text.as_ref().map(|new_text| {
+                    builder.create_string(String::from_utf16_lossy(&new_text.code_units).as_str())
+                });
+                let version_in_range = Some(version_in_range.to_flatbuf(builder));
+                operation_type = serialization::buffer::Operation::Edit;
+                operation = serialization::buffer::Edit::create(
+                    builder,
+                    &serialization::buffer::EditArgs {
+                        start_id: Some(&start_id.to_flatbuf()),
+                        start_offset: *start_offset as u64,
+                        end_id: Some(&end_id.to_flatbuf()),
+                        end_offset: *end_offset as u64,
+                        version_in_range,
+                        new_text,
+                        local_timestamp: Some(&local_timestamp.to_flatbuf()),
+                        lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
+                    },
+                )
+                .as_union_value();
+            }
+        }
+
         serialization::buffer::OperationEnvelope::create(
             builder,
             &serialization::buffer::OperationEnvelopeArgs {
-                operation_type: serialization::buffer::Operation::Edit,
-                operation: Some(edit.as_union_value()),
+                operation_type,
+                operation: Some(operation),
             },
         )
     }
@@ -2154,7 +2210,7 @@ impl Operation {
                 let message = serialization::buffer::Edit::init_from_table(
                     message.operation().ok_or(crate::Error::DeserializeError)?,
                 );
-                Ok(Some(Self {
+                Ok(Some(Operation::Edit {
                     start_id: time::Local::from_flatbuf(
                         message.start_id().ok_or(crate::Error::DeserializeError)?,
                     ),
@@ -2188,7 +2244,11 @@ impl Operation {
 
 impl operation_queue::Operation for Operation {
     fn timestamp(&self) -> time::Lamport {
-        self.lamport_timestamp
+        match self {
+            Operation::Edit {
+                lamport_timestamp, ..
+            } => *lamport_timestamp,
+        }
     }
 }
 
