@@ -106,6 +106,10 @@ export class WorkTree {
     return this.tree.remove(path);
   }
 
+  exists(path: Path): boolean {
+    return this.tree.exists(path);
+  }
+
   entries(options?: { descendInto?: Path[]; showDeleted?: boolean }): Entry[] {
     let descendInto = null;
     let showDeleted = false;

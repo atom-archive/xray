@@ -319,6 +319,13 @@ impl WorkTree {
         })
     }
 
+    pub fn exists<P>(&self, path: P) -> bool
+    where
+        P: AsRef<Path>,
+    {
+        self.cur_epoch().file_id(path).is_ok()
+    }
+
     pub fn open_text_file<P>(&self, path: P) -> Box<Future<Item = BufferId, Error = Error>>
     where
         P: Into<PathBuf>,
@@ -1104,6 +1111,27 @@ mod tests {
             .collect()
             .wait()
             .unwrap();
+    }
+
+    #[test]
+    fn test_exists() {
+        let git = Rc::new(TestGitProvider::new());
+        let commit = git.commit(&WorkTree::empty());
+        let (tree, ops) =
+            WorkTree::new(Uuid::from_u128(1), Some(commit), vec![], git.clone(), None).unwrap();
+        ops.collect().wait().unwrap();
+
+        tree.create_file("a", FileType::Directory).unwrap();
+        tree.create_file("a/b", FileType::Directory).unwrap();
+        tree.create_file("a/b/c", FileType::Text).unwrap();
+        tree.create_file("a/b/d", FileType::Text).unwrap();
+        tree.remove("a/b/d").unwrap();
+        assert!(tree.exists("a"));
+        assert!(tree.exists("a/b"));
+        assert!(tree.exists("a/b/c"));
+        assert!(!tree.exists("a/b/d"));
+        assert!(!tree.exists("non-existent-path"));
+        assert!(!tree.exists("invalid-path-;.'"));
     }
 
     fn serialize_ops<I: IntoIterator<Item = Operation>>(ops: I) -> Vec<Vec<u8>> {

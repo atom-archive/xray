@@ -173,6 +173,8 @@ suite("WorkTree", () => {
         }
       ]
     );
+    assert(tree1.exists("a/b/x"));
+    assert(!tree1.exists("a/b/d"));
 
     tree1BufferChanges.length = 0;
     tree2BufferChanges.length = 0;

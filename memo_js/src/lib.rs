@@ -196,6 +196,10 @@ impl WorkTree {
             .map_js_err()
     }
 
+    pub fn exists(&self, path: String) -> bool {
+        self.0.exists(&path)
+    }
+
     pub fn open_text_file(&mut self, path: String) -> js_sys::Promise {
         future_to_promise(
             self.0
