@@ -46,8 +46,10 @@ suite("WorkTree", () => {
     assert.strictEqual(ops2.length, 0);
 
     const tree1BufferC = await tree1.openTextFile("a/b/c");
-    const tree2BufferC = await tree2.openTextFile("a/b/c");
+    assert.strictEqual(tree1BufferC.getPath(), "a/b/c");
     assert.strictEqual(tree1BufferC.getText(), "oid0 base text");
+    const tree2BufferC = await tree2.openTextFile("a/b/c");
+    assert.strictEqual(tree2BufferC.getPath(), "a/b/c");
     assert.strictEqual(tree2BufferC.getText(), "oid0 base text");
 
     const tree1BufferChanges: memo.Change[] = [];
@@ -190,6 +192,9 @@ suite("WorkTree", () => {
       { start: point(0, 3), end: point(0, 5), text: "1 " },
       { start: point(0, 9), end: point(0, 10), text: " " }
     ]);
+
+    tree1.remove("a/b/c");
+    assert(tree1BufferC.getPath() == null);
   });
 
   test("incomplete base oids", async () => {

@@ -148,6 +148,10 @@ export class Buffer {
     return this.tree.edit(this.id, oldRanges, newText);
   }
 
+  getPath(): string | null {
+    return this.tree.path(this.id);
+  }
+
   getText(): string {
     return this.tree.text(this.id);
   }

@@ -209,6 +209,13 @@ impl WorkTree {
         )
     }
 
+    pub fn path(&self, buffer_id: JsValue) -> Result<Option<String>, JsValue> {
+        Ok(self
+            .0
+            .path(buffer_id.into_serde().map_js_err()?)
+            .map(|path| path.to_string_lossy().into_owned()))
+    }
+
     pub fn text(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
         self.0
             .text(buffer_id.into_serde().map_js_err()?)
