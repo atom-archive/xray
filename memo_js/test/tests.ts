@@ -194,8 +194,47 @@ suite("WorkTree", () => {
 
   test("incomplete base oids", async () => {
     assert.throws(() => {
-      const [tree, fixupOps] = WorkTree.create("12345678", [], new TestGitProvider());
+      const [tree, fixupOps] = WorkTree.create(
+        "12345678",
+        [],
+        new TestGitProvider()
+      );
     }, /12345678/);
+  });
+
+  test("buffer disposal", async () => {
+    const OID = "0".repeat(40);
+    const git = new TestGitProvider();
+    git.commit(OID, [
+      { depth: 1, name: "a", type: memo.FileType.Directory },
+      { depth: 2, name: "b", type: memo.FileType.Directory },
+      { depth: 3, name: "c", type: memo.FileType.Text, text: "oid0 base text" },
+      { depth: 3, name: "d", type: memo.FileType.Directory }
+    ]);
+
+    const [tree1, initOps1] = WorkTree.create(OID, [], git);
+    const [tree2, initOps2] = WorkTree.create(
+      OID,
+      await collectOps(initOps1),
+      git
+    );
+    tree1.applyOps(await collectOps(initOps2));
+
+    const buffer1 = await tree1.openTextFile("a/b/c");
+    let buffer1ChangeCount = 0;
+    buffer1.onChange(changes => buffer1ChangeCount++);
+
+    const buffer2 = await tree2.openTextFile("a/b/c");
+    tree1.applyOps([
+      buffer2.edit([{ start: point(0, 0), end: point(0, 0) }], "x").operation()
+    ]);
+    assert.strictEqual(buffer1ChangeCount, 1);
+
+    buffer1.dispose();
+    tree1.applyOps([
+      buffer2.edit([{ start: point(0, 0), end: point(0, 0) }], "y").operation()
+    ]);
+    assert.strictEqual(buffer1ChangeCount, 1);
   });
 });
 
