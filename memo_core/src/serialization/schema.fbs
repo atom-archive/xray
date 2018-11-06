@@ -14,6 +14,23 @@ table GlobalTimestamp {
 
 namespace buffer;
 
+enum AnchorVariant : byte { Start, End, Middle }
+
+enum AnchorBias : byte { Left, Right 
+
+table Anchor {
+  variant:AnchorVariant;
+  insertion_id:Timestamp;
+  offset:uint64;
+  bias:AnchorBias;
+}
+
+table Selection {
+  start:Anchor;
+  end:Anchor;
+  reversed:bool;
+}
+
 table Edit {
   start_id:Timestamp;
   start_offset:uint64;
@@ -25,7 +42,13 @@ table Edit {
   lamport_timestamp:Timestamp;
 }
 
-union Operation { Edit }
+table UpdateSelections {
+  set_id:Timestamp;
+  selections:[Selection];
+  lamport_timestamp:Timestamp;
+}
+
+union Operation { Edit, UpdateSelections }
 
 table OperationEnvelope {
   operation: Operation;

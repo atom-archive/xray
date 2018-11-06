@@ -1423,6 +1423,77 @@ impl Ord for Point {
     }
 }
 
+impl Anchor {
+    fn to_flatbuf<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::buffer::Anchor<'fbb>> {
+        match self {
+            Anchor::Start => serialization::buffer::Anchor::create(
+                builder,
+                &serialization::buffer::AnchorArgs {
+                    variant: serialization::buffer::AnchorVariant::Start,
+                    ..serialization::buffer::AnchorArgs::default()
+                },
+            ),
+            Anchor::End => serialization::buffer::Anchor::create(
+                builder,
+                &serialization::buffer::AnchorArgs {
+                    variant: serialization::buffer::AnchorVariant::End,
+                    ..serialization::buffer::AnchorArgs::default()
+                },
+            ),
+            Anchor::Middle {
+                insertion_id,
+                offset,
+                bias,
+            } => serialization::buffer::Anchor::create(
+                builder,
+                &serialization::buffer::AnchorArgs {
+                    variant: serialization::buffer::AnchorVariant::Middle,
+                    insertion_id: Some(&insertion_id.to_flatbuf()),
+                    offset: *offset as u64,
+                    bias: bias.to_flatbuf(),
+                },
+            ),
+        }
+    }
+
+    fn from_flatbuf<'fbb>(
+        message: &serialization::buffer::Anchor<'fbb>,
+    ) -> Result<Self, crate::Error> {
+        match message.variant() {
+            serialization::buffer::AnchorVariant::Start => Ok(Anchor::Start),
+            serialization::buffer::AnchorVariant::End => Ok(Anchor::End),
+            serialization::buffer::AnchorVariant::Middle => Ok(Anchor::Middle {
+                insertion_id: time::Local::from_flatbuf(
+                    message
+                        .insertion_id()
+                        .ok_or(crate::Error::DeserializeError)?,
+                ),
+                offset: message.offset() as usize,
+                bias: AnchorBias::from_flatbuf(message.bias()),
+            }),
+        }
+    }
+}
+
+impl AnchorBias {
+    fn to_flatbuf(&self) -> serialization::buffer::AnchorBias {
+        match self {
+            AnchorBias::Left => serialization::buffer::AnchorBias::Left,
+            AnchorBias::Right => serialization::buffer::AnchorBias::Right,
+        }
+    }
+
+    fn from_flatbuf(message: serialization::buffer::AnchorBias) -> Self {
+        match message {
+            serialization::buffer::AnchorBias::Left => AnchorBias::Left,
+            serialization::buffer::AnchorBias::Right => AnchorBias::Right,
+        }
+    }
+}
+
 impl Iter {
     fn new(buffer: &Buffer) -> Self {
         let mut fragment_cursor = buffer.fragments.cursor();
@@ -1670,6 +1741,33 @@ impl Selection {
 
     pub fn anchor_range(&self) -> Range<Anchor> {
         self.start.clone()..self.end.clone()
+    }
+
+    fn to_flatbuf<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::buffer::Selection<'fbb>> {
+        let start = Some(self.start.to_flatbuf(builder));
+        let end = Some(self.end.to_flatbuf(builder));
+
+        serialization::buffer::Selection::create(
+            builder,
+            &serialization::buffer::SelectionArgs {
+                start,
+                end,
+                reversed: self.reversed,
+            },
+        )
+    }
+
+    fn from_flatbuf<'fbb>(
+        message: serialization::buffer::Selection<'fbb>,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            start: Anchor::from_flatbuf(&message.start().ok_or(crate::Error::DeserializeError)?)?,
+            end: Anchor::from_flatbuf(&message.end().ok_or(crate::Error::DeserializeError)?)?,
+            reversed: message.reversed(),
+        })
     }
 }
 
@@ -2236,7 +2334,29 @@ impl Operation {
                 )
                 .as_union_value();
             }
-            Operation::UpdateSelections { .. } => panic!(),
+            Operation::UpdateSelections {
+                set_id,
+                selections,
+                lamport_timestamp,
+            } => {
+                operation_type = serialization::buffer::Operation::UpdateSelections;
+                let selections = selections.as_ref().map(|selections| {
+                    let selection_flatbufs = &selections
+                        .iter()
+                        .map(|s| s.to_flatbuf(builder))
+                        .collect::<Vec<_>>();
+                    builder.create_vector(selection_flatbufs)
+                });
+                operation = serialization::buffer::UpdateSelections::create(
+                    builder,
+                    &serialization::buffer::UpdateSelectionsArgs {
+                        set_id: Some(&set_id.to_flatbuf()),
+                        selections,
+                        lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
+                    },
+                )
+                .as_union_value();
+            }
         }
 
         serialization::buffer::OperationEnvelope::create(
@@ -2276,6 +2396,33 @@ impl Operation {
                             .local_timestamp()
                             .ok_or(crate::Error::DeserializeError)?,
                     ),
+                    lamport_timestamp: time::Lamport::from_flatbuf(
+                        message
+                            .lamport_timestamp()
+                            .ok_or(crate::Error::DeserializeError)?,
+                    ),
+                }))
+            }
+            serialization::buffer::Operation::UpdateSelections => {
+                let message = serialization::buffer::UpdateSelections::init_from_table(
+                    message.operation().ok_or(crate::Error::DeserializeError)?,
+                );
+
+                let selections = if let Some(flatbufs) = message.selections() {
+                    let mut selections = Vec::with_capacity(flatbufs.len());
+                    for i in 0..flatbufs.len() {
+                        selections.push(Selection::from_flatbuf(flatbufs.get(i))?);
+                    }
+                    Some(selections)
+                } else {
+                    None
+                };
+
+                Ok(Some(Operation::UpdateSelections {
+                    set_id: time::Local::from_flatbuf(
+                        message.set_id().ok_or(crate::Error::DeserializeError)?,
+                    ),
+                    selections,
                     lamport_timestamp: time::Lamport::from_flatbuf(
                         message
                             .lamport_timestamp()

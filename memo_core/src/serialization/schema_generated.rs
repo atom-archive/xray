@@ -214,16 +214,140 @@ pub mod buffer {
   use self::flatbuffers::EndianScalar;
 
 #[allow(non_camel_case_types)]
+#[repr(i8)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AnchorVariant {
+  Start = 0,
+  Middle = 1,
+  End = 2,
+
+}
+
+const ENUM_MIN_ANCHOR_VARIANT: i8 = 0;
+const ENUM_MAX_ANCHOR_VARIANT: i8 = 2;
+
+impl<'a> flatbuffers::Follow<'a> for AnchorVariant {
+  type Inner = Self;
+  #[inline]
+  fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    flatbuffers::read_scalar_at::<Self>(buf, loc)
+  }
+}
+
+impl flatbuffers::EndianScalar for AnchorVariant {
+  #[inline]
+  fn to_little_endian(self) -> Self {
+    let n = i8::to_le(self as i8);
+    let p = &n as *const i8 as *const AnchorVariant;
+    unsafe { *p }
+  }
+  #[inline]
+  fn from_little_endian(self) -> Self {
+    let n = i8::from_le(self as i8);
+    let p = &n as *const i8 as *const AnchorVariant;
+    unsafe { *p }
+  }
+}
+
+impl flatbuffers::Push for AnchorVariant {
+    type Output = AnchorVariant;
+    #[inline]
+    fn push(&self, dst: &mut [u8], _rest: &[u8]) {
+        flatbuffers::emplace_scalar::<AnchorVariant>(dst, *self);
+    }
+}
+
+#[allow(non_camel_case_types)]
+const ENUM_VALUES_ANCHOR_VARIANT:[AnchorVariant; 3] = [
+  AnchorVariant::Start,
+  AnchorVariant::Middle,
+  AnchorVariant::End
+];
+
+#[allow(non_camel_case_types)]
+const ENUM_NAMES_ANCHOR_VARIANT:[&'static str; 3] = [
+    "Start",
+    "Middle",
+    "End"
+];
+
+pub fn enum_name_anchor_variant(e: AnchorVariant) -> &'static str {
+  let index: usize = e as usize;
+  ENUM_NAMES_ANCHOR_VARIANT[index]
+}
+
+#[allow(non_camel_case_types)]
+#[repr(i8)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AnchorBias {
+  Left = 0,
+  Right = 1,
+
+}
+
+const ENUM_MIN_ANCHOR_BIAS: i8 = 0;
+const ENUM_MAX_ANCHOR_BIAS: i8 = 1;
+
+impl<'a> flatbuffers::Follow<'a> for AnchorBias {
+  type Inner = Self;
+  #[inline]
+  fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    flatbuffers::read_scalar_at::<Self>(buf, loc)
+  }
+}
+
+impl flatbuffers::EndianScalar for AnchorBias {
+  #[inline]
+  fn to_little_endian(self) -> Self {
+    let n = i8::to_le(self as i8);
+    let p = &n as *const i8 as *const AnchorBias;
+    unsafe { *p }
+  }
+  #[inline]
+  fn from_little_endian(self) -> Self {
+    let n = i8::from_le(self as i8);
+    let p = &n as *const i8 as *const AnchorBias;
+    unsafe { *p }
+  }
+}
+
+impl flatbuffers::Push for AnchorBias {
+    type Output = AnchorBias;
+    #[inline]
+    fn push(&self, dst: &mut [u8], _rest: &[u8]) {
+        flatbuffers::emplace_scalar::<AnchorBias>(dst, *self);
+    }
+}
+
+#[allow(non_camel_case_types)]
+const ENUM_VALUES_ANCHOR_BIAS:[AnchorBias; 2] = [
+  AnchorBias::Left,
+  AnchorBias::Right
+];
+
+#[allow(non_camel_case_types)]
+const ENUM_NAMES_ANCHOR_BIAS:[&'static str; 2] = [
+    "Left",
+    "Right"
+];
+
+pub fn enum_name_anchor_bias(e: AnchorBias) -> &'static str {
+  let index: usize = e as usize;
+  ENUM_NAMES_ANCHOR_BIAS[index]
+}
+
+#[allow(non_camel_case_types)]
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Operation {
   NONE = 0,
   Edit = 1,
+  UpdateSelections = 2,
 
 }
 
 const ENUM_MIN_OPERATION: u8 = 0;
-const ENUM_MAX_OPERATION: u8 = 1;
+const ENUM_MAX_OPERATION: u8 = 2;
 
 impl<'a> flatbuffers::Follow<'a> for Operation {
   type Inner = Self;
@@ -257,15 +381,17 @@ impl flatbuffers::Push for Operation {
 }
 
 #[allow(non_camel_case_types)]
-const ENUM_VALUES_OPERATION:[Operation; 2] = [
+const ENUM_VALUES_OPERATION:[Operation; 3] = [
   Operation::NONE,
-  Operation::Edit
+  Operation::Edit,
+  Operation::UpdateSelections
 ];
 
 #[allow(non_camel_case_types)]
-const ENUM_NAMES_OPERATION:[&'static str; 2] = [
+const ENUM_NAMES_OPERATION:[&'static str; 3] = [
     "NONE",
-    "Edit"
+    "Edit",
+    "UpdateSelections"
 ];
 
 pub fn enum_name_operation(e: Operation) -> &'static str {
@@ -274,6 +400,218 @@ pub fn enum_name_operation(e: Operation) -> &'static str {
 }
 
 pub struct OperationUnionTableOffset {}
+pub enum AnchorOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct Anchor<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for Anchor<'a> {
+    type Inner = Anchor<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> Anchor<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        Anchor {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args AnchorArgs<'args>) -> flatbuffers::WIPOffset<Anchor<'bldr>> {
+      let mut builder = AnchorBuilder::new(_fbb);
+      builder.add_offset(args.offset);
+      if let Some(x) = args.insertion_id { builder.add_insertion_id(x); }
+      builder.add_bias(args.bias);
+      builder.add_variant(args.variant);
+      builder.finish()
+    }
+
+    pub const VT_VARIANT: flatbuffers::VOffsetT = 4;
+    pub const VT_INSERTION_ID: flatbuffers::VOffsetT = 6;
+    pub const VT_OFFSET: flatbuffers::VOffsetT = 8;
+    pub const VT_BIAS: flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub fn variant(&self) -> AnchorVariant {
+    self._tab.get::<AnchorVariant>(Anchor::VT_VARIANT, Some(AnchorVariant::Start)).unwrap()
+  }
+  #[inline]
+  pub fn insertion_id(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(Anchor::VT_INSERTION_ID, None)
+  }
+  #[inline]
+  pub fn offset(&self) -> u64 {
+    self._tab.get::<u64>(Anchor::VT_OFFSET, Some(0)).unwrap()
+  }
+  #[inline]
+  pub fn bias(&self) -> AnchorBias {
+    self._tab.get::<AnchorBias>(Anchor::VT_BIAS, Some(AnchorBias::Left)).unwrap()
+  }
+}
+
+pub struct AnchorArgs<'a> {
+    pub variant: AnchorVariant,
+    pub insertion_id: Option<&'a  super::Timestamp>,
+    pub offset: u64,
+    pub bias: AnchorBias,
+}
+impl<'a> Default for AnchorArgs<'a> {
+    #[inline]
+    fn default() -> Self {
+        AnchorArgs {
+            variant: AnchorVariant::Start,
+            insertion_id: None,
+            offset: 0,
+            bias: AnchorBias::Left,
+        }
+    }
+}
+pub struct AnchorBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> AnchorBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_variant(&mut self, variant: AnchorVariant) {
+    self.fbb_.push_slot::<AnchorVariant>(Anchor::VT_VARIANT, variant, AnchorVariant::Start);
+  }
+  #[inline]
+  pub fn add_insertion_id(&mut self, insertion_id: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(Anchor::VT_INSERTION_ID, insertion_id);
+  }
+  #[inline]
+  pub fn add_offset(&mut self, offset: u64) {
+    self.fbb_.push_slot::<u64>(Anchor::VT_OFFSET, offset, 0);
+  }
+  #[inline]
+  pub fn add_bias(&mut self, bias: AnchorBias) {
+    self.fbb_.push_slot::<AnchorBias>(Anchor::VT_BIAS, bias, AnchorBias::Left);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> AnchorBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    AnchorBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<Anchor<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+pub enum SelectionOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct Selection<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for Selection<'a> {
+    type Inner = Selection<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> Selection<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        Selection {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args SelectionArgs<'args>) -> flatbuffers::WIPOffset<Selection<'bldr>> {
+      let mut builder = SelectionBuilder::new(_fbb);
+      if let Some(x) = args.end { builder.add_end(x); }
+      if let Some(x) = args.start { builder.add_start(x); }
+      builder.add_reversed(args.reversed);
+      builder.finish()
+    }
+
+    pub const VT_START: flatbuffers::VOffsetT = 4;
+    pub const VT_END: flatbuffers::VOffsetT = 6;
+    pub const VT_REVERSED: flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub fn start(&self) -> Option<Anchor<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<Anchor<'a>>>(Selection::VT_START, None)
+  }
+  #[inline]
+  pub fn end(&self) -> Option<Anchor<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<Anchor<'a>>>(Selection::VT_END, None)
+  }
+  #[inline]
+  pub fn reversed(&self) -> bool {
+    self._tab.get::<bool>(Selection::VT_REVERSED, Some(false)).unwrap()
+  }
+}
+
+pub struct SelectionArgs<'a> {
+    pub start: Option<flatbuffers::WIPOffset<Anchor<'a >>>,
+    pub end: Option<flatbuffers::WIPOffset<Anchor<'a >>>,
+    pub reversed: bool,
+}
+impl<'a> Default for SelectionArgs<'a> {
+    #[inline]
+    fn default() -> Self {
+        SelectionArgs {
+            start: None,
+            end: None,
+            reversed: false,
+        }
+    }
+}
+pub struct SelectionBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> SelectionBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_start(&mut self, start: flatbuffers::WIPOffset<Anchor<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Anchor>>(Selection::VT_START, start);
+  }
+  #[inline]
+  pub fn add_end(&mut self, end: flatbuffers::WIPOffset<Anchor<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Anchor>>(Selection::VT_END, end);
+  }
+  #[inline]
+  pub fn add_reversed(&mut self, reversed: bool) {
+    self.fbb_.push_slot::<bool>(Selection::VT_REVERSED, reversed, false);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> SelectionBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    SelectionBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<Selection<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
 pub enum EditOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
@@ -434,6 +772,106 @@ impl<'a: 'b, 'b> EditBuilder<'a, 'b> {
   }
 }
 
+pub enum UpdateSelectionsOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct UpdateSelections<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for UpdateSelections<'a> {
+    type Inner = UpdateSelections<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> UpdateSelections<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        UpdateSelections {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args UpdateSelectionsArgs<'args>) -> flatbuffers::WIPOffset<UpdateSelections<'bldr>> {
+      let mut builder = UpdateSelectionsBuilder::new(_fbb);
+      if let Some(x) = args.lamport_timestamp { builder.add_lamport_timestamp(x); }
+      if let Some(x) = args.selections { builder.add_selections(x); }
+      if let Some(x) = args.set_id { builder.add_set_id(x); }
+      builder.finish()
+    }
+
+    pub const VT_SET_ID: flatbuffers::VOffsetT = 4;
+    pub const VT_SELECTIONS: flatbuffers::VOffsetT = 6;
+    pub const VT_LAMPORT_TIMESTAMP: flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub fn set_id(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(UpdateSelections::VT_SET_ID, None)
+  }
+  #[inline]
+  pub fn selections(&self) -> Option<flatbuffers::Vector<flatbuffers::ForwardsUOffset<Selection<'a>>>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<flatbuffers::ForwardsUOffset<Selection<'a>>>>>(UpdateSelections::VT_SELECTIONS, None)
+  }
+  #[inline]
+  pub fn lamport_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(UpdateSelections::VT_LAMPORT_TIMESTAMP, None)
+  }
+}
+
+pub struct UpdateSelectionsArgs<'a> {
+    pub set_id: Option<&'a  super::Timestamp>,
+    pub selections: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a , flatbuffers::ForwardsUOffset<Selection<'a >>>>>,
+    pub lamport_timestamp: Option<&'a  super::Timestamp>,
+}
+impl<'a> Default for UpdateSelectionsArgs<'a> {
+    #[inline]
+    fn default() -> Self {
+        UpdateSelectionsArgs {
+            set_id: None,
+            selections: None,
+            lamport_timestamp: None,
+        }
+    }
+}
+pub struct UpdateSelectionsBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> UpdateSelectionsBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_set_id(&mut self, set_id: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(UpdateSelections::VT_SET_ID, set_id);
+  }
+  #[inline]
+  pub fn add_selections(&mut self, selections: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Selection<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(UpdateSelections::VT_SELECTIONS, selections);
+  }
+  #[inline]
+  pub fn add_lamport_timestamp(&mut self, lamport_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(UpdateSelections::VT_LAMPORT_TIMESTAMP, lamport_timestamp);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> UpdateSelectionsBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    UpdateSelectionsBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<UpdateSelections<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
 pub enum OperationEnvelopeOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
@@ -462,7 +900,6 @@ impl<'a> OperationEnvelope<'a> {
     pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
         _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
         args: &'args OperationEnvelopeArgs) -> flatbuffers::WIPOffset<OperationEnvelope<'bldr>> {
-            
       let mut builder = OperationEnvelopeBuilder::new(_fbb);
       if let Some(x) = args.operation { builder.add_operation(x); }
       builder.add_operation_type(args.operation_type);
@@ -485,6 +922,16 @@ impl<'a> OperationEnvelope<'a> {
   pub fn operation_as_edit(&'a self) -> Option<Edit> {
     if self.operation_type() == Operation::Edit {
       self.operation().map(|u| Edit::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn operation_as_update_selections(&'a self) -> Option<UpdateSelections> {
+    if self.operation_type() == Operation::UpdateSelections {
+      self.operation().map(|u| UpdateSelections::init_from_table(u))
     } else {
       None
     }
