@@ -139,6 +139,21 @@ impl WorkTree {
             }
         }
 
+        let fixup_ops = self.mutate_cur_epoch(|epoch| {
+            epoch.apply_ops(cur_epoch_ops, &mut self.lamport_clock.borrow_mut())
+        })?;
+
+        let fixup_ops_stream = Box::new(stream::iter_ok(fixup_ops));
+        Ok(epoch_streams.into_iter().fold(
+            fixup_ops_stream as Box<Stream<Item = Operation, Error = Error>>,
+            |acc, stream| Box::new(acc.chain(stream)),
+        ))
+    }
+
+    fn mutate_cur_epoch<'a, F>(&'a self, mutate: F) -> Result<Vec<Operation>, Error>
+    where
+        F: FnOnce(&mut Epoch) -> Result<Vec<epoch::Operation>, Error>,
+    {
         if let Some(epoch_ref) = self.epoch.clone() {
             let mut epoch = epoch_ref.borrow_mut();
 
@@ -147,7 +162,7 @@ impl WorkTree {
                 prev_versions.insert(*file_id, epoch.buffer_version(*file_id));
             }
 
-            let fixup_ops = epoch.apply_ops(cur_epoch_ops, &mut self.lamport_clock.borrow_mut())?;
+            let fixup_ops = mutate(&mut epoch)?;
             for (buffer_id, file_id) in self.buffers.borrow().iter() {
                 let mut changes = epoch
                     .changes_since(*file_id, prev_versions.remove(file_id).unwrap().unwrap())?
@@ -163,11 +178,7 @@ impl WorkTree {
                 }
             }
 
-            let fixup_ops_stream = Box::new(stream::iter_ok(Operation::stamp(epoch.id, fixup_ops)));
-            Ok(epoch_streams.into_iter().fold(
-                fixup_ops_stream as Box<Stream<Item = Operation, Error = Error>>,
-                |acc, stream| Box::new(acc.chain(stream)),
-            ))
+            Ok(Operation::stamp(epoch.id, fixup_ops).collect())
         } else {
             Err(Error::InvalidOperations)
         }
@@ -864,7 +875,10 @@ mod tests {
             let mut commits = vec![None];
             let base_tree = WorkTree::empty();
             for _ in 0..rng.gen_range(1, 10) {
-                base_tree.mutate(&mut rng, 5);
+                for path in base_tree.visible_paths(FileType::Text) {
+                    base_tree.open_text_file(&path).wait().unwrap();
+                }
+                base_tree.randomly_mutate(&mut rng, 5);
                 commits.push(Some(git.commit(&base_tree)));
             }
 
@@ -894,18 +908,20 @@ mod tests {
             for _ in 0..5 {
                 let replica_index = rng.gen_range(0, PEERS);
                 let tree = &mut trees[replica_index];
+                let observer = &observers[replica_index];
                 let replica_id = tree.replica_id();
-                let observer = &mut observers[replica_index];
                 let k = rng.gen_range(0, 4);
 
                 if k == 0 {
-                    let ops = tree.mutate(&mut rng, 5);
-                    network.broadcast(replica_id, serialize_ops(ops), &mut rng);
+                    tree.open_random_buffers(&mut rng, observer, 5);
                 } else if k == 1 {
+                    let ops = tree.randomly_mutate(&mut rng, 5);
+                    network.broadcast(replica_id, serialize_ops(ops), &mut rng);
+                } else if k == 2 {
                     let head = *rng.choose(&commits).unwrap();
                     let ops = tree.reset(head).collect().wait().unwrap();
                     network.broadcast(replica_id, serialize_ops(ops), &mut rng);
-                } else if k == 2 {
+                } else if k == 3 {
                     let received_ops = network.receive(replica_id, &mut rng);
                     let fixup_ops = tree.apply_ops(deserialize_ops(received_ops)).unwrap();
                     network.broadcast(
@@ -913,25 +929,6 @@ mod tests {
                         serialize_ops(fixup_ops.collect().wait().unwrap()),
                         &mut rng,
                     );
-                } else if k == 3 {
-                    let buffer_id = if tree.open_buffers().is_empty() || rng.gen() {
-                        tree.select_path(FileType::Text, &mut rng).map(|path| {
-                            let id = tree.open_text_file(path).wait().unwrap();
-                            observer.opened_buffer(id, tree);
-                            id
-                        })
-                    } else {
-                        rng.choose(&tree.open_buffers()).cloned()
-                    };
-
-                    if let Some(buffer_id) = buffer_id {
-                        let end = rng.gen_range(0, tree.text(buffer_id).unwrap().count() + 1);
-                        let start = rng.gen_range(0, end + 1);
-                        let text = gen_text(&mut rng);
-                        observer.edit(buffer_id, start..end, text.as_str());
-                        let op = tree.edit(buffer_id, Some(start..end), text).unwrap();
-                        network.broadcast(replica_id, serialize_ops(Some(op)), &mut rng);
-                    }
                 }
             }
 
@@ -1145,16 +1142,28 @@ mod tests {
             self.text(buffer_id).unwrap().into_string()
         }
 
-        fn mutate<T: Rng>(&self, rng: &mut T, count: usize) -> Vec<Operation> {
-            let mut epoch = self.cur_epoch_mut();
-            Operation::stamp(
-                epoch.id,
-                epoch.mutate(rng, &mut self.lamport_clock.borrow_mut(), count),
-            )
-            .collect()
+        fn randomly_mutate<T: Rng>(&self, rng: &mut T, count: usize) -> Vec<Operation> {
+            self.mutate_cur_epoch(|epoch| {
+                Ok(epoch.randomly_mutate(rng, &mut self.lamport_clock.borrow_mut(), count))
+            })
+            .unwrap()
         }
 
-        fn select_path<T: Rng>(&self, file_type: FileType, rng: &mut T) -> Option<PathBuf> {
+        fn open_random_buffers<T: Rng>(
+            &mut self,
+            rng: &mut T,
+            observer: &TestChangeObserver,
+            count: usize,
+        ) {
+            for _ in 0..rng.gen_range(0, count) {
+                if let Some(path) = self.select_path(rng, FileType::Text) {
+                    let buffer_id = self.open_text_file(path).wait().unwrap();
+                    observer.opened_buffer(buffer_id, self);
+                }
+            }
+        }
+
+        fn visible_paths(&self, file_type: FileType) -> Vec<PathBuf> {
             let mut visible_paths = Vec::new();
             self.with_cursor(|cursor| loop {
                 let entry = cursor.entry().unwrap();
@@ -1171,7 +1180,11 @@ mod tests {
                     break;
                 }
             });
+            visible_paths
+        }
 
+        fn select_path<T: Rng>(&self, rng: &mut T, file_type: FileType) -> Option<PathBuf> {
+            let mut visible_paths = self.visible_paths(file_type);
             if visible_paths.is_empty() {
                 None
             } else {
@@ -1287,19 +1300,6 @@ mod tests {
                 .insert(buffer_id, buffer::Buffer::new(text));
         }
 
-        fn edit<T>(&self, buffer_id: BufferId, range: Range<usize>, text: T)
-        where
-            T: Into<Text>,
-        {
-            let mut buffers = self.buffers.borrow_mut();
-            buffers.get_mut(&buffer_id).unwrap().edit(
-                Some(range),
-                text,
-                &mut self.local_clock.borrow_mut(),
-                &mut self.lamport_clock.borrow_mut(),
-            );
-        }
-
         fn text(&self, buffer_id: BufferId) -> String {
             self.buffers.borrow().get(&buffer_id).unwrap().to_string()
         }
@@ -1318,15 +1318,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    fn gen_text<T: Rng>(rng: &mut T) -> String {
-        let text_len = rng.gen_range(0, 50);
-        let mut text: String = rng.gen_ascii_chars().take(text_len).collect();
-        for _ in 0..rng.gen_range(0, 5) {
-            let index = rng.gen_range(0, text.len() + 1);
-            text.insert(index, '\n');
-        }
-        text
     }
 }

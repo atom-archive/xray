@@ -653,20 +653,13 @@ impl Epoch {
         I: IntoIterator<Item = Range<usize>>,
         T: Into<Text>,
     {
-        if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&file_id) {
-            let operations =
-                buffer.edit(old_ranges, new_text, &mut self.local_clock, lamport_clock);
-            let local_timestamp = self.local_clock.tick();
-            self.version.observe(local_timestamp);
-            Ok(Operation::BufferOperation {
-                file_id,
-                operations,
-                local_timestamp,
-                lamport_timestamp: lamport_clock.tick(),
-            })
-        } else {
-            Err(Error::InvalidFileId("file has not been opened".into()))
-        }
+        self.mutate_buffer(
+            file_id,
+            lamport_clock,
+            |buffer, local_clock, lamport_clock| {
+                Ok(buffer.edit(old_ranges, new_text, local_clock, lamport_clock))
+            },
+        )
     }
 
     pub fn edit_2d<I, T>(
@@ -680,9 +673,27 @@ impl Epoch {
         I: IntoIterator<Item = Range<Point>>,
         T: Into<Text>,
     {
+        self.mutate_buffer(
+            file_id,
+            lamport_clock,
+            |buffer, local_clock, lamport_clock| {
+                Ok(buffer.edit_2d(old_ranges, new_text, local_clock, lamport_clock))
+            },
+        )
+    }
+
+    fn mutate_buffer<F>(
+        &mut self,
+        file_id: FileId,
+        lamport_clock: &mut time::Lamport,
+        mutate: F,
+    ) -> Result<Operation, Error>
+    where
+        F: FnOnce(&mut Buffer, &mut time::Local, &mut time::Lamport)
+            -> Result<Vec<buffer::Operation>, Error>,
+    {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get_mut(&file_id) {
-            let operations =
-                buffer.edit_2d(old_ranges, new_text, &mut self.local_clock, lamport_clock);
+            let operations = mutate(buffer, &mut self.local_clock, lamport_clock)?;
             let local_timestamp = self.local_clock.tick();
             self.version.observe(local_timestamp);
             Ok(Operation::BufferOperation {
@@ -1711,6 +1722,14 @@ impl TextFile {
             TextFile::Buffered(buffer) => buffer.is_modified(),
         }
     }
+
+    #[cfg(test)]
+    fn is_buffered(&self) -> bool {
+        match self {
+            TextFile::Buffered(_) => true,
+            _ => false,
+        }
+    }
 }
 
 fn serialize_os_string<S>(os_string: &OsString, serializer: S) -> Result<S::Ok, S::Error>
@@ -2083,7 +2102,7 @@ mod tests {
             let mut rng = StdRng::from_seed(&[seed]);
 
             let mut base_epoch = Epoch::with_replica_id(Uuid::nil());
-            base_epoch.mutate(&mut rng, &mut time::Lamport::new(Uuid::nil()), 20);
+            base_epoch.randomly_mutate(&mut rng, &mut time::Lamport::new(Uuid::nil()), 20);
             let base_entries = base_epoch.entries();
             let base_entries = base_entries
                 .iter()
@@ -2143,7 +2162,7 @@ mod tests {
                         .unwrap();
                     network.broadcast(replica_id, fixup_ops, &mut rng);
                 } else {
-                    let ops = epoch.mutate(&mut rng, lamport_clock, 5);
+                    let ops = epoch.randomly_mutate(&mut rng, lamport_clock, 5);
                     network.broadcast(replica_id, ops, &mut rng);
                 }
             }
@@ -2249,7 +2268,7 @@ mod tests {
             paths
         }
 
-        pub fn mutate<T: Rng>(
+        pub fn randomly_mutate<T: Rng>(
             &mut self,
             rng: &mut T,
             lamport_clock: &mut time::Lamport,
@@ -2257,7 +2276,7 @@ mod tests {
         ) -> Vec<Operation> {
             let mut ops = Vec::new();
             for _ in 0..count {
-                let k = rng.gen_range(0, 3);
+                let k = rng.gen_range(0, 4);
                 if self.child_refs.is_empty() || k == 0 {
                     // println!("Random mutation: Creating file");
                     let parent_id = self
@@ -2303,6 +2322,31 @@ mod tests {
                             Err(_error) => {}
                         }
                     }
+                } else if k == 3 && self.text_files.values().any(|f| f.is_buffered()) {
+                    let buffered_file_ids = self
+                        .text_files
+                        .iter()
+                        .filter_map(|(file_id, file)| {
+                            if file.is_buffered() {
+                                Some(*file_id)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let file_id = *rng.choose(&buffered_file_ids).unwrap();
+                    let op = self
+                        .mutate_buffer(
+                            file_id,
+                            lamport_clock,
+                            |buffer, local_clock, lamport_clock| {
+                                let (_, _, ops) =
+                                    buffer.randomly_mutate(rng, local_clock, lamport_clock);
+                                Ok(ops)
+                            },
+                        )
+                        .unwrap();
+                    ops.push(op);
                 }
             }
             ops

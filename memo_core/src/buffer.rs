@@ -2489,26 +2489,8 @@ mod tests {
             let mut lamport_clock = time::Lamport::new(replica_id);
 
             for _i in 0..10 {
-                let mut old_ranges: Vec<Range<usize>> = Vec::new();
-                for _ in 0..5 {
-                    let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
-                    if last_end > buffer.len() {
-                        break;
-                    }
-                    let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
-                    let start = rng.gen_range::<usize>(last_end, end + 1);
-                    old_ranges.push(start..end);
-                }
-                let new_text = RandomCharIter(rng)
-                    .take(rng.gen_range(0, 10))
-                    .collect::<String>();
-
-                buffer.edit(
-                    old_ranges.iter().cloned(),
-                    new_text.as_str(),
-                    &mut local_clock,
-                    &mut lamport_clock,
-                );
+                let (old_ranges, new_text, _) =
+                    buffer.randomly_mutate(&mut rng, &mut local_clock, &mut lamport_clock);
                 for old_range in old_ranges.iter().rev() {
                     reference_string = [
                         &reference_string[0..old_range.start],
@@ -3002,36 +2984,17 @@ mod tests {
                 network.add_peer(replica_id);
             }
 
-            let mut edit_count = 10;
+            let mut mutation_count = 10;
             loop {
                 let replica_index = rng.gen_range(0, PEERS);
                 let replica_id = replica_ids[replica_index];
                 let buffer = &mut buffers[replica_index];
                 let local_clock = &mut local_clocks[replica_index];
                 let lamport_clock = &mut lamport_clocks[replica_index];
-                if edit_count > 0 && rng.gen() {
-                    let mut old_ranges: Vec<Range<usize>> = Vec::new();
-                    for _ in 0..5 {
-                        let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
-                        if last_end > buffer.len() {
-                            break;
-                        }
-                        let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
-                        let start = rng.gen_range::<usize>(last_end, end + 1);
-                        old_ranges.push(start..end);
-                    }
-                    let new_text = RandomCharIter(rng)
-                        .take(rng.gen_range(0, 10))
-                        .collect::<String>();
-
-                    if rng.gen_weighted_bool(5) {
-                        local_clock.tick();
-                    }
-
-                    let ops =
-                        buffer.edit(old_ranges, new_text.as_str(), local_clock, lamport_clock);
+                if mutation_count > 0 && rng.gen() {
+                    let (_, _, ops) = buffer.randomly_mutate(&mut rng, local_clock, lamport_clock);
                     network.broadcast(replica_id, ops, &mut rng);
-                    edit_count -= 1;
+                    mutation_count -= 1;
                 } else if network.has_unreceived(replica_id) {
                     buffer
                         .apply_ops(
@@ -3042,58 +3005,7 @@ mod tests {
                         .unwrap();
                 }
 
-                // Randomly add, remove or mutate selection sets.
-                if rng.gen_weighted_bool(4) {
-                    let replica_selection_sets = &buffer
-                        .selections()
-                        .map(|(set_id, _)| *set_id)
-                        .filter(|set_id| replica_id == set_id.replica_id)
-                        .collect::<Vec<_>>();
-                    let set_id = rng.choose(&replica_selection_sets);
-                    if set_id.is_some() && rng.gen() {
-                        let op = buffer
-                            .remove_selection_set(*set_id.unwrap(), lamport_clock)
-                            .unwrap();
-                        network.broadcast(replica_id, vec![op], &mut rng);
-                    } else {
-                        let mut selections = Vec::new();
-                        for _ in 0..rng.gen_range(1, 5) {
-                            let start = rng.gen_range(0, buffer.len() + 1);
-                            let end = rng.gen_range(0, buffer.len() + 1);
-                            let selection = if start > end {
-                                Selection {
-                                    start: buffer.anchor_before_offset(end).unwrap(),
-                                    end: buffer.anchor_before_offset(start).unwrap(),
-                                    reversed: true,
-                                }
-                            } else {
-                                Selection {
-                                    start: buffer.anchor_before_offset(start).unwrap(),
-                                    end: buffer.anchor_before_offset(end).unwrap(),
-                                    reversed: false,
-                                }
-                            };
-                            selections.push(selection);
-                        }
-
-                        let op = if let Some(set_id) = set_id {
-                            buffer
-                                .mutate_selections(
-                                    *set_id,
-                                    |_, set| *set = selections,
-                                    lamport_clock,
-                                )
-                                .unwrap()
-                        } else {
-                            buffer
-                                .add_selection_set(selections, local_clock, lamport_clock)
-                                .1
-                        };
-                        network.broadcast(replica_id, vec![op], &mut rng);
-                    }
-                }
-
-                if edit_count == 0 && network.is_idle() {
+                if mutation_count == 0 && network.is_idle() {
                     break;
                 }
             }
@@ -3119,6 +3031,88 @@ mod tests {
             } else {
                 Some(self.0.gen_range(b'a', b'z' + 1).into())
             }
+        }
+    }
+
+    impl Buffer {
+        pub fn randomly_mutate<T>(
+            &mut self,
+            rng: &mut T,
+            local_clock: &mut time::Local,
+            lamport_clock: &mut time::Lamport,
+        ) -> (Vec<Range<usize>>, String, Vec<Operation>)
+        where
+            T: Rng,
+        {
+            // Randomly mutate text.
+            let mut old_ranges: Vec<Range<usize>> = Vec::new();
+            for _ in 0..5 {
+                let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
+                if last_end > self.len() {
+                    break;
+                }
+                let end = rng.gen_range::<usize>(last_end, self.len() + 1);
+                let start = rng.gen_range::<usize>(last_end, end + 1);
+                old_ranges.push(start..end);
+            }
+            let new_text_len = rng.gen_range(0, 10);
+            let new_text: String = RandomCharIter(&mut *rng).take(new_text_len).collect();
+
+            if rng.gen_weighted_bool(5) {
+                local_clock.tick();
+            }
+
+            let mut operations = self.edit(
+                old_ranges.iter().cloned(),
+                new_text.as_str(),
+                local_clock,
+                lamport_clock,
+            );
+
+            // Randomly add, remove or mutate selection sets.
+            let replica_selection_sets = &self
+                .selections()
+                .map(|(set_id, _)| *set_id)
+                .filter(|set_id| local_clock.replica_id == set_id.replica_id)
+                .collect::<Vec<_>>();
+            let set_id = rng.choose(&replica_selection_sets);
+            if set_id.is_some() && rng.gen() {
+                let op = self
+                    .remove_selection_set(*set_id.unwrap(), lamport_clock)
+                    .unwrap();
+                operations.push(op);
+            } else {
+                let mut selections = Vec::new();
+                for _ in 0..rng.gen_range(1, 5) {
+                    let start = rng.gen_range(0, self.len() + 1);
+                    let end = rng.gen_range(0, self.len() + 1);
+                    let selection = if start > end {
+                        Selection {
+                            start: self.anchor_before_offset(end).unwrap(),
+                            end: self.anchor_before_offset(start).unwrap(),
+                            reversed: true,
+                        }
+                    } else {
+                        Selection {
+                            start: self.anchor_before_offset(start).unwrap(),
+                            end: self.anchor_before_offset(end).unwrap(),
+                            reversed: false,
+                        }
+                    };
+                    selections.push(selection);
+                }
+
+                let op = if let Some(set_id) = set_id {
+                    self.mutate_selections(*set_id, |_, set| *set = selections, lamport_clock)
+                        .unwrap()
+                } else {
+                    self.add_selection_set(selections, local_clock, lamport_clock)
+                        .1
+                };
+                operations.push(op);
+            }
+
+            (old_ranges, new_text, operations)
         }
     }
 }
