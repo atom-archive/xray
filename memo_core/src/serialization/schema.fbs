@@ -14,9 +14,9 @@ table GlobalTimestamp {
 
 namespace buffer;
 
-enum AnchorVariant : byte { Start, End, Middle }
+enum AnchorVariant : byte { Start, Middle, End }
 
-enum AnchorBias : byte { Left, Right 
+enum AnchorBias : byte { Left, Right }
 
 table Anchor {
   variant:AnchorVariant;
