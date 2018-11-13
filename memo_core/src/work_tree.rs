@@ -150,7 +150,7 @@ impl WorkTree {
         ))
     }
 
-    fn mutate_cur_epoch<'a, F>(&'a self, mutate: F) -> Result<Vec<Operation>, Error>
+    fn mutate_cur_epoch<F>(&self, mutate: F) -> Result<Vec<Operation>, Error>
     where
         F: FnOnce(&mut Epoch) -> Result<Vec<epoch::Operation>, Error>,
     {
