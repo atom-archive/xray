@@ -2,7 +2,7 @@ use crate::btree::{self, SeekBias};
 use crate::operation_queue::{self, OperationQueue};
 use crate::serialization;
 use crate::time;
-use crate::ReplicaId;
+use crate::{Error, ReplicaId};
 use difference::{Changeset, Difference};
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use lazy_static::lazy_static;
@@ -17,13 +17,7 @@ use std::ops::{Add, AddAssign, Range, Sub};
 use std::sync::Arc;
 use std::vec;
 
-#[derive(Eq, PartialEq, Debug)]
-pub enum Error {
-    OffsetOutOfRange,
-    InvalidAnchor,
-    InvalidOperation,
-    SelectionSetNotFound,
-}
+pub type SelectionSetId = time::Local;
 
 #[derive(Clone)]
 pub struct Buffer {
@@ -367,7 +361,7 @@ impl Buffer {
         selections: Vec<Selection>,
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
-    ) -> (time::Local, Operation) {
+    ) -> (SelectionSetId, Operation) {
         let set_id = local_clock.tick();
         self.selections.insert(set_id, selections.clone());
         (
@@ -382,12 +376,12 @@ impl Buffer {
 
     pub fn remove_selection_set(
         &mut self,
-        set_id: time::Local,
+        set_id: SelectionSetId,
         lamport_clock: &mut time::Lamport,
     ) -> Result<Operation, Error> {
         self.selections
             .remove(&set_id)
-            .ok_or(Error::SelectionSetNotFound)?;
+            .ok_or(Error::InvalidSelectionSet)?;
         Ok(Operation::UpdateSelections {
             set_id,
             selections: None,
@@ -401,7 +395,7 @@ impl Buffer {
 
     pub fn insert_selections<F>(
         &mut self,
-        set_id: time::Local,
+        set_id: SelectionSetId,
         f: F,
         lamport_clock: &mut time::Lamport,
     ) -> Result<Operation, Error>
@@ -459,7 +453,7 @@ impl Buffer {
 
     pub fn mutate_selections<F>(
         &mut self,
-        set_id: time::Local,
+        set_id: SelectionSetId,
         f: F,
         lamport_clock: &mut time::Lamport,
     ) -> Result<Operation, Error>
@@ -469,7 +463,7 @@ impl Buffer {
         let mut selections = self
             .selections
             .remove(&set_id)
-            .ok_or(Error::SelectionSetNotFound)?;
+            .ok_or(Error::InvalidSelectionSet)?;
         f(self, &mut selections);
         self.merge_selections(&mut selections);
         self.selections.insert(set_id, selections.clone());
