@@ -2063,7 +2063,7 @@ mod tests {
         );
 
         let changes = epoch_2
-            .with_buffer(file_id, |b| Ok(b.changes_since(base_version.clone())))
+            .with_buffer(file_id, |b| Ok(b.changes_since(&base_version)))
             .unwrap()
             .collect::<Vec<_>>();
         assert_eq!(changes.len(), 2);

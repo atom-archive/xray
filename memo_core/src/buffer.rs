@@ -26,7 +26,8 @@ pub struct Buffer {
     anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
     offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: time::Global,
-    selections: HashMap<time::Local, Vec<Selection>>,
+    selections: HashMap<SelectionSetId, Vec<Selection>>,
+    selections_last_update: time::Local,
     deferred_ops: OperationQueue<Operation>,
     deferred_replicas: HashSet<ReplicaId>,
 }
@@ -167,6 +168,7 @@ pub enum Operation {
     UpdateSelections {
         set_id: time::Local,
         selections: Option<Vec<Selection>>,
+        local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
     },
 }
@@ -229,6 +231,7 @@ impl Buffer {
             offset_cache: RefCell::new(HashMap::default()),
             version: time::Global::new(),
             selections: HashMap::default(),
+            selections_last_update: time::Local::default(),
             deferred_ops: OperationQueue::new(),
             deferred_replicas: HashSet::new(),
         }
@@ -286,12 +289,19 @@ impl Buffer {
         Iter::at_point(self, point)
     }
 
-    pub fn changes_since(&self, since: time::Global) -> impl Iterator<Item = Change> {
+    pub fn selections_changed_since(&self, since: &time::Global) -> bool {
+        since.observed(self.selections_last_update)
+    }
+
+    pub fn changes_since(&self, since: &time::Global) -> impl Iterator<Item = Change> {
         let since_2 = since.clone();
         let cursor = self
             .fragments
             .filter(move |summary| summary.max_version.changed_since(&since_2));
-        ChangesIter { cursor, since }
+        ChangesIter {
+            cursor,
+            since: since.clone(),
+        }
     }
 
     pub fn edit<I, T>(
@@ -368,6 +378,7 @@ impl Buffer {
             Operation::UpdateSelections {
                 set_id,
                 selections: Some(selections),
+                local_timestamp: local_clock.tick(),
                 lamport_timestamp: lamport_clock.tick(),
             },
         )
@@ -376,6 +387,7 @@ impl Buffer {
     pub fn remove_selection_set(
         &mut self,
         set_id: SelectionSetId,
+        local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<Operation, Error> {
         self.selections
@@ -384,77 +396,21 @@ impl Buffer {
         Ok(Operation::UpdateSelections {
             set_id,
             selections: None,
+            local_timestamp: local_clock.tick(),
             lamport_timestamp: lamport_clock.tick(),
         })
     }
 
-    pub fn selections(&self) -> impl Iterator<Item = (&time::Local, &Vec<Selection>)> {
+    pub fn selections(&self) -> impl Iterator<Item = (&SelectionSetId, &Vec<Selection>)> {
         self.selections.iter()
-    }
-
-    pub fn insert_selections<F>(
-        &mut self,
-        set_id: SelectionSetId,
-        f: F,
-        lamport_clock: &mut time::Lamport,
-    ) -> Result<Operation, Error>
-    where
-        F: FnOnce(&Buffer, &[Selection]) -> Vec<Selection>,
-    {
-        self.mutate_selections(
-            set_id,
-            |buffer, old_selections| {
-                let mut new_selections = f(buffer, old_selections);
-                new_selections
-                    .sort_unstable_by(|a, b| buffer.cmp_anchors(&a.start, &b.start).unwrap());
-
-                let mut selections =
-                    Vec::with_capacity(old_selections.len() + new_selections.len());
-                {
-                    let mut old_selections = old_selections.drain(..).peekable();
-                    let mut new_selections = new_selections.drain(..).peekable();
-                    loop {
-                        if old_selections.peek().is_some() {
-                            if new_selections.peek().is_some() {
-                                match buffer
-                                    .cmp_anchors(
-                                        &old_selections.peek().unwrap().start,
-                                        &new_selections.peek().unwrap().start,
-                                    )
-                                    .unwrap()
-                                {
-                                    Ordering::Less => {
-                                        selections.push(old_selections.next().unwrap());
-                                    }
-                                    Ordering::Equal => {
-                                        selections.push(old_selections.next().unwrap());
-                                        selections.push(new_selections.next().unwrap());
-                                    }
-                                    Ordering::Greater => {
-                                        selections.push(new_selections.next().unwrap());
-                                    }
-                                }
-                            } else {
-                                selections.push(old_selections.next().unwrap());
-                            }
-                        } else if new_selections.peek().is_some() {
-                            selections.push(new_selections.next().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                *old_selections = selections;
-            },
-            lamport_clock,
-        )
     }
 
     pub fn mutate_selections<F>(
         &mut self,
         set_id: SelectionSetId,
-        f: F,
+        local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
+        f: F,
     ) -> Result<Operation, Error>
     where
         F: FnOnce(&Buffer, &mut Vec<Selection>),
@@ -469,6 +425,7 @@ impl Buffer {
         Ok(Operation::UpdateSelections {
             set_id,
             selections: Some(selections),
+            local_timestamp: local_clock.tick(),
             lamport_timestamp: lamport_clock.tick(),
         })
     }
@@ -556,6 +513,7 @@ impl Buffer {
             Operation::UpdateSelections {
                 set_id,
                 selections,
+                local_timestamp,
                 lamport_timestamp,
             } => {
                 if let Some(selections) = selections {
@@ -565,6 +523,7 @@ impl Buffer {
                 }
                 local_clock.observe(set_id);
                 lamport_clock.observe(lamport_timestamp);
+                self.selections_last_update = local_timestamp;
             }
         }
         Ok(())
@@ -2286,7 +2245,9 @@ impl Operation {
             Operation::Edit {
                 local_timestamp, ..
             } => local_timestamp.replica_id,
-            Operation::UpdateSelections { set_id, .. } => set_id.replica_id,
+            Operation::UpdateSelections {
+                local_timestamp, ..
+            } => local_timestamp.replica_id,
         }
     }
 
@@ -2330,6 +2291,7 @@ impl Operation {
             Operation::UpdateSelections {
                 set_id,
                 selections,
+                local_timestamp,
                 lamport_timestamp,
             } => {
                 operation_type = serialization::buffer::Operation::UpdateSelections;
@@ -2345,6 +2307,7 @@ impl Operation {
                     &serialization::buffer::UpdateSelectionsArgs {
                         set_id: Some(&set_id.to_flatbuf()),
                         selections,
+                        local_timestamp: Some(&local_timestamp.to_flatbuf()),
                         lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
                     },
                 )
@@ -2416,6 +2379,11 @@ impl Operation {
                         message.set_id().ok_or(crate::Error::DeserializeError)?,
                     ),
                     selections,
+                    local_timestamp: time::Local::from_flatbuf(
+                        message
+                            .local_timestamp()
+                            .ok_or(crate::Error::DeserializeError)?,
+                    ),
                     lamport_timestamp: time::Lamport::from_flatbuf(
                         message
                             .lamport_timestamp()
@@ -2500,7 +2468,7 @@ mod tests {
             }
 
             for mut old_buffer in buffer_versions {
-                for change in buffer.changes_since(old_buffer.version.clone()) {
+                for change in buffer.changes_since(&old_buffer.version) {
                     old_buffer.edit_2d(
                         Some(change.range),
                         Text::new(change.code_units),
@@ -3071,7 +3039,7 @@ mod tests {
             let set_id = rng.choose(&replica_selection_sets);
             if set_id.is_some() && rng.gen() {
                 let op = self
-                    .remove_selection_set(*set_id.unwrap(), lamport_clock)
+                    .remove_selection_set(*set_id.unwrap(), local_clock, lamport_clock)
                     .unwrap();
                 operations.push(op);
             } else {
@@ -3096,8 +3064,10 @@ mod tests {
                 }
 
                 let op = if let Some(set_id) = set_id {
-                    self.mutate_selections(*set_id, |_, set| *set = selections, lamport_clock)
-                        .unwrap()
+                    self.mutate_selections(*set_id, local_clock, lamport_clock, |_, set| {
+                        *set = selections
+                    })
+                    .unwrap()
                 } else {
                     self.add_selection_set(selections, local_clock, lamport_clock)
                         .1

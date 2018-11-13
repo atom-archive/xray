@@ -20,6 +20,7 @@ pub trait GitProvider {
 
 pub trait ChangeObserver {
     fn text_changed(&self, buffer_id: BufferId, changes: Box<Iterator<Item = Change>>);
+    fn selections_changed(&self, buffer_id: BufferId);
 }
 
 pub struct WorkTree {
@@ -165,18 +166,29 @@ impl WorkTree {
             }
 
             let fixup_ops = mutate(&mut epoch)?;
-            for (buffer_id, file_id) in self.buffers.borrow().iter() {
-                let prev_version = prev_versions.remove(file_id).unwrap();
-                let mut changes = epoch
-                    .with_buffer(*file_id, |buf| Ok(buf.changes_since(prev_version)))
-                    .unwrap()
-                    .peekable();
-                if changes.peek().is_some() {
-                    if let Some(observer) = self.observer.as_ref() {
+            if let Some(observer) = self.observer.as_ref() {
+                for (buffer_id, file_id) in self.buffers.borrow().iter() {
+                    let prev_version = prev_versions.remove(file_id).unwrap();
+
+                    let mut changes = epoch
+                        .with_buffer(*file_id, |b| Ok(b.changes_since(&prev_version)))
+                        .unwrap()
+                        .peekable();
+                    if changes.peek().is_some() {
                         // Temporarily drop outstanding borrow to allow for re-entrant calls from
                         // the observer.
                         drop(epoch);
                         observer.text_changed(*buffer_id, Box::new(changes));
+                        epoch = epoch_ref.borrow_mut();
+                    }
+
+                    if epoch
+                        .with_buffer(*file_id, |b| Ok(b.selections_changed_since(&prev_version)))?
+                    {
+                        // Temporarily drop outstanding borrow to allow for re-entrant calls from
+                        // the observer.
+                        drop(epoch);
+                        observer.selections_changed(*buffer_id);
                         epoch = epoch_ref.borrow_mut();
                     }
                 }
@@ -1026,6 +1038,15 @@ mod tests {
                 })
                 .unwrap();
             }
+
+            fn selections_changed(&self, buffer_id: BufferId) {
+                // Assume that users of WorkTree can always acquire a mutable reference to it.
+                let tree = unsafe { self.0.as_ptr().as_mut().unwrap() };
+                tree.with_buffer_mut(buffer_id, |buffer, local_clock, lamport_clock| {
+                    Ok(buffer.edit(Some(0..0), "!", local_clock, lamport_clock))
+                })
+                .unwrap();
+            }
         }
 
         let git = Rc::new(TestGitProvider::new());
@@ -1073,14 +1094,18 @@ mod tests {
         let buffer_id_2 = tree_2.open_text_file("a").wait().unwrap();
 
         // Synchronous re-entrant calls from the observer don't throw errors.
-        let edit_op = base_tree
+        let op = base_tree
             .with_buffer_mut(buffer_id_2, |buffer, local_clock, lamport_clock| {
-                Ok(buffer.edit(Some(0..0), "x", local_clock, lamport_clock))
+                let mut ops = vec![];
+                ops.extend(buffer.edit(Some(0..0), "x", local_clock, lamport_clock));
+                let (_, op) = buffer.add_selection_set(vec![], local_clock, lamport_clock);
+                ops.push(op);
+                Ok(ops)
             })
             .unwrap();
         tree_1
             .borrow_mut()
-            .apply_ops(Some(edit_op))
+            .apply_ops(Some(op))
             .unwrap()
             .collect()
             .wait()
@@ -1195,6 +1220,7 @@ mod tests {
         buffers: RefCell<HashMap<BufferId, buffer::Buffer>>,
         local_clock: RefCell<time::Local>,
         lamport_clock: RefCell<time::Lamport>,
+        selection_change_counts: RefCell<HashMap<BufferId, usize>>,
     }
 
     impl TestGitProvider {
@@ -1286,6 +1312,7 @@ mod tests {
                 buffers: RefCell::new(HashMap::new()),
                 local_clock: RefCell::new(time::Local::default()),
                 lamport_clock: RefCell::new(time::Lamport::default()),
+                selection_change_counts: RefCell::new(HashMap::new()),
             }
         }
 
@@ -1315,6 +1342,12 @@ mod tests {
                     );
                 }
             }
+        }
+
+        fn selections_changed(&self, buffer_id: BufferId) {
+            let mut change_counts = self.selection_change_counts.borrow_mut();
+            let count = change_counts.entry(buffer_id).or_insert(0);
+            *count += 1;
         }
     }
 }
