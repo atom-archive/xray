@@ -1,7 +1,7 @@
 use crate::btree::{Cursor, Dimension, Edit, Item, KeyedItem, Tree};
+use crate::time;
 use std::fmt::Debug;
 use std::ops::{Add, AddAssign};
-use crate::time;
 
 pub trait Operation: Clone + Debug + Eq {
     fn timestamp(&self) -> time::Lamport;

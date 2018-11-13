@@ -274,7 +274,6 @@ impl Buffer {
         self.iter().collect::<Vec<u16>>()
     }
 
-    #[cfg(test)]
     pub fn to_string(&self) -> String {
         String::from_utf16_lossy(&self.to_u16_chars())
     }
