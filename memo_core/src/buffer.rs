@@ -2152,9 +2152,9 @@ impl Operation {
     pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
-    ) -> WIPOffset<serialization::buffer::OperationEnvelope<'fbb>> {
-        let operation_type;
-        let operation;
+    ) -> WIPOffset<serialization::buffer::Operation<'fbb>> {
+        let variant_type;
+        let variant;
         match self {
             Operation::Edit {
                 start_id,
@@ -2170,8 +2170,8 @@ impl Operation {
                     builder.create_string(String::from_utf16_lossy(&new_text.code_units).as_str())
                 });
                 let version_in_range = Some(version_in_range.to_flatbuf(builder));
-                operation_type = serialization::buffer::Operation::Edit;
-                operation = serialization::buffer::Edit::create(
+                variant_type = serialization::buffer::OperationVariant::Edit;
+                variant = serialization::buffer::Edit::create(
                     builder,
                     &serialization::buffer::EditArgs {
                         start_id: Some(&start_id.to_flatbuf()),
@@ -2188,22 +2188,22 @@ impl Operation {
             }
         }
 
-        serialization::buffer::OperationEnvelope::create(
+        serialization::buffer::Operation::create(
             builder,
-            &serialization::buffer::OperationEnvelopeArgs {
-                operation_type,
-                operation: Some(operation),
+            &serialization::buffer::OperationArgs {
+                variant_type,
+                variant: Some(variant),
             },
         )
     }
 
     pub fn from_flatbuf<'fbb>(
-        message: &serialization::buffer::OperationEnvelope<'fbb>,
+        message: &serialization::buffer::Operation<'fbb>,
     ) -> Result<Option<Self>, crate::Error> {
-        match message.operation_type() {
-            serialization::buffer::Operation::Edit => {
+        match message.variant_type() {
+            serialization::buffer::OperationVariant::Edit => {
                 let message = serialization::buffer::Edit::init_from_table(
-                    message.operation().ok_or(crate::Error::DeserializeError)?,
+                    message.variant().ok_or(crate::Error::DeserializeError)?,
                 );
                 Ok(Some(Operation::Edit {
                     start_id: time::Local::from_flatbuf(
@@ -2232,7 +2232,7 @@ impl Operation {
                     ),
                 }))
             }
-            serialization::buffer::Operation::NONE => Ok(None),
+            serialization::buffer::OperationVariant::NONE => Ok(None),
         }
     }
 }

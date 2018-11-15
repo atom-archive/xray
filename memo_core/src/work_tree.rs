@@ -554,28 +554,28 @@ impl Operation {
     }
 
     pub fn deserialize<'a>(buffer: &'a [u8]) -> Result<Option<Self>, Error> {
-        use crate::serialization::worktree::OperationEnvelope;
-        let root = flatbuffers::get_root::<OperationEnvelope<'a>>(buffer);
+        use crate::serialization::worktree::Operation;
+        let root = flatbuffers::get_root::<Operation<'a>>(buffer);
         Self::from_flatbuf(root)
     }
 
     pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
-    ) -> WIPOffset<serialization::worktree::OperationEnvelope<'fbb>> {
+    ) -> WIPOffset<serialization::worktree::Operation<'fbb>> {
         use crate::serialization::worktree::{
-            EpochOperation, EpochOperationArgs, Operation as OperationType, OperationEnvelope,
-            OperationEnvelopeArgs, StartEpoch, StartEpochArgs,
+            EpochOperation, EpochOperationArgs, Operation as OperationFlatbuf, OperationArgs,
+            OperationVariant, StartEpoch, StartEpochArgs,
         };
 
-        let operation_type;
-        let operation_table;
+        let variant_type;
+        let variant;
 
         match self {
             Operation::StartEpoch { epoch_id, head } => {
-                operation_type = OperationType::StartEpoch;
+                variant_type = OperationVariant::StartEpoch;
                 let head = head.map(|head| builder.create_vector(&head));
-                operation_table = StartEpoch::create(
+                variant = StartEpoch::create(
                     builder,
                     &StartEpochArgs {
                         epoch_id: Some(&epoch_id.to_flatbuf()),
@@ -588,9 +588,9 @@ impl Operation {
                 epoch_id,
                 operation,
             } => {
-                operation_type = OperationType::EpochOperation;
+                variant_type = OperationVariant::EpochOperation;
                 let (epoch_operation_type, epoch_operation_table) = operation.to_flatbuf(builder);
-                operation_table = EpochOperation::create(
+                variant = EpochOperation::create(
                     builder,
                     &EpochOperationArgs {
                         epoch_id: Some(&epoch_id.to_flatbuf()),
@@ -602,22 +602,24 @@ impl Operation {
             }
         }
 
-        OperationEnvelope::create(
+        OperationFlatbuf::create(
             builder,
-            &OperationEnvelopeArgs {
-                operation_type,
-                operation: Some(operation_table),
+            &OperationArgs {
+                variant_type,
+                variant: Some(variant),
             },
         )
     }
 
     pub fn from_flatbuf<'fbb>(
-        message: serialization::worktree::OperationEnvelope<'fbb>,
+        message: serialization::worktree::Operation<'fbb>,
     ) -> Result<Option<Self>, Error> {
-        let operation = message.operation().ok_or(Error::DeserializeError)?;
-        match message.operation_type() {
-            serialization::worktree::Operation::StartEpoch => {
-                let message = serialization::worktree::StartEpoch::init_from_table(operation);
+        use crate::serialization::worktree::{EpochOperation, OperationVariant, StartEpoch};
+
+        let variant = message.variant().ok_or(Error::DeserializeError)?;
+        match message.variant_type() {
+            OperationVariant::StartEpoch => {
+                let message = StartEpoch::init_from_table(variant);
                 let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
                 Ok(Some(Operation::StartEpoch {
                     epoch_id: time::Lamport::from_flatbuf(epoch_id),
@@ -628,8 +630,8 @@ impl Operation {
                     }),
                 }))
             }
-            serialization::worktree::Operation::EpochOperation => {
-                let message = serialization::worktree::EpochOperation::init_from_table(operation);
+            OperationVariant::EpochOperation => {
+                let message = EpochOperation::init_from_table(variant);
                 let operation = message.operation().ok_or(Error::DeserializeError)?;
                 let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
                 if let Some(epoch_op) =
@@ -643,7 +645,7 @@ impl Operation {
                     Ok(None)
                 }
             }
-            serialization::worktree::Operation::NONE => Ok(None),
+            OperationVariant::NONE => Ok(None),
         }
     }
 }
