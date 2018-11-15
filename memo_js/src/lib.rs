@@ -46,7 +46,7 @@ pub struct WorkTreeNewResult {
 }
 
 #[wasm_bindgen]
-pub struct OperationEnvelope(memo::Operation);
+pub struct OperationEnvelope(memo::OperationEnvelope);
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 struct EditRange {
@@ -275,22 +275,27 @@ impl WorkTreeNewResult {
 
 #[wasm_bindgen]
 impl OperationEnvelope {
-    fn new(operation: memo::Operation) -> Self {
+    fn new(operation: memo::OperationEnvelope) -> Self {
         OperationEnvelope(operation)
     }
 
     #[wasm_bindgen(js_name = epochReplicaId)]
     pub fn epoch_replica_id(&self) -> JsValue {
-        JsValue::from_serde(&self.0.epoch_id().replica_id).unwrap()
+        JsValue::from_serde(&self.0.operation.epoch_id().replica_id).unwrap()
     }
 
     #[wasm_bindgen(js_name = epochTimestamp)]
     pub fn epoch_timestamp(&self) -> JsValue {
-        JsValue::from_serde(&self.0.epoch_id().value).unwrap()
+        JsValue::from_serde(&self.0.operation.epoch_id().value).unwrap()
+    }
+
+    #[wasm_bindgen(js_name = epochHead)]
+    pub fn epoch_head(&self) -> JsValue {
+        JsValue::from_serde(&self.0.epoch_head.map(|head| HexOid(head))).unwrap()
     }
 
     pub fn operation(&self) -> Vec<u8> {
-        self.0.serialize()
+        self.0.operation.serialize()
     }
 }
 
