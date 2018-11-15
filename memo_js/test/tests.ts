@@ -192,7 +192,7 @@ suite("WorkTree", () => {
 
   test("incomplete base oids", async () => {
     assert.throws(() => {
-      const [tree, fixupOps] = WorkTree.create("12345678", [], new TestGitProvider());
+      WorkTree.create("12345678", [], new TestGitProvider());
     }, /12345678/);
   });
 });
