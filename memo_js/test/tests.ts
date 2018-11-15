@@ -190,10 +190,25 @@ suite("WorkTree", () => {
     ]);
   });
 
-  test("incomplete base oids", async () => {
+  test("an invalid base commit oid throws an error instead of crashing", async () => {
     assert.throws(() => {
-      const [tree, fixupOps] = WorkTree.create("12345678", [], new TestGitProvider());
+      WorkTree.create("12345678", [], new TestGitProvider());
     }, /12345678/);
+  });
+
+  test("the epoch head is available on operation envelopes", async () => {
+    const OID = "0".repeat(40);
+
+    const git = new TestGitProvider();
+    git.commit(OID, [{ depth: 1, name: "a", type: memo.FileType.Directory }]);
+
+    const [tree1] = WorkTree.create(null, [], git);
+    const envelope1 = tree1.createFile("x", memo.FileType.Text);
+    assert.strictEqual(envelope1.epochHead(), null);
+    const [envelope2] = await collect(tree1.reset(OID));
+    assert.strictEqual(envelope2.epochHead(), OID);
+    const envelope3 = tree1.createFile("y", memo.FileType.Text);
+    assert.strictEqual(envelope3.epochHead(), OID);
   });
 });
 

@@ -40,6 +40,7 @@ export type ReplicaId = Tagged<string, "ReplicaId">;
 export interface OperationEnvelope {
   epochTimestamp(): number;
   epochReplicaId(): ReplicaId;
+  epochHead(): null | Oid;
   operation(): Operation;
 }
 
