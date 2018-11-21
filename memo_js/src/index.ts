@@ -10,7 +10,6 @@ export {
 } from "./support";
 import {
   BufferId,
-  Change,
   ChangeObserver,
   ChangeObserverCallback,
   GitProvider,
@@ -18,7 +17,6 @@ import {
   FileType,
   Oid,
   Path,
-  Point,
   Range,
   Tagged
 } from "./support";
@@ -26,12 +24,13 @@ import { randomBytes } from "crypto";
 
 let memo: any;
 
-export async function init() {
-  memo = await import("../dist/memo_js");
-  memo.StreamToAsyncIterator.prototype[Symbol.asyncIterator] = function() {
-    return this;
-  };
-  return { WorkTree };
+async function init() {
+  if (!memo) {
+    memo = await import("../dist/memo_js");
+    memo.StreamToAsyncIterator.prototype[Symbol.asyncIterator] = function() {
+      return this;
+    };
+  }
 }
 
 export type Version = Tagged<string, "Version">;
@@ -66,11 +65,13 @@ export class WorkTree {
   private tree: any;
   private observer: ChangeObserver;
 
-  static create(
+  static async create(
     base: Oid | null,
     startOps: ReadonlyArray<Operation>,
     git: GitProvider
-  ): [WorkTree, AsyncIterable<OperationEnvelope>] {
+  ): Promise<[WorkTree, AsyncIterable<OperationEnvelope>]> {
+    await init();
+
     const observer = new ChangeObserver();
     const result = memo.WorkTree.new(
       new GitProviderWrapper(git),

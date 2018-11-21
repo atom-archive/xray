@@ -1,32 +1,38 @@
-import * as memo from "../src/index";
+import {
+  BaseEntry as MemoBaseEntry,
+  Change,
+  GitProvider,
+  FileStatus,
+  FileType,
+  Oid,
+  Operation,
+  OperationEnvelope,
+  Path,
+  Point,
+  WorkTree
+} from "../src/index";
 import * as assert from "assert";
 
 suite("WorkTree", () => {
-  let WorkTree: typeof memo.WorkTree;
-
-  suiteSetup(async () => {
-    ({ WorkTree } = await memo.init());
-  });
-
   test("basic API interaction", async () => {
     const OID_0 = "0".repeat(40);
     const OID_1 = "1".repeat(40);
 
     const git = new TestGitProvider();
     git.commit(OID_0, [
-      { depth: 1, name: "a", type: memo.FileType.Directory },
-      { depth: 2, name: "b", type: memo.FileType.Directory },
-      { depth: 3, name: "c", type: memo.FileType.Text, text: "oid0 base text" },
-      { depth: 3, name: "d", type: memo.FileType.Directory }
+      { depth: 1, name: "a", type: FileType.Directory },
+      { depth: 2, name: "b", type: FileType.Directory },
+      { depth: 3, name: "c", type: FileType.Text, text: "oid0 base text" },
+      { depth: 3, name: "d", type: FileType.Directory }
     ]);
     git.commit(OID_1, [
-      { depth: 1, name: "a", type: memo.FileType.Directory },
-      { depth: 2, name: "b", type: memo.FileType.Directory },
-      { depth: 3, name: "c", type: memo.FileType.Text, text: "oid1 base text" }
+      { depth: 1, name: "a", type: FileType.Directory },
+      { depth: 2, name: "b", type: FileType.Directory },
+      { depth: 3, name: "c", type: FileType.Text, text: "oid1 base text" }
     ]);
 
-    const [tree1, initOps1] = WorkTree.create(OID_0, [], git);
-    const [tree2, initOps2] = WorkTree.create(
+    const [tree1, initOps1] = await WorkTree.create(OID_0, [], git);
+    const [tree2, initOps2] = await WorkTree.create(
       OID_0,
       await collectOps(initOps1),
       git
@@ -35,8 +41,8 @@ suite("WorkTree", () => {
 
     const ops1 = [];
     const ops2 = [];
-    ops1.push(tree1.createFile("e", memo.FileType.Text).operation());
-    ops2.push(tree2.createFile("f", memo.FileType.Text).operation());
+    ops1.push(tree1.createFile("e", FileType.Text).operation());
+    ops2.push(tree2.createFile("f", FileType.Text).operation());
 
     await assert.rejects(() => tree2.openTextFile("e"));
 
@@ -50,7 +56,7 @@ suite("WorkTree", () => {
     assert.strictEqual(tree1BufferC.getText(), "oid0 base text");
     assert.strictEqual(tree2BufferC.getText(), "oid0 base text");
 
-    const tree1BufferChanges: memo.Change[] = [];
+    const tree1BufferChanges: Change[] = [];
     tree1BufferC.onChange(c => tree1BufferChanges.push(...c));
     ops1.push(
       tree1BufferC
@@ -65,7 +71,7 @@ suite("WorkTree", () => {
     );
     assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
 
-    const tree2BufferChanges: memo.Change[] = [];
+    const tree2BufferChanges: Change[] = [];
     tree2BufferC.onChange(c => tree2BufferChanges.push(...c));
     assert.deepStrictEqual(await collectOps(tree2.applyOps(ops1)), []);
     assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
@@ -76,8 +82,8 @@ suite("WorkTree", () => {
     ]);
     ops1.length = 0;
 
-    ops1.push(tree1.createFile("x", memo.FileType.Directory).operation());
-    ops1.push(tree1.createFile("x/y", memo.FileType.Directory).operation());
+    ops1.push(tree1.createFile("x", FileType.Directory).operation());
+    ops1.push(tree1.createFile("x/y", FileType.Directory).operation());
     ops1.push(tree1.rename("x", "a/b/x").operation());
     ops1.push(tree1.remove("a/b/d").operation());
     assert.deepStrictEqual(await collectOps(tree2.applyOps(ops1)), []);
@@ -89,26 +95,26 @@ suite("WorkTree", () => {
     assert.deepEqual(tree1.entries({ descendInto: [] }), [
       {
         depth: 1,
-        type: memo.FileType.Directory,
+        type: FileType.Directory,
         name: "a",
         path: "a",
-        status: memo.FileStatus.Unchanged,
+        status: FileStatus.Unchanged,
         visible: true
       },
       {
         depth: 1,
-        type: memo.FileType.Text,
+        type: FileType.Text,
         name: "e",
         path: "e",
-        status: memo.FileStatus.New,
+        status: FileStatus.New,
         visible: true
       },
       {
         depth: 1,
-        type: memo.FileType.Text,
+        type: FileType.Text,
         name: "f",
         path: "f",
-        status: memo.FileStatus.New,
+        status: FileStatus.New,
         visible: true
       }
     ]);
@@ -117,58 +123,58 @@ suite("WorkTree", () => {
       [
         {
           depth: 1,
-          type: memo.FileType.Directory,
+          type: FileType.Directory,
           name: "a",
           path: "a",
-          status: memo.FileStatus.Unchanged,
+          status: FileStatus.Unchanged,
           visible: true
         },
         {
           depth: 2,
-          type: memo.FileType.Directory,
+          type: FileType.Directory,
           name: "b",
           path: "a/b",
-          status: memo.FileStatus.Unchanged,
+          status: FileStatus.Unchanged,
           visible: true
         },
         {
           depth: 3,
-          type: memo.FileType.Text,
+          type: FileType.Text,
           name: "c",
           path: "a/b/c",
-          status: memo.FileStatus.Modified,
+          status: FileStatus.Modified,
           visible: true
         },
         {
           depth: 3,
-          type: memo.FileType.Directory,
+          type: FileType.Directory,
           name: "d",
           path: "a/b/d",
-          status: memo.FileStatus.Removed,
+          status: FileStatus.Removed,
           visible: false
         },
         {
           depth: 3,
-          type: memo.FileType.Directory,
+          type: FileType.Directory,
           name: "x",
           path: "a/b/x",
-          status: memo.FileStatus.New,
+          status: FileStatus.New,
           visible: true
         },
         {
           depth: 1,
-          type: memo.FileType.Text,
+          type: FileType.Text,
           name: "e",
           path: "e",
-          status: memo.FileStatus.New,
+          status: FileStatus.New,
           visible: true
         },
         {
           depth: 1,
-          type: memo.FileType.Text,
+          type: FileType.Text,
           name: "f",
           path: "f",
-          status: memo.FileStatus.New,
+          status: FileStatus.New,
           visible: true
         }
       ]
@@ -191,30 +197,31 @@ suite("WorkTree", () => {
   });
 
   test("an invalid base commit oid throws an error instead of crashing", async () => {
-    assert.throws(() => {
-      WorkTree.create("12345678", [], new TestGitProvider());
-    }, /12345678/);
+    assert.rejects(
+      () => WorkTree.create("12345678", [], new TestGitProvider()),
+      /12345678/
+    );
   });
 
   test("the epoch head is available on operation envelopes", async () => {
     const OID = "0".repeat(40);
 
     const git = new TestGitProvider();
-    git.commit(OID, [{ depth: 1, name: "a", type: memo.FileType.Directory }]);
+    git.commit(OID, [{ depth: 1, name: "a", type: FileType.Directory }]);
 
-    const [tree1] = WorkTree.create(null, [], git);
-    const envelope1 = tree1.createFile("x", memo.FileType.Text);
+    const [tree1] = await WorkTree.create(null, [], git);
+    const envelope1 = tree1.createFile("x", FileType.Text);
     assert.strictEqual(envelope1.epochHead(), null);
     const [envelope2] = await collect(tree1.reset(OID));
     assert.strictEqual(envelope2.epochHead(), OID);
-    const envelope3 = tree1.createFile("y", memo.FileType.Text);
+    const envelope3 = tree1.createFile("y", FileType.Text);
     assert.strictEqual(envelope3.epochHead(), OID);
   });
 });
 
 type BaseEntry =
-  | memo.BaseEntry & { type: memo.FileType.Directory }
-  | memo.BaseEntry & { type: memo.FileType.Text; text: string };
+  | MemoBaseEntry & { type: FileType.Directory }
+  | MemoBaseEntry & { type: FileType.Text; text: string };
 
 async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   const items = [];
@@ -225,26 +232,26 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 }
 
 async function collectOps(
-  ops: AsyncIterable<memo.OperationEnvelope>
-): Promise<memo.Operation[]> {
+  ops: AsyncIterable<OperationEnvelope>
+): Promise<Operation[]> {
   const envelopes = await collect(ops);
   return envelopes.map(envelope => envelope.operation());
 }
 
-function point(row: number, column: number): memo.Point {
+function point(row: number, column: number): Point {
   return { row, column };
 }
 
-class TestGitProvider implements memo.GitProvider {
-  private entries: Map<memo.Oid, ReadonlyArray<memo.BaseEntry>>;
-  private text: Map<memo.Oid, Map<memo.Path, string>>;
+class TestGitProvider implements GitProvider {
+  private entries: Map<Oid, ReadonlyArray<BaseEntry>>;
+  private text: Map<Oid, Map<Path, string>>;
 
   constructor() {
     this.entries = new Map();
     this.text = new Map();
   }
 
-  commit(oid: memo.Oid, entries: ReadonlyArray<BaseEntry>) {
+  commit(oid: Oid, entries: ReadonlyArray<BaseEntry>) {
     this.entries.set(oid, entries);
 
     const textByPath = new Map();
@@ -252,14 +259,14 @@ class TestGitProvider implements memo.GitProvider {
     for (const entry of entries) {
       path.length = entry.depth - 1;
       path.push(entry.name);
-      if (entry.type === memo.FileType.Text) {
+      if (entry.type === FileType.Text) {
         textByPath.set(path.join("/"), entry.text);
       }
     }
     this.text.set(oid, textByPath);
   }
 
-  async *baseEntries(oid: memo.Oid): AsyncIterable<memo.BaseEntry> {
+  async *baseEntries(oid: Oid): AsyncIterable<BaseEntry> {
     const entries = this.entries.get(oid);
     if (entries) {
       for (const entry of entries) {
@@ -270,7 +277,7 @@ class TestGitProvider implements memo.GitProvider {
     }
   }
 
-  async baseText(oid: memo.Oid, path: memo.Path): Promise<string> {
+  async baseText(oid: Oid, path: Path): Promise<string> {
     const textByPath = this.text.get(oid);
     if (textByPath != null) {
       const text = textByPath.get(path);
