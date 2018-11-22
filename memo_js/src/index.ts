@@ -33,7 +33,7 @@ async function init() {
   }
 }
 
-export type Version = Tagged<string, "Version">;
+export type Version = Tagged<Uint8Array, "Version">;
 export type Operation = Tagged<Uint8Array, "Operation">;
 export type ReplicaId = Tagged<string, "ReplicaId">;
 export interface OperationEnvelope {
@@ -86,6 +86,14 @@ export class WorkTree {
   private constructor(tree: any, observer: ChangeObserver) {
     this.tree = tree;
     this.observer = observer;
+  }
+
+  version(): Version {
+    return this.tree.version()
+  }
+
+  hasObserved(version: Version): boolean {
+    return this.tree.observed(version)
   }
 
   reset(base: Oid | null): AsyncIterable<OperationEnvelope> {

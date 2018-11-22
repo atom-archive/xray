@@ -33,6 +33,12 @@ pub struct WorkTree {
     observer: Option<Rc<ChangeObserver>>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct Version {
+    epoch_id: epoch::Id,
+    epoch_version: time::Global,
+}
+
 pub struct OperationEnvelope {
     pub epoch_head: Option<Oid>,
     pub operation: Operation,
@@ -255,8 +261,21 @@ impl WorkTree {
         }
     }
 
-    pub fn version(&self) -> time::Global {
-        self.cur_epoch().version()
+    pub fn observed(&self, other: Version) -> bool {
+        let version = self.version();
+        match version.epoch_id.cmp(&other.epoch_id) {
+            Ordering::Less => false,
+            Ordering::Equal => other.epoch_version <= version.epoch_version,
+            Ordering::Greater => true,
+        }
+    }
+
+    pub fn version(&self) -> Version {
+        let epoch = self.cur_epoch();
+        Version {
+            epoch_id: epoch.id,
+            epoch_version: epoch.version(),
+        }
     }
 
     pub fn with_cursor<F>(&self, mut f: F)
@@ -1162,6 +1181,65 @@ mod tests {
             .collect()
             .wait()
             .unwrap();
+    }
+
+    #[test]
+    fn test_version() {
+        let git = Rc::new(TestGitProvider::new());
+        let base_tree = WorkTree::empty();
+        base_tree.create_file("a", FileType::Text).unwrap();
+        let a_base = base_tree.open_text_file("a").wait().unwrap();
+        base_tree.edit(a_base, Some(0..0), "abc").unwrap();
+        let commit_0 = git.commit(&base_tree);
+
+        base_tree.edit(a_base, Some(1..2), "def").unwrap();
+        base_tree.create_file("b", FileType::Directory).unwrap();
+        let commit_1 = git.commit(&base_tree);
+
+        base_tree.edit(a_base, Some(2..3), "ghi").unwrap();
+        base_tree.create_file("b/c", FileType::Text).unwrap();
+        let commit_2 = git.commit(&base_tree);
+
+        let (mut tree_1, ops_1) = WorkTree::new(
+            Uuid::from_u128(1),
+            Some(commit_0),
+            vec![],
+            git.clone(),
+            None,
+        )
+        .unwrap();
+        let (mut tree_2, ops_2) = WorkTree::new(
+            Uuid::from_u128(2),
+            Some(commit_0),
+            open_envelopes(ops_1.collect().wait().unwrap()),
+            git.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(ops_2.wait().next().is_none());
+
+        let ops_1 = open_envelopes(tree_1.create_file("x.txt", FileType::Text));
+        let ops_2 = open_envelopes(tree_2.create_file("y.txt", FileType::Text));
+        assert!(!tree_1.observed(tree_2.version()));
+        assert!(!tree_2.observed(tree_1.version()));
+
+        tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
+        assert!(tree_1.observed(tree_2.version()));
+        tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
+        assert!(tree_2.observed(tree_1.version()));
+
+        let ops_1 = open_envelopes(tree_1.reset(Some(commit_1)).collect().wait().unwrap());
+        let ops_2 = open_envelopes(tree_2.reset(Some(commit_2)).collect().wait().unwrap());
+        // Even though the two sites haven't exchanged operations yet, it's as if tree_1 has
+        // already observed tree_2's state, since it won't ever go back to an epoch whose Lamport
+        // timestamp is smaller.
+        assert!(tree_1.observed(tree_2.version()));
+        assert!(!tree_2.observed(tree_1.version()));
+
+        tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
+        assert!(tree_1.observed(tree_2.version()));
+        tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
+        assert!(tree_2.observed(tree_1.version()));
     }
 
     fn open_envelopes<I: IntoIterator<Item = OperationEnvelope>>(envelopes: I) -> Vec<Operation> {

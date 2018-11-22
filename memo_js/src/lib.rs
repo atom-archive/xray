@@ -1,5 +1,6 @@
 #![feature(macros_in_extern)]
 
+use bincode;
 use futures::{Async, Future, Poll, Stream};
 use memo_core as memo;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -135,6 +136,15 @@ impl WorkTree {
                     .map_err(|err| err.to_string()),
             )),
         })
+    }
+
+    pub fn version(&self) -> Vec<u8> {
+        bincode::serialize(&self.0.version()).unwrap()
+    }
+
+    pub fn observed(&self, version_bytes: &[u8]) -> Result<bool, JsValue> {
+        let version = bincode::deserialize(&version_bytes).map_js_err()?;
+        Ok(self.0.observed(version))
     }
 
     pub fn reset(&mut self, base: JsValue) -> Result<StreamToAsyncIterator, JsValue> {

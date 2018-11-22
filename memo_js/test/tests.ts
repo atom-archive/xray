@@ -217,6 +217,33 @@ suite("WorkTree", () => {
     const envelope3 = tree1.createFile("y", FileType.Text);
     assert.strictEqual(envelope3.epochHead(), OID);
   });
+
+  test("versions", async () => {
+    const OID = "0".repeat(40);
+
+    const git = new TestGitProvider();
+    git.commit(OID, [{ depth: 1, name: "a", type: FileType.Directory }]);
+
+    const [tree1, initOps1] = await WorkTree.create(OID, [], git);
+    const [tree2, initOps2] = await WorkTree.create(
+      OID,
+      await collectOps(initOps1),
+      git
+    );
+    assert.deepEqual(await collectOps(initOps2), []);
+    assert(tree1.hasObserved(tree2.version()));
+    assert(tree2.hasObserved(tree1.version()));
+
+    let op1 = tree1.createFile("a/b.txt", FileType.Text);
+    let op2 = tree2.createFile("a/c.txt", FileType.Text);
+    assert(!tree1.hasObserved(tree2.version()));
+    assert(!tree2.hasObserved(tree1.version()));
+
+    await collectOps(tree1.applyOps([op2.operation()]));
+    assert(tree1.hasObserved(tree2.version()));
+    await collectOps(tree2.applyOps([op1.operation()]));
+    assert(tree2.hasObserved(tree1.version()));
+  });
 });
 
 type BaseEntry =
