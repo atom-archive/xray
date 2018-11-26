@@ -12,6 +12,7 @@ import {
   WorkTree
 } from "../src/index";
 import * as assert from "assert";
+import * as uuid from "uuid/v4";
 
 suite("WorkTree", () => {
   test("basic API interaction", async () => {
@@ -31,8 +32,9 @@ suite("WorkTree", () => {
       { depth: 3, name: "c", type: FileType.Text, text: "oid1 base text" }
     ]);
 
-    const [tree1, initOps1] = await WorkTree.create(OID_0, [], git);
+    const [tree1, initOps1] = await WorkTree.create(uuid(), OID_0, [], git);
     const [tree2, initOps2] = await WorkTree.create(
+      uuid(),
       OID_0,
       await collectOps(initOps1),
       git
@@ -205,7 +207,7 @@ suite("WorkTree", () => {
 
   test("an invalid base commit oid throws an error instead of crashing", async () => {
     assert.rejects(
-      () => WorkTree.create("12345678", [], new TestGitProvider()),
+      () => WorkTree.create(uuid(), "12345678", [], new TestGitProvider()),
       /12345678/
     );
   });
@@ -216,7 +218,7 @@ suite("WorkTree", () => {
     const git = new TestGitProvider();
     git.commit(OID, [{ depth: 1, name: "a", type: FileType.Directory }]);
 
-    const [tree1] = await WorkTree.create(null, [], git);
+    const [tree1] = await WorkTree.create(uuid(), null, [], git);
     const envelope1 = tree1.createFile("x", FileType.Text);
     assert.strictEqual(envelope1.epochHead(), null);
     const [envelope2] = await collect(tree1.reset(OID));
@@ -225,14 +227,30 @@ suite("WorkTree", () => {
     assert.strictEqual(envelope3.epochHead(), OID);
   });
 
+  test("replica id", async () => {
+    const git = new TestGitProvider();
+
+    {
+      const replicaId = uuid();
+      const [tree] = await WorkTree.create(replicaId, null, [], git);
+      const envelope = tree.createFile("x", FileType.Text);
+      assert.strictEqual(envelope.epochReplicaId(), replicaId);
+    }
+
+    {
+      await assert.rejects(WorkTree.create("invalid id", null, [], git));
+    }
+  });
+
   test("versions", async () => {
     const OID = "0".repeat(40);
 
     const git = new TestGitProvider();
     git.commit(OID, [{ depth: 1, name: "a", type: FileType.Directory }]);
 
-    const [tree1, initOps1] = await WorkTree.create(OID, [], git);
+    const [tree1, initOps1] = await WorkTree.create(uuid(), OID, [], git);
     const [tree2, initOps2] = await WorkTree.create(
+      uuid(),
       OID,
       await collectOps(initOps1),
       git
@@ -262,8 +280,9 @@ suite("WorkTree", () => {
       { depth: 3, name: "d", type: FileType.Directory }
     ]);
 
-    const [tree1, initOps1] = await WorkTree.create(OID, [], git);
+    const [tree1, initOps1] = await WorkTree.create(uuid(), OID, [], git);
     const [tree2, initOps2] = await WorkTree.create(
+      uuid(),
       OID,
       await collectOps(initOps1),
       git

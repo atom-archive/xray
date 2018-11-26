@@ -21,7 +21,6 @@ import {
   Range,
   Tagged
 } from "./support";
-import { randomBytes } from "crypto";
 
 let memo: any;
 
@@ -67,6 +66,7 @@ export class WorkTree {
   private observer: ChangeObserver;
 
   static async create(
+    replicaId: string,
     base: Oid | null,
     startOps: ReadonlyArray<Operation>,
     git: GitProvider
@@ -77,7 +77,7 @@ export class WorkTree {
     const result = memo.WorkTree.new(
       new GitProviderWrapper(git),
       observer,
-      randomBytes(16),
+      replicaId,
       base,
       startOps
     );
@@ -90,11 +90,11 @@ export class WorkTree {
   }
 
   version(): Version {
-    return this.tree.version()
+    return this.tree.version();
   }
 
   hasObserved(version: Version): boolean {
-    return this.tree.observed(version)
+    return this.tree.observed(version);
   }
 
   reset(base: Oid | null): AsyncIterable<OperationEnvelope> {
