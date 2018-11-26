@@ -206,6 +206,10 @@ impl WorkTree {
             .map_js_err()
     }
 
+    pub fn exists(&self, path: String) -> bool {
+        self.0.exists(&path)
+    }
+
     pub fn open_text_file(&mut self, path: String) -> js_sys::Promise {
         future_to_promise(
             self.0
@@ -213,6 +217,13 @@ impl WorkTree {
                 .map(|buffer_id| JsValue::from_serde(&buffer_id).unwrap())
                 .map_err(|error| JsValue::from_str(&error.to_string())),
         )
+    }
+
+    pub fn path(&self, buffer_id: JsValue) -> Result<Option<String>, JsValue> {
+        Ok(self
+            .0
+            .path(buffer_id.into_serde().map_js_err()?)
+            .map(|path| path.to_string_lossy().into_owned()))
     }
 
     pub fn text(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {

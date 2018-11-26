@@ -52,8 +52,10 @@ suite("WorkTree", () => {
     assert.strictEqual(ops2.length, 0);
 
     const tree1BufferC = await tree1.openTextFile("a/b/c");
-    const tree2BufferC = await tree2.openTextFile("a/b/c");
+    assert.strictEqual(tree1BufferC.getPath(), "a/b/c");
     assert.strictEqual(tree1BufferC.getText(), "oid0 base text");
+    const tree2BufferC = await tree2.openTextFile("a/b/c");
+    assert.strictEqual(tree2BufferC.getPath(), "a/b/c");
     assert.strictEqual(tree2BufferC.getText(), "oid0 base text");
 
     const tree1BufferChanges: Change[] = [];
@@ -179,6 +181,8 @@ suite("WorkTree", () => {
         }
       ]
     );
+    assert(tree1.exists("a/b/x"));
+    assert(!tree1.exists("a/b/d"));
 
     tree1BufferChanges.length = 0;
     tree2BufferChanges.length = 0;
@@ -194,6 +198,9 @@ suite("WorkTree", () => {
       { start: point(0, 3), end: point(0, 5), text: "1 " },
       { start: point(0, 9), end: point(0, 10), text: " " }
     ]);
+
+    tree1.remove("a/b/c");
+    assert(tree1BufferC.getPath() == null);
   });
 
   test("an invalid base commit oid throws an error instead of crashing", async () => {
@@ -243,6 +250,41 @@ suite("WorkTree", () => {
     assert(tree1.hasObserved(tree2.version()));
     await collectOps(tree2.applyOps([op1.operation()]));
     assert(tree2.hasObserved(tree1.version()));
+  });
+
+  test("buffer disposal", async () => {
+    const OID = "0".repeat(40);
+    const git = new TestGitProvider();
+    git.commit(OID, [
+      { depth: 1, name: "a", type: FileType.Directory },
+      { depth: 2, name: "b", type: FileType.Directory },
+      { depth: 3, name: "c", type: FileType.Text, text: "oid0 base text" },
+      { depth: 3, name: "d", type: FileType.Directory }
+    ]);
+
+    const [tree1, initOps1] = await WorkTree.create(OID, [], git);
+    const [tree2, initOps2] = await WorkTree.create(
+      OID,
+      await collectOps(initOps1),
+      git
+    );
+    tree1.applyOps(await collectOps(initOps2));
+
+    const buffer1 = await tree1.openTextFile("a/b/c");
+    let buffer1ChangeCount = 0;
+    buffer1.onChange(_ => buffer1ChangeCount++);
+
+    const buffer2 = await tree2.openTextFile("a/b/c");
+    tree1.applyOps([
+      buffer2.edit([{ start: point(0, 0), end: point(0, 0) }], "x").operation()
+    ]);
+    assert.strictEqual(buffer1ChangeCount, 1);
+
+    buffer1.dispose();
+    tree1.applyOps([
+      buffer2.edit([{ start: point(0, 0), end: point(0, 0) }], "y").operation()
+    ]);
+    assert.strictEqual(buffer1ChangeCount, 1);
   });
 });
 

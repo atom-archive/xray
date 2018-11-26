@@ -12,6 +12,7 @@ import {
   BufferId,
   ChangeObserver,
   ChangeObserverCallback,
+  CompositeDisposable,
   GitProvider,
   GitProviderWrapper,
   FileType,
@@ -116,6 +117,10 @@ export class WorkTree {
     return this.tree.remove(path);
   }
 
+  exists(path: Path): boolean {
+    return this.tree.exists(path);
+  }
+
   entries(options?: { descendInto?: Path[]; showDeleted?: boolean }): Entry[] {
     let descendInto = null;
     let showDeleted = false;
@@ -136,15 +141,25 @@ export class Buffer {
   private id: BufferId;
   private tree: any;
   private observer: ChangeObserver;
+  private disposables: CompositeDisposable;
 
   constructor(id: BufferId, tree: any, observer: ChangeObserver) {
     this.id = id;
     this.tree = tree;
     this.observer = observer;
+    this.disposables = new CompositeDisposable();
+  }
+
+  dispose() {
+    this.disposables.dispose();
   }
 
   edit(oldRanges: Range[], newText: string): OperationEnvelope {
     return this.tree.edit(this.id, oldRanges, newText);
+  }
+
+  getPath(): string | null {
+    return this.tree.path(this.id);
   }
 
   getText(): string {
@@ -152,6 +167,6 @@ export class Buffer {
   }
 
   onChange(callback: ChangeObserverCallback) {
-    this.observer.onChange(this.id, callback);
+    this.disposables.add(this.observer.onChange(this.id, callback));
   }
 }

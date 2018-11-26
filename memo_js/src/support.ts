@@ -55,27 +55,79 @@ export class AsyncIteratorWrapper<T> {
 export type ChangeObserverCallback = (changes: ReadonlyArray<Change>) => void;
 
 export class ChangeObserver {
-  private callbacks: Map<BufferId, ChangeObserverCallback[]>;
+  emitter: Emitter;
+
+  constructor() {
+    this.emitter = new Emitter();
+  }
+
+  onChange(bufferId: BufferId, callback: ChangeObserverCallback): Disposable {
+    return this.emitter.on(`buffer-${bufferId}-change`, callback);
+  }
+
+  textChanged(bufferId: BufferId, changes: Change[]) {
+    this.emitter.emit(`buffer-${bufferId}-change`, changes);
+  }
+}
+
+export interface Disposable {
+  dispose(): void;
+}
+
+export class CompositeDisposable implements Disposable {
+  private disposables: Disposable[];
+  private disposed: boolean;
+
+  constructor() {
+    this.disposables = [];
+    this.disposed = false;
+  }
+
+  add(disposable: Disposable) {
+    this.disposables.push(disposable);
+  }
+
+  dispose() {
+    if (!this.disposed) {
+      this.disposed = true;
+      for (const disposable of this.disposables) {
+        disposable.dispose();
+      }
+    }
+  }
+}
+
+export type EmitterCallback = (params: any) => void;
+export class Emitter {
+  private callbacks: Map<string, EmitterCallback[]>;
 
   constructor() {
     this.callbacks = new Map();
   }
 
-  onChange(bufferId: BufferId, callback: ChangeObserverCallback) {
-    let callbacks = this.callbacks.get(bufferId);
-    if (!callbacks) {
-      callbacks = [];
-      this.callbacks.set(bufferId, callbacks);
-    }
-    callbacks.push(callback);
-  }
-
-  textChanged(bufferId: BufferId, changes: Change[]) {
-    const callbacks = this.callbacks.get(bufferId);
+  emit(eventName: string, params: any) {
+    const callbacks = this.callbacks.get(eventName);
     if (callbacks) {
       for (const callback of callbacks) {
-        callback(changes);
+        callback(params);
       }
     }
+  }
+
+  on(eventName: string, callback: EmitterCallback): Disposable {
+    let callbacks = this.callbacks.get(eventName);
+    if (!callbacks) {
+      callbacks = [];
+      this.callbacks.set(eventName, callbacks);
+    }
+    callbacks.push(callback);
+    return {
+      dispose: () => {
+        if (callbacks) {
+          const callbackIndex = callbacks.indexOf(callback);
+          if (callbackIndex >= 0) callbacks.splice(callbackIndex, 1);
+        }
+      }
+    };
   }
 }
