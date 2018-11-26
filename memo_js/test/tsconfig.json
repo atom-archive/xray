@@ -1,5 +1,4 @@
 {
-  "include": ["src/**/*.ts"],
   "compilerOptions": {
     "outDir": "./dist/",
     "noImplicitAny": true,
@@ -8,6 +7,6 @@
     "declarationMap": true,
     "declaration": true,
     "lib": ["es2015", "esnext"],
-    "types": ["node"]
+    "types": ["mocha", "node"]
   }
 }

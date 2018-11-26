@@ -1,5 +1,6 @@
 #![feature(macros_in_extern)]
 
+use bincode;
 use futures::{Async, Future, Poll, Stream};
 use memo_core as memo;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -46,7 +47,7 @@ pub struct WorkTreeNewResult {
 }
 
 #[wasm_bindgen]
-pub struct OperationEnvelope(memo::Operation);
+pub struct OperationEnvelope(memo::OperationEnvelope);
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 struct EditRange {
@@ -135,6 +136,15 @@ impl WorkTree {
                     .map_err(|err| err.to_string()),
             )),
         })
+    }
+
+    pub fn version(&self) -> Vec<u8> {
+        bincode::serialize(&self.0.version()).unwrap()
+    }
+
+    pub fn observed(&self, version_bytes: &[u8]) -> Result<bool, JsValue> {
+        let version = bincode::deserialize(&version_bytes).map_js_err()?;
+        Ok(self.0.observed(version))
     }
 
     pub fn reset(&mut self, base: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
@@ -286,22 +296,27 @@ impl WorkTreeNewResult {
 
 #[wasm_bindgen]
 impl OperationEnvelope {
-    fn new(operation: memo::Operation) -> Self {
+    fn new(operation: memo::OperationEnvelope) -> Self {
         OperationEnvelope(operation)
     }
 
     #[wasm_bindgen(js_name = epochReplicaId)]
     pub fn epoch_replica_id(&self) -> JsValue {
-        JsValue::from_serde(&self.0.epoch_id().replica_id).unwrap()
+        JsValue::from_serde(&self.0.operation.epoch_id().replica_id).unwrap()
     }
 
     #[wasm_bindgen(js_name = epochTimestamp)]
     pub fn epoch_timestamp(&self) -> JsValue {
-        JsValue::from_serde(&self.0.epoch_id().value).unwrap()
+        JsValue::from_serde(&self.0.operation.epoch_id().value).unwrap()
+    }
+
+    #[wasm_bindgen(js_name = epochHead)]
+    pub fn epoch_head(&self) -> JsValue {
+        JsValue::from_serde(&self.0.epoch_head.map(|head| HexOid(head))).unwrap()
     }
 
     pub fn operation(&self) -> Vec<u8> {
-        self.0.serialize()
+        self.0.operation.serialize()
     }
 }
 

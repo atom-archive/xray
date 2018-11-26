@@ -3,6 +3,8 @@ use crate::Error;
 use crate::ReplicaId;
 use crate::ReplicaIdExt;
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
+use serde::{Deserializer, Serializer};
+use serde_derive::{Deserialize, Serialize};
 use std::cmp::{self, Ordering};
 use std::collections::HashMap;
 use std::ops::{Add, AddAssign};
@@ -14,10 +16,18 @@ pub struct Local {
     pub value: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Global(Arc<HashMap<ReplicaId, u64>>);
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Global(
+    #[serde(
+        serialize_with = "Global::serialize_inner",
+        deserialize_with = "Global::deserialize_inner"
+    )]
+    Arc<HashMap<ReplicaId, u64>>,
+);
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
 pub struct Lamport {
     pub value: u64,
     pub replica_id: ReplicaId,
@@ -74,6 +84,25 @@ impl<'a> AddAssign<&'a Local> for Local {
 impl Global {
     pub fn new() -> Self {
         Global(Arc::new(HashMap::new()))
+    }
+
+    fn serialize_inner<S>(
+        inner: &Arc<HashMap<ReplicaId, u64>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::Serialize;
+        inner.serialize(serializer)
+    }
+
+    fn deserialize_inner<'de, D>(deserializer: D) -> Result<Arc<HashMap<ReplicaId, u64>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::Deserialize;
+        Ok(Arc::new(HashMap::deserialize(deserializer)?))
     }
 
     pub fn get(&self, replica_id: ReplicaId) -> u64 {
