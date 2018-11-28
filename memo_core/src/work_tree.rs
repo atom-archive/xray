@@ -118,6 +118,10 @@ impl WorkTree {
         Ok((tree, ops))
     }
 
+    pub fn head(&self) -> Option<Oid> {
+        self.epoch.as_ref().and_then(|e| e.borrow().head)
+    }
+
     pub fn reset(
         &mut self,
         head: Option<Oid>,
@@ -1091,7 +1095,9 @@ mod tests {
         .unwrap();
         assert!(ops_2.wait().next().is_none());
 
+        assert_eq!(tree_1.head(), Some(commit_0));
         assert_eq!(tree_1.dir_entries(), git.tree(commit_0).dir_entries());
+        assert_eq!(tree_2.head(), Some(commit_0));
         assert_eq!(tree_2.dir_entries(), git.tree(commit_0).dir_entries());
 
         let a_1 = tree_1.open_text_file("a").wait().unwrap();
@@ -1102,11 +1108,13 @@ mod tests {
         assert_eq!(tree_2.text_str(a_2), git.tree(commit_0).text_str(a_base));
 
         let ops_1 = open_envelopes(tree_1.reset(Some(commit_1)).collect().wait().unwrap());
+        assert_eq!(tree_1.head(), Some(commit_1));
         assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
         assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));
         assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
 
         let ops_2 = open_envelopes(tree_2.reset(Some(commit_2)).collect().wait().unwrap());
+        assert_eq!(tree_2.head(), Some(commit_2));
         assert_eq!(tree_2.dir_entries(), git.tree(commit_2).dir_entries());
         assert_eq!(tree_2.text_str(a_2), git.tree(commit_2).text_str(a_2));
         assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
@@ -1115,6 +1123,8 @@ mod tests {
         let fixup_ops_2 = tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
         assert!(fixup_ops_1.is_empty());
         assert!(fixup_ops_2.is_empty());
+        assert_eq!(tree_1.head(), Some(commit_1));
+        assert_eq!(tree_2.head(), Some(commit_1));
         assert_eq!(tree_1.entries(), tree_2.entries());
         assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
         assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));

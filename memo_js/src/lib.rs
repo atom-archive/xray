@@ -149,6 +149,10 @@ impl WorkTree {
         Ok(self.0.observed(version))
     }
 
+    pub fn head(&self) -> JsValue {
+        JsValue::from_serde(&self.0.head().map(|head| HexOid(head))).unwrap()
+    }
+
     pub fn reset(&mut self, base: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
         let base = base
             .into_serde::<Option<HexOid>>()

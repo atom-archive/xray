@@ -97,6 +97,10 @@ export class WorkTree {
     return this.tree.observed(version);
   }
 
+  head(): null | Oid {
+    return this.tree.head();
+  }
+
   reset(base: Oid | null): AsyncIterable<OperationEnvelope> {
     return this.tree.reset(base);
   }

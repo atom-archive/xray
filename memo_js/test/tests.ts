@@ -40,6 +40,8 @@ suite("WorkTree", () => {
       git
     );
     assert.strictEqual((await collectOps(initOps2)).length, 0);
+    assert.strictEqual(tree1.head(), OID_0)
+    assert.strictEqual(tree2.head(), OID_0)
 
     const ops1 = [];
     const ops2 = [];
@@ -190,6 +192,8 @@ suite("WorkTree", () => {
     tree2BufferChanges.length = 0;
     ops1.push(...(await collectOps(tree1.reset(OID_1))));
     assert.deepStrictEqual(await collect(tree2.applyOps(ops1)), []);
+    assert.strictEqual(tree1.head(), OID_1);
+    assert.strictEqual(tree2.head(), OID_1);
     assert.strictEqual(tree1BufferC.getText(), "oid1 base text");
     assert.strictEqual(tree2BufferC.getText(), "oid1 base text");
     assert.deepStrictEqual(tree1BufferChanges, [
@@ -203,6 +207,9 @@ suite("WorkTree", () => {
 
     tree1.remove("a/b/c");
     assert(tree1BufferC.getPath() == null);
+
+    await collectOps(tree1.reset(null));
+    assert.strictEqual(tree1.head(), null)
   });
 
   test("an invalid base commit oid throws an error instead of crashing", async () => {
