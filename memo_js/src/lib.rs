@@ -105,6 +105,11 @@ impl WorkTree {
         base: JsValue,
         js_start_ops: js_sys::Array,
     ) -> Result<WorkTreeNewResult, JsValue> {
+        let replica_id = replica_id
+            .into_serde()
+            .map_err(|e| format!("ReplicaId must be a valid UUID: {}", e.to_string()))
+            .map_js_err()?;
+
         let base = base
             .into_serde::<Option<HexOid>>()
             .map_js_err()?
@@ -118,7 +123,7 @@ impl WorkTree {
         }
 
         let (tree, operations) = memo::WorkTree::new(
-            replica_id.into_serde().map_js_err()?,
+            replica_id,
             base,
             start_ops,
             Rc::new(git),
