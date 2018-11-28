@@ -107,7 +107,7 @@ impl WorkTree {
     ) -> Result<WorkTreeNewResult, JsValue> {
         let replica_id = replica_id
             .into_serde()
-            .map_err(|e| format!("ReplicaId must be a valid UUID: {}", e.to_string()))
+            .map_err(|e| format!("ReplicaId {:?} must be a valid UUID: {}", replica_id, e))
             .map_js_err()?;
 
         let base = base

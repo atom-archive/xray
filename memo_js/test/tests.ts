@@ -238,7 +238,10 @@ suite("WorkTree", () => {
     }
 
     {
-      await assert.rejects(WorkTree.create("invalid id", null, [], git));
+      await assert.rejects(
+        WorkTree.create("invalid-replica-id", null, [], git),
+        /invalid-replica-id/
+      );
     }
   });
 
