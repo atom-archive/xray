@@ -15,11 +15,13 @@
     "@types/mocha": "^5.2.5",
     "@types/node": "^10.11.4",
     "@types/uuid": "^3.4.4",
+    "@types/uuid-parse": "^1.0.0",
     "mocha": "^5.2.0",
     "source-map-support": "^0.5.9",
     "ts-loader": "^5.2.0",
     "typescript": "^3.0.3",
     "uuid": "^3.3.2",
+    "uuid-parse": "^1.0.0",
     "webpack": "^4.20.2",
     "webpack-cli": "^3.1.1"
   }

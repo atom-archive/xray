@@ -35,8 +35,10 @@ async function init() {
 
 export type Version = Tagged<Uint8Array, "Version">;
 export type Operation = Tagged<Uint8Array, "Operation">;
+export type EpochId = Tagged<Uint8Array, "EpochId">;
 export type ReplicaId = Tagged<string, "ReplicaId">;
 export interface OperationEnvelope {
+  epochId(): EpochId;
   epochTimestamp(): number;
   epochReplicaId(): ReplicaId;
   epochHead(): null | Oid;

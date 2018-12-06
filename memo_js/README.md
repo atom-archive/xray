@@ -156,6 +156,7 @@ In either case, operations are wrapped in an `OperationEnvelope`. An operation e
 
 ```ts
 export interface OperationEnvelope {
+  epochId(): Uint8Array;
   epochTimestamp(): number;
   epochReplicaId(): string;
   operation(): Operation;

@@ -17,6 +17,13 @@
   resolved "https://registry.yarnpkg.com/@types/node/-/node-10.11.4.tgz#e8bd933c3f78795d580ae41d86590bfc1f4f389d"
   integrity sha512-ojnbBiKkZFYRfQpmtnnWTMw+rzGp/JiystjluW9jgN3VzRwilXddJ6aGQ9V/7iuDG06SBgn7ozW9k3zcAnYjYQ==
 
+"@types/uuid-parse@^1.0.0":
+  version "1.0.0"
+  resolved "https://registry.yarnpkg.com/@types/uuid-parse/-/uuid-parse-1.0.0.tgz#615a1a992bacaa2f50c382a4bc17fe5349d50e36"
+  integrity sha512-iptjRzo+N2P5MWRIZSe1iTfi6jV5WdpuC5XGZZw04LSWQ0C9QTicdpHUt93myV9Tgf0wK+E4O8RE+wq+V1zIkA==
+  dependencies:
+    "@types/node" "*"
+
 "@types/uuid@^3.4.4":
   version "3.4.4"
   resolved "https://registry.yarnpkg.com/@types/uuid/-/uuid-3.4.4.tgz#7af69360fa65ef0decb41fd150bf4ca5c0cefdf5"
@@ -2747,6 +2754,11 @@ util@^0.10.3:
   integrity sha512-0Pm9hTQ3se5ll1XihRic3FDIku70C+iHUdT/W926rSgHV5QgXsYbKZN8MSC3tJtSkhuROzvsQjAaFENRXr+19A==
   dependencies:
     inherits "2.0.3"
+
+uuid-parse@^1.0.0:
+  version "1.0.0"
+  resolved "https://registry.yarnpkg.com/uuid-parse/-/uuid-parse-1.0.0.tgz#f4657717624b0e4b88af36f98d89589a5bbee569"
+  integrity sha1-9GV3F2JLDkuIrzb5jYlYmlu+5Wk=
 
 uuid@^3.3.2:
   version "3.3.2"

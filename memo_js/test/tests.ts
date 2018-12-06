@@ -9,10 +9,12 @@ import {
   OperationEnvelope,
   Path,
   Point,
+  ReplicaId,
   WorkTree
 } from "../src/index";
 import * as assert from "assert";
 import * as uuid from "uuid/v4";
+import * as uuidParse from "uuid-parse";
 
 suite("WorkTree", () => {
   test("basic API interaction", async () => {
@@ -40,8 +42,8 @@ suite("WorkTree", () => {
       git
     );
     assert.strictEqual((await collectOps(initOps2)).length, 0);
-    assert.strictEqual(tree1.head(), OID_0)
-    assert.strictEqual(tree2.head(), OID_0)
+    assert.strictEqual(tree1.head(), OID_0);
+    assert.strictEqual(tree2.head(), OID_0);
 
     const ops1 = [];
     const ops2 = [];
@@ -209,7 +211,7 @@ suite("WorkTree", () => {
     assert(tree1BufferC.getPath() == null);
 
     await collectOps(tree1.reset(null));
-    assert.strictEqual(tree1.head(), null)
+    assert.strictEqual(tree1.head(), null);
   });
 
   test("an invalid base commit oid throws an error instead of crashing", async () => {
@@ -232,6 +234,18 @@ suite("WorkTree", () => {
     assert.strictEqual(envelope2.epochHead(), OID);
     const envelope3 = tree1.createFile("y", FileType.Text);
     assert.strictEqual(envelope3.epochHead(), OID);
+  });
+
+  test("epoch id", async () => {
+    const git = new TestGitProvider();
+    const replicaId = uuid();
+    const [tree] = await WorkTree.create(replicaId, null, [], git);
+    const envelope1 = tree.createFile("a", FileType.Text);
+    const envelope1EpochId = parseEpochId(envelope1.epochId());
+    const envelope2 = tree.createFile("b", FileType.Text);
+    const envelope2EpochId = parseEpochId(envelope2.epochId());
+    assert.deepStrictEqual(envelope1EpochId, envelope2EpochId);
+    assert.equal(envelope1EpochId.replicaId, replicaId);
   });
 
   test("replica id", async () => {
@@ -338,6 +352,19 @@ async function collectOps(
 
 function point(row: number, column: number): Point {
   return { row, column };
+}
+
+type ParsedEpochId = { timestamp: number; replicaId: ReplicaId };
+
+function parseEpochId(epochId: Uint8Array): ParsedEpochId {
+  const epochIdBuffer = Buffer.from(epochId);
+  assert.equal(epochIdBuffer.length, 24);
+  // Timestamp is a u64 but JavaScript doesn't support it, so we fail if its
+  // high bits are not 0.
+  assert.equal(epochIdBuffer.readUInt32BE(0), 0);
+  const timestamp = epochIdBuffer.readUInt32BE(1);
+  const replicaId = uuidParse.unparse(epochIdBuffer.slice(8)) as ReplicaId;
+  return { timestamp, replicaId };
 }
 
 class TestGitProvider implements GitProvider {
