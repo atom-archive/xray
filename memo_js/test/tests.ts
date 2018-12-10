@@ -294,6 +294,14 @@ suite("WorkTree", () => {
     assert(tree2.hasObserved(tree1.version()));
   });
 
+  test("buffer reuse", async () => {
+    const git = new TestGitProvider();
+    const replicaId = uuid();
+    const [tree] = await WorkTree.create(replicaId, null, [], git);
+    tree.createFile("a", FileType.Text);
+    assert.equal(await tree.openTextFile("a"), await tree.openTextFile("a"));
+  });
+
   test("buffer disposal", async () => {
     const OID = "0".repeat(40);
     const git = new TestGitProvider();

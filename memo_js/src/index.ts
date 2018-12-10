@@ -66,6 +66,7 @@ export interface Entry {
 export class WorkTree {
   private tree: any;
   private observer: ChangeObserver;
+  private buffers: Map<BufferId, Buffer> = new Map();
 
   static async create(
     replicaId: string,
@@ -139,7 +140,12 @@ export class WorkTree {
 
   async openTextFile(path: Path): Promise<Buffer> {
     const bufferId = await this.tree.open_text_file(path);
-    return new Buffer(bufferId, this.tree, this.observer);
+    let buffer = this.buffers.get(bufferId);
+    if (!buffer) {
+      buffer = new Buffer(bufferId, this.tree, this.observer);
+      this.buffers.set(bufferId, buffer);
+    }
+    return buffer;
   }
 }
 
