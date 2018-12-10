@@ -302,7 +302,7 @@ suite("WorkTree", () => {
     assert.equal(await tree.openTextFile("a"), await tree.openTextFile("a"));
   });
 
-  test("buffer disposal", async () => {
+  test("buffer.onChange disposal", async () => {
     const OID = "0".repeat(40);
     const git = new TestGitProvider();
     git.commit(OID, [
@@ -323,7 +323,7 @@ suite("WorkTree", () => {
 
     const buffer1 = await tree1.openTextFile("a/b/c");
     let buffer1ChangeCount = 0;
-    buffer1.onChange(_ => buffer1ChangeCount++);
+    const disposable = buffer1.onChange(_ => buffer1ChangeCount++);
 
     const buffer2 = await tree2.openTextFile("a/b/c");
     tree1.applyOps([
@@ -331,7 +331,7 @@ suite("WorkTree", () => {
     ]);
     assert.strictEqual(buffer1ChangeCount, 1);
 
-    buffer1.dispose();
+    disposable.dispose();
     tree1.applyOps([
       buffer2.edit([{ start: point(0, 0), end: point(0, 0) }], "y").operation()
     ]);

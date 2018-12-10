@@ -12,7 +12,7 @@ import {
   BufferId,
   ChangeObserver,
   ChangeObserverCallback,
-  CompositeDisposable,
+  Disposable,
   GitProvider,
   GitProviderWrapper,
   FileType,
@@ -153,17 +153,11 @@ export class Buffer {
   private id: BufferId;
   private tree: any;
   private observer: ChangeObserver;
-  private disposables: CompositeDisposable;
 
   constructor(id: BufferId, tree: any, observer: ChangeObserver) {
     this.id = id;
     this.tree = tree;
     this.observer = observer;
-    this.disposables = new CompositeDisposable();
-  }
-
-  dispose() {
-    this.disposables.dispose();
   }
 
   edit(oldRanges: Range[], newText: string): OperationEnvelope {
@@ -178,7 +172,7 @@ export class Buffer {
     return this.tree.text(this.id);
   }
 
-  onChange(callback: ChangeObserverCallback) {
-    this.disposables.add(this.observer.onChange(this.id, callback));
+  onChange(callback: ChangeObserverCallback): Disposable {
+    return this.observer.onChange(this.id, callback);
   }
 }
