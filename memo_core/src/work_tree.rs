@@ -1,4 +1,4 @@
-use crate::buffer::{self, Buffer, Change};
+use crate::buffer::{self, Change, Point, Selection, SelectionSetId, Text};
 use crate::epoch::{self, Cursor, DirEntry, Epoch, FileId, FileType};
 use crate::serialization;
 use crate::{time, Error, Oid, ReplicaId};
@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io;
 use std::mem;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -159,10 +160,7 @@ impl WorkTree {
 
             let mut prev_versions = HashMap::new();
             for file_id in self.buffers.borrow().values() {
-                prev_versions.insert(
-                    *file_id,
-                    epoch.with_buffer(*file_id, |buf| Ok(buf.version.clone()))?,
-                );
+                prev_versions.insert(*file_id, epoch.buffer_version(*file_id).unwrap());
             }
 
             let fixup_ops = mutate(&mut epoch)?;
@@ -170,10 +168,7 @@ impl WorkTree {
                 for (buffer_id, file_id) in self.buffers.borrow().iter() {
                     let prev_version = prev_versions.remove(file_id).unwrap();
 
-                    let mut changes = epoch
-                        .with_buffer(*file_id, |b| Ok(b.changes_since(&prev_version)))
-                        .unwrap()
-                        .peekable();
+                    let mut changes = epoch.changes_since(*file_id, &prev_version)?.peekable();
                     if changes.peek().is_some() {
                         // Temporarily drop outstanding borrow to allow for re-entrant calls from
                         // the observer.
@@ -182,9 +177,7 @@ impl WorkTree {
                         epoch = epoch_ref.borrow_mut();
                     }
 
-                    if epoch
-                        .with_buffer(*file_id, |b| Ok(b.selections_changed_since(&prev_version)))?
-                    {
+                    if epoch.selections_changed_since(*file_id, &prev_version)? {
                         // Temporarily drop outstanding borrow to allow for re-entrant calls from
                         // the observer.
                         drop(epoch);
@@ -423,29 +416,6 @@ impl WorkTree {
         None
     }
 
-    pub fn with_buffer<F, T>(&self, buffer_id: BufferId, f: F) -> Result<T, Error>
-    where
-        F: FnOnce(&Buffer) -> Result<T, Error>,
-    {
-        let buffer_file_id = self.buffer_file_id(buffer_id)?;
-        self.cur_epoch().with_buffer(buffer_file_id, f)
-    }
-
-    pub fn with_buffer_mut<F, I>(&self, buffer_id: BufferId, mutate: F) -> Result<Operation, Error>
-    where
-        F: FnOnce(&mut Buffer, &mut time::Local, &mut time::Lamport) -> Result<I, Error>,
-        I: IntoIterator<Item = buffer::Operation>,
-    {
-        let buffer_file_id = self.buffer_file_id(buffer_id)?;
-        let mut epoch = self.cur_epoch_mut();
-        let operation =
-            epoch.with_buffer_mut(buffer_file_id, &mut self.lamport_clock.borrow_mut(), mutate)?;
-        Ok(Operation::EpochOperation {
-            epoch_id: epoch.id,
-            operation,
-        })
-    }
-
     fn base_text(
         path: &Path,
         epoch: &RefCell<Epoch>,
@@ -468,11 +438,102 @@ impl WorkTree {
         }
     }
 
+    pub fn edit<I, T>(
+        &self,
+        buffer_id: BufferId,
+        old_ranges: I,
+        new_text: T,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = Range<usize>>,
+        T: Into<Text>,
+    {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        let mut cur_epoch = self.cur_epoch_mut();
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch
+            .edit(
+                file_id,
+                old_ranges,
+                new_text,
+                &mut self.lamport_clock.borrow_mut(),
+            )
+            .unwrap();
+
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
+    }
+
+    pub fn edit_2d<I, T>(
+        &self,
+        buffer_id: BufferId,
+        old_ranges: I,
+        new_text: T,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+        T: Into<Text>,
+    {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        let mut cur_epoch = self.cur_epoch_mut();
+        let epoch_id = cur_epoch.id;
+        let operation = cur_epoch
+            .edit_2d(
+                file_id,
+                old_ranges,
+                new_text,
+                &mut self.lamport_clock.borrow_mut(),
+            )
+            .unwrap();
+
+        Ok(Operation::EpochOperation {
+            epoch_id,
+            operation,
+        })
+    }
+
+    pub fn add_selection_set(
+        &self,
+        buffer_id: BufferId,
+        selections: Vec<Selection>,
+    ) -> Result<(SelectionSetId, Operation), Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        let mut cur_epoch = self.cur_epoch_mut();
+        let epoch_id = cur_epoch.id;
+        let (set_id, operation) = cur_epoch.add_selection_set(
+            file_id,
+            selections,
+            &mut self.lamport_clock.borrow_mut(),
+        )?;
+        let operation = Operation::EpochOperation {
+            epoch_id,
+            operation,
+        };
+
+        Ok((set_id, operation))
+    }
+
     pub fn path(&self, buffer_id: BufferId) -> Option<PathBuf> {
         self.buffers
             .borrow()
             .get(&buffer_id)
             .and_then(|file_id| self.cur_epoch().path(*file_id))
+    }
+
+    pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().text(file_id)
+    }
+
+    pub fn changes_since(
+        &self,
+        buffer_id: BufferId,
+        version: &time::Global,
+    ) -> Result<impl Iterator<Item = buffer::Change>, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().changes_since(file_id, version)
     }
 
     fn cur_epoch(&self) -> Ref<Epoch> {
@@ -737,17 +798,11 @@ impl Future for SwitchEpoch {
                             operation,
                         });
                         to_assign.open_text_file(new_file_id, "", &mut lamport_clock)?;
-                        let operation = to_assign.with_buffer_mut(
+                        let operation = to_assign.edit(
                             new_file_id,
+                            Some(0..0),
+                            cur_epoch.text(buffers[&buffer_id])?.into_string().as_str(),
                             &mut lamport_clock,
-                            |buffer, local_clock, lamport_clock| {
-                                Ok(buffer.edit(
-                                    Some(0..0),
-                                    buffer.to_string().as_str(),
-                                    local_clock,
-                                    lamport_clock,
-                                ))
-                            },
                         )?;
                         fixup_ops.push(Operation::EpochOperation {
                             epoch_id: to_assign.id,
@@ -767,9 +822,8 @@ impl Future for SwitchEpoch {
 
                 let mut buffer_changes = Vec::new();
                 for (buffer_id, new_file_id) in buffer_mappings {
-                    let old_file_id = buffers[&buffer_id];
-                    let old_text = cur_epoch.with_buffer(old_file_id, |buf| Ok(buf.to_string()))?;
-                    let new_text = to_assign.with_buffer(new_file_id, |buf| Ok(buf.to_string()))?;
+                    let old_text = cur_epoch.text(buffers[&buffer_id])?.into_string();
+                    let new_text = to_assign.text(new_file_id)?.into_string();
                     let mut changes = buffer::diff(&old_text, &new_text).peekable();
                     if changes.peek().is_some() {
                         buffer_changes.push((buffer_id, changes));
@@ -936,8 +990,7 @@ mod tests {
                 for buffer_id in tree.open_buffers() {
                     assert_eq!(
                         observer.text(buffer_id),
-                        tree.with_buffer(buffer_id, |buf| Ok(buf.to_string()))
-                            .unwrap()
+                        tree.text(buffer_id).unwrap().into_string()
                     );
                 }
             }
@@ -950,26 +1003,14 @@ mod tests {
         let base_tree = WorkTree::empty();
         base_tree.create_file("a", FileType::Text).unwrap();
         let a_base = base_tree.open_text_file("a").wait().unwrap();
-        base_tree
-            .with_buffer_mut(a_base, |buffer, local_clock, lamport_clock| {
-                Ok(buffer.edit(Some(0..0), "abc", local_clock, lamport_clock))
-            })
-            .unwrap();
+        base_tree.edit(a_base, Some(0..0), "abc").unwrap();
         let commit_0 = git.commit(&base_tree);
 
-        base_tree
-            .with_buffer_mut(a_base, |buffer, local_clock, lamport_clock| {
-                Ok(buffer.edit(Some(1..2), "def", local_clock, lamport_clock))
-            })
-            .unwrap();
+        base_tree.edit(a_base, Some(1..2), "def").unwrap();
         base_tree.create_file("b", FileType::Directory).unwrap();
         let commit_1 = git.commit(&base_tree);
 
-        base_tree
-            .with_buffer_mut(a_base, |buffer, local_clock, lamport_clock| {
-                Ok(buffer.edit(Some(2..3), "ghi", local_clock, lamport_clock))
-            })
-            .unwrap();
+        base_tree.edit(a_base, Some(2..3), "ghi").unwrap();
         base_tree.create_file("b/c", FileType::Text).unwrap();
         let commit_2 = git.commit(&base_tree);
 
@@ -1033,19 +1074,13 @@ mod tests {
             fn text_changed(&self, buffer_id: BufferId, _: Box<Iterator<Item = Change>>) {
                 // Assume that users of WorkTree can always acquire a mutable reference to it.
                 let tree = unsafe { self.0.as_ptr().as_mut().unwrap() };
-                tree.with_buffer_mut(buffer_id, |buffer, local_clock, lamport_clock| {
-                    Ok(buffer.edit(Some(0..0), "!", local_clock, lamport_clock))
-                })
-                .unwrap();
+                tree.edit(buffer_id, Some(0..0), "!").unwrap();
             }
 
             fn selections_changed(&self, buffer_id: BufferId) {
                 // Assume that users of WorkTree can always acquire a mutable reference to it.
                 let tree = unsafe { self.0.as_ptr().as_mut().unwrap() };
-                tree.with_buffer_mut(buffer_id, |buffer, local_clock, lamport_clock| {
-                    Ok(buffer.edit(Some(0..0), "!", local_clock, lamport_clock))
-                })
-                .unwrap();
+                tree.edit(buffer_id, Some(0..0), "!").unwrap();
             }
         }
 
@@ -1054,18 +1089,10 @@ mod tests {
         base_tree.create_file("a", FileType::Text).unwrap();
         let a_base = base_tree.open_text_file("a").wait().unwrap();
 
-        base_tree
-            .with_buffer_mut(a_base, |buffer, local_clock, lamport_clock| {
-                Ok(buffer.edit(Some(0..0), "abc", local_clock, lamport_clock))
-            })
-            .unwrap();
+        base_tree.edit(a_base, Some(0..0), "abc").unwrap();
         let commit_0 = git.commit(&base_tree);
 
-        base_tree
-            .with_buffer_mut(a_base, |buffer, local_clock, lamport_clock| {
-                Ok(buffer.edit(Some(3..3), "def", local_clock, lamport_clock))
-            })
-            .unwrap();
+        base_tree.edit(a_base, Some(3..3), "def").unwrap();
         let commit_1 = git.commit(&base_tree);
 
         let (tree_1, ops_1) = WorkTree::new(
@@ -1094,18 +1121,11 @@ mod tests {
         let buffer_id_2 = tree_2.open_text_file("a").wait().unwrap();
 
         // Synchronous re-entrant calls from the observer don't throw errors.
-        let op = base_tree
-            .with_buffer_mut(buffer_id_2, |buffer, local_clock, lamport_clock| {
-                let mut ops = vec![];
-                ops.extend(buffer.edit(Some(0..0), "x", local_clock, lamport_clock));
-                let (_, op) = buffer.add_selection_set(vec![], local_clock, lamport_clock);
-                ops.push(op);
-                Ok(ops)
-            })
-            .unwrap();
+        let edit_op = tree_2.edit(buffer_id_2, Some(0..0), "x").unwrap();
+        let (_, selection_op) = tree_2.add_selection_set(buffer_id_2, vec![]).unwrap();
         tree_1
             .borrow_mut()
-            .apply_ops(Some(op))
+            .apply_ops(vec![edit_op, selection_op])
             .unwrap()
             .collect()
             .wait()
@@ -1156,8 +1176,7 @@ mod tests {
         }
 
         fn text_str(&self, buffer_id: BufferId) -> String {
-            self.with_buffer(buffer_id, |buf| Ok(buf.to_string()))
-                .unwrap()
+            self.text(buffer_id).unwrap().into_string()
         }
 
         fn randomly_mutate<T: Rng>(&self, rng: &mut T, count: usize) -> Vec<Operation> {
@@ -1296,10 +1315,7 @@ mod tests {
                             .map_err(|_| {
                                 io::Error::new(io::ErrorKind::Other, "Path does not exist")
                             })
-                            .map(|buffer_id| {
-                                tree.with_buffer(buffer_id, |buf| Ok(buf.to_string()))
-                                    .unwrap()
-                            })
+                            .map(|buffer_id| tree.text(buffer_id).unwrap().into_string())
                     })
                     .into_future(),
             )
@@ -1317,9 +1333,7 @@ mod tests {
         }
 
         fn opened_buffer(&self, buffer_id: BufferId, tree: &WorkTree) {
-            let text = tree
-                .with_buffer(buffer_id, |buf| Ok(buf.to_string()))
-                .unwrap();
+            let text = tree.text(buffer_id).unwrap().collect::<Vec<u16>>();
             self.buffers
                 .borrow_mut()
                 .insert(buffer_id, buffer::Buffer::new(text));
