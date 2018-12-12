@@ -26,6 +26,7 @@ pub struct Buffer {
     anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
     offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: time::Global,
+    last_edit: time::Local,
     selections: HashMap<SelectionSetId, Vec<Selection>>,
     selections_last_update: time::Local,
     deferred_ops: OperationQueue<Operation>,
@@ -230,6 +231,7 @@ impl Buffer {
             anchor_cache: RefCell::new(HashMap::default()),
             offset_cache: RefCell::new(HashMap::default()),
             version: time::Global::new(),
+            last_edit: time::Local::default(),
             selections: HashMap::default(),
             selections_last_update: time::Local::default(),
             deferred_ops: OperationQueue::new(),
@@ -238,7 +240,7 @@ impl Buffer {
     }
 
     pub fn is_modified(&self) -> bool {
-        self.version > time::Global::new()
+        self.last_edit != time::Local::default()
     }
 
     pub fn len(&self) -> usize {
@@ -337,12 +339,8 @@ impl Buffer {
             lamport_clock,
         );
         if let Some(op) = ops.last() {
-            match op {
-                Operation::Edit {
-                    local_timestamp, ..
-                } => self.version.observe(*local_timestamp),
-                _ => unreachable!(),
-            }
+            self.last_edit = op.local_timestamp();
+            self.version.observe(op.local_timestamp());
         }
         ops
     }
@@ -377,12 +375,15 @@ impl Buffer {
     ) -> (SelectionSetId, Operation) {
         let set_id = local_clock.tick();
         self.selections.insert(set_id, selections.clone());
+
+        let local_timestamp = local_clock.tick();
+        self.version.observe(local_timestamp);
         (
             set_id,
             Operation::UpdateSelections {
                 set_id,
                 selections: Some(selections),
-                local_timestamp: local_clock.tick(),
+                local_timestamp,
                 lamport_timestamp: lamport_clock.tick(),
             },
         )
@@ -397,10 +398,13 @@ impl Buffer {
         self.selections
             .remove(&set_id)
             .ok_or(Error::InvalidSelectionSet)?;
+
+        let local_timestamp = local_clock.tick();
+        self.version.observe(local_timestamp);
         Ok(Operation::UpdateSelections {
             set_id,
             selections: None,
-            local_timestamp: local_clock.tick(),
+            local_timestamp,
             lamport_timestamp: lamport_clock.tick(),
         })
     }
@@ -426,10 +430,13 @@ impl Buffer {
         f(self, &mut selections);
         self.merge_selections(&mut selections);
         self.selections.insert(set_id, selections.clone());
+
+        let local_timestamp = local_clock.tick();
+        self.version.observe(local_timestamp);
         Ok(Operation::UpdateSelections {
             set_id,
             selections: Some(selections),
-            local_timestamp: local_clock.tick(),
+            local_timestamp,
             lamport_timestamp: lamport_clock.tick(),
         })
     }
@@ -488,6 +495,7 @@ impl Buffer {
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
+        let op_timestamp = op.local_timestamp();
         match op {
             Operation::Edit {
                 start_id,
@@ -513,6 +521,7 @@ impl Buffer {
                 )?;
                 self.anchor_cache.borrow_mut().clear();
                 self.offset_cache.borrow_mut().clear();
+                self.last_edit = local_timestamp;
             }
             Operation::UpdateSelections {
                 set_id,
@@ -530,6 +539,7 @@ impl Buffer {
                 self.selections_last_update = local_timestamp;
             }
         }
+        self.version.observe(op_timestamp);
         Ok(())
     }
 
@@ -648,7 +658,6 @@ impl Buffer {
 
         new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
-        self.version.observe(local_timestamp);
         local_clock.observe(local_timestamp);
         lamport_clock.observe(lamport_timestamp);
         Ok(())
@@ -2245,13 +2254,24 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
 
 impl Operation {
     fn replica_id(&self) -> ReplicaId {
+        self.local_timestamp().replica_id
+    }
+
+    fn local_timestamp(&self) -> time::Local {
         match self {
             Operation::Edit {
                 local_timestamp, ..
-            } => local_timestamp.replica_id,
+            } => *local_timestamp,
             Operation::UpdateSelections {
                 local_timestamp, ..
-            } => local_timestamp.replica_id,
+            } => *local_timestamp,
+        }
+    }
+
+    pub fn is_edit(&self) -> bool {
+        match self {
+            Operation::Edit { .. } => true,
+            _ => false,
         }
     }
 

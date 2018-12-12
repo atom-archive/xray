@@ -1761,7 +1761,7 @@ impl btree::Dimension<ChildRefValueSummary> for usize {
 impl TextFile {
     fn is_modified(&self) -> bool {
         match self {
-            TextFile::Deferred(ops) => !ops.is_empty(),
+            TextFile::Deferred(ops) => ops.iter().any(|op| op.is_edit()),
             TextFile::Buffered(buffer) => buffer.is_modified(),
         }
     }
