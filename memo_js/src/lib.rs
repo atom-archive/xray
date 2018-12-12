@@ -242,6 +242,14 @@ impl WorkTree {
             .map_err(|e| e.into_js_err())
     }
 
+    pub fn buffer_deferred_ops_len(&self, buffer_id: JsValue) -> Result<u32, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
+        self.0
+            .buffer_deferred_ops_len(buffer_id)
+            .map(|len| len as u32)
+            .map_err(|e| e.into_js_err())
+    }
+
     pub fn edit(
         &self,
         buffer_id: JsValue,

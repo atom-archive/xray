@@ -175,4 +175,8 @@ export class Buffer {
   onChange(callback: ChangeObserverCallback): Disposable {
     return this.observer.onChange(this.id, callback);
   }
+
+  getDeferredOperationCount(): number {
+    return this.tree.buffer_deferred_ops_len(this.id);
+  }
 }
