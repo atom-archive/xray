@@ -19,8 +19,8 @@ trait JsValueExt {
     fn into_operation(self) -> Result<Option<memo::Operation>, JsValue>;
 }
 
-trait MapJsError<T> {
-    fn map_js_err(self) -> Result<T, JsValue>;
+trait IntoJsError {
+    fn into_js_err(self) -> JsValue;
 }
 
 #[wasm_bindgen]
@@ -106,14 +106,13 @@ impl WorkTree {
         base: JsValue,
         js_start_ops: js_sys::Array,
     ) -> Result<WorkTreeNewResult, JsValue> {
-        let replica_id = replica_id
-            .into_serde()
-            .map_err(|e| format!("ReplicaId {:?} must be a valid UUID: {}", replica_id, e))
-            .map_js_err()?;
+        let replica_id = replica_id.into_serde().map_err(|e| {
+            format!("ReplicaId {:?} must be a valid UUID: {}", replica_id, e).into_js_err()
+        })?;
 
         let base = base
             .into_serde::<Option<HexOid>>()
-            .map_js_err()?
+            .map_err(|e| e.into_js_err())?
             .map(|b| b.0);
 
         let mut start_ops = Vec::new();
@@ -130,13 +129,13 @@ impl WorkTree {
             Rc::new(git),
             Some(Rc::new(observer)),
         )
-        .map_js_err()?;
+        .map_err(|e| e.into_js_err())?;
         Ok(WorkTreeNewResult {
             tree: Some(WorkTree(tree)),
             operations: Some(StreamToAsyncIterator::new(
                 operations
                     .map(|op| JsValue::from(OperationEnvelope::new(op)))
-                    .map_err(|err| err.to_string()),
+                    .map_err(|e| e.into_js_err()),
             )),
         })
     }
@@ -146,7 +145,7 @@ impl WorkTree {
     }
 
     pub fn observed(&self, version_bytes: &[u8]) -> Result<bool, JsValue> {
-        let version = bincode::deserialize(&version_bytes).map_js_err()?;
+        let version = bincode::deserialize(&version_bytes).map_err(|e| e.into_js_err())?;
         Ok(self.0.observed(version))
     }
 
@@ -157,13 +156,13 @@ impl WorkTree {
     pub fn reset(&mut self, base: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
         let base = base
             .into_serde::<Option<HexOid>>()
-            .map_js_err()?
+            .map_err(|e| e.into_js_err())?
             .map(|b| b.0);
         Ok(StreamToAsyncIterator::new(
             self.0
                 .reset(base)
                 .map(|op| JsValue::from(OperationEnvelope::new(op)))
-                .map_err(|err| err.to_string()),
+                .map_err(|e| e.into_js_err()),
         ))
     }
 
@@ -181,10 +180,10 @@ impl WorkTree {
                 StreamToAsyncIterator::new(
                     fixup_ops
                         .map(|op| JsValue::from(OperationEnvelope::new(op)))
-                        .map_err(|err| err.to_string()),
+                        .map_err(|e| e.into_js_err()),
                 )
             })
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn create_file(
@@ -192,25 +191,25 @@ impl WorkTree {
         path: String,
         file_type: JsValue,
     ) -> Result<OperationEnvelope, JsValue> {
-        let file_type = file_type.into_serde().map_js_err()?;
+        let file_type = file_type.into_serde().map_err(|e| e.into_js_err())?;
         self.0
             .create_file(&path, file_type)
             .map(|operation| OperationEnvelope::new(operation))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn rename(&self, old_path: String, new_path: String) -> Result<OperationEnvelope, JsValue> {
         self.0
             .rename(&old_path, &new_path)
             .map(|operation| OperationEnvelope::new(operation))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn remove(&self, path: String) -> Result<OperationEnvelope, JsValue> {
         self.0
             .remove(&path)
             .map(|operation| OperationEnvelope::new(operation))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn exists(&self, path: String) -> bool {
@@ -222,22 +221,24 @@ impl WorkTree {
             self.0
                 .open_text_file(path)
                 .map(|buffer_id| JsValue::from_serde(&buffer_id).unwrap())
-                .map_err(|error| JsValue::from_str(&error.to_string())),
+                .map_err(|e| e.into_js_err()),
         )
     }
 
     pub fn path(&self, buffer_id: JsValue) -> Result<Option<String>, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
         Ok(self
             .0
-            .path(buffer_id.into_serde().map_js_err()?)
+            .path(buffer_id)
             .map(|path| path.to_string_lossy().into_owned()))
     }
 
     pub fn text(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
         self.0
-            .text(buffer_id.into_serde().map_js_err()?)
+            .text(buffer_id)
             .map(|text| JsValue::from_str(&text.into_string()))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn edit(
@@ -246,21 +247,22 @@ impl WorkTree {
         old_ranges: JsValue,
         new_text: &str,
     ) -> Result<OperationEnvelope, JsValue> {
-        let buffer_id = buffer_id.into_serde().map_js_err()?;
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
         let old_ranges = old_ranges
             .into_serde::<Vec<EditRange>>()
-            .map_js_err()?
+            .map_err(|e| e.into_js_err())?
             .into_iter()
             .map(|EditRange { start, end }| start..end);
 
         self.0
             .edit_2d(buffer_id, old_ranges, new_text)
             .map(|op| OperationEnvelope::new(op))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn entries(&self, descend_into: JsValue, show_deleted: bool) -> Result<JsValue, JsValue> {
-        let descend_into: Option<HashSet<PathBuf>> = descend_into.into_serde().map_js_err()?;
+        let descend_into: Option<HashSet<PathBuf>> =
+            descend_into.into_serde().map_err(|e| e.into_js_err())?;
         let mut entries = Vec::new();
         self.0.with_cursor(|cursor| loop {
             let entry = cursor.entry().unwrap();
@@ -282,7 +284,7 @@ impl WorkTree {
                 break;
             }
         });
-        JsValue::from_serde(&entries).map_js_err()
+        JsValue::from_serde(&entries).map_err(|e| e.into_js_err())
     }
 }
 
@@ -291,13 +293,13 @@ impl WorkTreeNewResult {
     pub fn tree(&mut self) -> Result<WorkTree, JsValue> {
         self.tree
             .take()
-            .ok_or(JsValue::from_str("Cannot take tree twice"))
+            .ok_or(js_sys::Error::new("Cannot take tree twice").into())
     }
 
     pub fn operations(&mut self) -> Result<StreamToAsyncIterator, JsValue> {
         self.operations
             .take()
-            .ok_or(JsValue::from_str("Cannot take operations twice"))
+            .ok_or(js_sys::Error::new("Cannot take operations twice").into())
     }
 }
 
@@ -358,7 +360,7 @@ where
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         match self.next_value.poll() {
             Ok(Async::Ready(result)) => {
-                let result: AsyncResult<T> = result.into_serde().map_err(|err| err.to_string())?;
+                let result: AsyncResult<T> = result.into_serde().map_err(|e| e.to_string())?;
                 if result.done {
                     Ok(Async::Ready(None))
                 } else {
@@ -367,30 +369,27 @@ where
                 }
             }
             Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(error) => Err(error.into_serde().map_err(|err| err.to_string())?),
+            Err(error) => Err(error.into_serde().map_err(|e| e.to_string())?),
         }
     }
 }
 
 impl StreamToAsyncIterator {
-    fn new<E, S>(stream: S) -> Self
+    fn new<S>(stream: S) -> Self
     where
-        E: Serialize,
-        S: 'static + Stream<Item = JsValue, Error = E>,
+        S: 'static + Stream<Item = JsValue, Error = JsValue>,
     {
-        let js_value_stream = stream
-            .map(|value| {
-                let result = JsValue::from(js_sys::Object::new());
-                js_sys::Reflect::set(&result, &JsValue::from_str("value"), &value).unwrap();
-                js_sys::Reflect::set(
-                    &result,
-                    &JsValue::from_str("done"),
-                    &JsValue::from_bool(false),
-                )
-                .unwrap();
-                result
-            })
-            .map_err(|error| JsValue::from_serde(&error).unwrap());
+        let js_value_stream = stream.map(|value| {
+            let result = JsValue::from(js_sys::Object::new());
+            js_sys::Reflect::set(&result, &JsValue::from_str("value"), &value).unwrap();
+            js_sys::Reflect::set(
+                &result,
+                &JsValue::from_str("done"),
+                &JsValue::from_bool(false),
+            )
+            .unwrap();
+            result
+        });
 
         StreamToAsyncIterator(Rc::new(Cell::new(Some(Box::new(js_value_stream)))))
     }
@@ -504,12 +503,9 @@ impl<'de> Deserialize<'de> for HexOid {
     }
 }
 
-impl<T, E> MapJsError<T> for Result<T, E>
-where
-    E: ToString,
-{
-    fn map_js_err(self) -> Result<T, JsValue> {
-        self.map_err(|err| JsValue::from(err.to_string()))
+impl<T: ToString> IntoJsError for T {
+    fn into_js_err(self) -> JsValue {
+        js_sys::Error::new(&self.to_string()).into()
     }
 }
 
@@ -517,9 +513,9 @@ impl JsValueExt for JsValue {
     fn into_operation(self) -> Result<Option<memo::Operation>, JsValue> {
         let js_bytes = self
             .dyn_into::<js_sys::Uint8Array>()
-            .map_err(|_| JsValue::from_str("Operation must be Uint8Array"))?;
+            .map_err(|_| "Operation must be Uint8Array".into_js_err())?;
         let mut bytes = Vec::with_capacity(js_bytes.byte_length() as usize);
         js_bytes.for_each(&mut |byte, _, _| bytes.push(byte));
-        memo::Operation::deserialize(&bytes).map_js_err()
+        memo::Operation::deserialize(&bytes).map_err(|e| e.into_js_err())
     }
 }
