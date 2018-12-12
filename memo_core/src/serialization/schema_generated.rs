@@ -339,17 +339,17 @@ pub fn enum_name_anchor_bias(e: AnchorBias) -> &'static str {
 #[allow(non_camel_case_types)]
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Operation {
+pub enum OperationVariant {
   NONE = 0,
   Edit = 1,
   UpdateSelections = 2,
 
 }
 
-const ENUM_MIN_OPERATION: u8 = 0;
-const ENUM_MAX_OPERATION: u8 = 2;
+const ENUM_MIN_OPERATION_VARIANT: u8 = 0;
+const ENUM_MAX_OPERATION_VARIANT: u8 = 2;
 
-impl<'a> flatbuffers::Follow<'a> for Operation {
+impl<'a> flatbuffers::Follow<'a> for OperationVariant {
   type Inner = Self;
   #[inline]
   fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
@@ -357,49 +357,49 @@ impl<'a> flatbuffers::Follow<'a> for Operation {
   }
 }
 
-impl flatbuffers::EndianScalar for Operation {
+impl flatbuffers::EndianScalar for OperationVariant {
   #[inline]
   fn to_little_endian(self) -> Self {
     let n = u8::to_le(self as u8);
-    let p = &n as *const u8 as *const Operation;
+    let p = &n as *const u8 as *const OperationVariant;
     unsafe { *p }
   }
   #[inline]
   fn from_little_endian(self) -> Self {
     let n = u8::from_le(self as u8);
-    let p = &n as *const u8 as *const Operation;
+    let p = &n as *const u8 as *const OperationVariant;
     unsafe { *p }
   }
 }
 
-impl flatbuffers::Push for Operation {
-    type Output = Operation;
+impl flatbuffers::Push for OperationVariant {
+    type Output = OperationVariant;
     #[inline]
     fn push(&self, dst: &mut [u8], _rest: &[u8]) {
-        flatbuffers::emplace_scalar::<Operation>(dst, *self);
+        flatbuffers::emplace_scalar::<OperationVariant>(dst, *self);
     }
 }
 
 #[allow(non_camel_case_types)]
-const ENUM_VALUES_OPERATION:[Operation; 3] = [
-  Operation::NONE,
-  Operation::Edit,
-  Operation::UpdateSelections
+const ENUM_VALUES_OPERATION_VARIANT:[OperationVariant; 3] = [
+  OperationVariant::NONE,
+  OperationVariant::Edit,
+  OperationVariant::UpdateSelections
 ];
 
 #[allow(non_camel_case_types)]
-const ENUM_NAMES_OPERATION:[&'static str; 3] = [
+const ENUM_NAMES_OPERATION_VARIANT:[&'static str; 3] = [
     "NONE",
     "Edit",
     "UpdateSelections"
 ];
 
-pub fn enum_name_operation(e: Operation) -> &'static str {
+pub fn enum_name_operation_variant(e: OperationVariant) -> &'static str {
   let index: usize = e as usize;
-  ENUM_NAMES_OPERATION[index]
+  ENUM_NAMES_OPERATION_VARIANT[index]
 }
 
-pub struct OperationUnionTableOffset {}
+pub struct OperationVariantUnionTableOffset {}
 pub enum AnchorOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
@@ -884,15 +884,15 @@ impl<'a: 'b, 'b> UpdateSelectionsBuilder<'a, 'b> {
   }
 }
 
-pub enum OperationEnvelopeOffset {}
+pub enum OperationOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
-pub struct OperationEnvelope<'a> {
+pub struct Operation<'a> {
   pub _tab: flatbuffers::Table<'a>,
 }
 
-impl<'a> flatbuffers::Follow<'a> for OperationEnvelope<'a> {
-    type Inner = OperationEnvelope<'a>;
+impl<'a> flatbuffers::Follow<'a> for Operation<'a> {
+    type Inner = Operation<'a>;
     #[inline]
     fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
         Self {
@@ -901,39 +901,39 @@ impl<'a> flatbuffers::Follow<'a> for OperationEnvelope<'a> {
     }
 }
 
-impl<'a> OperationEnvelope<'a> {
+impl<'a> Operation<'a> {
     #[inline]
     pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-        OperationEnvelope {
+        Operation {
             _tab: table,
         }
     }
     #[allow(unused_mut)]
     pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
         _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
-        args: &'args OperationEnvelopeArgs) -> flatbuffers::WIPOffset<OperationEnvelope<'bldr>> {
-      let mut builder = OperationEnvelopeBuilder::new(_fbb);
-      if let Some(x) = args.operation { builder.add_operation(x); }
-      builder.add_operation_type(args.operation_type);
+        args: &'args OperationArgs) -> flatbuffers::WIPOffset<Operation<'bldr>> {
+      let mut builder = OperationBuilder::new(_fbb);
+      if let Some(x) = args.variant { builder.add_variant(x); }
+      builder.add_variant_type(args.variant_type);
       builder.finish()
     }
 
-    pub const VT_OPERATION_TYPE: flatbuffers::VOffsetT = 4;
-    pub const VT_OPERATION: flatbuffers::VOffsetT = 6;
+    pub const VT_VARIANT_TYPE: flatbuffers::VOffsetT = 4;
+    pub const VT_VARIANT: flatbuffers::VOffsetT = 6;
 
   #[inline]
-  pub fn operation_type(&self) -> Operation {
-    self._tab.get::<Operation>(OperationEnvelope::VT_OPERATION_TYPE, Some(Operation::NONE)).unwrap()
+  pub fn variant_type(&self) -> OperationVariant {
+    self._tab.get::<OperationVariant>(Operation::VT_VARIANT_TYPE, Some(OperationVariant::NONE)).unwrap()
   }
   #[inline]
-  pub fn operation(&self) -> Option<flatbuffers::Table<'a>> {
-    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(OperationEnvelope::VT_OPERATION, None)
+  pub fn variant(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(Operation::VT_VARIANT, None)
   }
   #[inline]
   #[allow(non_snake_case)]
-  pub fn operation_as_edit(&'a self) -> Option<Edit> {
-    if self.operation_type() == Operation::Edit {
-      self.operation().map(|u| Edit::init_from_table(u))
+  pub fn variant_as_edit(&'a self) -> Option<Edit> {
+    if self.variant_type() == OperationVariant::Edit {
+      self.variant().map(|u| Edit::init_from_table(u))
     } else {
       None
     }
@@ -941,9 +941,9 @@ impl<'a> OperationEnvelope<'a> {
 
   #[inline]
   #[allow(non_snake_case)]
-  pub fn operation_as_update_selections(&'a self) -> Option<UpdateSelections> {
-    if self.operation_type() == Operation::UpdateSelections {
-      self.operation().map(|u| UpdateSelections::init_from_table(u))
+  pub fn variant_as_update_selections(&'a self) -> Option<UpdateSelections> {
+    if self.variant_type() == OperationVariant::UpdateSelections {
+      self.variant().map(|u| UpdateSelections::init_from_table(u))
     } else {
       None
     }
@@ -951,42 +951,42 @@ impl<'a> OperationEnvelope<'a> {
 
 }
 
-pub struct OperationEnvelopeArgs {
-    pub operation_type: Operation,
-    pub operation: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+pub struct OperationArgs {
+    pub variant_type: OperationVariant,
+    pub variant: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
 }
-impl<'a> Default for OperationEnvelopeArgs {
+impl<'a> Default for OperationArgs {
     #[inline]
     fn default() -> Self {
-        OperationEnvelopeArgs {
-            operation_type: Operation::NONE,
-            operation: None,
+        OperationArgs {
+            variant_type: OperationVariant::NONE,
+            variant: None,
         }
     }
 }
-pub struct OperationEnvelopeBuilder<'a: 'b, 'b> {
+pub struct OperationBuilder<'a: 'b, 'b> {
   fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
   start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
 }
-impl<'a: 'b, 'b> OperationEnvelopeBuilder<'a, 'b> {
+impl<'a: 'b, 'b> OperationBuilder<'a, 'b> {
   #[inline]
-  pub fn add_operation_type(&mut self, operation_type: Operation) {
-    self.fbb_.push_slot::<Operation>(OperationEnvelope::VT_OPERATION_TYPE, operation_type, Operation::NONE);
+  pub fn add_variant_type(&mut self, variant_type: OperationVariant) {
+    self.fbb_.push_slot::<OperationVariant>(Operation::VT_VARIANT_TYPE, variant_type, OperationVariant::NONE);
   }
   #[inline]
-  pub fn add_operation(&mut self, operation: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(OperationEnvelope::VT_OPERATION, operation);
+  pub fn add_variant(&mut self, variant: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Operation::VT_VARIANT, variant);
   }
   #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> OperationEnvelopeBuilder<'a, 'b> {
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> OperationBuilder<'a, 'b> {
     let start = _fbb.start_table();
-    OperationEnvelopeBuilder {
+    OperationBuilder {
       fbb_: _fbb,
       start_: start,
     }
   }
   #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<OperationEnvelope<'a>> {
+  pub fn finish(self) -> flatbuffers::WIPOffset<Operation<'a>> {
     let o = self.fbb_.end_table(self.start_);
     flatbuffers::WIPOffset::new(o.value())
   }
@@ -1787,8 +1787,8 @@ impl<'a> BufferOperation<'a> {
     self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(BufferOperation::VT_FILE_ID, None)
   }
   #[inline]
-  pub fn operations(&self) -> Option<flatbuffers::Vector<flatbuffers::ForwardsUOffset<super::buffer::OperationEnvelope<'a>>>> {
-    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<flatbuffers::ForwardsUOffset<super::buffer::OperationEnvelope<'a>>>>>(BufferOperation::VT_OPERATIONS, None)
+  pub fn operations(&self) -> Option<flatbuffers::Vector<flatbuffers::ForwardsUOffset<super::buffer::Operation<'a>>>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<flatbuffers::ForwardsUOffset<super::buffer::Operation<'a>>>>>(BufferOperation::VT_OPERATIONS, None)
   }
   #[inline]
   pub fn local_timestamp(&self) -> Option<&'a super::Timestamp> {
@@ -1823,7 +1823,7 @@ impl<'a> BufferOperation<'a> {
 pub struct BufferOperationArgs<'a> {
     pub file_id_type: FileId,
     pub file_id: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
-    pub operations: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a , flatbuffers::ForwardsUOffset<super::buffer::OperationEnvelope<'a >>>>>,
+    pub operations: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a , flatbuffers::ForwardsUOffset<super::buffer::Operation<'a >>>>>,
     pub local_timestamp: Option<&'a  super::Timestamp>,
     pub lamport_timestamp: Option<&'a  super::Timestamp>,
 }
@@ -1853,7 +1853,7 @@ impl<'a: 'b, 'b> BufferOperationBuilder<'a, 'b> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(BufferOperation::VT_FILE_ID, file_id);
   }
   #[inline]
-  pub fn add_operations(&mut self, operations: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<super::buffer::OperationEnvelope<'b >>>>) {
+  pub fn add_operations(&mut self, operations: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<super::buffer::Operation<'b >>>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(BufferOperation::VT_OPERATIONS, operations);
   }
   #[inline]
@@ -1894,17 +1894,17 @@ pub mod worktree {
 #[allow(non_camel_case_types)]
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Operation {
+pub enum OperationVariant {
   NONE = 0,
   StartEpoch = 1,
   EpochOperation = 2,
 
 }
 
-const ENUM_MIN_OPERATION: u8 = 0;
-const ENUM_MAX_OPERATION: u8 = 2;
+const ENUM_MIN_OPERATION_VARIANT: u8 = 0;
+const ENUM_MAX_OPERATION_VARIANT: u8 = 2;
 
-impl<'a> flatbuffers::Follow<'a> for Operation {
+impl<'a> flatbuffers::Follow<'a> for OperationVariant {
   type Inner = Self;
   #[inline]
   fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
@@ -1912,49 +1912,49 @@ impl<'a> flatbuffers::Follow<'a> for Operation {
   }
 }
 
-impl flatbuffers::EndianScalar for Operation {
+impl flatbuffers::EndianScalar for OperationVariant {
   #[inline]
   fn to_little_endian(self) -> Self {
     let n = u8::to_le(self as u8);
-    let p = &n as *const u8 as *const Operation;
+    let p = &n as *const u8 as *const OperationVariant;
     unsafe { *p }
   }
   #[inline]
   fn from_little_endian(self) -> Self {
     let n = u8::from_le(self as u8);
-    let p = &n as *const u8 as *const Operation;
+    let p = &n as *const u8 as *const OperationVariant;
     unsafe { *p }
   }
 }
 
-impl flatbuffers::Push for Operation {
-    type Output = Operation;
+impl flatbuffers::Push for OperationVariant {
+    type Output = OperationVariant;
     #[inline]
     fn push(&self, dst: &mut [u8], _rest: &[u8]) {
-        flatbuffers::emplace_scalar::<Operation>(dst, *self);
+        flatbuffers::emplace_scalar::<OperationVariant>(dst, *self);
     }
 }
 
 #[allow(non_camel_case_types)]
-const ENUM_VALUES_OPERATION:[Operation; 3] = [
-  Operation::NONE,
-  Operation::StartEpoch,
-  Operation::EpochOperation
+const ENUM_VALUES_OPERATION_VARIANT:[OperationVariant; 3] = [
+  OperationVariant::NONE,
+  OperationVariant::StartEpoch,
+  OperationVariant::EpochOperation
 ];
 
 #[allow(non_camel_case_types)]
-const ENUM_NAMES_OPERATION:[&'static str; 3] = [
+const ENUM_NAMES_OPERATION_VARIANT:[&'static str; 3] = [
     "NONE",
     "StartEpoch",
     "EpochOperation"
 ];
 
-pub fn enum_name_operation(e: Operation) -> &'static str {
+pub fn enum_name_operation_variant(e: OperationVariant) -> &'static str {
   let index: usize = e as usize;
-  ENUM_NAMES_OPERATION[index]
+  ENUM_NAMES_OPERATION_VARIANT[index]
 }
 
-pub struct OperationUnionTableOffset {}
+pub struct OperationVariantUnionTableOffset {}
 pub enum StartEpochOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
@@ -2173,15 +2173,15 @@ impl<'a: 'b, 'b> EpochOperationBuilder<'a, 'b> {
   }
 }
 
-pub enum OperationEnvelopeOffset {}
+pub enum OperationOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
-pub struct OperationEnvelope<'a> {
+pub struct Operation<'a> {
   pub _tab: flatbuffers::Table<'a>,
 }
 
-impl<'a> flatbuffers::Follow<'a> for OperationEnvelope<'a> {
-    type Inner = OperationEnvelope<'a>;
+impl<'a> flatbuffers::Follow<'a> for Operation<'a> {
+    type Inner = Operation<'a>;
     #[inline]
     fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
         Self {
@@ -2190,39 +2190,39 @@ impl<'a> flatbuffers::Follow<'a> for OperationEnvelope<'a> {
     }
 }
 
-impl<'a> OperationEnvelope<'a> {
+impl<'a> Operation<'a> {
     #[inline]
     pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-        OperationEnvelope {
+        Operation {
             _tab: table,
         }
     }
     #[allow(unused_mut)]
     pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
         _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
-        args: &'args OperationEnvelopeArgs) -> flatbuffers::WIPOffset<OperationEnvelope<'bldr>> {
-      let mut builder = OperationEnvelopeBuilder::new(_fbb);
-      if let Some(x) = args.operation { builder.add_operation(x); }
-      builder.add_operation_type(args.operation_type);
+        args: &'args OperationArgs) -> flatbuffers::WIPOffset<Operation<'bldr>> {
+      let mut builder = OperationBuilder::new(_fbb);
+      if let Some(x) = args.variant { builder.add_variant(x); }
+      builder.add_variant_type(args.variant_type);
       builder.finish()
     }
 
-    pub const VT_OPERATION_TYPE: flatbuffers::VOffsetT = 4;
-    pub const VT_OPERATION: flatbuffers::VOffsetT = 6;
+    pub const VT_VARIANT_TYPE: flatbuffers::VOffsetT = 4;
+    pub const VT_VARIANT: flatbuffers::VOffsetT = 6;
 
   #[inline]
-  pub fn operation_type(&self) -> Operation {
-    self._tab.get::<Operation>(OperationEnvelope::VT_OPERATION_TYPE, Some(Operation::NONE)).unwrap()
+  pub fn variant_type(&self) -> OperationVariant {
+    self._tab.get::<OperationVariant>(Operation::VT_VARIANT_TYPE, Some(OperationVariant::NONE)).unwrap()
   }
   #[inline]
-  pub fn operation(&self) -> Option<flatbuffers::Table<'a>> {
-    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(OperationEnvelope::VT_OPERATION, None)
+  pub fn variant(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(Operation::VT_VARIANT, None)
   }
   #[inline]
   #[allow(non_snake_case)]
-  pub fn operation_as_start_epoch(&'a self) -> Option<StartEpoch> {
-    if self.operation_type() == Operation::StartEpoch {
-      self.operation().map(|u| StartEpoch::init_from_table(u))
+  pub fn variant_as_start_epoch(&'a self) -> Option<StartEpoch> {
+    if self.variant_type() == OperationVariant::StartEpoch {
+      self.variant().map(|u| StartEpoch::init_from_table(u))
     } else {
       None
     }
@@ -2230,9 +2230,9 @@ impl<'a> OperationEnvelope<'a> {
 
   #[inline]
   #[allow(non_snake_case)]
-  pub fn operation_as_epoch_operation(&'a self) -> Option<EpochOperation> {
-    if self.operation_type() == Operation::EpochOperation {
-      self.operation().map(|u| EpochOperation::init_from_table(u))
+  pub fn variant_as_epoch_operation(&'a self) -> Option<EpochOperation> {
+    if self.variant_type() == OperationVariant::EpochOperation {
+      self.variant().map(|u| EpochOperation::init_from_table(u))
     } else {
       None
     }
@@ -2240,66 +2240,66 @@ impl<'a> OperationEnvelope<'a> {
 
 }
 
-pub struct OperationEnvelopeArgs {
-    pub operation_type: Operation,
-    pub operation: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+pub struct OperationArgs {
+    pub variant_type: OperationVariant,
+    pub variant: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
 }
-impl<'a> Default for OperationEnvelopeArgs {
+impl<'a> Default for OperationArgs {
     #[inline]
     fn default() -> Self {
-        OperationEnvelopeArgs {
-            operation_type: Operation::NONE,
-            operation: None,
+        OperationArgs {
+            variant_type: OperationVariant::NONE,
+            variant: None,
         }
     }
 }
-pub struct OperationEnvelopeBuilder<'a: 'b, 'b> {
+pub struct OperationBuilder<'a: 'b, 'b> {
   fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
   start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
 }
-impl<'a: 'b, 'b> OperationEnvelopeBuilder<'a, 'b> {
+impl<'a: 'b, 'b> OperationBuilder<'a, 'b> {
   #[inline]
-  pub fn add_operation_type(&mut self, operation_type: Operation) {
-    self.fbb_.push_slot::<Operation>(OperationEnvelope::VT_OPERATION_TYPE, operation_type, Operation::NONE);
+  pub fn add_variant_type(&mut self, variant_type: OperationVariant) {
+    self.fbb_.push_slot::<OperationVariant>(Operation::VT_VARIANT_TYPE, variant_type, OperationVariant::NONE);
   }
   #[inline]
-  pub fn add_operation(&mut self, operation: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(OperationEnvelope::VT_OPERATION, operation);
+  pub fn add_variant(&mut self, variant: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Operation::VT_VARIANT, variant);
   }
   #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> OperationEnvelopeBuilder<'a, 'b> {
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> OperationBuilder<'a, 'b> {
     let start = _fbb.start_table();
-    OperationEnvelopeBuilder {
+    OperationBuilder {
       fbb_: _fbb,
       start_: start,
     }
   }
   #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<OperationEnvelope<'a>> {
+  pub fn finish(self) -> flatbuffers::WIPOffset<Operation<'a>> {
     let o = self.fbb_.end_table(self.start_);
     flatbuffers::WIPOffset::new(o.value())
   }
 }
 
 #[inline]
-pub fn get_root_as_operation_envelope<'a>(buf: &'a [u8]) -> OperationEnvelope<'a> {
-  flatbuffers::get_root::<OperationEnvelope<'a>>(buf)
+pub fn get_root_as_operation<'a>(buf: &'a [u8]) -> Operation<'a> {
+  flatbuffers::get_root::<Operation<'a>>(buf)
 }
 
 #[inline]
-pub fn get_size_prefixed_root_as_operation_envelope<'a>(buf: &'a [u8]) -> OperationEnvelope<'a> {
-  flatbuffers::get_size_prefixed_root::<OperationEnvelope<'a>>(buf)
+pub fn get_size_prefixed_root_as_operation<'a>(buf: &'a [u8]) -> Operation<'a> {
+  flatbuffers::get_size_prefixed_root::<Operation<'a>>(buf)
 }
 
 #[inline]
-pub fn finish_operation_envelope_buffer<'a, 'b>(
+pub fn finish_operation_buffer<'a, 'b>(
     fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>,
-    root: flatbuffers::WIPOffset<OperationEnvelope<'a>>) {
+    root: flatbuffers::WIPOffset<Operation<'a>>) {
   fbb.finish(root, None);
 }
 
 #[inline]
-pub fn finish_size_prefixed_operation_envelope_buffer<'a, 'b>(fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>, root: flatbuffers::WIPOffset<OperationEnvelope<'a>>) {
+pub fn finish_size_prefixed_operation_buffer<'a, 'b>(fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>, root: flatbuffers::WIPOffset<Operation<'a>>) {
   fbb.finish_size_prefixed(root, None);
 }
 }  // pub mod worktree

@@ -2,19 +2,6 @@
 
 Memo allows multiple remote collaborators to share the state of a single Git working copy. The core of the library is written in Rust for efficiency and reusability in other contexts. This library exposes the capabilities of the Rust core via WebAssembly and wraps them in an idiomatic JavaScript API.
 
-## Initialization
-
-Because WebAssembly compilation is asynchronous, to use this library, you must call the `init` function, which returns a promise. This function returns all remaining exports in an object.
-
-```ts
-import * as memo from "@atom/memo";
-
-async function main() {
-  const { WorkTree } = await memo.init();
-  // ...your code here...
-}
-```
-
 ## Creating a WorkTree
 
 `WorkTree` is the fundamental abstraction provided by this library. The state of a `WorkTree` is expressed as a sequence of fine-grained _operations_ applied on top of a a _base commit_. There are two possible cases when constructing a new `WorkTree`:
@@ -25,13 +12,14 @@ async function main() {
 Both scenarios are automatically handled when you call `WorkTree.create`:
 
 ```ts
+const replicaId = generateUUID()
 const baseCommitOID = "8251a3c491b3884d7f828d2a1c5c565855171a2c";
 const startOps = await fetchInitialOperations();
-const [tree, ops] = WorkTree.create(baseCommitOID, startOps, gitProvider);
+const [tree, ops] = await WorkTree.create(replicaId, baseCommitOID, startOps, gitProvider);
 broadcast(ops);
 ```
 
-In the example above, `WorkTree.create` is called with a base commit (`baseCommitOID`) and an array of existing operations (`startOps`). If the existing operations array is _empty_, we assume this is the first collaborator and initialize the tree at the provided base commit. If operations are provided, the `baseCommitOID` argument is ignored and the current base commit is determined from the given operations.
+In the example above, `WorkTree.create` is called with a replica id (`replicaId`), a base commit (`baseCommitOID`) and an array of existing operations (`startOps`). If the existing operations array is _empty_, we assume this is the first collaborator and initialize the tree at the provided base commit. If operations are provided, the `baseCommitOID` argument is ignored and the current base commit is determined from the given operations.
 
 You can ignore how `fetchInitialOperations` works for now. It is not included as part of this library, and a reference implementation will be covered later in the guide.
 
@@ -152,7 +140,8 @@ If you want to reset the work tree to a different (possibly `null`) base (e.g. a
 ```ts
 const commitOid = "70403cdf91c2e6fbf76167f725935e6b0993eeb1";
 const resetOps = tree.reset(commitOid);
-broadcast(resetOps);
+await broadcast(resetOps);
+console.log(tree.head()) // => 70403cdf91c2e6fbf76167f725935e6b0993eeb1
 ```
 
 This resets you and all the other peers to the new commit. Note that this is an asynchronous action, as the tree needs to perform I/O in order to retrieve the new base entries.
@@ -167,6 +156,7 @@ In either case, operations are wrapped in an `OperationEnvelope`. An operation e
 
 ```ts
 export interface OperationEnvelope {
+  epochId(): Uint8Array;
   epochTimestamp(): number;
   epochReplicaId(): string;
   operation(): Operation;

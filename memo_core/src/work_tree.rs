@@ -34,6 +34,17 @@ pub struct WorkTree {
     observer: Option<Rc<ChangeObserver>>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct Version {
+    epoch_id: epoch::Id,
+    epoch_version: time::Global,
+}
+
+pub struct OperationEnvelope {
+    pub epoch_head: Option<Oid>,
+    pub operation: Operation,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Operation {
     StartEpoch {
@@ -78,7 +89,13 @@ impl WorkTree {
         ops: I,
         git: Rc<GitProvider>,
         observer: Option<Rc<ChangeObserver>>,
-    ) -> Result<(WorkTree, Box<Stream<Item = Operation, Error = Error>>), Error>
+    ) -> Result<
+        (
+            WorkTree,
+            Box<Stream<Item = OperationEnvelope, Error = Error>>,
+        ),
+        Error,
+    >
     where
         I: 'static + IntoIterator<Item = Operation>,
     {
@@ -94,24 +111,34 @@ impl WorkTree {
         };
 
         let ops = if ops.peek().is_none() {
-            Box::new(tree.reset(base)) as Box<Stream<Item = Operation, Error = Error>>
+            Box::new(tree.reset(base)) as Box<Stream<Item = OperationEnvelope, Error = Error>>
         } else {
-            Box::new(tree.apply_ops(ops)?) as Box<Stream<Item = Operation, Error = Error>>
+            Box::new(tree.apply_ops(ops)?) as Box<Stream<Item = OperationEnvelope, Error = Error>>
         };
 
         Ok((tree, ops))
     }
 
-    pub fn reset(&mut self, head: Option<Oid>) -> impl Stream<Item = Operation, Error = Error> {
+    pub fn head(&self) -> Option<Oid> {
+        self.epoch.as_ref().and_then(|e| e.borrow().head)
+    }
+
+    pub fn reset(
+        &mut self,
+        head: Option<Oid>,
+    ) -> impl Stream<Item = OperationEnvelope, Error = Error> {
         let epoch_id = self.lamport_clock.borrow_mut().tick();
-        stream::once(Ok(Operation::StartEpoch { epoch_id, head }))
-            .chain(self.start_epoch(epoch_id, head))
+        stream::once(Ok(OperationEnvelope {
+            epoch_head: head,
+            operation: Operation::StartEpoch { epoch_id, head },
+        }))
+        .chain(self.start_epoch(epoch_id, head))
     }
 
     pub fn apply_ops<I>(
         &mut self,
         ops: I,
-    ) -> Result<impl Stream<Item = Operation, Error = Error>, Error>
+    ) -> Result<impl Stream<Item = OperationEnvelope, Error = Error>, Error>
     where
         I: IntoIterator<Item = Operation>,
     {
@@ -146,12 +173,12 @@ impl WorkTree {
 
         let fixup_ops_stream = Box::new(stream::iter_ok(fixup_ops));
         Ok(epoch_streams.into_iter().fold(
-            fixup_ops_stream as Box<Stream<Item = Operation, Error = Error>>,
+            fixup_ops_stream as Box<Stream<Item = OperationEnvelope, Error = Error>>,
             |acc, stream| Box::new(acc.chain(stream)),
         ))
     }
 
-    fn mutate_cur_epoch<F>(&self, mutate: F) -> Result<Vec<Operation>, Error>
+    fn mutate_cur_epoch<F>(&self, mutate: F) -> Result<Vec<OperationEnvelope>, Error>
     where
         F: FnOnce(&mut Epoch) -> Result<Vec<epoch::Operation>, Error>,
     {
@@ -187,7 +214,9 @@ impl WorkTree {
                 }
             }
 
-            Ok(Operation::stamp(epoch.id, fixup_ops).collect())
+            Ok(OperationEnvelope::wrap_many(
+                epoch.id, epoch.head, fixup_ops,
+            ))
         } else {
             Err(Error::InvalidOperations)
         }
@@ -197,7 +226,7 @@ impl WorkTree {
         &mut self,
         new_epoch_id: epoch::Id,
         new_head: Option<Oid>,
-    ) -> Box<Stream<Item = Operation, Error = Error>> {
+    ) -> Box<Stream<Item = OperationEnvelope, Error = Error>> {
         if self
             .epoch
             .as_ref()
@@ -222,10 +251,14 @@ impl WorkTree {
                                 base_entries,
                                 &mut lamport_clock.borrow_mut(),
                             )?;
-                            Ok(stream::iter_ok(Operation::stamp(new_epoch_id, fixup_ops)))
+                            Ok(stream::iter_ok(OperationEnvelope::wrap_many(
+                                new_epoch_id,
+                                Some(new_head),
+                                fixup_ops,
+                            )))
                         })
                         .flatten(),
-                ) as Box<Stream<Item = Operation, Error = Error>>
+                ) as Box<Stream<Item = OperationEnvelope, Error = Error>>
             } else {
                 Box::new(stream::empty())
             };
@@ -252,8 +285,21 @@ impl WorkTree {
         }
     }
 
-    pub fn version(&self) -> time::Global {
-        self.cur_epoch().version()
+    pub fn observed(&self, other: Version) -> bool {
+        let version = self.version();
+        match version.epoch_id.cmp(&other.epoch_id) {
+            Ordering::Less => false,
+            Ordering::Equal => other.epoch_version <= version.epoch_version,
+            Ordering::Greater => true,
+        }
+    }
+
+    pub fn version(&self) -> Version {
+        let epoch = self.cur_epoch();
+        Version {
+            epoch_id: epoch.id,
+            epoch_version: epoch.version(),
+        }
     }
 
     pub fn with_cursor<F>(&self, mut f: F)
@@ -265,7 +311,7 @@ impl WorkTree {
         }
     }
 
-    pub fn create_file<P>(&self, path: P, file_type: FileType) -> Result<Operation, Error>
+    pub fn create_file<P>(&self, path: P, file_type: FileType) -> Result<OperationEnvelope, Error>
     where
         P: AsRef<Path>,
     {
@@ -279,20 +325,21 @@ impl WorkTree {
         } else {
             epoch::ROOT_FILE_ID
         };
-        let epoch_id = cur_epoch.id;
         let operation = cur_epoch.create_file(
             parent_id,
             name,
             file_type,
             &mut self.lamport_clock.borrow_mut(),
         )?;
-        Ok(Operation::EpochOperation {
-            epoch_id,
+
+        Ok(OperationEnvelope::wrap(
+            cur_epoch.id,
+            cur_epoch.head,
             operation,
-        })
+        ))
     }
 
-    pub fn rename<P1, P2>(&self, old_path: P1, new_path: P2) -> Result<Operation, Error>
+    pub fn rename<P1, P2>(&self, old_path: P1, new_path: P2) -> Result<OperationEnvelope, Error>
     where
         P1: AsRef<Path>,
         P2: AsRef<Path>,
@@ -311,32 +358,40 @@ impl WorkTree {
             epoch::ROOT_FILE_ID
         };
 
-        let epoch_id = cur_epoch.id;
         let operation = cur_epoch.rename(
             file_id,
             new_parent_id,
             new_name,
             &mut self.lamport_clock.borrow_mut(),
         )?;
-        Ok(Operation::EpochOperation {
-            epoch_id,
+
+        Ok(OperationEnvelope::wrap(
+            cur_epoch.id,
+            cur_epoch.head,
             operation,
-        })
+        ))
     }
 
-    pub fn remove<P>(&self, path: P) -> Result<Operation, Error>
+    pub fn remove<P>(&self, path: P) -> Result<OperationEnvelope, Error>
     where
         P: AsRef<Path>,
     {
         let mut cur_epoch = self.cur_epoch_mut();
         let file_id = cur_epoch.file_id(path.as_ref())?;
-        let epoch_id = cur_epoch.id;
         let operation = cur_epoch.remove(file_id, &mut self.lamport_clock.borrow_mut())?;
 
-        Ok(Operation::EpochOperation {
-            epoch_id,
+        Ok(OperationEnvelope::wrap(
+            cur_epoch.id,
+            cur_epoch.head,
             operation,
-        })
+        ))
+    }
+
+    pub fn exists<P>(&self, path: P) -> bool
+    where
+        P: AsRef<Path>,
+    {
+        self.cur_epoch().file_id(path).is_ok()
     }
 
     pub fn open_text_file<P>(&self, path: P) -> Box<Future<Item = BufferId, Error = Error>>
@@ -443,14 +498,13 @@ impl WorkTree {
         buffer_id: BufferId,
         old_ranges: I,
         new_text: T,
-    ) -> Result<Operation, Error>
+    ) -> Result<OperationEnvelope, Error>
     where
         I: IntoIterator<Item = Range<usize>>,
         T: Into<Text>,
     {
         let file_id = self.buffer_file_id(buffer_id)?;
         let mut cur_epoch = self.cur_epoch_mut();
-        let epoch_id = cur_epoch.id;
         let operation = cur_epoch
             .edit(
                 file_id,
@@ -460,10 +514,11 @@ impl WorkTree {
             )
             .unwrap();
 
-        Ok(Operation::EpochOperation {
-            epoch_id,
+        Ok(OperationEnvelope::wrap(
+            cur_epoch.id,
+            cur_epoch.head,
             operation,
-        })
+        ))
     }
 
     pub fn edit_2d<I, T>(
@@ -471,14 +526,13 @@ impl WorkTree {
         buffer_id: BufferId,
         old_ranges: I,
         new_text: T,
-    ) -> Result<Operation, Error>
+    ) -> Result<OperationEnvelope, Error>
     where
         I: IntoIterator<Item = Range<Point>>,
         T: Into<Text>,
     {
         let file_id = self.buffer_file_id(buffer_id)?;
         let mut cur_epoch = self.cur_epoch_mut();
-        let epoch_id = cur_epoch.id;
         let operation = cur_epoch
             .edit_2d(
                 file_id,
@@ -488,31 +542,30 @@ impl WorkTree {
             )
             .unwrap();
 
-        Ok(Operation::EpochOperation {
-            epoch_id,
+        Ok(OperationEnvelope::wrap(
+            cur_epoch.id,
+            cur_epoch.head,
             operation,
-        })
+        ))
     }
 
     pub fn add_selection_set(
         &self,
         buffer_id: BufferId,
         selections: Vec<Selection>,
-    ) -> Result<(SelectionSetId, Operation), Error> {
+    ) -> Result<(SelectionSetId, OperationEnvelope), Error> {
         let file_id = self.buffer_file_id(buffer_id)?;
         let mut cur_epoch = self.cur_epoch_mut();
-        let epoch_id = cur_epoch.id;
         let (set_id, operation) = cur_epoch.add_selection_set(
             file_id,
             selections,
             &mut self.lamport_clock.borrow_mut(),
         )?;
-        let operation = Operation::EpochOperation {
-            epoch_id,
-            operation,
-        };
 
-        Ok((set_id, operation))
+        Ok((
+            set_id,
+            OperationEnvelope::wrap(cur_epoch.id, cur_epoch.head, operation),
+        ))
     }
 
     pub fn path(&self, buffer_id: BufferId) -> Option<PathBuf> {
@@ -534,6 +587,11 @@ impl WorkTree {
     ) -> Result<impl Iterator<Item = buffer::Change>, Error> {
         let file_id = self.buffer_file_id(buffer_id)?;
         self.cur_epoch().changes_since(file_id, version)
+    }
+
+    pub fn buffer_deferred_ops_len(&self, buffer_id: BufferId) -> Result<usize, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().buffer_deferred_ops_len(file_id)
     }
 
     fn cur_epoch(&self) -> Ref<Epoch> {
@@ -562,6 +620,34 @@ impl WorkTree {
             .get(&buffer_id)
             .cloned()
             .ok_or(Error::InvalidBufferId)
+    }
+}
+
+impl OperationEnvelope {
+    fn wrap(epoch_id: epoch::Id, epoch_head: Option<Oid>, operation: epoch::Operation) -> Self {
+        OperationEnvelope {
+            epoch_head,
+            operation: Operation::EpochOperation {
+                epoch_id,
+                operation,
+            },
+        }
+    }
+
+    fn wrap_many<T>(epoch_id: epoch::Id, epoch_head: Option<Oid>, operations: T) -> Vec<Self>
+    where
+        T: IntoIterator<Item = epoch::Operation>,
+    {
+        operations
+            .into_iter()
+            .map(move |operation| OperationEnvelope {
+                epoch_head,
+                operation: Operation::EpochOperation {
+                    epoch_id,
+                    operation,
+                },
+            })
+            .collect()
     }
 }
 
@@ -595,28 +681,28 @@ impl Operation {
     }
 
     pub fn deserialize<'a>(buffer: &'a [u8]) -> Result<Option<Self>, Error> {
-        use crate::serialization::worktree::OperationEnvelope;
-        let root = flatbuffers::get_root::<OperationEnvelope<'a>>(buffer);
+        use crate::serialization::worktree::Operation;
+        let root = flatbuffers::get_root::<Operation<'a>>(buffer);
         Self::from_flatbuf(root)
     }
 
     pub fn to_flatbuf<'fbb>(
         &self,
         builder: &mut FlatBufferBuilder<'fbb>,
-    ) -> WIPOffset<serialization::worktree::OperationEnvelope<'fbb>> {
+    ) -> WIPOffset<serialization::worktree::Operation<'fbb>> {
         use crate::serialization::worktree::{
-            EpochOperation, EpochOperationArgs, Operation as OperationType, OperationEnvelope,
-            OperationEnvelopeArgs, StartEpoch, StartEpochArgs,
+            EpochOperation, EpochOperationArgs, Operation as OperationFlatbuf, OperationArgs,
+            OperationVariant, StartEpoch, StartEpochArgs,
         };
 
-        let operation_type;
-        let operation_table;
+        let variant_type;
+        let variant;
 
         match self {
             Operation::StartEpoch { epoch_id, head } => {
-                operation_type = OperationType::StartEpoch;
+                variant_type = OperationVariant::StartEpoch;
                 let head = head.map(|head| builder.create_vector(&head));
-                operation_table = StartEpoch::create(
+                variant = StartEpoch::create(
                     builder,
                     &StartEpochArgs {
                         epoch_id: Some(&epoch_id.to_flatbuf()),
@@ -629,9 +715,9 @@ impl Operation {
                 epoch_id,
                 operation,
             } => {
-                operation_type = OperationType::EpochOperation;
+                variant_type = OperationVariant::EpochOperation;
                 let (epoch_operation_type, epoch_operation_table) = operation.to_flatbuf(builder);
-                operation_table = EpochOperation::create(
+                variant = EpochOperation::create(
                     builder,
                     &EpochOperationArgs {
                         epoch_id: Some(&epoch_id.to_flatbuf()),
@@ -643,22 +729,24 @@ impl Operation {
             }
         }
 
-        OperationEnvelope::create(
+        OperationFlatbuf::create(
             builder,
-            &OperationEnvelopeArgs {
-                operation_type,
-                operation: Some(operation_table),
+            &OperationArgs {
+                variant_type,
+                variant: Some(variant),
             },
         )
     }
 
     pub fn from_flatbuf<'fbb>(
-        message: serialization::worktree::OperationEnvelope<'fbb>,
+        message: serialization::worktree::Operation<'fbb>,
     ) -> Result<Option<Self>, Error> {
-        let operation = message.operation().ok_or(Error::DeserializeError)?;
-        match message.operation_type() {
-            serialization::worktree::Operation::StartEpoch => {
-                let message = serialization::worktree::StartEpoch::init_from_table(operation);
+        use crate::serialization::worktree::{EpochOperation, OperationVariant, StartEpoch};
+
+        let variant = message.variant().ok_or(Error::DeserializeError)?;
+        match message.variant_type() {
+            OperationVariant::StartEpoch => {
+                let message = StartEpoch::init_from_table(variant);
                 let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
                 Ok(Some(Operation::StartEpoch {
                     epoch_id: time::Lamport::from_flatbuf(epoch_id),
@@ -669,8 +757,8 @@ impl Operation {
                     }),
                 }))
             }
-            serialization::worktree::Operation::EpochOperation => {
-                let message = serialization::worktree::EpochOperation::init_from_table(operation);
+            OperationVariant::EpochOperation => {
+                let message = EpochOperation::init_from_table(variant);
                 let operation = message.operation().ok_or(Error::DeserializeError)?;
                 let epoch_id = message.epoch_id().ok_or(Error::DeserializeError)?;
                 if let Some(epoch_op) =
@@ -684,7 +772,7 @@ impl Operation {
                     Ok(None)
                 }
             }
-            serialization::worktree::Operation::NONE => Ok(None),
+            OperationVariant::NONE => Ok(None),
         }
     }
 }
@@ -715,7 +803,7 @@ impl SwitchEpoch {
 }
 
 impl Future for SwitchEpoch {
-    type Item = Vec<Operation>;
+    type Item = Vec<OperationEnvelope>;
     type Error = Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
@@ -793,10 +881,11 @@ impl Future for SwitchEpoch {
                         // can't, we will resort to path-based mapping or to creating a completely
                         // new file id for untitled buffers.
                         let (new_file_id, operation) = to_assign.new_text_file(&mut lamport_clock);
-                        fixup_ops.push(Operation::EpochOperation {
-                            epoch_id: to_assign.id,
+                        fixup_ops.push(OperationEnvelope::wrap(
+                            to_assign.id,
+                            to_assign.head,
                             operation,
-                        });
+                        ));
                         to_assign.open_text_file(new_file_id, "", &mut lamport_clock)?;
                         let operation = to_assign.edit(
                             new_file_id,
@@ -804,17 +893,19 @@ impl Future for SwitchEpoch {
                             cur_epoch.text(buffers[&buffer_id])?.into_string().as_str(),
                             &mut lamport_clock,
                         )?;
-                        fixup_ops.push(Operation::EpochOperation {
-                            epoch_id: to_assign.id,
+                        fixup_ops.push(OperationEnvelope::wrap(
+                            to_assign.id,
+                            to_assign.head,
                             operation,
-                        });
+                        ));
                         buffer_mappings.push((buffer_id, new_file_id));
                     }
                 }
 
                 if let Some(ops) = deferred_ops.remove(&to_assign.id) {
-                    fixup_ops.extend(Operation::stamp(
+                    fixup_ops.extend(OperationEnvelope::wrap_many(
                         to_assign.id,
+                        to_assign.head,
                         to_assign.apply_ops(ops, &mut lamport_clock)?,
                     ));
                 }
@@ -908,7 +999,7 @@ mod tests {
                 for path in base_tree.visible_paths(FileType::Text) {
                     base_tree.open_text_file(&path).wait().unwrap();
                 }
-                base_tree.randomly_mutate(&mut rng, 5);
+                base_tree.randomly_mutate(&mut rng, None, 5);
                 commits.push(Some(git.commit(&base_tree)));
             }
 
@@ -929,7 +1020,7 @@ mod tests {
                 network.add_peer(tree.replica_id());
                 network.broadcast(
                     tree.replica_id(),
-                    serialize_ops(ops.collect().wait().unwrap()),
+                    serialize_ops(open_envelopes(ops.collect().wait().unwrap())),
                     &mut rng,
                 );
                 trees.push(tree);
@@ -945,20 +1036,22 @@ mod tests {
                 if k == 0 {
                     tree.open_random_buffers(&mut rng, observer, 5);
                 } else if k == 1 {
-                    let ops = tree.randomly_mutate(&mut rng, 5);
-                    network.broadcast(replica_id, serialize_ops(ops), &mut rng);
-                } else if k == 2 {
                     let head = *rng.choose(&commits).unwrap();
-                    let ops = tree.reset(head).collect().wait().unwrap();
+                    let ops = open_envelopes(tree.reset(head).collect().wait().unwrap());
                     network.broadcast(replica_id, serialize_ops(ops), &mut rng);
-                } else if k == 3 {
+                } else if k == 2 && network.has_unreceived(replica_id) {
                     let received_ops = network.receive(replica_id, &mut rng);
-                    let fixup_ops = tree.apply_ops(deserialize_ops(received_ops)).unwrap();
-                    network.broadcast(
-                        replica_id,
-                        serialize_ops(fixup_ops.collect().wait().unwrap()),
-                        &mut rng,
+                    let fixup_ops = open_envelopes(
+                        tree.apply_ops(deserialize_ops(received_ops))
+                            .unwrap()
+                            .collect()
+                            .wait()
+                            .unwrap(),
                     );
+                    network.broadcast(replica_id, serialize_ops(fixup_ops), &mut rng);
+                } else {
+                    let ops = tree.randomly_mutate(&mut rng, Some(observer), 5);
+                    network.broadcast(replica_id, serialize_ops(open_envelopes(ops)), &mut rng);
                 }
             }
 
@@ -970,7 +1063,7 @@ mod tests {
                     let fixup_ops = tree.apply_ops(deserialize_ops(received_ops)).unwrap();
                     network.broadcast(
                         replica_id,
-                        serialize_ops(fixup_ops.collect().wait().unwrap()),
+                        serialize_ops(open_envelopes(fixup_ops.collect().wait().unwrap())),
                         &mut rng,
                     );
                 }
@@ -1027,14 +1120,16 @@ mod tests {
         let (mut tree_2, ops_2) = WorkTree::new(
             Uuid::from_u128(2),
             Some(commit_0),
-            ops_1.collect().wait().unwrap(),
+            open_envelopes(ops_1.collect().wait().unwrap()),
             git.clone(),
             Some(observer_2.clone()),
         )
         .unwrap();
         assert!(ops_2.wait().next().is_none());
 
+        assert_eq!(tree_1.head(), Some(commit_0));
         assert_eq!(tree_1.dir_entries(), git.tree(commit_0).dir_entries());
+        assert_eq!(tree_2.head(), Some(commit_0));
         assert_eq!(tree_2.dir_entries(), git.tree(commit_0).dir_entries());
 
         let a_1 = tree_1.open_text_file("a").wait().unwrap();
@@ -1044,12 +1139,14 @@ mod tests {
         assert_eq!(tree_1.text_str(a_1), git.tree(commit_0).text_str(a_base));
         assert_eq!(tree_2.text_str(a_2), git.tree(commit_0).text_str(a_base));
 
-        let ops_1 = tree_1.reset(Some(commit_1)).collect().wait().unwrap();
+        let ops_1 = open_envelopes(tree_1.reset(Some(commit_1)).collect().wait().unwrap());
+        assert_eq!(tree_1.head(), Some(commit_1));
         assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
         assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));
         assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
 
-        let ops_2 = tree_2.reset(Some(commit_2)).collect().wait().unwrap();
+        let ops_2 = open_envelopes(tree_2.reset(Some(commit_2)).collect().wait().unwrap());
+        assert_eq!(tree_2.head(), Some(commit_2));
         assert_eq!(tree_2.dir_entries(), git.tree(commit_2).dir_entries());
         assert_eq!(tree_2.text_str(a_2), git.tree(commit_2).text_str(a_2));
         assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
@@ -1058,6 +1155,8 @@ mod tests {
         let fixup_ops_2 = tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
         assert!(fixup_ops_1.is_empty());
         assert!(fixup_ops_2.is_empty());
+        assert_eq!(tree_1.head(), Some(commit_1));
+        assert_eq!(tree_2.head(), Some(commit_1));
         assert_eq!(tree_1.entries(), tree_2.entries());
         assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
         assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));
@@ -1110,7 +1209,7 @@ mod tests {
         let (tree_2, ops_2) = WorkTree::new(
             Uuid::from_u128(1),
             Some(commit_0),
-            ops_1.collect().wait().unwrap(),
+            open_envelopes(ops_1.collect().wait().unwrap()),
             git.clone(),
             None,
         )
@@ -1125,7 +1224,7 @@ mod tests {
         let (_, selection_op) = tree_2.add_selection_set(buffer_id_2, vec![]).unwrap();
         tree_1
             .borrow_mut()
-            .apply_ops(vec![edit_op, selection_op])
+            .apply_ops(vec![edit_op.operation, selection_op.operation])
             .unwrap()
             .collect()
             .wait()
@@ -1138,6 +1237,90 @@ mod tests {
             .collect()
             .wait()
             .unwrap();
+    }
+
+    #[test]
+    fn test_exists() {
+        let git = Rc::new(TestGitProvider::new());
+        let commit = git.commit(&WorkTree::empty());
+        let (tree, ops) =
+            WorkTree::new(Uuid::from_u128(1), Some(commit), vec![], git.clone(), None).unwrap();
+        ops.collect().wait().unwrap();
+
+        tree.create_file("a", FileType::Directory).unwrap();
+        tree.create_file("a/b", FileType::Directory).unwrap();
+        tree.create_file("a/b/c", FileType::Text).unwrap();
+        tree.create_file("a/b/d", FileType::Text).unwrap();
+        tree.remove("a/b/d").unwrap();
+        assert!(tree.exists("a"));
+        assert!(tree.exists("a/b"));
+        assert!(tree.exists("a/b/c"));
+        assert!(!tree.exists("a/b/d"));
+        assert!(!tree.exists("non-existent-path"));
+        assert!(!tree.exists("invalid-path-;.'"));
+    }
+
+    #[test]
+    fn test_version() {
+        let git = Rc::new(TestGitProvider::new());
+        let base_tree = WorkTree::empty();
+        base_tree.create_file("a", FileType::Text).unwrap();
+        let a_base = base_tree.open_text_file("a").wait().unwrap();
+        base_tree.edit(a_base, Some(0..0), "abc").unwrap();
+        let commit_0 = git.commit(&base_tree);
+
+        base_tree.edit(a_base, Some(1..2), "def").unwrap();
+        base_tree.create_file("b", FileType::Directory).unwrap();
+        let commit_1 = git.commit(&base_tree);
+
+        base_tree.edit(a_base, Some(2..3), "ghi").unwrap();
+        base_tree.create_file("b/c", FileType::Text).unwrap();
+        let commit_2 = git.commit(&base_tree);
+
+        let (mut tree_1, ops_1) = WorkTree::new(
+            Uuid::from_u128(1),
+            Some(commit_0),
+            vec![],
+            git.clone(),
+            None,
+        )
+        .unwrap();
+        let (mut tree_2, ops_2) = WorkTree::new(
+            Uuid::from_u128(2),
+            Some(commit_0),
+            open_envelopes(ops_1.collect().wait().unwrap()),
+            git.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(ops_2.wait().next().is_none());
+
+        let ops_1 = open_envelopes(tree_1.create_file("x.txt", FileType::Text));
+        let ops_2 = open_envelopes(tree_2.create_file("y.txt", FileType::Text));
+        assert!(!tree_1.observed(tree_2.version()));
+        assert!(!tree_2.observed(tree_1.version()));
+
+        tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
+        assert!(tree_1.observed(tree_2.version()));
+        tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
+        assert!(tree_2.observed(tree_1.version()));
+
+        let ops_1 = open_envelopes(tree_1.reset(Some(commit_1)).collect().wait().unwrap());
+        let ops_2 = open_envelopes(tree_2.reset(Some(commit_2)).collect().wait().unwrap());
+        // Even though the two sites haven't exchanged operations yet, it's as if tree_1 has
+        // already observed tree_2's state, since it won't ever go back to an epoch whose Lamport
+        // timestamp is smaller.
+        assert!(tree_1.observed(tree_2.version()));
+        assert!(!tree_2.observed(tree_1.version()));
+
+        tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
+        assert!(tree_1.observed(tree_2.version()));
+        tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
+        assert!(tree_2.observed(tree_1.version()));
+    }
+
+    fn open_envelopes<I: IntoIterator<Item = OperationEnvelope>>(envelopes: I) -> Vec<Operation> {
+        envelopes.into_iter().map(|e| e.operation).collect()
     }
 
     fn serialize_ops<I: IntoIterator<Item = Operation>>(ops: I) -> Vec<Vec<u8>> {
@@ -1179,9 +1362,32 @@ mod tests {
             self.text(buffer_id).unwrap().into_string()
         }
 
-        fn randomly_mutate<T: Rng>(&self, rng: &mut T, count: usize) -> Vec<Operation> {
+        fn randomly_mutate<T: Rng>(
+            &self,
+            rng: &mut T,
+            observer: Option<&TestChangeObserver>,
+            count: usize,
+        ) -> Vec<OperationEnvelope> {
             self.mutate_cur_epoch(|epoch| {
-                Ok(epoch.randomly_mutate(rng, &mut self.lamport_clock.borrow_mut(), count))
+                let mut buffer_versions = Vec::new();
+                let buffers = self.buffers.borrow();
+                for (buffer_id, file_id) in buffers.iter() {
+                    let version = epoch.buffer_version(*file_id).unwrap();
+                    buffer_versions.push((*buffer_id, *file_id, version));
+                }
+
+                let operations =
+                    epoch.randomly_mutate(rng, &mut self.lamport_clock.borrow_mut(), count);
+
+                if let Some(observer) = observer {
+                    for (buffer_id, file_id, version) in buffer_versions {
+                        for change in epoch.changes_since(file_id, &version).unwrap() {
+                            observer.edit(buffer_id, change.range, change.code_units);
+                        }
+                    }
+                }
+
+                Ok(operations)
             })
             .unwrap()
         }
@@ -1337,6 +1543,17 @@ mod tests {
             self.buffers
                 .borrow_mut()
                 .insert(buffer_id, buffer::Buffer::new(text));
+        }
+
+        fn edit<T: Into<Text>>(&self, buffer_id: BufferId, range: Range<Point>, text: T) {
+            let mut buffers = self.buffers.borrow_mut();
+            let buffer = buffers.get_mut(&buffer_id).unwrap();
+            buffer.edit_2d(
+                Some(range),
+                text,
+                &mut self.local_clock.borrow_mut(),
+                &mut self.lamport_clock.borrow_mut(),
+            );
         }
 
         fn text(&self, buffer_id: BufferId) -> String {

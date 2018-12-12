@@ -1,5 +1,6 @@
 #![feature(macros_in_extern)]
 
+use bincode;
 use futures::{Async, Future, Poll, Stream};
 use memo_core as memo;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -8,6 +9,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::io;
 use std::marker::PhantomData;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use wasm_bindgen::{prelude::*, JsCast};
@@ -15,10 +17,11 @@ use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 trait JsValueExt {
     fn into_operation(self) -> Result<Option<memo::Operation>, JsValue>;
+    fn into_error_message(self) -> Result<String, String>;
 }
 
-trait MapJsError<T> {
-    fn map_js_err(self) -> Result<T, JsValue>;
+trait IntoJsError {
+    fn into_js_err(self) -> JsValue;
 }
 
 #[wasm_bindgen]
@@ -30,10 +33,10 @@ struct AsyncResult<T> {
     done: bool,
 }
 
-struct AsyncIteratorToStream<T, E> {
+struct AsyncIteratorToStream<T> {
     next_value: JsFuture,
     iterator: AsyncIteratorWrapper,
-    _phantom: PhantomData<(T, E)>,
+    _phantom: PhantomData<T>,
 }
 
 #[wasm_bindgen]
@@ -46,7 +49,7 @@ pub struct WorkTreeNewResult {
 }
 
 #[wasm_bindgen]
-pub struct OperationEnvelope(memo::Operation);
+pub struct OperationEnvelope(memo::OperationEnvelope);
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 struct EditRange {
@@ -100,13 +103,17 @@ impl WorkTree {
     pub fn new(
         git: GitProviderWrapper,
         observer: ChangeObserver,
-        replica_id_bytes_slice: &[u8],
+        replica_id: JsValue,
         base: JsValue,
         js_start_ops: js_sys::Array,
     ) -> Result<WorkTreeNewResult, JsValue> {
+        let replica_id = replica_id.into_serde().map_err(|e| {
+            format!("ReplicaId {:?} must be a valid UUID: {}", replica_id, e).into_js_err()
+        })?;
+
         let base = base
             .into_serde::<Option<HexOid>>()
-            .map_js_err()?
+            .map_err(|e| e.into_js_err())?
             .map(|b| b.0);
 
         let mut start_ops = Vec::new();
@@ -116,9 +123,6 @@ impl WorkTree {
             }
         }
 
-        let mut replica_id_bytes = [0; 16];
-        replica_id_bytes.copy_from_slice(replica_id_bytes_slice);
-        let replica_id = memo::ReplicaId::from_random_bytes(replica_id_bytes);
         let (tree, operations) = memo::WorkTree::new(
             replica_id,
             base,
@@ -126,27 +130,40 @@ impl WorkTree {
             Rc::new(git),
             Some(Rc::new(observer)),
         )
-        .map_js_err()?;
+        .map_err(|e| e.into_js_err())?;
         Ok(WorkTreeNewResult {
             tree: Some(WorkTree(tree)),
             operations: Some(StreamToAsyncIterator::new(
                 operations
                     .map(|op| JsValue::from(OperationEnvelope::new(op)))
-                    .map_err(|err| err.to_string()),
+                    .map_err(|e| e.into_js_err()),
             )),
         })
+    }
+
+    pub fn version(&self) -> Vec<u8> {
+        bincode::serialize(&self.0.version()).unwrap()
+    }
+
+    pub fn observed(&self, version_bytes: &[u8]) -> Result<bool, JsValue> {
+        let version = bincode::deserialize(&version_bytes).map_err(|e| e.into_js_err())?;
+        Ok(self.0.observed(version))
+    }
+
+    pub fn head(&self) -> JsValue {
+        JsValue::from_serde(&self.0.head().map(|head| HexOid(head))).unwrap()
     }
 
     pub fn reset(&mut self, base: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
         let base = base
             .into_serde::<Option<HexOid>>()
-            .map_js_err()?
+            .map_err(|e| e.into_js_err())?
             .map(|b| b.0);
         Ok(StreamToAsyncIterator::new(
             self.0
                 .reset(base)
                 .map(|op| JsValue::from(OperationEnvelope::new(op)))
-                .map_err(|err| err.to_string()),
+                .map_err(|e| e.into_js_err()),
         ))
     }
 
@@ -164,10 +181,10 @@ impl WorkTree {
                 StreamToAsyncIterator::new(
                     fixup_ops
                         .map(|op| JsValue::from(OperationEnvelope::new(op)))
-                        .map_err(|err| err.to_string()),
+                        .map_err(|e| e.into_js_err()),
                 )
             })
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn create_file(
@@ -175,25 +192,29 @@ impl WorkTree {
         path: String,
         file_type: JsValue,
     ) -> Result<OperationEnvelope, JsValue> {
-        let file_type = file_type.into_serde().map_js_err()?;
+        let file_type = file_type.into_serde().map_err(|e| e.into_js_err())?;
         self.0
             .create_file(&path, file_type)
             .map(|operation| OperationEnvelope::new(operation))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn rename(&self, old_path: String, new_path: String) -> Result<OperationEnvelope, JsValue> {
         self.0
             .rename(&old_path, &new_path)
             .map(|operation| OperationEnvelope::new(operation))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn remove(&self, path: String) -> Result<OperationEnvelope, JsValue> {
         self.0
             .remove(&path)
             .map(|operation| OperationEnvelope::new(operation))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
+    }
+
+    pub fn exists(&self, path: String) -> bool {
+        self.0.exists(&path)
     }
 
     pub fn open_text_file(&mut self, path: String) -> js_sys::Promise {
@@ -201,15 +222,32 @@ impl WorkTree {
             self.0
                 .open_text_file(path)
                 .map(|buffer_id| JsValue::from_serde(&buffer_id).unwrap())
-                .map_err(|error| JsValue::from_str(&error.to_string())),
+                .map_err(|e| e.into_js_err()),
         )
     }
 
+    pub fn path(&self, buffer_id: JsValue) -> Result<Option<String>, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
+        Ok(self
+            .0
+            .path(buffer_id)
+            .map(|path| path.to_string_lossy().into_owned()))
+    }
+
     pub fn text(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
         self.0
-            .text(buffer_id.into_serde().map_js_err()?)
+            .text(buffer_id)
             .map(|text| JsValue::from_str(&text.into_string()))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
+    }
+
+    pub fn buffer_deferred_ops_len(&self, buffer_id: JsValue) -> Result<u32, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
+        self.0
+            .buffer_deferred_ops_len(buffer_id)
+            .map(|len| len as u32)
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn edit(
@@ -218,21 +256,22 @@ impl WorkTree {
         old_ranges: JsValue,
         new_text: &str,
     ) -> Result<OperationEnvelope, JsValue> {
-        let buffer_id = buffer_id.into_serde().map_js_err()?;
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
         let old_ranges = old_ranges
             .into_serde::<Vec<EditRange>>()
-            .map_js_err()?
+            .map_err(|e| e.into_js_err())?
             .into_iter()
             .map(|EditRange { start, end }| start..end);
 
         self.0
             .edit_2d(buffer_id, old_ranges, new_text)
             .map(|op| OperationEnvelope::new(op))
-            .map_js_err()
+            .map_err(|e| e.into_js_err())
     }
 
     pub fn entries(&self, descend_into: JsValue, show_deleted: bool) -> Result<JsValue, JsValue> {
-        let descend_into: Option<HashSet<PathBuf>> = descend_into.into_serde().map_js_err()?;
+        let descend_into: Option<HashSet<PathBuf>> =
+            descend_into.into_serde().map_err(|e| e.into_js_err())?;
         let mut entries = Vec::new();
         self.0.with_cursor(|cursor| loop {
             let entry = cursor.entry().unwrap();
@@ -254,7 +293,7 @@ impl WorkTree {
                 break;
             }
         });
-        JsValue::from_serde(&entries).map_js_err()
+        JsValue::from_serde(&entries).map_err(|e| e.into_js_err())
     }
 }
 
@@ -263,38 +302,53 @@ impl WorkTreeNewResult {
     pub fn tree(&mut self) -> Result<WorkTree, JsValue> {
         self.tree
             .take()
-            .ok_or(JsValue::from_str("Cannot take tree twice"))
+            .ok_or(js_sys::Error::new("Cannot take tree twice").into())
     }
 
     pub fn operations(&mut self) -> Result<StreamToAsyncIterator, JsValue> {
         self.operations
             .take()
-            .ok_or(JsValue::from_str("Cannot take operations twice"))
+            .ok_or(js_sys::Error::new("Cannot take operations twice").into())
     }
 }
 
 #[wasm_bindgen]
 impl OperationEnvelope {
-    fn new(operation: memo::Operation) -> Self {
+    fn new(operation: memo::OperationEnvelope) -> Self {
         OperationEnvelope(operation)
+    }
+
+    #[wasm_bindgen(js_name = epochId)]
+    pub fn epoch_id(&self) -> Vec<u8> {
+        let epoch_id = self.0.operation.epoch_id();
+        let timestamp_bytes: [u8; 8] = unsafe { mem::transmute(epoch_id.value.to_be()) };
+        let mut epoch_id_bytes = Vec::with_capacity(24);
+        epoch_id_bytes.extend_from_slice(&timestamp_bytes);
+        epoch_id_bytes.extend_from_slice(epoch_id.replica_id.as_bytes());
+        epoch_id_bytes
     }
 
     #[wasm_bindgen(js_name = epochReplicaId)]
     pub fn epoch_replica_id(&self) -> JsValue {
-        JsValue::from_serde(&self.0.epoch_id().replica_id).unwrap()
+        JsValue::from_serde(&self.0.operation.epoch_id().replica_id).unwrap()
     }
 
     #[wasm_bindgen(js_name = epochTimestamp)]
     pub fn epoch_timestamp(&self) -> JsValue {
-        JsValue::from_serde(&self.0.epoch_id().value).unwrap()
+        JsValue::from_serde(&self.0.operation.epoch_id().value).unwrap()
+    }
+
+    #[wasm_bindgen(js_name = epochHead)]
+    pub fn epoch_head(&self) -> JsValue {
+        JsValue::from_serde(&self.0.epoch_head.map(|head| HexOid(head))).unwrap()
     }
 
     pub fn operation(&self) -> Vec<u8> {
-        self.0.serialize()
+        self.0.operation.serialize()
     }
 }
 
-impl<T, E> AsyncIteratorToStream<T, E> {
+impl<T> AsyncIteratorToStream<T> {
     fn new(iterator: AsyncIteratorWrapper) -> Self {
         AsyncIteratorToStream {
             next_value: JsFuture::from(iterator.next()),
@@ -304,18 +358,17 @@ impl<T, E> AsyncIteratorToStream<T, E> {
     }
 }
 
-impl<T, E> Stream for AsyncIteratorToStream<T, E>
+impl<T> Stream for AsyncIteratorToStream<T>
 where
-    E: for<'de> Deserialize<'de> + From<String>,
     T: for<'de> Deserialize<'de>,
 {
     type Item = T;
-    type Error = E;
+    type Error = String;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         match self.next_value.poll() {
             Ok(Async::Ready(result)) => {
-                let result: AsyncResult<T> = result.into_serde().map_err(|err| err.to_string())?;
+                let result: AsyncResult<T> = result.into_serde().map_err(|e| e.to_string())?;
                 if result.done {
                     Ok(Async::Ready(None))
                 } else {
@@ -324,30 +377,27 @@ where
                 }
             }
             Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(error) => Err(error.into_serde().map_err(|err| err.to_string())?),
+            Err(error) => Err(error.into_error_message()?),
         }
     }
 }
 
 impl StreamToAsyncIterator {
-    fn new<E, S>(stream: S) -> Self
+    fn new<S>(stream: S) -> Self
     where
-        E: Serialize,
-        S: 'static + Stream<Item = JsValue, Error = E>,
+        S: 'static + Stream<Item = JsValue, Error = JsValue>,
     {
-        let js_value_stream = stream
-            .map(|value| {
-                let result = JsValue::from(js_sys::Object::new());
-                js_sys::Reflect::set(&result, &JsValue::from_str("value"), &value).unwrap();
-                js_sys::Reflect::set(
-                    &result,
-                    &JsValue::from_str("done"),
-                    &JsValue::from_bool(false),
-                )
-                .unwrap();
-                result
-            })
-            .map_err(|error| JsValue::from_serde(&error).unwrap());
+        let js_value_stream = stream.map(|value| {
+            let result = JsValue::from(js_sys::Object::new());
+            js_sys::Reflect::set(&result, &JsValue::from_str("value"), &value).unwrap();
+            js_sys::Reflect::set(
+                &result,
+                &JsValue::from_str("done"),
+                &JsValue::from_bool(false),
+            )
+            .unwrap();
+            result
+        });
 
         StreamToAsyncIterator(Rc::new(Cell::new(Some(Box::new(js_value_stream)))))
     }
@@ -405,9 +455,7 @@ impl memo::GitProvider for GitProviderWrapper {
                 Ok(value) => value
                     .as_string()
                     .ok_or_else(|| String::from("Text is not a string")),
-                Err(error) => error
-                    .as_string()
-                    .ok_or_else(|| String::from("Error is not a string")),
+                Err(error) => Err(error.into_error_message()?),
             })
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error)),
         )
@@ -461,12 +509,9 @@ impl<'de> Deserialize<'de> for HexOid {
     }
 }
 
-impl<T, E> MapJsError<T> for Result<T, E>
-where
-    E: ToString,
-{
-    fn map_js_err(self) -> Result<T, JsValue> {
-        self.map_err(|err| JsValue::from(err.to_string()))
+impl<T: ToString> IntoJsError for T {
+    fn into_js_err(self) -> JsValue {
+        js_sys::Error::new(&self.to_string()).into()
     }
 }
 
@@ -474,9 +519,18 @@ impl JsValueExt for JsValue {
     fn into_operation(self) -> Result<Option<memo::Operation>, JsValue> {
         let js_bytes = self
             .dyn_into::<js_sys::Uint8Array>()
-            .map_err(|_| JsValue::from_str("Operation must be Uint8Array"))?;
+            .map_err(|_| "Operation must be Uint8Array".into_js_err())?;
         let mut bytes = Vec::with_capacity(js_bytes.byte_length() as usize);
         js_bytes.for_each(&mut |byte, _, _| bytes.push(byte));
-        memo::Operation::deserialize(&bytes).map_js_err()
+        memo::Operation::deserialize(&bytes).map_err(|e| e.into_js_err())
+    }
+
+    fn into_error_message(self) -> Result<String, String> {
+        match self.dyn_into::<js_sys::Error>() {
+            Ok(js_err) => Ok(js_err.message().into()),
+            Err(_) => Err(String::from(
+                "An error occurred but can't be displayed because it's not an instance of an error",
+            )),
+        }
     }
 }

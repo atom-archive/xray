@@ -9,7 +9,9 @@ mod work_tree;
 
 pub use crate::buffer::{Buffer, Change, Point};
 pub use crate::epoch::{Cursor, DirEntry, Epoch, FileStatus, FileType, ROOT_FILE_ID};
-pub use crate::work_tree::{BufferId, ChangeObserver, GitProvider, Operation, WorkTree};
+pub use crate::work_tree::{
+    BufferId, ChangeObserver, GitProvider, Operation, OperationEnvelope, WorkTree,
+};
 use std::borrow::Cow;
 use std::fmt;
 use std::io;

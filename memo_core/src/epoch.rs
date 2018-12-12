@@ -842,6 +842,14 @@ impl Epoch {
         }
     }
 
+    pub fn buffer_deferred_ops_len(&self, file_id: FileId) -> Result<usize, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            Ok(buffer.deferred_ops_len())
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
     pub fn file_type(&self, file_id: FileId) -> Result<FileType, Error> {
         Ok(self.metadata(file_id)?.file_type)
     }
@@ -2124,6 +2132,46 @@ mod tests {
         assert!(epoch_1
             .open_text_file(dir_id, Text::from(""), &mut lamport_clock_1)
             .is_err());
+    }
+
+    #[test]
+    fn test_buffer_deferred_ops_len() -> Result<(), Error> {
+        let replica_1_id = Uuid::from_u128(1);
+        let mut epoch_1 = Epoch::with_replica_id(replica_1_id);
+        let mut clock_1 = time::Lamport::new(replica_1_id);
+
+        let (file_id, new_file_op) = epoch_1.new_text_file(&mut clock_1);
+        epoch_1.open_text_file(file_id, "", &mut clock_1).unwrap();
+        let edit_1_op = epoch_1.edit(file_id, Some(0..0), "135", &mut clock_1)?;
+        let edit_2_op = epoch_1.edit(file_id, Some(1..1), "2", &mut clock_1)?;
+        let edit_3_op = epoch_1.edit(file_id, Some(3..3), "4", &mut clock_1)?;
+
+        let replica_2_id = Uuid::from_u128(2);
+        let mut epoch_2 = Epoch::with_replica_id(replica_2_id);
+        let mut clock_2 = time::Lamport::new(replica_2_id);
+        epoch_2.apply_ops(Some(new_file_op.clone()), &mut clock_2)?;
+
+        epoch_2.open_text_file(file_id, "", &mut clock_2)?;
+        assert_eq!(epoch_2.buffer_deferred_ops_len(file_id)?, 0);
+
+        epoch_2.apply_ops(Some(edit_3_op.clone()), &mut clock_2)?;
+        assert_eq!(epoch_2.buffer_deferred_ops_len(file_id)?, 1);
+
+        epoch_2.apply_ops(Some(edit_2_op.clone()), &mut clock_2)?;
+        assert_eq!(epoch_2.buffer_deferred_ops_len(file_id)?, 2);
+
+        epoch_2.apply_ops(Some(edit_1_op.clone()), &mut clock_2)?;
+        assert_eq!(epoch_2.buffer_deferred_ops_len(file_id)?, 0);
+
+        // If the buffer has never been opened, we can't determine how many operations are deferred.
+        let replica_3_id = Uuid::from_u128(3);
+        let mut epoch_3 = Epoch::with_replica_id(replica_3_id);
+        let mut clock_3 = time::Lamport::new(replica_3_id);
+        epoch_3.apply_ops(Some(new_file_op), &mut clock_3)?;
+        epoch_3.apply_ops(Some(edit_3_op), &mut clock_3)?;
+        assert!(epoch_3.buffer_deferred_ops_len(file_id).is_err());
+
+        Ok(())
     }
 
     #[test]

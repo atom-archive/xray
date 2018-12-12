@@ -49,10 +49,10 @@ table UpdateSelections {
   lamport_timestamp:Timestamp;
 }
 
-union Operation { Edit, UpdateSelections }
+union OperationVariant { Edit, UpdateSelections }
 
-table OperationEnvelope {
-  operation: Operation;
+table Operation {
+  variant: OperationVariant;
 }
 
 namespace epoch;
@@ -88,7 +88,7 @@ table UpdateParent {
 
 table BufferOperation {
   file_id:FileId;
-  operations:[buffer.OperationEnvelope];
+  operations:[buffer.Operation];
   local_timestamp:Timestamp;
   lamport_timestamp:Timestamp;
 }
@@ -107,10 +107,10 @@ table EpochOperation {
   operation:epoch.Operation;
 }
 
-union Operation { StartEpoch, EpochOperation }
+union OperationVariant { StartEpoch, EpochOperation }
 
-table OperationEnvelope {
-   operation:Operation;
+table Operation {
+   variant:OperationVariant;
 }
 
-root_type OperationEnvelope;
+root_type Operation;
