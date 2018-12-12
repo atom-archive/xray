@@ -369,7 +369,7 @@ suite("WorkTree", () => {
       },
       async baseText(): Promise<string> {
         await 0;
-        throw {};
+        throw new Error("baseText");
       }
     };
     const OID = "0".repeat(40);
