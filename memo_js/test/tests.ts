@@ -60,9 +60,11 @@ suite("WorkTree", () => {
     const tree1BufferC = await tree1.openTextFile("a/b/c");
     assert.strictEqual(tree1BufferC.getPath(), "a/b/c");
     assert.strictEqual(tree1BufferC.getText(), "oid0 base text");
+    assert.strictEqual(tree1BufferC.getDeferredOperationCount(), 0);
     const tree2BufferC = await tree2.openTextFile("a/b/c");
     assert.strictEqual(tree2BufferC.getPath(), "a/b/c");
     assert.strictEqual(tree2BufferC.getText(), "oid0 base text");
+    assert.strictEqual(tree1BufferC.getDeferredOperationCount(), 0);
 
     const tree1BufferChanges: Change[] = [];
     tree1BufferC.onChange(c => tree1BufferChanges.push(...c));

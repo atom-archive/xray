@@ -550,6 +550,11 @@ impl WorkTree {
         self.cur_epoch().changes_since(file_id, version)
     }
 
+    pub fn buffer_deferred_ops_len(&self, buffer_id: BufferId) -> Result<usize, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().buffer_deferred_ops_len(file_id)
+    }
+
     fn cur_epoch(&self) -> Ref<Epoch> {
         self.epoch.as_ref().unwrap().borrow()
     }

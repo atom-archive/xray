@@ -310,6 +310,10 @@ impl Buffer {
         ChangesIter { cursor, since }
     }
 
+    pub fn deferred_ops_len(&self) -> usize {
+        self.deferred_ops.len()
+    }
+
     pub fn edit<I, T>(
         &mut self,
         old_ranges: I,
