@@ -344,6 +344,39 @@ suite("WorkTree", () => {
     ]);
     assert.strictEqual(buffer1ChangeCount, 1);
   });
+
+  test("throwing error when retrieving base entries", async () => {
+    const git = {
+      async *baseEntries(): AsyncIterable<BaseEntry> {
+        await 0;
+        throw new Error("baseEntries error");
+      },
+      async baseText(): Promise<string> {
+        await 0;
+        throw new Error("baseText");
+      }
+    };
+    const OID = "0".repeat(40);
+    const [, initOps] = await WorkTree.create(uuid(), OID, [], git);
+    assert.rejects(collectOps(initOps), /baseEntries error/);
+  });
+
+  test("throwing error when retrieving base text", async () => {
+    const git = {
+      async *baseEntries(): AsyncIterable<BaseEntry> {
+        await 0;
+        yield { depth: 1, name: "a", type: FileType.Text, text: "base text" };
+      },
+      async baseText(): Promise<string> {
+        await 0;
+        throw {};
+      }
+    };
+    const OID = "0".repeat(40);
+    const [tree, initOps] = await WorkTree.create(uuid(), OID, [], git);
+    await collectOps(initOps);
+    assert.rejects(tree.openTextFile("a"), /baseText/);
+  });
 });
 
 type BaseEntry =

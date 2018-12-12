@@ -17,6 +17,7 @@ use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 trait JsValueExt {
     fn into_operation(self) -> Result<Option<memo::Operation>, JsValue>;
+    fn into_error_message(self) -> Result<String, String>;
 }
 
 trait IntoJsError {
@@ -32,10 +33,10 @@ struct AsyncResult<T> {
     done: bool,
 }
 
-struct AsyncIteratorToStream<T, E> {
+struct AsyncIteratorToStream<T> {
     next_value: JsFuture,
     iterator: AsyncIteratorWrapper,
-    _phantom: PhantomData<(T, E)>,
+    _phantom: PhantomData<T>,
 }
 
 #[wasm_bindgen]
@@ -339,7 +340,7 @@ impl OperationEnvelope {
     }
 }
 
-impl<T, E> AsyncIteratorToStream<T, E> {
+impl<T> AsyncIteratorToStream<T> {
     fn new(iterator: AsyncIteratorWrapper) -> Self {
         AsyncIteratorToStream {
             next_value: JsFuture::from(iterator.next()),
@@ -349,13 +350,12 @@ impl<T, E> AsyncIteratorToStream<T, E> {
     }
 }
 
-impl<T, E> Stream for AsyncIteratorToStream<T, E>
+impl<T> Stream for AsyncIteratorToStream<T>
 where
-    E: for<'de> Deserialize<'de> + From<String>,
     T: for<'de> Deserialize<'de>,
 {
     type Item = T;
-    type Error = E;
+    type Error = String;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         match self.next_value.poll() {
@@ -369,7 +369,7 @@ where
                 }
             }
             Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(error) => Err(error.into_serde().map_err(|e| e.to_string())?),
+            Err(error) => Err(error.into_error_message()?),
         }
     }
 }
@@ -447,9 +447,7 @@ impl memo::GitProvider for GitProviderWrapper {
                 Ok(value) => value
                     .as_string()
                     .ok_or_else(|| String::from("Text is not a string")),
-                Err(error) => error
-                    .as_string()
-                    .ok_or_else(|| String::from("Error is not a string")),
+                Err(error) => Err(error.into_error_message()?),
             })
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error)),
         )
@@ -517,5 +515,14 @@ impl JsValueExt for JsValue {
         let mut bytes = Vec::with_capacity(js_bytes.byte_length() as usize);
         js_bytes.for_each(&mut |byte, _, _| bytes.push(byte));
         memo::Operation::deserialize(&bytes).map_err(|e| e.into_js_err())
+    }
+
+    fn into_error_message(self) -> Result<String, String> {
+        match self.dyn_into::<js_sys::Error>() {
+            Ok(js_err) => Ok(js_err.message().into()),
+            Err(_) => Err(String::from(
+                "An error occurred but can't be displayed because it's not an instance of an error",
+            )),
+        }
     }
 }
