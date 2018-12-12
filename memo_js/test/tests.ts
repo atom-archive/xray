@@ -221,6 +221,13 @@ suite("WorkTree", () => {
     );
   });
 
+  test("opening a directory as a text file", async () => {
+    const git = new TestGitProvider();
+    const [tree] = await WorkTree.create(uuid(), null, [], git);
+    tree.createFile("dir", FileType.Directory);
+    assert.rejects(tree.openTextFile("dir"), /text/i);
+  });
+
   test("the epoch head is available on operation envelopes", async () => {
     const OID = "0".repeat(40);
 
@@ -336,6 +343,39 @@ suite("WorkTree", () => {
       buffer2.edit([{ start: point(0, 0), end: point(0, 0) }], "y").operation()
     ]);
     assert.strictEqual(buffer1ChangeCount, 1);
+  });
+
+  test("throwing error when retrieving base entries", async () => {
+    const git = {
+      async *baseEntries(): AsyncIterable<BaseEntry> {
+        await 0;
+        throw new Error("baseEntries error");
+      },
+      async baseText(): Promise<string> {
+        await 0;
+        throw new Error("baseText");
+      }
+    };
+    const OID = "0".repeat(40);
+    const [, initOps] = await WorkTree.create(uuid(), OID, [], git);
+    assert.rejects(collectOps(initOps), /baseEntries error/);
+  });
+
+  test("throwing error when retrieving base text", async () => {
+    const git = {
+      async *baseEntries(): AsyncIterable<BaseEntry> {
+        await 0;
+        yield { depth: 1, name: "a", type: FileType.Text, text: "base text" };
+      },
+      async baseText(): Promise<string> {
+        await 0;
+        throw {};
+      }
+    };
+    const OID = "0".repeat(40);
+    const [tree, initOps] = await WorkTree.create(uuid(), OID, [], git);
+    await collectOps(initOps);
+    assert.rejects(tree.openTextFile("a"), /baseText/);
   });
 });
 
