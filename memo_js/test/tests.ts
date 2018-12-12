@@ -221,6 +221,13 @@ suite("WorkTree", () => {
     );
   });
 
+  test("opening a directory as a text file", async () => {
+    const git = new TestGitProvider();
+    const [tree] = await WorkTree.create(uuid(), null, [], git);
+    tree.createFile("dir", FileType.Directory);
+    assert.rejects(tree.openTextFile("dir"), /text/i);
+  });
+
   test("the epoch head is available on operation envelopes", async () => {
     const OID = "0".repeat(40);
 
