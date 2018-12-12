@@ -57,7 +57,7 @@ pub enum Operation {
     },
 }
 
-#[derive(Copy, Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct BufferId(u32);
 
 enum MaybeDone<F: Future> {
@@ -167,21 +167,6 @@ impl WorkTree {
             }
         }
 
-        let fixup_ops = self.mutate_cur_epoch(|epoch| {
-            epoch.apply_ops(cur_epoch_ops, &mut self.lamport_clock.borrow_mut())
-        })?;
-
-        let fixup_ops_stream = Box::new(stream::iter_ok(fixup_ops));
-        Ok(epoch_streams.into_iter().fold(
-            fixup_ops_stream as Box<Stream<Item = OperationEnvelope, Error = Error>>,
-            |acc, stream| Box::new(acc.chain(stream)),
-        ))
-    }
-
-    fn mutate_cur_epoch<F>(&self, mutate: F) -> Result<Vec<OperationEnvelope>, Error>
-    where
-        F: FnOnce(&mut Epoch) -> Result<Vec<epoch::Operation>, Error>,
-    {
         if let Some(epoch_ref) = self.epoch.clone() {
             let mut epoch = epoch_ref.borrow_mut();
 
@@ -190,7 +175,8 @@ impl WorkTree {
                 prev_versions.insert(*file_id, epoch.buffer_version(*file_id).unwrap());
             }
 
-            let fixup_ops = mutate(&mut epoch)?;
+            let fixup_ops = epoch.apply_ops(cur_epoch_ops, &mut self.lamport_clock.borrow_mut())?;
+
             if let Some(observer) = self.observer.as_ref() {
                 for (buffer_id, file_id) in self.buffers.borrow().iter() {
                     let prev_version = prev_versions.remove(file_id).unwrap();
@@ -214,8 +200,12 @@ impl WorkTree {
                 }
             }
 
-            Ok(OperationEnvelope::wrap_many(
+            let fixup_ops_stream = Box::new(stream::iter_ok(OperationEnvelope::wrap_many(
                 epoch.id, epoch.head, fixup_ops,
+            )));
+            Ok(epoch_streams.into_iter().fold(
+                fixup_ops_stream as Box<Stream<Item = OperationEnvelope, Error = Error>>,
+                |acc, stream| Box::new(acc.chain(stream)),
             ))
         } else {
             Err(Error::InvalidOperations)
@@ -999,7 +989,7 @@ mod tests {
                 for path in base_tree.visible_paths(FileType::Text) {
                     base_tree.open_text_file(&path).wait().unwrap();
                 }
-                base_tree.randomly_mutate(&mut rng, None, 5);
+                base_tree.randomly_mutate(&mut rng, 5);
                 commits.push(Some(git.commit(&base_tree)));
             }
 
@@ -1050,7 +1040,7 @@ mod tests {
                     );
                     network.broadcast(replica_id, serialize_ops(fixup_ops), &mut rng);
                 } else {
-                    let ops = tree.randomly_mutate(&mut rng, Some(observer), 5);
+                    let ops = tree.randomly_mutate(&mut rng, 5);
                     network.broadcast(replica_id, serialize_ops(open_envelopes(ops)), &mut rng);
                 }
             }
@@ -1362,34 +1352,31 @@ mod tests {
             self.text(buffer_id).unwrap().into_string()
         }
 
-        fn randomly_mutate<T: Rng>(
-            &self,
-            rng: &mut T,
-            observer: Option<&TestChangeObserver>,
-            count: usize,
-        ) -> Vec<OperationEnvelope> {
-            self.mutate_cur_epoch(|epoch| {
-                let mut buffer_versions = Vec::new();
-                let buffers = self.buffers.borrow();
-                for (buffer_id, file_id) in buffers.iter() {
-                    let version = epoch.buffer_version(*file_id).unwrap();
-                    buffer_versions.push((*buffer_id, *file_id, version));
+        fn randomly_mutate<T: Rng>(&self, rng: &mut T, count: usize) -> Vec<OperationEnvelope> {
+            let mut epoch = self.cur_epoch_mut();
+
+            // Store version for all open buffers so that we can keep the observer up to date.
+            let mut buffer_versions = Vec::new();
+            let buffers = self.buffers.borrow();
+            for (buffer_id, file_id) in buffers.iter() {
+                let version = epoch.buffer_version(*file_id).unwrap();
+                buffer_versions.push((*buffer_id, *file_id, version));
+            }
+
+            let operations =
+                epoch.randomly_mutate(rng, &mut self.lamport_clock.borrow_mut(), count);
+
+            // Apply the random changes to the observer as well so that it matches what's in the tree.
+            if let Some(observer) = self.observer.as_ref() {
+                for (buffer_id, file_id, version) in buffer_versions {
+                    observer.text_changed(
+                        buffer_id,
+                        Box::new(epoch.changes_since(file_id, &version).unwrap()),
+                    );
                 }
+            }
 
-                let operations =
-                    epoch.randomly_mutate(rng, &mut self.lamport_clock.borrow_mut(), count);
-
-                if let Some(observer) = observer {
-                    for (buffer_id, file_id, version) in buffer_versions {
-                        for change in epoch.changes_since(file_id, &version).unwrap() {
-                            observer.edit(buffer_id, change.range, change.code_units);
-                        }
-                    }
-                }
-
-                Ok(operations)
-            })
-            .unwrap()
+            OperationEnvelope::wrap_many(epoch.id, epoch.head, operations)
         }
 
         fn open_random_buffers<T: Rng>(
@@ -1543,17 +1530,6 @@ mod tests {
             self.buffers
                 .borrow_mut()
                 .insert(buffer_id, buffer::Buffer::new(text));
-        }
-
-        fn edit<T: Into<Text>>(&self, buffer_id: BufferId, range: Range<Point>, text: T) {
-            let mut buffers = self.buffers.borrow_mut();
-            let buffer = buffers.get_mut(&buffer_id).unwrap();
-            buffer.edit_2d(
-                Some(range),
-                text,
-                &mut self.local_clock.borrow_mut(),
-                &mut self.lamport_clock.borrow_mut(),
-            );
         }
 
         fn text(&self, buffer_id: BufferId) -> String {
