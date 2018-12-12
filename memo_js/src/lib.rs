@@ -206,10 +206,9 @@ impl WorkTree {
     }
 
     pub fn text(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
-        let buffer_id = buffer_id.into_serde().map_js_err()?;
         self.0
-            .with_buffer(buffer_id, |buf| Ok(buf.to_string()))
-            .map(|text| JsValue::from_str(&text))
+            .text(buffer_id.into_serde().map_js_err()?)
+            .map(|text| JsValue::from_str(&text.into_string()))
             .map_js_err()
     }
 
@@ -227,9 +226,7 @@ impl WorkTree {
             .map(|EditRange { start, end }| start..end);
 
         self.0
-            .with_buffer_mut(buffer_id, |buf, local_clock, lamport_clock| {
-                Ok(buf.edit_2d(old_ranges, new_text, local_clock, lamport_clock))
-            })
+            .edit_2d(buffer_id, old_ranges, new_text)
             .map(|op| OperationEnvelope::new(op))
             .map_js_err()
     }
