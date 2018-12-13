@@ -367,18 +367,22 @@ impl Buffer {
         self.edit(old_1d_ranges, new_text, local_clock, lamport_clock)
     }
 
-    pub fn add_selection_set(
+    pub fn add_selection_set<I>(
         &mut self,
-        selections: Vec<Selection>,
+        ranges: I,
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
-    ) -> (SelectionSetId, Operation) {
+    ) -> Result<(SelectionSetId, Operation), Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+    {
+        let selections = self.selections_from_ranges(ranges)?;
         let set_id = local_clock.tick();
         self.selections.insert(set_id, selections.clone());
 
         let local_timestamp = local_clock.tick();
         self.version.observe(local_timestamp);
-        (
+        Ok((
             set_id,
             Operation::UpdateSelections {
                 set_id,
@@ -386,7 +390,35 @@ impl Buffer {
                 local_timestamp,
                 lamport_timestamp: lamport_clock.tick(),
             },
-        )
+        ))
+    }
+
+    pub fn replace_selection_set<I>(
+        &mut self,
+        set_id: SelectionSetId,
+        ranges: I,
+        local_clock: &mut time::Local,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+    {
+        self.selections
+            .remove(&set_id)
+            .ok_or(Error::InvalidSelectionSet)?;
+
+        let mut selections = self.selections_from_ranges(ranges)?;
+        self.merge_selections(&mut selections);
+        self.selections.insert(set_id, selections.clone());
+
+        let local_timestamp = local_clock.tick();
+        self.version.observe(local_timestamp);
+        Ok(Operation::UpdateSelections {
+            set_id,
+            selections: Some(selections),
+            local_timestamp,
+            lamport_timestamp: lamport_clock.tick(),
+        })
     }
 
     pub fn remove_selection_set(
@@ -411,34 +443,6 @@ impl Buffer {
 
     pub fn selections(&self) -> impl Iterator<Item = (&SelectionSetId, &Vec<Selection>)> {
         self.selections.iter()
-    }
-
-    pub fn mutate_selections<F>(
-        &mut self,
-        set_id: SelectionSetId,
-        local_clock: &mut time::Local,
-        lamport_clock: &mut time::Lamport,
-        f: F,
-    ) -> Result<Operation, Error>
-    where
-        F: FnOnce(&Buffer, &mut Vec<Selection>),
-    {
-        let mut selections = self
-            .selections
-            .remove(&set_id)
-            .ok_or(Error::InvalidSelectionSet)?;
-        f(self, &mut selections);
-        self.merge_selections(&mut selections);
-        self.selections.insert(set_id, selections.clone());
-
-        let local_timestamp = local_clock.tick();
-        self.version.observe(local_timestamp);
-        Ok(Operation::UpdateSelections {
-            set_id,
-            selections: Some(selections),
-            local_timestamp,
-            lamport_timestamp: lamport_clock.tick(),
-        })
     }
 
     fn merge_selections(&mut self, selections: &mut Vec<Selection>) {
@@ -467,6 +471,24 @@ impl Buffer {
             }
         }
         *selections = new_selections;
+    }
+
+    fn selections_from_ranges<I>(&self, ranges: I) -> Result<Vec<Selection>, Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+    {
+        let mut ranges = ranges.into_iter().collect::<Vec<_>>();
+        ranges.sort_unstable_by_key(|range| range.start);
+
+        let mut selections = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            selections.push(Selection {
+                start: self.anchor_before_point(range.start)?,
+                end: self.anchor_before_point(range.end)?,
+                reversed: range.start > range.end,
+            });
+        }
+        Ok(selections)
     }
 
     pub fn apply_ops<I: IntoIterator<Item = Operation>>(
@@ -3067,39 +3089,41 @@ mod tests {
                     .unwrap();
                 operations.push(op);
             } else {
-                let mut selections = Vec::new();
+                let mut ranges = Vec::new();
                 for _ in 0..5 {
                     let start = rng.gen_range(0, self.len() + 1);
+                    let start_point = self.point_for_offset(start).unwrap();
                     let end = rng.gen_range(0, self.len() + 1);
-                    let selection = if start > end {
-                        Selection {
-                            start: self.anchor_before_offset(end).unwrap(),
-                            end: self.anchor_before_offset(start).unwrap(),
-                            reversed: true,
-                        }
-                    } else {
-                        Selection {
-                            start: self.anchor_before_offset(start).unwrap(),
-                            end: self.anchor_before_offset(end).unwrap(),
-                            reversed: false,
-                        }
-                    };
-                    selections.push(selection);
+                    let end_point = self.point_for_offset(end).unwrap();
+                    ranges.push(start_point..end_point);
                 }
 
                 let op = if let Some(set_id) = set_id {
-                    self.mutate_selections(*set_id, local_clock, lamport_clock, |_, set| {
-                        *set = selections
-                    })
-                    .unwrap()
+                    self.replace_selection_set(*set_id, ranges, local_clock, lamport_clock)
+                        .unwrap()
                 } else {
-                    self.add_selection_set(selections, local_clock, lamport_clock)
+                    self.add_selection_set(ranges, local_clock, lamport_clock)
+                        .unwrap()
                         .1
                 };
                 operations.push(op);
             }
 
             (old_ranges, new_text, operations)
+        }
+
+        fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
+            let mut fragments_cursor = self.fragments.cursor();
+            fragments_cursor.seek(&offset, SeekBias::Left);
+            fragments_cursor
+                .item()
+                .ok_or(Error::OffsetOutOfRange)
+                .map(|fragment| {
+                    let overshoot = fragment
+                        .point_for_offset(offset - &fragments_cursor.start::<usize>())
+                        .unwrap();
+                    fragments_cursor.start::<Point>() + &overshoot
+                })
         }
     }
 }

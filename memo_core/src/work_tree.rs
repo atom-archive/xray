@@ -544,18 +544,18 @@ impl WorkTree {
         ))
     }
 
-    pub fn add_selection_set(
+    pub fn add_selection_set<I>(
         &self,
         buffer_id: BufferId,
-        selections: Vec<Selection>,
-    ) -> Result<(SelectionSetId, OperationEnvelope), Error> {
+        ranges: I,
+    ) -> Result<(SelectionSetId, OperationEnvelope), Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+    {
         let file_id = self.buffer_file_id(buffer_id)?;
         let mut cur_epoch = self.cur_epoch_mut();
-        let (set_id, operation) = cur_epoch.add_selection_set(
-            file_id,
-            selections,
-            &mut self.lamport_clock.borrow_mut(),
-        )?;
+        let (set_id, operation) =
+            cur_epoch.add_selection_set(file_id, ranges, &mut self.lamport_clock.borrow_mut())?;
 
         Ok((
             set_id,

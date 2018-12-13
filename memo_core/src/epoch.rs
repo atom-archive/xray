@@ -682,19 +682,22 @@ impl Epoch {
         )
     }
 
-    pub fn add_selection_set(
+    pub fn add_selection_set<I>(
         &mut self,
         file_id: FileId,
-        selections: Vec<Selection>,
+        ranges: I,
         lamport_clock: &mut time::Lamport,
-    ) -> Result<(SelectionSetId, Operation), Error> {
+    ) -> Result<(SelectionSetId, Operation), Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+    {
         let mut new_set_id = None;
         let operation = self.mutate_buffer(
             file_id,
             lamport_clock,
             |buffer, local_clock, lamport_clock| {
                 let (set_id, operation) =
-                    buffer.add_selection_set(selections, local_clock, lamport_clock);
+                    buffer.add_selection_set(ranges, local_clock, lamport_clock)?;
                 new_set_id = Some(set_id);
                 Ok(vec![operation])
             },
