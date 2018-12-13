@@ -20,7 +20,7 @@ pub trait GitProvider {
 }
 
 pub trait ChangeObserver {
-    fn text_changed(&self, buffer_id: BufferId, changes: Box<Iterator<Item = Change>>);
+    fn text_changed(&self, buffer_id: BufferId, changes: Vec<Change>);
     fn selections_changed(&self, buffer_id: BufferId);
 }
 
@@ -87,6 +87,7 @@ struct SwitchEpoch {
     last_seen: epoch::Id,
     base_text_requests: HashMap<BufferId, Option<BaseTextRequest>>,
     buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+    local_selection_sets: Rc<RefCell<HashMap<LocalSelectionSetId, buffer::SelectionSetId>>>,
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
     git: Rc<GitProvider>,
@@ -199,7 +200,7 @@ impl WorkTree {
                         // Temporarily drop outstanding borrow to allow for re-entrant calls from
                         // the observer.
                         drop(epoch);
-                        observer.text_changed(*buffer_id, Box::new(changes));
+                        observer.text_changed(*buffer_id, changes.collect());
                         epoch = epoch_ref.borrow_mut();
                     }
 
@@ -271,6 +272,7 @@ impl WorkTree {
                     new_epoch,
                     cur_epoch,
                     self.buffers.clone(),
+                    self.local_selection_sets.clone(),
                     self.deferred_ops.clone(),
                     self.lamport_clock.clone(),
                     self.git.clone(),
@@ -647,7 +649,7 @@ impl WorkTree {
             local: HashMap::new(),
             remote: HashMap::new(),
         };
-        for (set_id, ranges) in cur_epoch.selection_ranges(file_id)? {
+        for (set_id, ranges) in cur_epoch.all_selection_ranges(file_id)? {
             if let Some(local_set_id) = set_ids_to_local_set_ids.get(&set_id) {
                 selections.local.insert(*local_set_id, ranges);
             } else {
@@ -875,6 +877,7 @@ impl SwitchEpoch {
         to_assign: Rc<RefCell<Epoch>>,
         cur_epoch: Rc<RefCell<Epoch>>,
         buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
+        local_selection_sets: Rc<RefCell<HashMap<LocalSelectionSetId, buffer::SelectionSetId>>>,
         deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
         lamport_clock: Rc<RefCell<time::Lamport>>,
         git: Rc<GitProvider>,
@@ -887,6 +890,7 @@ impl SwitchEpoch {
             last_seen,
             base_text_requests: HashMap::new(),
             buffers,
+            local_selection_sets,
             deferred_ops,
             lamport_clock,
             git,
@@ -905,6 +909,7 @@ impl Future for SwitchEpoch {
         let mut to_assign = self.to_assign.borrow_mut();
         let mut deferred_ops = self.deferred_ops.borrow_mut();
         let mut lamport_clock = self.lamport_clock.borrow_mut();
+        let mut local_selection_sets = self.local_selection_sets.borrow_mut();
 
         if to_assign.id > cur_epoch.id {
             if self.last_seen != cur_epoch.id {
@@ -1009,7 +1014,30 @@ impl Future for SwitchEpoch {
                     let old_file_id = buffers[&buffer_id];
                     let old_text = cur_epoch.text(old_file_id)?.into_string();
                     let new_text = to_assign.text(new_file_id)?.into_string();
-                    let changes = buffer::diff(&old_text, &new_text).peekable();
+                    let changes = buffer::diff(&old_text, &new_text).collect::<Vec<_>>();
+
+                    // TODO: This is inefficient and somewhat inelegant. We should transform
+                    // selections using only spatial coordinates, as opposed to editing the
+                    // previous buffer's text.
+                    let mut tmp_lamport_clock = lamport_clock.clone();
+                    for change in &changes {
+                        cur_epoch.edit_2d(
+                            old_file_id,
+                            Some(change.range.clone()),
+                            change.code_units.clone(),
+                            &mut tmp_lamport_clock,
+                        )?;
+                    }
+
+                    for set_id in local_selection_sets.values_mut() {
+                        let new_ranges = cur_epoch.selection_ranges(old_file_id, *set_id).unwrap();
+                        let (new_set_id, op) = to_assign
+                            .add_selection_set(new_file_id, new_ranges, &mut lamport_clock)
+                            .unwrap();
+                        fixup_ops.push(OperationEnvelope::wrap(to_assign.id, to_assign.head, op));
+                        *set_id = new_set_id;
+                    }
+
                     buffer_changes.push((buffer_id, changes));
                     buffers.insert(buffer_id, new_file_id);
                 }
@@ -1023,9 +1051,10 @@ impl Future for SwitchEpoch {
                     drop(to_assign);
                     drop(deferred_ops);
                     drop(lamport_clock);
-                    for (buffer_id, mut changes) in buffer_changes {
-                        if changes.peek().is_some() {
-                            observer.text_changed(buffer_id, Box::new(changes));
+                    drop(local_selection_sets);
+                    for (buffer_id, changes) in buffer_changes {
+                        if !changes.is_empty() {
+                            observer.text_changed(buffer_id, changes);
                         }
 
                         observer.selections_changed(buffer_id);
@@ -1274,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_selections_across_resets() {
+    fn test_selections_across_resets() -> Result<(), Error> {
         let git = Rc::new(TestGitProvider::new());
         let base_tree = WorkTree::empty();
         base_tree.create_file("a", FileType::Text).unwrap();
@@ -1292,52 +1321,156 @@ mod tests {
             vec![],
             git.clone(),
             None,
-        )
-        .unwrap();
+        )?;
         let (mut tree_2, ops_2) = WorkTree::new(
             Uuid::from_u128(2),
             Some(commit_0),
-            open_envelopes(ops_1.collect().wait().unwrap()),
+            open_envelopes(ops_1.collect().wait()?),
             git.clone(),
             None,
-        )
-        .unwrap();
+        )?;
         assert!(ops_2.wait().next().is_none());
 
-        let a_1 = tree_1.open_text_file("a").wait().unwrap();
-        let (a_1_set, a_1_set_op) = tree_1
-            .add_selection_set(
-                a_1,
+        let a_1 = tree_1.open_text_file("a").wait()?;
+        let (a_1_set, a_1_set_op) = tree_1.add_selection_set(
+            a_1,
+            vec![
+                Point::new(0, 1)..Point::new(0, 2),
+                Point::new(1, 1)..Point::new(1, 1),
+            ],
+        )?;
+
+        let a_2 = tree_2.open_text_file("a").wait()?;
+        let (a_2_set, a_2_set_op) = tree_2.add_selection_set(
+            a_2,
+            vec![
+                Point::new(0, 0)..Point::new(0, 0),
+                Point::new(1, 2)..Point::new(1, 2),
+            ],
+        )?;
+
+        tree_1
+            .apply_ops(Some(a_2_set_op.operation))?
+            .collect()
+            .wait()?;
+        let tree_1_selections = tree_1.selections(a_1)?;
+        assert_eq!(
+            tree_1_selections.local.into_iter().collect::<Vec<_>>(),
+            vec![(
+                a_1_set,
                 vec![
                     Point::new(0, 1)..Point::new(0, 2),
-                    Point::new(1, 0)..Point::new(1, 1),
-                ],
-            )
-            .unwrap();
+                    Point::new(1, 1)..Point::new(1, 1),
+                ]
+            )]
+        );
+        assert_eq!(
+            tree_1_selections.remote.into_iter().collect::<Vec<_>>(),
+            vec![(
+                tree_2.replica_id(),
+                vec![vec![
+                    Point::new(0, 0)..Point::new(0, 0),
+                    Point::new(1, 2)..Point::new(1, 2),
+                ]]
+            )]
+        );
 
-        let a_2 = tree_2.open_text_file("a").wait().unwrap();
-        let (a_2_set, a_2_set_op) = tree_2
-            .add_selection_set(
-                a_2,
+        tree_2
+            .apply_ops(Some(a_1_set_op.operation))?
+            .collect()
+            .wait()?;
+        let tree_2_selections = tree_2.selections(a_2)?;
+        assert_eq!(
+            tree_2_selections.local.into_iter().collect::<Vec<_>>(),
+            vec![(
+                a_2_set,
                 vec![
                     Point::new(0, 0)..Point::new(0, 0),
                     Point::new(1, 2)..Point::new(1, 2),
-                ],
-            )
-            .unwrap();
+                ]
+            )]
+        );
+        assert_eq!(
+            tree_2_selections.remote.into_iter().collect::<Vec<_>>(),
+            vec![(
+                tree_1.replica_id(),
+                vec![vec![
+                    Point::new(0, 1)..Point::new(0, 2),
+                    Point::new(1, 1)..Point::new(1, 1),
+                ]]
+            )]
+        );
 
-        let reset_ops = tree_1.reset(Some(commit_1)).collect().wait().unwrap();
-        let tree_1_selections = tree_1.selections(a_1).unwrap();
+        let fixup_ops_1 = tree_1.reset(Some(commit_1)).collect().wait()?;
+        let tree_1_selections = tree_1.selections(a_1)?;
         assert_eq!(
             tree_1_selections.local.into_iter().collect::<Vec<_>>(),
             vec![(
                 a_1_set,
                 vec![
                     Point::new(1, 1)..Point::new(1, 2),
-                    Point::new(3, 0)..Point::new(3, 1),
+                    Point::new(3, 1)..Point::new(3, 1),
                 ]
             )]
         );
+        assert_eq!(
+            tree_1_selections.remote.into_iter().collect::<Vec<_>>(),
+            vec![]
+        );
+
+        let fixup_ops_2 = tree_2
+            .apply_ops(open_envelopes(fixup_ops_1))?
+            .collect()
+            .wait()?;
+        let tree_2_selections = tree_2.selections(a_2)?;
+        assert_eq!(
+            tree_2_selections.local.into_iter().collect::<Vec<_>>(),
+            vec![(
+                a_2_set,
+                vec![
+                    Point::new(0, 0)..Point::new(0, 0),
+                    Point::new(3, 2)..Point::new(3, 2),
+                ]
+            )]
+        );
+        assert_eq!(
+            tree_2_selections.remote.into_iter().collect::<Vec<_>>(),
+            vec![(
+                tree_1.replica_id(),
+                vec![vec![
+                    Point::new(1, 1)..Point::new(1, 2),
+                    Point::new(3, 1)..Point::new(3, 1),
+                ]]
+            )]
+        );
+
+        tree_1
+            .apply_ops(open_envelopes(fixup_ops_2))?
+            .collect()
+            .wait()?;
+        let tree_1_selections = tree_1.selections(a_1)?;
+        assert_eq!(
+            tree_1_selections.local.into_iter().collect::<Vec<_>>(),
+            vec![(
+                a_1_set,
+                vec![
+                    Point::new(1, 1)..Point::new(1, 2),
+                    Point::new(3, 1)..Point::new(3, 1),
+                ]
+            )]
+        );
+        assert_eq!(
+            tree_1_selections.remote.into_iter().collect::<Vec<_>>(),
+            vec![(
+                tree_2.replica_id(),
+                vec![vec![
+                    Point::new(0, 0)..Point::new(0, 0),
+                    Point::new(3, 2)..Point::new(3, 2),
+                ]]
+            )]
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -1345,7 +1478,7 @@ mod tests {
         struct ReentrantChangeObserver(Rc<RefCell<WorkTree>>);
 
         impl ChangeObserver for ReentrantChangeObserver {
-            fn text_changed(&self, buffer_id: BufferId, _: Box<Iterator<Item = Change>>) {
+            fn text_changed(&self, buffer_id: BufferId, _: Vec<Change>) {
                 // Assume that users of WorkTree can always acquire a mutable reference to it.
                 let tree = unsafe { self.0.as_ptr().as_mut().unwrap() };
                 tree.edit(buffer_id, Some(0..0), "!").unwrap();
@@ -1555,10 +1688,12 @@ mod tests {
             // Apply the random changes to the observer as well so that it matches what's in the tree.
             if let Some(observer) = self.observer.as_ref() {
                 for (buffer_id, file_id, version) in buffer_versions {
-                    observer.text_changed(
-                        buffer_id,
-                        Box::new(self.cur_epoch().changes_since(file_id, &version).unwrap()),
-                    );
+                    let text_changes = self
+                        .cur_epoch()
+                        .changes_since(file_id, &version)
+                        .unwrap()
+                        .collect();
+                    observer.text_changed(buffer_id, text_changes);
                     observer.selections_changed(buffer_id);
                 }
             }
@@ -1761,7 +1896,7 @@ mod tests {
     }
 
     impl ChangeObserver for TestChangeObserver {
-        fn text_changed(&self, buffer_id: BufferId, changes: Box<Iterator<Item = Change>>) {
+        fn text_changed(&self, buffer_id: BufferId, changes: Vec<Change>) {
             if let Some(buffer) = self.buffers.borrow_mut().get_mut(&buffer_id) {
                 for change in changes {
                     buffer.edit_2d(

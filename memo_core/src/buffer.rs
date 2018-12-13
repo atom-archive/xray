@@ -441,25 +441,35 @@ impl Buffer {
         })
     }
 
-    pub fn selections(&self) -> impl Iterator<Item = (&SelectionSetId, &Vec<Selection>)> {
+    pub fn selection_ranges<'a>(
+        &'a self,
+        set_id: SelectionSetId,
+    ) -> Result<impl Iterator<Item = Range<Point>> + 'a, Error> {
+        let selections = self
+            .selections
+            .get(&set_id)
+            .ok_or(Error::InvalidSelectionSet)?;
+        Ok(selections.iter().map(move |selection| {
+            let start = self.point_for_anchor(&selection.start).unwrap();
+            let end = self.point_for_anchor(&selection.end).unwrap();
+            if selection.reversed {
+                end..start
+            } else {
+                start..end
+            }
+        }))
+    }
+
+    pub fn all_selections(&self) -> impl Iterator<Item = (&SelectionSetId, &Vec<Selection>)> {
         self.selections.iter()
     }
 
-    pub fn selection_ranges<'a>(
+    pub fn all_selection_ranges<'a>(
         &'a self,
     ) -> impl 'a + Iterator<Item = (SelectionSetId, Vec<Range<Point>>)> {
-        self.selections.iter().map(move |(set_id, selections)| {
-            let ranges = selections.iter().map(|selection| {
-                let start = self.point_for_anchor(&selection.start).unwrap();
-                let end = self.point_for_anchor(&selection.end).unwrap();
-                if selection.reversed {
-                    end..start
-                } else {
-                    start..end
-                }
-            });
-            (*set_id, ranges.collect())
-        })
+        self.selections
+            .keys()
+            .map(move |set_id| (*set_id, self.selection_ranges(*set_id).unwrap().collect()))
     }
 
     fn merge_selections(&mut self, selections: &mut Vec<Selection>) {
@@ -3045,8 +3055,8 @@ mod tests {
             for buffer in &buffers[1..] {
                 assert_eq!(buffer.to_string(), buffers[0].to_string());
                 assert_eq!(
-                    buffer.selections().collect::<HashMap<_, _>>(),
-                    buffers[0].selections().collect::<HashMap<_, _>>()
+                    buffer.all_selections().collect::<HashMap<_, _>>(),
+                    buffers[0].all_selections().collect::<HashMap<_, _>>()
                 );
             }
         }
@@ -3103,7 +3113,7 @@ mod tests {
 
             // Randomly add, remove or mutate selection sets.
             let replica_selection_sets = &self
-                .selections()
+                .all_selections()
                 .map(|(set_id, _)| *set_id)
                 .filter(|set_id| local_clock.replica_id == set_id.replica_id)
                 .collect::<Vec<_>>();

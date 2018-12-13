@@ -742,13 +742,13 @@ impl Epoch {
         )
     }
 
-    pub fn selections(
+    pub fn all_selections(
         &self,
         file_id: FileId,
     ) -> Result<Vec<(SelectionSetId, Vec<Selection>)>, Error> {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
             Ok(buffer
-                .selections()
+                .all_selections()
                 .map(|(set_id, selections)| (*set_id, selections.clone()))
                 .collect())
         } else {
@@ -759,9 +759,21 @@ impl Epoch {
     pub fn selection_ranges<'a>(
         &'a self,
         file_id: FileId,
+        set_id: SelectionSetId,
+    ) -> Result<impl Iterator<Item = Range<Point>> + 'a, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            buffer.selection_ranges(set_id)
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
+    pub fn all_selection_ranges<'a>(
+        &'a self,
+        file_id: FileId,
     ) -> Result<impl Iterator<Item = (SelectionSetId, Vec<Range<Point>>)> + 'a, Error> {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
-            Ok(buffer.selection_ranges())
+            Ok(buffer.all_selection_ranges())
         } else {
             Err(Error::InvalidFileId("file has not been opened".into()))
         }
