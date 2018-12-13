@@ -705,6 +705,43 @@ impl Epoch {
         Ok((new_set_id.unwrap(), operation))
     }
 
+    pub fn replace_selection_set<I>(
+        &mut self,
+        file_id: FileId,
+        set_id: SelectionSetId,
+        ranges: I,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+    {
+        self.mutate_buffer(
+            file_id,
+            lamport_clock,
+            |buffer, local_clock, lamport_clock| {
+                let operation =
+                    buffer.replace_selection_set(set_id, ranges, local_clock, lamport_clock)?;
+                Ok(vec![operation])
+            },
+        )
+    }
+
+    pub fn remove_selection_set(
+        &mut self,
+        file_id: FileId,
+        set_id: SelectionSetId,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<Operation, Error> {
+        self.mutate_buffer(
+            file_id,
+            lamport_clock,
+            |buffer, local_clock, lamport_clock| {
+                let operation = buffer.remove_selection_set(set_id, local_clock, lamport_clock)?;
+                Ok(vec![operation])
+            },
+        )
+    }
+
     pub fn selections(
         &self,
         file_id: FileId,
@@ -714,6 +751,17 @@ impl Epoch {
                 .selections()
                 .map(|(set_id, selections)| (*set_id, selections.clone()))
                 .collect())
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
+    pub fn selection_ranges<'a>(
+        &'a self,
+        file_id: FileId,
+    ) -> Result<impl Iterator<Item = (SelectionSetId, Vec<Range<Point>>)> + 'a, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            Ok(buffer.selection_ranges())
         } else {
             Err(Error::InvalidFileId("file has not been opened".into()))
         }

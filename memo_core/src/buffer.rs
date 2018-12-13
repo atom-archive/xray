@@ -445,6 +445,23 @@ impl Buffer {
         self.selections.iter()
     }
 
+    pub fn selection_ranges<'a>(
+        &'a self,
+    ) -> impl 'a + Iterator<Item = (SelectionSetId, Vec<Range<Point>>)> {
+        self.selections.iter().map(move |(set_id, selections)| {
+            let ranges = selections.iter().map(|selection| {
+                let start = self.point_for_anchor(&selection.start).unwrap();
+                let end = self.point_for_anchor(&selection.end).unwrap();
+                if selection.reversed {
+                    end..start
+                } else {
+                    start..end
+                }
+            });
+            (*set_id, ranges.collect())
+        })
+    }
+
     fn merge_selections(&mut self, selections: &mut Vec<Selection>) {
         let mut new_selections = Vec::with_capacity(selections.len());
         {
@@ -482,11 +499,19 @@ impl Buffer {
 
         let mut selections = Vec::with_capacity(ranges.len());
         for range in ranges {
-            selections.push(Selection {
-                start: self.anchor_before_point(range.start)?,
-                end: self.anchor_before_point(range.end)?,
-                reversed: range.start > range.end,
-            });
+            if range.start > range.end {
+                selections.push(Selection {
+                    start: self.anchor_before_point(range.end)?,
+                    end: self.anchor_before_point(range.start)?,
+                    reversed: true,
+                });
+            } else {
+                selections.push(Selection {
+                    start: self.anchor_before_point(range.start)?,
+                    end: self.anchor_before_point(range.end)?,
+                    reversed: false,
+                });
+            }
         }
         Ok(selections)
     }
@@ -3098,13 +3123,13 @@ mod tests {
                     ranges.push(start_point..end_point);
                 }
 
-                let op = if let Some(set_id) = set_id {
-                    self.replace_selection_set(*set_id, ranges, local_clock, lamport_clock)
-                        .unwrap()
-                } else {
+                let op = if set_id.is_none() || rng.gen_weighted_bool(5) {
                     self.add_selection_set(ranges, local_clock, lamport_clock)
                         .unwrap()
                         .1
+                } else {
+                    self.replace_selection_set(*set_id.unwrap(), ranges, local_clock, lamport_clock)
+                        .unwrap()
                 };
                 operations.push(op);
             }
