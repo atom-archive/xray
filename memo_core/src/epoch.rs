@@ -702,6 +702,20 @@ impl Epoch {
         Ok((new_set_id.unwrap(), operation))
     }
 
+    pub fn selections(
+        &self,
+        file_id: FileId,
+    ) -> Result<Vec<(SelectionSetId, Vec<Selection>)>, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            Ok(buffer
+                .selections()
+                .map(|(set_id, selections)| (*set_id, selections.clone()))
+                .collect())
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
     fn mutate_buffer<F>(
         &mut self,
         file_id: FileId,

@@ -21,7 +21,11 @@ pub trait GitProvider {
 
 pub trait ChangeObserver {
     fn text_changed(&self, buffer_id: BufferId, changes: Box<Iterator<Item = Change>>);
-    fn selections_changed(&self, buffer_id: BufferId);
+    fn selections_changed(
+        &self,
+        buffer_id: BufferId,
+        selections: Vec<(SelectionSetId, Vec<Selection>)>,
+    );
 }
 
 pub struct WorkTree {
@@ -191,10 +195,11 @@ impl WorkTree {
                     }
 
                     if epoch.selections_changed_since(*file_id, &prev_version)? {
+                        let selections = epoch.selections(*file_id)?;
                         // Temporarily drop outstanding borrow to allow for re-entrant calls from
                         // the observer.
                         drop(epoch);
-                        observer.selections_changed(*buffer_id);
+                        observer.selections_changed(*buffer_id, selections);
                         epoch = epoch_ref.borrow_mut();
                     }
                 }
@@ -570,6 +575,14 @@ impl WorkTree {
         self.cur_epoch().text(file_id)
     }
 
+    pub fn selections(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<Vec<(SelectionSetId, Vec<Selection>)>, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().selections(file_id)
+    }
+
     pub fn changes_since(
         &self,
         buffer_id: BufferId,
@@ -903,12 +916,12 @@ impl Future for SwitchEpoch {
 
                 let mut buffer_changes = Vec::new();
                 for (buffer_id, new_file_id) in buffer_mappings {
-                    let old_text = cur_epoch.text(buffers[&buffer_id])?.into_string();
+                    let old_file_id = buffers[&buffer_id];
+                    let old_text = cur_epoch.text(old_file_id)?.into_string();
                     let new_text = to_assign.text(new_file_id)?.into_string();
-                    let mut changes = buffer::diff(&old_text, &new_text).peekable();
-                    if changes.peek().is_some() {
-                        buffer_changes.push((buffer_id, changes));
-                    }
+                    let changes = buffer::diff(&old_text, &new_text).peekable();
+                    let selections = to_assign.selections(new_file_id)?;
+                    buffer_changes.push((buffer_id, changes, selections));
                     buffers.insert(buffer_id, new_file_id);
                 }
 
@@ -921,8 +934,12 @@ impl Future for SwitchEpoch {
                     drop(to_assign);
                     drop(deferred_ops);
                     drop(lamport_clock);
-                    for (buffer_id, changes) in buffer_changes {
-                        observer.text_changed(buffer_id, Box::new(changes));
+                    for (buffer_id, mut changes, selections) in buffer_changes {
+                        if changes.peek().is_some() {
+                            observer.text_changed(buffer_id, Box::new(changes));
+                        }
+
+                        observer.selections_changed(buffer_id, selections);
                     }
                 }
 
@@ -985,7 +1002,7 @@ mod tests {
 
             let mut commits = vec![None];
             let base_tree = WorkTree::empty();
-            for _ in 0..rng.gen_range(1, 10) {
+            for _ in 0..10 {
                 for path in base_tree.visible_paths(FileType::Text) {
                     base_tree.open_text_file(&path).wait().unwrap();
                 }
@@ -1074,6 +1091,10 @@ mod tests {
                     assert_eq!(
                         observer.text(buffer_id),
                         tree.text(buffer_id).unwrap().into_string()
+                    );
+                    assert_eq!(
+                        observer.selections(buffer_id),
+                        tree.selections(buffer_id).unwrap()
                     );
                 }
             }
@@ -1166,7 +1187,11 @@ mod tests {
                 tree.edit(buffer_id, Some(0..0), "!").unwrap();
             }
 
-            fn selections_changed(&self, buffer_id: BufferId) {
+            fn selections_changed(
+                &self,
+                buffer_id: BufferId,
+                _: Vec<(SelectionSetId, Vec<Selection>)>,
+            ) {
                 // Assume that users of WorkTree can always acquire a mutable reference to it.
                 let tree = unsafe { self.0.as_ptr().as_mut().unwrap() };
                 tree.edit(buffer_id, Some(0..0), "!").unwrap();
@@ -1373,6 +1398,7 @@ mod tests {
                         buffer_id,
                         Box::new(epoch.changes_since(file_id, &version).unwrap()),
                     );
+                    observer.selections_changed(buffer_id, epoch.selections(file_id).unwrap());
                 }
             }
 
@@ -1432,7 +1458,7 @@ mod tests {
         buffers: RefCell<HashMap<BufferId, buffer::Buffer>>,
         local_clock: RefCell<time::Local>,
         lamport_clock: RefCell<time::Lamport>,
-        selection_change_counts: RefCell<HashMap<BufferId, usize>>,
+        selections: RefCell<HashMap<BufferId, Vec<(SelectionSetId, Vec<Selection>)>>>,
     }
 
     impl TestGitProvider {
@@ -1521,19 +1547,25 @@ mod tests {
                 buffers: RefCell::new(HashMap::new()),
                 local_clock: RefCell::new(time::Local::default()),
                 lamport_clock: RefCell::new(time::Lamport::default()),
-                selection_change_counts: RefCell::new(HashMap::new()),
+                selections: RefCell::new(HashMap::new()),
             }
         }
 
         fn opened_buffer(&self, buffer_id: BufferId, tree: &WorkTree) {
             let text = tree.text(buffer_id).unwrap().collect::<Vec<u16>>();
+            let selections = tree.selections(buffer_id).unwrap();
             self.buffers
                 .borrow_mut()
                 .insert(buffer_id, buffer::Buffer::new(text));
+            self.selections.borrow_mut().insert(buffer_id, selections);
         }
 
         fn text(&self, buffer_id: BufferId) -> String {
             self.buffers.borrow().get(&buffer_id).unwrap().to_string()
+        }
+
+        fn selections(&self, buffer_id: BufferId) -> Vec<(SelectionSetId, Vec<Selection>)> {
+            self.selections.borrow().get(&buffer_id).unwrap().clone()
         }
     }
 
@@ -1551,10 +1583,12 @@ mod tests {
             }
         }
 
-        fn selections_changed(&self, buffer_id: BufferId) {
-            let mut change_counts = self.selection_change_counts.borrow_mut();
-            let count = change_counts.entry(buffer_id).or_insert(0);
-            *count += 1;
+        fn selections_changed(
+            &self,
+            buffer_id: BufferId,
+            selections: Vec<(SelectionSetId, Vec<Selection>)>,
+        ) {
+            self.selections.borrow_mut().insert(buffer_id, selections);
         }
     }
 }

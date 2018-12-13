@@ -292,7 +292,7 @@ impl Buffer {
     }
 
     pub fn selections_changed_since(&self, since: &time::Global) -> bool {
-        since.observed(self.selections_last_update)
+        !since.observed(self.selections_last_update)
     }
 
     pub fn changes_since(&self, since: &time::Global) -> impl Iterator<Item = Change> {
@@ -3061,14 +3061,14 @@ mod tests {
                 .filter(|set_id| local_clock.replica_id == set_id.replica_id)
                 .collect::<Vec<_>>();
             let set_id = rng.choose(&replica_selection_sets);
-            if set_id.is_some() && rng.gen() {
+            if set_id.is_some() && rng.gen_weighted_bool(6) {
                 let op = self
                     .remove_selection_set(*set_id.unwrap(), local_clock, lamport_clock)
                     .unwrap();
                 operations.push(op);
             } else {
                 let mut selections = Vec::new();
-                for _ in 0..rng.gen_range(1, 5) {
+                for _ in 0..5 {
                     let start = rng.gen_range(0, self.len() + 1);
                     let end = rng.gen_range(0, self.len() + 1);
                     let selection = if start > end {
