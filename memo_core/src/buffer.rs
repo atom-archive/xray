@@ -3056,6 +3056,10 @@ mod tests {
                     buffer.all_selections().collect::<HashMap<_, _>>(),
                     buffers[0].all_selections().collect::<HashMap<_, _>>()
                 );
+                assert_eq!(
+                    buffer.all_selection_ranges().collect::<HashMap<_, _>>(),
+                    buffers[0].all_selection_ranges().collect::<HashMap<_, _>>()
+                );
             }
         }
     }
