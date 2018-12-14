@@ -6,10 +6,11 @@ use memo_core as memo;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::marker::PhantomData;
 use std::mem;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use wasm_bindgen::{prelude::*, JsCast};
@@ -17,6 +18,7 @@ use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 trait JsValueExt {
     fn into_operation(self) -> Result<Option<memo::Operation>, JsValue>;
+    fn into_ranges_vec(self) -> Result<Vec<Range<memo::Point>>, JsValue>;
     fn into_error_message(self) -> Result<String, String>;
 }
 
@@ -49,13 +51,13 @@ pub struct WorkTreeNewResult {
 }
 
 #[wasm_bindgen]
-pub struct OperationEnvelope(memo::OperationEnvelope);
-
-#[derive(Copy, Clone, Serialize, Deserialize)]
-struct EditRange {
-    start: memo::Point,
-    end: memo::Point,
+pub struct AddSelectionSetResult {
+    set_id: memo::LocalSelectionSetId,
+    operation: Option<OperationEnvelope>,
 }
+
+#[wasm_bindgen]
+pub struct OperationEnvelope(memo::OperationEnvelope);
 
 #[derive(Serialize)]
 struct Change {
@@ -73,6 +75,18 @@ struct Entry {
     path: String,
     status: memo::FileStatus,
     visible: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct JsRange {
+    start: memo::Point,
+    end: memo::Point,
+}
+
+#[derive(Deserialize, Serialize)]
+struct JsSelections {
+    local: HashMap<memo::LocalSelectionSetId, Vec<JsRange>>,
+    remote: HashMap<memo::ReplicaId, Vec<Vec<JsRange>>>,
 }
 
 pub struct HexOid(memo::Oid);
@@ -96,6 +110,9 @@ extern "C" {
 
     #[wasm_bindgen(method, js_name = textChanged)]
     fn text_changed(this: &ChangeObserver, buffer_id: JsValue, changes: JsValue);
+
+    #[wasm_bindgen(method, js_name = selectionsChanged)]
+    fn selections_changed(this: &ChangeObserver, buffer_id: JsValue);
 }
 
 #[wasm_bindgen]
@@ -257,16 +274,68 @@ impl WorkTree {
         new_text: &str,
     ) -> Result<OperationEnvelope, JsValue> {
         let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
-        let old_ranges = old_ranges
-            .into_serde::<Vec<EditRange>>()
-            .map_err(|e| e.into_js_err())?
-            .into_iter()
-            .map(|EditRange { start, end }| start..end);
-
+        let old_ranges = old_ranges.into_ranges_vec()?;
         self.0
             .edit_2d(buffer_id, old_ranges, new_text)
             .map(|op| OperationEnvelope::new(op))
             .map_err(|e| e.into_js_err())
+    }
+
+    pub fn add_selection_set(
+        &self,
+        buffer_id: JsValue,
+        ranges: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
+        let ranges = ranges.into_ranges_vec()?;
+        let (set_id, op) = self
+            .0
+            .add_selection_set(buffer_id, ranges)
+            .map_err(|e| e.into_js_err())?;
+        Ok(JsValue::from(AddSelectionSetResult {
+            set_id,
+            operation: Some(OperationEnvelope::new(op)),
+        }))
+    }
+
+    pub fn replace_selection_set(
+        &self,
+        buffer_id: JsValue,
+        set_id: JsValue,
+        ranges: JsValue,
+    ) -> Result<OperationEnvelope, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
+        let set_id = set_id.into_serde().map_err(|e| e.into_js_err())?;
+        let ranges = ranges.into_ranges_vec()?;
+        let op = self
+            .0
+            .replace_selection_set(buffer_id, set_id, ranges)
+            .map_err(|e| e.into_js_err())?;
+        Ok(OperationEnvelope::new(op))
+    }
+
+    pub fn remove_selection_set(
+        &self,
+        buffer_id: JsValue,
+        set_id: JsValue,
+    ) -> Result<OperationEnvelope, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
+        let set_id = set_id.into_serde().map_err(|e| e.into_js_err())?;
+        let op = self
+            .0
+            .remove_selection_set(buffer_id, set_id)
+            .map_err(|e| e.into_js_err())?;
+        Ok(OperationEnvelope::new(op))
+    }
+
+    pub fn selections(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
+        let selections = self
+            .0
+            .selection_ranges(buffer_id)
+            .map_err(|e| e.into_js_err())?;
+        let js_selections = JsSelections::from(selections);
+        Ok(JsValue::from_serde(&js_selections).unwrap())
     }
 
     pub fn entries(&self, descend_into: JsValue, show_deleted: bool) -> Result<JsValue, JsValue> {
@@ -309,6 +378,19 @@ impl WorkTreeNewResult {
         self.operations
             .take()
             .ok_or(js_sys::Error::new("Cannot take operations twice").into())
+    }
+}
+
+#[wasm_bindgen]
+impl AddSelectionSetResult {
+    pub fn set_id(&mut self) -> JsValue {
+        JsValue::from_serde(&self.set_id).unwrap()
+    }
+
+    pub fn operation(&mut self) -> Result<OperationEnvelope, JsValue> {
+        self.operation
+            .take()
+            .ok_or(js_sys::Error::new("Cannot take operation twice").into())
     }
 }
 
@@ -463,8 +545,9 @@ impl memo::GitProvider for GitProviderWrapper {
 }
 
 impl memo::ChangeObserver for ChangeObserver {
-    fn text_changed(&self, buffer_id: memo::BufferId, changes: Box<Iterator<Item = memo::Change>>) {
+    fn text_changed(&self, buffer_id: memo::BufferId, changes: Vec<memo::Change>) {
         let changes = changes
+            .into_iter()
             .map(|change| Change {
                 start: change.range.start,
                 end: change.range.end,
@@ -476,6 +559,45 @@ impl memo::ChangeObserver for ChangeObserver {
             JsValue::from_serde(&buffer_id).unwrap(),
             JsValue::from_serde(&changes).unwrap(),
         );
+    }
+
+    fn selections_changed(&self, buffer_id: memo::BufferId) {
+        ChangeObserver::selections_changed(self, JsValue::from_serde(&buffer_id).unwrap());
+    }
+}
+
+impl From<memo::BufferSelectionRanges> for JsSelections {
+    fn from(selections: memo::BufferSelectionRanges) -> Self {
+        let mut js_selections = JsSelections {
+            local: HashMap::new(),
+            remote: HashMap::new(),
+        };
+
+        for (set_id, ranges) in selections.local {
+            js_selections.local.insert(
+                set_id,
+                ranges.into_iter().map(|range| range.into()).collect(),
+            );
+        }
+
+        for (replica_id, sets) in selections.remote {
+            let js_sets = sets
+                .into_iter()
+                .map(|ranges| ranges.into_iter().map(|range| range.into()).collect())
+                .collect();
+            js_selections.remote.insert(replica_id, js_sets);
+        }
+
+        js_selections
+    }
+}
+
+impl From<Range<memo::Point>> for JsRange {
+    fn from(range: Range<memo::Point>) -> Self {
+        JsRange {
+            start: range.start,
+            end: range.end,
+        }
     }
 }
 
@@ -523,6 +645,15 @@ impl JsValueExt for JsValue {
         let mut bytes = Vec::with_capacity(js_bytes.byte_length() as usize);
         js_bytes.for_each(&mut |byte, _, _| bytes.push(byte));
         memo::Operation::deserialize(&bytes).map_err(|e| e.into_js_err())
+    }
+
+    fn into_ranges_vec(self) -> Result<Vec<Range<memo::Point>>, JsValue> {
+        Ok(self
+            .into_serde::<Vec<JsRange>>()
+            .map_err(|e| e.into_js_err())?
+            .into_iter()
+            .map(|JsRange { start, end }| start..end)
+            .collect())
     }
 
     fn into_error_message(self) -> Result<String, String> {

@@ -11,7 +11,6 @@ export {
 import {
   BufferId,
   ChangeObserver,
-  ChangeObserverCallback,
   Disposable,
   GitProvider,
   GitProviderWrapper,
@@ -19,7 +18,9 @@ import {
   Oid,
   Path,
   Range,
-  Tagged
+  SelectionsChangeObserverCallback,
+  Tagged,
+  TextChangeObserverCallback
 } from "./support";
 
 let memo: any;
@@ -37,6 +38,7 @@ export type Version = Tagged<Uint8Array, "Version">;
 export type Operation = Tagged<Uint8Array, "Operation">;
 export type EpochId = Tagged<Uint8Array, "EpochId">;
 export type ReplicaId = Tagged<string, "ReplicaId">;
+export type SelectionSetId = Tagged<number, "SelectionSetId">;
 export interface OperationEnvelope {
   epochId(): EpochId;
   epochTimestamp(): number;
@@ -61,6 +63,11 @@ export interface Entry {
   readonly path: string;
   readonly status: FileStatus;
   readonly visible: boolean;
+}
+
+export interface Selections {
+  local: Map<SelectionSetId, Array<Range>>;
+  remote: Map<ReplicaId, Array<Array<Range>>>;
 }
 
 export class WorkTree {
@@ -164,6 +171,19 @@ export class Buffer {
     return this.tree.edit(this.id, oldRanges, newText);
   }
 
+  addSelectionSet(ranges: Range[]): [SelectionSetId, OperationEnvelope] {
+    const result = this.tree.add_selection_set(this.id, ranges);
+    return [result.set_id(), result.operation()];
+  }
+
+  replaceSelectionSet(id: SelectionSetId, ranges: Range[]): OperationEnvelope {
+    return this.tree.replace_selection_set(this.id, id, ranges);
+  }
+
+  removeSelectionSet(id: SelectionSetId): OperationEnvelope {
+    return this.tree.remove_selection_set(this.id, id);
+  }
+
   getPath(): string | null {
     return this.tree.path(this.id);
   }
@@ -172,8 +192,16 @@ export class Buffer {
     return this.tree.text(this.id);
   }
 
-  onChange(callback: ChangeObserverCallback): Disposable {
-    return this.observer.onChange(this.id, callback);
+  getSelections(): Selections {
+    return this.tree.selections(this.id);
+  }
+
+  onTextChange(callback: TextChangeObserverCallback): Disposable {
+    return this.observer.onTextChange(this.id, callback);
+  }
+
+  onSelectionsChange(callback: SelectionsChangeObserverCallback): Disposable {
+    return this.observer.onSelectionsChange(this.id, callback);
   }
 
   getDeferredOperationCount(): number {

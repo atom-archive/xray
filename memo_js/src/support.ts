@@ -52,7 +52,10 @@ export class AsyncIteratorWrapper<T> {
   }
 }
 
-export type ChangeObserverCallback = (changes: ReadonlyArray<Change>) => void;
+export type TextChangeObserverCallback = (
+  changes: ReadonlyArray<Change>
+) => void;
+export type SelectionsChangeObserverCallback = () => void;
 
 export class ChangeObserver {
   emitter: Emitter;
@@ -61,12 +64,23 @@ export class ChangeObserver {
     this.emitter = new Emitter();
   }
 
-  onChange(bufferId: BufferId, callback: ChangeObserverCallback): Disposable {
-    return this.emitter.on(`buffer-${bufferId}-change`, callback);
+  onTextChange(
+    bufferId: BufferId,
+    callback: TextChangeObserverCallback
+  ): Disposable {
+    return this.emitter.on(`buffer-${bufferId}-text-change`, callback);
+  }
+
+  onSelectionsChange(bufferId: BufferId, callback: SelectionsChangeObserverCallback): Disposable {
+    return this.emitter.on(`buffer-${bufferId}-selections-change`, callback);
   }
 
   textChanged(bufferId: BufferId, changes: Change[]) {
-    this.emitter.emit(`buffer-${bufferId}-change`, changes);
+    this.emitter.emit(`buffer-${bufferId}-text-change`, changes);
+  }
+
+  selectionsChanged(bufferId: BufferId) {
+    this.emitter.emit(`buffer-${bufferId}-selections-change`, {});
   }
 }
 

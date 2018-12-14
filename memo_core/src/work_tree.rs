@@ -68,8 +68,8 @@ pub struct LocalSelectionSetId(u32);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BufferSelectionRanges {
-    local: HashMap<LocalSelectionSetId, Vec<Range<Point>>>,
-    remote: HashMap<ReplicaId, Vec<Vec<Range<Point>>>>,
+    pub local: HashMap<LocalSelectionSetId, Vec<Range<Point>>>,
+    pub remote: HashMap<ReplicaId, Vec<Vec<Range<Point>>>>,
 }
 
 enum MaybeDone<F: Future> {
