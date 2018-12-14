@@ -575,9 +575,7 @@ impl WorkTree {
         let (remote_set_id, operation) =
             cur_epoch.add_selection_set(file_id, ranges, &mut self.lamport_clock.borrow_mut())?;
 
-        let local_set_id = *self.next_local_selection_set_id.borrow();
-        self.next_local_selection_set_id.borrow_mut().0 += 1;
-
+        let local_set_id = self.gen_local_set_id();
         let mut local_selection_sets = self.local_selection_sets.borrow_mut();
         let buffer_sets = local_selection_sets
             .entry(buffer_id)
@@ -628,6 +626,11 @@ impl WorkTree {
             set_id,
             &mut self.lamport_clock.borrow_mut(),
         )?;
+        self.local_selection_sets
+            .borrow_mut()
+            .get_mut(&buffer_id)
+            .unwrap()
+            .remove(&local_set_id);
         Ok(OperationEnvelope::wrap(
             cur_epoch.id,
             cur_epoch.head,
@@ -747,6 +750,12 @@ impl WorkTree {
             .get(&buffer_id)
             .cloned()
             .ok_or(Error::InvalidBufferId)
+    }
+
+    fn gen_local_set_id(&self) -> LocalSelectionSetId {
+        let local_set_id = *self.next_local_selection_set_id.borrow();
+        self.next_local_selection_set_id.borrow_mut().0 += 1;
+        local_set_id
     }
 
     fn selection_set_id(
@@ -1168,8 +1177,7 @@ mod tests {
 
         const PEERS: usize = 5;
 
-        for seed in 0..10000 {
-            // let seed = 4261;
+        for seed in 0..100 {
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
             let git = Rc::new(TestGitProvider::new());
@@ -1218,7 +1226,6 @@ mod tests {
 
                 if k == 0 {
                     tree.open_random_buffers(&mut rng, observer, 5);
-                    tree.add_random_selection_sets(&mut rng, observer, 5);
                 } else if k == 1 {
                     let head = *rng.choose(&commits).unwrap();
                     let ops = open_envelopes(tree.reset(head).collect().wait().unwrap());
@@ -1739,6 +1746,7 @@ mod tests {
                 &mut self.lamport_clock.borrow_mut(),
                 count,
             );
+            self.update_local_selection_sets();
 
             // Apply the random changes to the observer as well so that it matches what's in the tree.
             if let Some(observer) = self.observer.as_ref() {
@@ -1765,23 +1773,8 @@ mod tests {
             for _ in 0..rng.gen_range(0, count) {
                 if let Some(path) = self.select_path(rng, FileType::Text) {
                     let buffer_id = self.open_text_file(path).wait().unwrap();
+                    self.update_local_selection_sets();
                     observer.opened_buffer(buffer_id);
-                }
-            }
-        }
-
-        fn add_random_selection_sets<T: Rng>(
-            &mut self,
-            rng: &mut T,
-            observer: &TestChangeObserver,
-            count: usize,
-        ) {
-            let buffer_ids = self.buffers.borrow().keys().cloned().collect::<Vec<_>>();
-            if !buffer_ids.is_empty() {
-                for _ in 0..rng.gen_range(0, count) {
-                    let buffer_id = *rng.choose(&buffer_ids).unwrap();
-                    self.add_selection_set(buffer_id, vec![]).unwrap();
-                    observer.selections_changed(buffer_id);
                 }
             }
         }
@@ -1812,6 +1805,36 @@ mod tests {
                 None
             } else {
                 Some(visible_paths.swap_remove(rng.gen_range(0, visible_paths.len())))
+            }
+        }
+
+        fn update_local_selection_sets(&self) {
+            use std::collections::HashSet;
+
+            let mut local_selection_sets = self.local_selection_sets.borrow_mut();
+
+            for (buffer_id, file_id) in self.buffers.borrow().iter() {
+                let buffer_sets = local_selection_sets
+                    .entry(*buffer_id)
+                    .or_insert(HashMap::new());
+
+                for local_set_id in buffer_sets.keys().cloned().collect::<Vec<_>>() {
+                    let set_id = buffer_sets[&local_set_id];
+                    match self.cur_epoch().selection_ranges(*file_id, set_id) {
+                        Ok(_) => {}
+                        Err(Error::InvalidSelectionSet(_)) => {
+                            buffer_sets.remove(&local_set_id);
+                        }
+                        Err(error) => panic!("{:?}", error),
+                    }
+                }
+
+                let buffer_set_ids = buffer_sets.values().cloned().collect::<HashSet<_>>();
+                for (set_id, _) in self.cur_epoch().all_selections(*file_id).unwrap() {
+                    if set_id.replica_id == self.replica_id() && !buffer_set_ids.contains(&set_id) {
+                        buffer_sets.insert(self.gen_local_set_id(), set_id);
+                    }
+                }
             }
         }
     }
