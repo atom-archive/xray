@@ -552,51 +552,53 @@ impl Buffer {
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
-        let op_timestamp = op.local_timestamp();
-        match op {
-            Operation::Edit {
-                start_id,
-                start_offset,
-                end_id,
-                end_offset,
-                new_text,
-                version_in_range,
-                local_timestamp,
-                lamport_timestamp,
-            } => {
-                self.apply_edit(
+        let local_timestamp = op.local_timestamp();
+        if !self.version.observed(local_timestamp) {
+            match op {
+                Operation::Edit {
                     start_id,
                     start_offset,
                     end_id,
                     end_offset,
-                    new_text.as_ref().cloned(),
-                    &version_in_range,
+                    new_text,
+                    version_in_range,
                     local_timestamp,
                     lamport_timestamp,
-                    local_clock,
-                    lamport_clock,
-                )?;
-                self.anchor_cache.borrow_mut().clear();
-                self.offset_cache.borrow_mut().clear();
-                self.last_edit = local_timestamp;
-            }
-            Operation::UpdateSelections {
-                set_id,
-                selections,
-                local_timestamp,
-                lamport_timestamp,
-            } => {
-                if let Some(selections) = selections {
-                    self.selections.insert(set_id, selections);
-                } else {
-                    self.selections.remove(&set_id);
+                } => {
+                    self.apply_edit(
+                        start_id,
+                        start_offset,
+                        end_id,
+                        end_offset,
+                        new_text.as_ref().cloned(),
+                        &version_in_range,
+                        local_timestamp,
+                        lamport_timestamp,
+                        local_clock,
+                        lamport_clock,
+                    )?;
+                    self.anchor_cache.borrow_mut().clear();
+                    self.offset_cache.borrow_mut().clear();
+                    self.last_edit = local_timestamp;
                 }
-                local_clock.observe(set_id);
-                lamport_clock.observe(lamport_timestamp);
-                self.selections_last_update = local_timestamp;
+                Operation::UpdateSelections {
+                    set_id,
+                    selections,
+                    local_timestamp,
+                    lamport_timestamp,
+                } => {
+                    if let Some(selections) = selections {
+                        self.selections.insert(set_id, selections);
+                    } else {
+                        self.selections.remove(&set_id);
+                    }
+                    local_clock.observe(set_id);
+                    lamport_clock.observe(lamport_timestamp);
+                    self.selections_last_update = local_timestamp;
+                }
             }
+            self.version.observe(local_timestamp);
         }
-        self.version.observe(op_timestamp);
         Ok(())
     }
 
@@ -613,10 +615,6 @@ impl Buffer {
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
-        if self.version.observed(local_timestamp) {
-            return Ok(());
-        }
-
         let mut new_text = new_text.as_ref().cloned();
         let start_fragment_id = self.resolve_fragment_id(start_id, start_offset)?;
         let end_fragment_id = self.resolve_fragment_id(end_id, end_offset)?;
