@@ -67,12 +67,6 @@ pub struct BufferId(u32);
 pub struct LocalSelectionSetId(u32);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BufferSelections {
-    local: HashMap<LocalSelectionSetId, Vec<buffer::Selection>>,
-    remote: HashMap<ReplicaId, Vec<Vec<buffer::Selection>>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BufferSelectionRanges {
     local: HashMap<LocalSelectionSetId, Vec<Range<Point>>>,
     remote: HashMap<ReplicaId, Vec<Vec<Range<Point>>>>,
@@ -648,36 +642,6 @@ impl WorkTree {
     pub fn text(&self, buffer_id: BufferId) -> Result<buffer::Iter, Error> {
         let file_id = self.buffer_file_id(buffer_id)?;
         self.cur_epoch().text(file_id)
-    }
-
-    pub fn selections(&self, buffer_id: BufferId) -> Result<BufferSelections, Error> {
-        let file_id = self.buffer_file_id(buffer_id)?;
-        let cur_epoch = self.cur_epoch();
-
-        let mut set_ids_to_local_set_ids = HashMap::new();
-        if let Some(buffer_sets) = self.local_selection_sets.borrow().get(&buffer_id) {
-            for (local_set_id, set_id) in buffer_sets {
-                set_ids_to_local_set_ids.insert(*set_id, *local_set_id);
-            }
-        }
-
-        let mut selections = BufferSelections {
-            local: HashMap::new(),
-            remote: HashMap::new(),
-        };
-        for (set_id, buffer_selections) in cur_epoch.all_selections(file_id)? {
-            if let Some(local_set_id) = set_ids_to_local_set_ids.get(&set_id) {
-                selections.local.insert(*local_set_id, buffer_selections);
-            } else {
-                selections
-                    .remote
-                    .entry(set_id.replica_id)
-                    .or_insert(Vec::new())
-                    .push(buffer_selections);
-            }
-        }
-
-        Ok(selections)
     }
 
     pub fn selection_ranges(&self, buffer_id: BufferId) -> Result<BufferSelectionRanges, Error> {
@@ -1703,6 +1667,12 @@ mod tests {
             .collect()
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct BufferSelections {
+        local: HashMap<LocalSelectionSetId, Vec<buffer::Selection>>,
+        remote: HashMap<ReplicaId, Vec<Vec<buffer::Selection>>>,
+    }
+
     impl WorkTree {
         fn empty() -> Self {
             let (tree, _) = Self::new(
@@ -1836,6 +1806,36 @@ mod tests {
                     }
                 }
             }
+        }
+
+        fn selections(&self, buffer_id: BufferId) -> Result<BufferSelections, Error> {
+            let file_id = self.buffer_file_id(buffer_id)?;
+            let cur_epoch = self.cur_epoch();
+
+            let mut set_ids_to_local_set_ids = HashMap::new();
+            if let Some(buffer_sets) = self.local_selection_sets.borrow().get(&buffer_id) {
+                for (local_set_id, set_id) in buffer_sets {
+                    set_ids_to_local_set_ids.insert(*set_id, *local_set_id);
+                }
+            }
+
+            let mut selections = BufferSelections {
+                local: HashMap::new(),
+                remote: HashMap::new(),
+            };
+            for (set_id, buffer_selections) in cur_epoch.all_selections(file_id)? {
+                if let Some(local_set_id) = set_ids_to_local_set_ids.get(&set_id) {
+                    selections.local.insert(*local_set_id, buffer_selections);
+                } else {
+                    selections
+                        .remote
+                        .entry(set_id.replica_id)
+                        .or_insert(Vec::new())
+                        .push(buffer_selections);
+                }
+            }
+
+            Ok(selections)
         }
     }
 
