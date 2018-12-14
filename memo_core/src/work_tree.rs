@@ -28,7 +28,8 @@ pub struct WorkTree {
     epoch: Option<Rc<RefCell<Epoch>>>,
     buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
     next_buffer_id: Rc<RefCell<BufferId>>,
-    local_selection_sets: Rc<RefCell<HashMap<LocalSelectionSetId, buffer::SelectionSetId>>>,
+    local_selection_sets:
+        Rc<RefCell<HashMap<BufferId, HashMap<LocalSelectionSetId, buffer::SelectionSetId>>>>,
     next_local_selection_set_id: Rc<RefCell<LocalSelectionSetId>>,
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
@@ -67,6 +68,12 @@ pub struct LocalSelectionSetId(u32);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BufferSelections {
+    local: HashMap<LocalSelectionSetId, Vec<buffer::Selection>>,
+    remote: HashMap<ReplicaId, Vec<Vec<buffer::Selection>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BufferSelectionRanges {
     local: HashMap<LocalSelectionSetId, Vec<Range<Point>>>,
     remote: HashMap<ReplicaId, Vec<Vec<Range<Point>>>>,
 }
@@ -87,7 +94,8 @@ struct SwitchEpoch {
     last_seen: epoch::Id,
     base_text_requests: HashMap<BufferId, Option<BaseTextRequest>>,
     buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
-    local_selection_sets: Rc<RefCell<HashMap<LocalSelectionSetId, buffer::SelectionSetId>>>,
+    local_selection_sets:
+        Rc<RefCell<HashMap<BufferId, HashMap<LocalSelectionSetId, buffer::SelectionSetId>>>>,
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
     git: Rc<GitProvider>,
@@ -569,9 +577,12 @@ impl WorkTree {
 
         let local_set_id = *self.next_local_selection_set_id.borrow();
         self.next_local_selection_set_id.borrow_mut().0 += 1;
-        self.local_selection_sets
-            .borrow_mut()
-            .insert(local_set_id, remote_set_id);
+
+        let mut local_selection_sets = self.local_selection_sets.borrow_mut();
+        let buffer_sets = local_selection_sets
+            .entry(buffer_id)
+            .or_insert(HashMap::new());
+        buffer_sets.insert(local_set_id, remote_set_id);
 
         Ok((
             local_set_id,
@@ -589,7 +600,7 @@ impl WorkTree {
         I: IntoIterator<Item = Range<Point>>,
     {
         let file_id = self.buffer_file_id(buffer_id)?;
-        let set_id = self.selection_set_id(local_set_id)?;
+        let set_id = self.selection_set_id(buffer_id, local_set_id)?;
         let mut cur_epoch = self.cur_epoch_mut();
         let operation = cur_epoch.replace_selection_set(
             file_id,
@@ -610,7 +621,7 @@ impl WorkTree {
         local_set_id: LocalSelectionSetId,
     ) -> Result<OperationEnvelope, Error> {
         let file_id = self.buffer_file_id(buffer_id)?;
-        let set_id = self.selection_set_id(local_set_id)?;
+        let set_id = self.selection_set_id(buffer_id, local_set_id)?;
         let mut cur_epoch = self.cur_epoch_mut();
         let operation = cur_epoch.remove_selection_set(
             file_id,
@@ -641,11 +652,43 @@ impl WorkTree {
         let cur_epoch = self.cur_epoch();
 
         let mut set_ids_to_local_set_ids = HashMap::new();
-        for (local_set_id, set_id) in self.local_selection_sets.borrow().iter() {
-            set_ids_to_local_set_ids.insert(*set_id, *local_set_id);
+        if let Some(buffer_sets) = self.local_selection_sets.borrow().get(&buffer_id) {
+            for (local_set_id, set_id) in buffer_sets {
+                set_ids_to_local_set_ids.insert(*set_id, *local_set_id);
+            }
         }
 
         let mut selections = BufferSelections {
+            local: HashMap::new(),
+            remote: HashMap::new(),
+        };
+        for (set_id, buffer_selections) in cur_epoch.all_selections(file_id)? {
+            if let Some(local_set_id) = set_ids_to_local_set_ids.get(&set_id) {
+                selections.local.insert(*local_set_id, buffer_selections);
+            } else {
+                selections
+                    .remote
+                    .entry(set_id.replica_id)
+                    .or_insert(Vec::new())
+                    .push(buffer_selections);
+            }
+        }
+
+        Ok(selections)
+    }
+
+    pub fn selection_ranges(&self, buffer_id: BufferId) -> Result<BufferSelectionRanges, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        let cur_epoch = self.cur_epoch();
+
+        let mut set_ids_to_local_set_ids = HashMap::new();
+        if let Some(buffer_sets) = self.local_selection_sets.borrow().get(&buffer_id) {
+            for (local_set_id, set_id) in buffer_sets {
+                set_ids_to_local_set_ids.insert(*set_id, *local_set_id);
+            }
+        }
+
+        let mut selections = BufferSelectionRanges {
             local: HashMap::new(),
             remote: HashMap::new(),
         };
@@ -708,13 +751,16 @@ impl WorkTree {
 
     fn selection_set_id(
         &self,
+        buffer_id: BufferId,
         set_id: LocalSelectionSetId,
     ) -> Result<buffer::SelectionSetId, Error> {
         self.local_selection_sets
             .borrow()
+            .get(&buffer_id)
+            .ok_or(Error::InvalidLocalSelectionSet(set_id))?
             .get(&set_id)
             .cloned()
-            .ok_or(Error::InvalidSelectionSet)
+            .ok_or(Error::InvalidLocalSelectionSet(set_id))
     }
 }
 
@@ -877,7 +923,9 @@ impl SwitchEpoch {
         to_assign: Rc<RefCell<Epoch>>,
         cur_epoch: Rc<RefCell<Epoch>>,
         buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
-        local_selection_sets: Rc<RefCell<HashMap<LocalSelectionSetId, buffer::SelectionSetId>>>,
+        local_selection_sets: Rc<
+            RefCell<HashMap<BufferId, HashMap<LocalSelectionSetId, buffer::SelectionSetId>>>,
+        >,
         deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
         lamport_clock: Rc<RefCell<time::Lamport>>,
         git: Rc<GitProvider>,
@@ -1029,13 +1077,20 @@ impl Future for SwitchEpoch {
                         )?;
                     }
 
-                    for set_id in local_selection_sets.values_mut() {
-                        let new_ranges = cur_epoch.selection_ranges(old_file_id, *set_id).unwrap();
-                        let (new_set_id, op) = to_assign
-                            .add_selection_set(new_file_id, new_ranges, &mut lamport_clock)
-                            .unwrap();
-                        fixup_ops.push(OperationEnvelope::wrap(to_assign.id, to_assign.head, op));
-                        *set_id = new_set_id;
+                    if let Some(buffer_sets) = local_selection_sets.get_mut(&buffer_id) {
+                        for set_id in buffer_sets.values_mut() {
+                            let new_ranges =
+                                cur_epoch.selection_ranges(old_file_id, *set_id).unwrap();
+                            let (new_set_id, op) = to_assign
+                                .add_selection_set(new_file_id, new_ranges, &mut lamport_clock)
+                                .unwrap();
+                            fixup_ops.push(OperationEnvelope::wrap(
+                                to_assign.id,
+                                to_assign.head,
+                                op,
+                            ));
+                            *set_id = new_set_id;
+                        }
                     }
 
                     buffer_changes.push((buffer_id, changes));
@@ -1353,7 +1408,7 @@ mod tests {
             .apply_ops(Some(a_2_set_op.operation))?
             .collect()
             .wait()?;
-        let tree_1_selections = tree_1.selections(a_1)?;
+        let tree_1_selections = tree_1.selection_ranges(a_1)?;
         assert_eq!(
             tree_1_selections.local.into_iter().collect::<Vec<_>>(),
             vec![(
@@ -1379,7 +1434,7 @@ mod tests {
             .apply_ops(Some(a_1_set_op.operation))?
             .collect()
             .wait()?;
-        let tree_2_selections = tree_2.selections(a_2)?;
+        let tree_2_selections = tree_2.selection_ranges(a_2)?;
         assert_eq!(
             tree_2_selections.local.into_iter().collect::<Vec<_>>(),
             vec![(
@@ -1402,7 +1457,7 @@ mod tests {
         );
 
         let fixup_ops_1 = tree_1.reset(Some(commit_1)).collect().wait()?;
-        let tree_1_selections = tree_1.selections(a_1)?;
+        let tree_1_selections = tree_1.selection_ranges(a_1)?;
         assert_eq!(
             tree_1_selections.local.into_iter().collect::<Vec<_>>(),
             vec![(
@@ -1422,7 +1477,7 @@ mod tests {
             .apply_ops(open_envelopes(fixup_ops_1))?
             .collect()
             .wait()?;
-        let tree_2_selections = tree_2.selections(a_2)?;
+        let tree_2_selections = tree_2.selection_ranges(a_2)?;
         assert_eq!(
             tree_2_selections.local.into_iter().collect::<Vec<_>>(),
             vec![(
@@ -1448,7 +1503,7 @@ mod tests {
             .apply_ops(open_envelopes(fixup_ops_2))?
             .collect()
             .wait()?;
-        let tree_1_selections = tree_1.selections(a_1)?;
+        let tree_1_selections = tree_1.selection_ranges(a_1)?;
         assert_eq!(
             tree_1_selections.local.into_iter().collect::<Vec<_>>(),
             vec![(

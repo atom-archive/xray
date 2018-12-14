@@ -10,7 +10,8 @@ mod work_tree;
 pub use crate::buffer::{Buffer, Change, Point};
 pub use crate::epoch::{Cursor, DirEntry, Epoch, FileStatus, FileType, ROOT_FILE_ID};
 pub use crate::work_tree::{
-    BufferId, ChangeObserver, GitProvider, Operation, OperationEnvelope, WorkTree,
+    BufferId, ChangeObserver, GitProvider, LocalSelectionSetId, Operation, OperationEnvelope,
+    WorkTree,
 };
 use std::borrow::Cow;
 use std::fmt;
@@ -30,7 +31,8 @@ pub enum Error {
     InvalidBufferId,
     InvalidDirEntry,
     InvalidOperation,
-    InvalidSelectionSet,
+    InvalidSelectionSet(buffer::SelectionSetId),
+    InvalidLocalSelectionSet(LocalSelectionSetId),
     InvalidAnchor,
     OffsetOutOfRange,
     CursorExhausted,
@@ -103,7 +105,10 @@ impl PartialEq for Error {
             (Error::InvalidBufferId, Error::InvalidBufferId) => true,
             (Error::InvalidDirEntry, Error::InvalidDirEntry) => true,
             (Error::InvalidOperation, Error::InvalidOperation) => true,
-            (Error::InvalidSelectionSet, Error::InvalidSelectionSet) => true,
+            (Error::InvalidSelectionSet(id_1), Error::InvalidSelectionSet(id_2)) => id_1 == id_2,
+            (Error::InvalidLocalSelectionSet(id_1), Error::InvalidLocalSelectionSet(id_2)) => {
+                id_1 == id_2
+            }
             (Error::InvalidAnchor, Error::InvalidAnchor) => true,
             (Error::OffsetOutOfRange, Error::OffsetOutOfRange) => true,
             (Error::CursorExhausted, Error::CursorExhausted) => true,

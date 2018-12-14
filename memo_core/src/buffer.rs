@@ -405,7 +405,7 @@ impl Buffer {
     {
         self.selections
             .remove(&set_id)
-            .ok_or(Error::InvalidSelectionSet)?;
+            .ok_or(Error::InvalidSelectionSet(set_id))?;
 
         let mut selections = self.selections_from_ranges(ranges)?;
         self.merge_selections(&mut selections);
@@ -429,7 +429,7 @@ impl Buffer {
     ) -> Result<Operation, Error> {
         self.selections
             .remove(&set_id)
-            .ok_or(Error::InvalidSelectionSet)?;
+            .ok_or(Error::InvalidSelectionSet(set_id))?;
 
         let local_timestamp = local_clock.tick();
         self.version.observe(local_timestamp);
@@ -448,7 +448,7 @@ impl Buffer {
         let selections = self
             .selections
             .get(&set_id)
-            .ok_or(Error::InvalidSelectionSet)?;
+            .ok_or(Error::InvalidSelectionSet(set_id))?;
         Ok(selections.iter().map(move |selection| {
             let start = self.point_for_anchor(&selection.start).unwrap();
             let end = self.point_for_anchor(&selection.end).unwrap();
