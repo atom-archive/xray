@@ -1329,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn test_selections_across_resets() -> Result<(), Error> {
+    fn test_selections_across_resets() {
         let git = Rc::new(TestGitProvider::new());
         let base_tree = WorkTree::empty();
         base_tree.create_file("a", FileType::Text).unwrap();
@@ -1347,97 +1347,71 @@ mod tests {
             vec![],
             git.clone(),
             None,
-        )?;
+        )
+        .unwrap();
         let (mut tree_2, ops_2) = WorkTree::new(
             Uuid::from_u128(2),
             Some(commit_0),
-            open_envelopes(ops_1.collect().wait()?),
+            open_envelopes(ops_1.collect().wait().unwrap()),
             git.clone(),
             None,
-        )?;
+        )
+        .unwrap();
         assert!(ops_2.wait().next().is_none());
 
-        let a_1 = tree_1.open_text_file("a").wait()?;
-        let (a_1_set, a_1_set_op) = tree_1.add_selection_set(
-            a_1,
-            vec![
-                Point::new(0, 1)..Point::new(0, 2),
-                Point::new(1, 1)..Point::new(1, 1),
-            ],
-        )?;
+        let a_1 = tree_1.open_text_file("a").wait().unwrap();
+        let (a_1_set, a_1_set_op) = tree_1
+            .add_selection_set(a_1, vec![Point::new(1, 1)..Point::new(1, 1)])
+            .unwrap();
 
-        let a_2 = tree_2.open_text_file("a").wait()?;
-        let (a_2_set, a_2_set_op) = tree_2.add_selection_set(
-            a_2,
-            vec![
-                Point::new(0, 0)..Point::new(0, 0),
-                Point::new(1, 2)..Point::new(1, 2),
-            ],
-        )?;
+        let a_2 = tree_2.open_text_file("a").wait().unwrap();
+        let (a_2_set, a_2_set_op) = tree_2
+            .add_selection_set(a_2, vec![Point::new(0, 0)..Point::new(0, 0)])
+            .unwrap();
 
         tree_1
-            .apply_ops(Some(a_2_set_op.operation))?
+            .apply_ops(Some(a_2_set_op.operation))
+            .unwrap()
             .collect()
-            .wait()?;
-        let tree_1_selections = tree_1.selection_ranges(a_1)?;
+            .wait()
+            .unwrap();
+        let tree_1_selections = tree_1.selection_ranges(a_1).unwrap();
         assert_eq!(
             tree_1_selections.local.into_iter().collect::<Vec<_>>(),
-            vec![(
-                a_1_set,
-                vec![
-                    Point::new(0, 1)..Point::new(0, 2),
-                    Point::new(1, 1)..Point::new(1, 1),
-                ]
-            )]
+            vec![(a_1_set, vec![Point::new(1, 1)..Point::new(1, 1)])]
         );
         assert_eq!(
             tree_1_selections.remote.into_iter().collect::<Vec<_>>(),
             vec![(
                 tree_2.replica_id(),
-                vec![vec![
-                    Point::new(0, 0)..Point::new(0, 0),
-                    Point::new(1, 2)..Point::new(1, 2),
-                ]]
+                vec![vec![Point::new(0, 0)..Point::new(0, 0)]]
             )]
         );
 
         tree_2
-            .apply_ops(Some(a_1_set_op.operation))?
+            .apply_ops(Some(a_1_set_op.operation))
+            .unwrap()
             .collect()
-            .wait()?;
-        let tree_2_selections = tree_2.selection_ranges(a_2)?;
+            .wait()
+            .unwrap();
+        let tree_2_selections = tree_2.selection_ranges(a_2).unwrap();
         assert_eq!(
             tree_2_selections.local.into_iter().collect::<Vec<_>>(),
-            vec![(
-                a_2_set,
-                vec![
-                    Point::new(0, 0)..Point::new(0, 0),
-                    Point::new(1, 2)..Point::new(1, 2),
-                ]
-            )]
+            vec![(a_2_set, vec![Point::new(0, 0)..Point::new(0, 0)])]
         );
         assert_eq!(
             tree_2_selections.remote.into_iter().collect::<Vec<_>>(),
             vec![(
                 tree_1.replica_id(),
-                vec![vec![
-                    Point::new(0, 1)..Point::new(0, 2),
-                    Point::new(1, 1)..Point::new(1, 1),
-                ]]
+                vec![vec![Point::new(1, 1)..Point::new(1, 1)]]
             )]
         );
 
-        let fixup_ops_1 = tree_1.reset(Some(commit_1)).collect().wait()?;
-        let tree_1_selections = tree_1.selection_ranges(a_1)?;
+        let fixup_ops_1 = tree_1.reset(Some(commit_1)).collect().wait().unwrap();
+        let tree_1_selections = tree_1.selection_ranges(a_1).unwrap();
         assert_eq!(
             tree_1_selections.local.into_iter().collect::<Vec<_>>(),
-            vec![(
-                a_1_set,
-                vec![
-                    Point::new(1, 1)..Point::new(1, 2),
-                    Point::new(3, 1)..Point::new(3, 1),
-                ]
-            )]
+            vec![(a_1_set, vec![Point::new(3, 1)..Point::new(3, 1)])]
         );
         assert_eq!(
             tree_1_selections.remote.into_iter().collect::<Vec<_>>(),
@@ -1445,58 +1419,42 @@ mod tests {
         );
 
         let fixup_ops_2 = tree_2
-            .apply_ops(open_envelopes(fixup_ops_1))?
+            .apply_ops(open_envelopes(fixup_ops_1))
+            .unwrap()
             .collect()
-            .wait()?;
-        let tree_2_selections = tree_2.selection_ranges(a_2)?;
+            .wait()
+            .unwrap();
+        let tree_2_selections = tree_2.selection_ranges(a_2).unwrap();
         assert_eq!(
             tree_2_selections.local.into_iter().collect::<Vec<_>>(),
-            vec![(
-                a_2_set,
-                vec![
-                    Point::new(0, 0)..Point::new(0, 0),
-                    Point::new(3, 2)..Point::new(3, 2),
-                ]
-            )]
+            vec![(a_2_set, vec![Point::new(0, 0)..Point::new(0, 0)])]
         );
         assert_eq!(
             tree_2_selections.remote.into_iter().collect::<Vec<_>>(),
             vec![(
                 tree_1.replica_id(),
-                vec![vec![
-                    Point::new(1, 1)..Point::new(1, 2),
-                    Point::new(3, 1)..Point::new(3, 1),
-                ]]
+                vec![vec![Point::new(3, 1)..Point::new(3, 1)]]
             )]
         );
 
         tree_1
-            .apply_ops(open_envelopes(fixup_ops_2))?
+            .apply_ops(open_envelopes(fixup_ops_2))
+            .unwrap()
             .collect()
-            .wait()?;
-        let tree_1_selections = tree_1.selection_ranges(a_1)?;
+            .wait()
+            .unwrap();
+        let tree_1_selections = tree_1.selection_ranges(a_1).unwrap();
         assert_eq!(
             tree_1_selections.local.into_iter().collect::<Vec<_>>(),
-            vec![(
-                a_1_set,
-                vec![
-                    Point::new(1, 1)..Point::new(1, 2),
-                    Point::new(3, 1)..Point::new(3, 1),
-                ]
-            )]
+            vec![(a_1_set, vec![Point::new(3, 1)..Point::new(3, 1)])]
         );
         assert_eq!(
             tree_1_selections.remote.into_iter().collect::<Vec<_>>(),
             vec![(
                 tree_2.replica_id(),
-                vec![vec![
-                    Point::new(0, 0)..Point::new(0, 0),
-                    Point::new(3, 2)..Point::new(3, 2),
-                ]]
+                vec![vec![Point::new(0, 0)..Point::new(0, 0)]]
             )]
         );
-
-        Ok(())
     }
 
     #[test]
