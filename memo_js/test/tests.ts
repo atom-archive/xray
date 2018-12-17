@@ -242,49 +242,41 @@ suite("WorkTree", () => {
     const [set, createSetOp] = buffer1.addSelectionSet([
       { start: point(0, 0), end: point(0, 1) }
     ]);
-    assert.deepEqual(buffer1.getSelections(), {
-      local: { [set]: [{ start: point(0, 0), end: point(0, 1) }] },
-      remote: {}
+    assert.deepEqual(mapToObject(buffer1.getSelections().local), {
+      [set]: [{ start: point(0, 0), end: point(0, 1) }]
     });
+    assert.deepEqual(mapToObject(buffer1.getSelections().remote), {});
 
     await collectOps(tree2.applyOps([createSetOp.operation()]));
     assert.equal(selection2ChangeCount, 1);
-    assert.deepEqual(buffer2.getSelections(), {
-      local: {},
-      remote: {
-        [replica1]: [[{ start: point(0, 0), end: point(0, 1) }]]
-      }
+    assert.deepEqual(mapToObject(buffer2.getSelections().local), {});
+    assert.deepEqual(mapToObject(buffer2.getSelections().remote), {
+      [replica1]: [[{ start: point(0, 0), end: point(0, 1) }]]
     });
 
     const replaceSetOp = buffer1.replaceSelectionSet(set, [
       { start: point(0, 2), end: point(0, 3) }
     ]);
-    assert.deepEqual(buffer1.getSelections(), {
-      local: { [set]: [{ start: point(0, 2), end: point(0, 3) }] },
-      remote: {}
+    assert.deepEqual(mapToObject(buffer1.getSelections().local), {
+      [set]: [{ start: point(0, 2), end: point(0, 3) }]
     });
+    assert.deepEqual(mapToObject(buffer1.getSelections().remote), {});
 
     await collectOps(tree2.applyOps([replaceSetOp.operation()]));
     assert.equal(selection2ChangeCount, 2);
-    assert.deepEqual(buffer2.getSelections(), {
-      local: {},
-      remote: {
-        [replica1]: [[{ start: point(0, 2), end: point(0, 3) }]]
-      }
+    assert.deepEqual(mapToObject(buffer2.getSelections().local), {});
+    assert.deepEqual(mapToObject(buffer2.getSelections().remote), {
+      [replica1]: [[{ start: point(0, 2), end: point(0, 3) }]]
     });
 
     const removeSetOp = buffer1.removeSelectionSet(set);
-    assert.deepEqual(buffer1.getSelections(), {
-      local: {},
-      remote: {}
-    });
+    assert.deepEqual(mapToObject(buffer1.getSelections().local), {});
+    assert.deepEqual(mapToObject(buffer1.getSelections().remote), {});
 
     await collectOps(tree2.applyOps([removeSetOp.operation()]));
     assert.equal(selection2ChangeCount, 3);
-    assert.deepEqual(buffer2.getSelections(), {
-      local: {},
-      remote: {}
-    });
+    assert.deepEqual(mapToObject(buffer2.getSelections().local), {});
+    assert.deepEqual(mapToObject(buffer2.getSelections().remote), {});
   });
 
   test("an invalid base commit oid throws an error instead of crashing", async () => {
@@ -486,6 +478,14 @@ function parseEpochId(epochId: Uint8Array): ParsedEpochId {
   const timestamp = epochIdBuffer.readUInt32BE(1);
   const replicaId = uuidParse.unparse(epochIdBuffer.slice(8)) as ReplicaId;
   return { timestamp, replicaId };
+}
+
+function mapToObject<T>(map: Map<string | number, T>): { [key: string]: T } {
+  const object: { [key: string]: T } = {};
+  map.forEach((value, key) => {
+    object[key] = value;
+  });
+  return object;
 }
 
 class TestGitProvider implements GitProvider {

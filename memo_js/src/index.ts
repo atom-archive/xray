@@ -193,7 +193,19 @@ export class Buffer {
   }
 
   getSelections(): Selections {
-    return this.tree.selections(this.id);
+    const selections = this.tree.selections(this.id);
+
+    const local = new Map();
+    for (const setId in selections.local) {
+      local.set(setId, selections.local[setId]);
+    }
+
+    const remote = new Map();
+    for (const replicaId in selections.remote) {
+      remote.set(replicaId, selections.remote[replicaId]);
+    }
+
+    return { local, remote };
   }
 
   onTextChange(callback: TextChangeObserverCallback): Disposable {
