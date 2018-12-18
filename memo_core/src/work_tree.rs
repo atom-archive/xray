@@ -195,16 +195,21 @@ impl WorkTree {
             if let Some(observer) = self.observer.as_ref() {
                 for (buffer_id, file_id) in self.buffers.borrow().iter() {
                     let prev_version = prev_versions.remove(file_id).unwrap();
-                    observer.changed(
-                        *buffer_id,
-                        epoch.changes_since(*file_id, &prev_version)?.collect(),
-                        Self::selection_ranges_internal(
-                            &self.local_selection_sets.borrow(),
-                            &self.buffers.borrow(),
-                            &epoch,
+                    let changes: Vec<_> = epoch.changes_since(*file_id, &prev_version)?.collect();
+                    if !changes.is_empty()
+                        || epoch.selections_changed_since(*file_id, &prev_version)?
+                    {
+                        observer.changed(
                             *buffer_id,
-                        )?,
-                    );
+                            changes,
+                            Self::selection_ranges_internal(
+                                &self.local_selection_sets.borrow(),
+                                &self.buffers.borrow(),
+                                &epoch,
+                                *buffer_id,
+                            )?,
+                        );
+                    }
                 }
             }
 
