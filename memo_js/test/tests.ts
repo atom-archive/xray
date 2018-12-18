@@ -10,6 +10,7 @@ import {
   Path,
   Point,
   ReplicaId,
+  SelectionRanges,
   WorkTree
 } from "../src/index";
 import * as assert from "assert";
@@ -67,7 +68,7 @@ suite("WorkTree", () => {
     assert.strictEqual(tree1BufferC.getDeferredOperationCount(), 0);
 
     const tree1BufferChanges: Change[] = [];
-    tree1BufferC.onTextChange(c => tree1BufferChanges.push(...c));
+    tree1BufferC.onChange(c => tree1BufferChanges.push(...c.textChanges));
     ops1.push(
       tree1BufferC
         .edit(
@@ -82,7 +83,7 @@ suite("WorkTree", () => {
     assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
 
     const tree2BufferChanges: Change[] = [];
-    tree2BufferC.onTextChange(c => tree2BufferChanges.push(...c));
+    tree2BufferC.onChange(c => tree2BufferChanges.push(...c.textChanges));
     assert.deepStrictEqual(await collectOps(tree2.applyOps(ops1)), []);
     assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
     assert.deepStrictEqual(tree1BufferChanges, []);
@@ -235,48 +236,57 @@ suite("WorkTree", () => {
     await collectOps(initOps2);
 
     const buffer1 = await tree1.openTextFile("a");
-    let selection2ChangeCount = 0;
+    let selection2Changes: Array<SelectionRanges> = [];
     const buffer2 = await tree2.openTextFile("a");
-    buffer2.onSelectionsChange(() => selection2ChangeCount++);
+    buffer2.onChange(c => selection2Changes.push(c.selectionRanges));
 
     const [set, createSetOp] = buffer1.addSelectionSet([
       { start: point(0, 0), end: point(0, 1) }
     ]);
-    assert.deepEqual(mapToObject(buffer1.getSelections().local), {
+    assert.deepEqual(mapToObject(buffer1.getSelectionRanges().local), {
       [set]: [{ start: point(0, 0), end: point(0, 1) }]
     });
-    assert.deepEqual(mapToObject(buffer1.getSelections().remote), {});
+    assert.deepEqual(mapToObject(buffer1.getSelectionRanges().remote), {});
 
     await collectOps(tree2.applyOps([createSetOp.operation()]));
-    assert.equal(selection2ChangeCount, 1);
-    assert.deepEqual(mapToObject(buffer2.getSelections().local), {});
-    assert.deepEqual(mapToObject(buffer2.getSelections().remote), {
+
+    assert.deepEqual(mapToObject(buffer2.getSelectionRanges().local), {});
+    assert.deepEqual(mapToObject(buffer2.getSelectionRanges().remote), {
       [replica1]: [[{ start: point(0, 0), end: point(0, 1) }]]
     });
+
+    assert.equal(selection2Changes.length, 1);
+    assert.deepEqual(last(selection2Changes), buffer2.getSelectionRanges());
 
     const replaceSetOp = buffer1.replaceSelectionSet(set, [
       { start: point(0, 2), end: point(0, 3) }
     ]);
-    assert.deepEqual(mapToObject(buffer1.getSelections().local), {
+    assert.deepEqual(mapToObject(buffer1.getSelectionRanges().local), {
       [set]: [{ start: point(0, 2), end: point(0, 3) }]
     });
-    assert.deepEqual(mapToObject(buffer1.getSelections().remote), {});
+    assert.deepEqual(mapToObject(buffer1.getSelectionRanges().remote), {});
 
     await collectOps(tree2.applyOps([replaceSetOp.operation()]));
-    assert.equal(selection2ChangeCount, 2);
-    assert.deepEqual(mapToObject(buffer2.getSelections().local), {});
-    assert.deepEqual(mapToObject(buffer2.getSelections().remote), {
+
+    assert.deepEqual(mapToObject(buffer2.getSelectionRanges().local), {});
+    assert.deepEqual(mapToObject(buffer2.getSelectionRanges().remote), {
       [replica1]: [[{ start: point(0, 2), end: point(0, 3) }]]
     });
 
+    assert.equal(selection2Changes.length, 2);
+    assert.deepEqual(last(selection2Changes), buffer2.getSelectionRanges());
+
     const removeSetOp = buffer1.removeSelectionSet(set);
-    assert.deepEqual(mapToObject(buffer1.getSelections().local), {});
-    assert.deepEqual(mapToObject(buffer1.getSelections().remote), {});
+    assert.deepEqual(mapToObject(buffer1.getSelectionRanges().local), {});
+    assert.deepEqual(mapToObject(buffer1.getSelectionRanges().remote), {});
 
     await collectOps(tree2.applyOps([removeSetOp.operation()]));
-    assert.equal(selection2ChangeCount, 3);
-    assert.deepEqual(mapToObject(buffer2.getSelections().local), {});
-    assert.deepEqual(mapToObject(buffer2.getSelections().remote), {});
+
+    assert.deepEqual(mapToObject(buffer2.getSelectionRanges().local), {});
+    assert.deepEqual(mapToObject(buffer2.getSelectionRanges().remote), {});
+
+    assert.equal(selection2Changes.length, 3);
+    assert.deepEqual(last(selection2Changes), buffer2.getSelectionRanges());
   });
 
   test("an invalid base commit oid throws an error instead of crashing", async () => {
@@ -374,7 +384,7 @@ suite("WorkTree", () => {
     assert.equal(await tree.openTextFile("a"), await tree.openTextFile("a"));
   });
 
-  test("buffer.onTextChange disposal", async () => {
+  test("buffer.onChange disposal", async () => {
     const OID = "0".repeat(40);
     const git = new TestGitProvider();
     git.commit(OID, [
@@ -395,7 +405,7 @@ suite("WorkTree", () => {
 
     const buffer1 = await tree1.openTextFile("a/b/c");
     let buffer1ChangeCount = 0;
-    const disposable = buffer1.onTextChange(_ => buffer1ChangeCount++);
+    const disposable = buffer1.onChange(_ => buffer1ChangeCount++);
 
     const buffer2 = await tree2.openTextFile("a/b/c");
     tree1.applyOps([
@@ -486,6 +496,10 @@ function mapToObject<T>(map: Map<string | number, T>): { [key: string]: T } {
     object[key] = value;
   });
   return object;
+}
+
+function last<T>(array: ArrayLike<T>): undefined | T {
+  return array[array.length - 1];
 }
 
 class TestGitProvider implements GitProvider {

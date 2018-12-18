@@ -6,11 +6,15 @@ export {
   Oid,
   Path,
   Point,
-  Range
+  Range,
+  ReplicaId,
+  SelectionRanges,
+  SelectionSetId,
 } from "./support";
 import {
   BufferId,
   ChangeObserver,
+  ChangeObserverCallback,
   Disposable,
   GitProvider,
   GitProviderWrapper,
@@ -18,9 +22,11 @@ import {
   Oid,
   Path,
   Range,
-  SelectionsChangeObserverCallback,
+  ReplicaId,
+  SelectionRanges,
+  SelectionSetId,
   Tagged,
-  TextChangeObserverCallback
+  fromMemoSelectionRanges
 } from "./support";
 
 let memo: any;
@@ -37,8 +43,6 @@ async function init() {
 export type Version = Tagged<Uint8Array, "Version">;
 export type Operation = Tagged<Uint8Array, "Operation">;
 export type EpochId = Tagged<Uint8Array, "EpochId">;
-export type ReplicaId = Tagged<string, "ReplicaId">;
-export type SelectionSetId = Tagged<number, "SelectionSetId">;
 export interface OperationEnvelope {
   epochId(): EpochId;
   epochTimestamp(): number;
@@ -63,11 +67,6 @@ export interface Entry {
   readonly path: string;
   readonly status: FileStatus;
   readonly visible: boolean;
-}
-
-export interface Selections {
-  local: Map<SelectionSetId, Array<Range>>;
-  remote: Map<ReplicaId, Array<Array<Range>>>;
 }
 
 export class WorkTree {
@@ -192,28 +191,13 @@ export class Buffer {
     return this.tree.text(this.id);
   }
 
-  getSelections(): Selections {
-    const selections = this.tree.selections(this.id);
-
-    const local = new Map();
-    for (const setId in selections.local) {
-      local.set(setId, selections.local[setId]);
-    }
-
-    const remote = new Map();
-    for (const replicaId in selections.remote) {
-      remote.set(replicaId, selections.remote[replicaId]);
-    }
-
-    return { local, remote };
+  getSelectionRanges(): SelectionRanges {
+    const selections = this.tree.selection_ranges(this.id);
+    return fromMemoSelectionRanges(selections)
   }
 
-  onTextChange(callback: TextChangeObserverCallback): Disposable {
-    return this.observer.onTextChange(this.id, callback);
-  }
-
-  onSelectionsChange(callback: SelectionsChangeObserverCallback): Disposable {
-    return this.observer.onSelectionsChange(this.id, callback);
+  onChange(callback: ChangeObserverCallback): Disposable {
+    return this.observer.onChange(this.id, callback);
   }
 
   getDeferredOperationCount(): number {

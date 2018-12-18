@@ -146,17 +146,24 @@ const removeSetOp = buffer.removeSelectionSet(set);
 broadcast([editOp1, editOp2, createSetOp, replaceSetOp, removeSetOp]);
 ```
 
-As you incorporate operations received from other peers, you may want to use `Buffer.prototype.onTextChange` and `Buffer.prototype.onSelectionsChange` to keep an external representation of the buffer up-to-date:
+As you incorporate operations received from other peers, you may want to use `Buffer.prototype.onChange` to keep an external representation of the buffer up-to-date:
 
 ```ts
-buffer.onTextChange(changes => {
-  for (const change of changes) {
-    console.log(change); // => { start: { row: 0, column: 0 }, end: { row: 0, column: 5 }, text: "Goodbye" }
-    externalBuffer.edit(change.start, change.end, change.text);
+buffer.onChange(change => {
+  for (const textChange of change.textChanges) {
+    console.log(textChange); // => { start: { row: 0, column: 0 }, end: { row: 0, column: 5 }, text: "Goodbye" }
+    externalBuffer.edit(textChange.start, textChange.end, textChange.text);
   }
-});
-buffer.onSelectionsChange(() => {
-  console.log(buffer.getSelections());
+  console.log(change.selectionRanges); /* => {
+    local: {
+      1: [{ start: { row: 0, column: 2 }, end: { row: 0, column: 3 } }]
+    },
+    remote: {
+      "65242244-9706-4b42-9785-fa5cbe5d5709": [
+        [{ start: { row: 0, column: 2 }, end: { row: 0, column: 3 } }]
+      ]
+    }
+  }*/
 });
 ```
 

@@ -108,11 +108,13 @@ extern "C" {
 
     pub type ChangeObserver;
 
-    #[wasm_bindgen(method, js_name = textChanged)]
-    fn text_changed(this: &ChangeObserver, buffer_id: JsValue, changes: JsValue);
-
-    #[wasm_bindgen(method, js_name = selectionsChanged)]
-    fn selections_changed(this: &ChangeObserver, buffer_id: JsValue);
+    #[wasm_bindgen(method)]
+    fn changed(
+        this: &ChangeObserver,
+        buffer_id: JsValue,
+        changes: JsValue,
+        selection_ranges: JsValue,
+    );
 }
 
 #[wasm_bindgen]
@@ -328,7 +330,7 @@ impl WorkTree {
         Ok(OperationEnvelope::new(op))
     }
 
-    pub fn selections(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
+    pub fn selection_ranges(&self, buffer_id: JsValue) -> Result<JsValue, JsValue> {
         let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
         let selections = self
             .0
@@ -545,7 +547,12 @@ impl memo::GitProvider for GitProviderWrapper {
 }
 
 impl memo::ChangeObserver for ChangeObserver {
-    fn text_changed(&self, buffer_id: memo::BufferId, changes: Vec<memo::Change>) {
+    fn changed(
+        &self,
+        buffer_id: memo::BufferId,
+        changes: Vec<memo::Change>,
+        selection_ranges: memo::BufferSelectionRanges,
+    ) {
         let changes = changes
             .into_iter()
             .map(|change| Change {
@@ -554,15 +561,12 @@ impl memo::ChangeObserver for ChangeObserver {
                 text: String::from_utf16_lossy(&change.code_units),
             })
             .collect::<Vec<_>>();
-        ChangeObserver::text_changed(
+        ChangeObserver::changed(
             self,
             JsValue::from_serde(&buffer_id).unwrap(),
             JsValue::from_serde(&changes).unwrap(),
+            JsValue::from_serde(&JsSelections::from(selection_ranges)).unwrap(),
         );
-    }
-
-    fn selections_changed(&self, buffer_id: memo::BufferId) {
-        ChangeObserver::selections_changed(self, JsValue::from_serde(&buffer_id).unwrap());
     }
 }
 
