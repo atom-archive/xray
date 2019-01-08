@@ -804,6 +804,21 @@ impl Operation {
         }
     }
 
+    pub fn is_selection_update(&self) -> bool {
+        match self {
+            Operation::EpochOperation { operation, .. } => match operation {
+                epoch::Operation::BufferOperation { operations, .. } => {
+                    operations.iter().all(|buffer_op| match buffer_op {
+                        buffer::Operation::UpdateSelections { .. } => true,
+                        _ => false,
+                    })
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::new();
         let root = self.to_flatbuf(&mut builder);

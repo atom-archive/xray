@@ -49,6 +49,7 @@ export interface OperationEnvelope {
   epochReplicaId(): ReplicaId;
   epochHead(): null | Oid;
   operation(): Operation;
+  isSelectionUpdate(): boolean;
 }
 
 export enum FileStatus {

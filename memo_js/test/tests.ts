@@ -348,6 +348,24 @@ suite("WorkTree", () => {
     }
   });
 
+  test("isSelectionUpdate", async () => {
+    const git = new TestGitProvider();
+    const [tree] = await WorkTree.create(uuid(), null, [], git);
+
+    const envelope1 = tree.createFile("file", FileType.Text);
+    assert(!envelope1.isSelectionUpdate());
+
+    const buffer1 = await tree.openTextFile("file");
+    const envelope2 = buffer1.edit(
+      [{ start: point(0, 0), end: point(0, 0) }],
+      "abc"
+    );
+    assert(!envelope2.isSelectionUpdate());
+
+    const [, envelope3] = buffer1.addSelectionSet([]);
+    assert(envelope3.isSelectionUpdate());
+  });
+
   test("versions", async () => {
     const OID = "0".repeat(40);
 

@@ -430,6 +430,11 @@ impl OperationEnvelope {
     pub fn operation(&self) -> Vec<u8> {
         self.0.operation.serialize()
     }
+
+    #[wasm_bindgen(js_name = isSelectionUpdate)]
+    pub fn is_selection_update(&self) -> bool {
+        self.0.operation.is_selection_update()
+    }
 }
 
 impl<T> AsyncIteratorToStream<T> {
