@@ -187,17 +187,20 @@ impl WorkTree {
 
             let mut prev_versions = HashMap::new();
             for file_id in self.buffers.borrow().values() {
-                prev_versions.insert(*file_id, epoch.buffer_version(*file_id).unwrap());
+                let edit_version = epoch.buffer_version(*file_id).unwrap();
+                let selections_last_update = epoch.buffer_selections_last_update(*file_id).unwrap();
+                prev_versions.insert(*file_id, (edit_version, selections_last_update));
             }
 
             let fixup_ops = epoch.apply_ops(cur_epoch_ops, &mut self.lamport_clock.borrow_mut())?;
 
             if let Some(observer) = self.observer.as_ref() {
                 for (buffer_id, file_id) in self.buffers.borrow().iter() {
-                    let prev_version = prev_versions.remove(file_id).unwrap();
-                    let changes: Vec<_> = epoch.changes_since(*file_id, &prev_version)?.collect();
+                    let (edit_version, selections_last_update) =
+                        prev_versions.remove(file_id).unwrap();
+                    let changes: Vec<_> = epoch.changes_since(*file_id, &edit_version)?.collect();
                     if !changes.is_empty()
-                        || epoch.selections_changed_since(*file_id, &prev_version)?
+                        || epoch.selections_changed_since(*file_id, selections_last_update)?
                     {
                         observer.changed(
                             *buffer_id,

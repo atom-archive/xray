@@ -199,6 +199,14 @@ impl Epoch {
         }
     }
 
+    pub fn buffer_selections_last_update(&self, file_id: FileId) -> Result<time::Lamport, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            Ok(buffer.selections_last_update)
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
     pub fn version(&self) -> time::Global {
         self.version.clone()
     }
@@ -695,9 +703,8 @@ impl Epoch {
         let operation = self.mutate_buffer(
             file_id,
             lamport_clock,
-            |buffer, local_clock, lamport_clock| {
-                let (set_id, operation) =
-                    buffer.add_selection_set(ranges, local_clock, lamport_clock)?;
+            |buffer, _local_clock, lamport_clock| {
+                let (set_id, operation) = buffer.add_selection_set(ranges, lamport_clock)?;
                 new_set_id = Some(set_id);
                 Ok(vec![operation])
             },
@@ -718,9 +725,8 @@ impl Epoch {
         self.mutate_buffer(
             file_id,
             lamport_clock,
-            |buffer, local_clock, lamport_clock| {
-                let operation =
-                    buffer.replace_selection_set(set_id, ranges, local_clock, lamport_clock)?;
+            |buffer, _local_clock, lamport_clock| {
+                let operation = buffer.replace_selection_set(set_id, ranges, lamport_clock)?;
                 Ok(vec![operation])
             },
         )
@@ -735,8 +741,8 @@ impl Epoch {
         self.mutate_buffer(
             file_id,
             lamport_clock,
-            |buffer, local_clock, lamport_clock| {
-                let operation = buffer.remove_selection_set(set_id, local_clock, lamport_clock)?;
+            |buffer, _local_clock, lamport_clock| {
+                let operation = buffer.remove_selection_set(set_id, lamport_clock)?;
                 Ok(vec![operation])
             },
         )
@@ -898,10 +904,10 @@ impl Epoch {
     pub fn selections_changed_since(
         &self,
         file_id: FileId,
-        version: &time::Global,
+        last_selection_update: time::Lamport,
     ) -> Result<bool, Error> {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
-            Ok(buffer.selections_changed_since(version))
+            Ok(buffer.selections_changed_since(last_selection_update))
         } else {
             Err(Error::InvalidFileId("file has not been opened".into()))
         }

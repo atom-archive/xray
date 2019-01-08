@@ -802,7 +802,6 @@ impl<'a> UpdateSelections<'a> {
         args: &'args UpdateSelectionsArgs<'args>) -> flatbuffers::WIPOffset<UpdateSelections<'bldr>> {
       let mut builder = UpdateSelectionsBuilder::new(_fbb);
       if let Some(x) = args.lamport_timestamp { builder.add_lamport_timestamp(x); }
-      if let Some(x) = args.local_timestamp { builder.add_local_timestamp(x); }
       if let Some(x) = args.selections { builder.add_selections(x); }
       if let Some(x) = args.set_id { builder.add_set_id(x); }
       builder.finish()
@@ -810,8 +809,7 @@ impl<'a> UpdateSelections<'a> {
 
     pub const VT_SET_ID: flatbuffers::VOffsetT = 4;
     pub const VT_SELECTIONS: flatbuffers::VOffsetT = 6;
-    pub const VT_LOCAL_TIMESTAMP: flatbuffers::VOffsetT = 8;
-    pub const VT_LAMPORT_TIMESTAMP: flatbuffers::VOffsetT = 10;
+    pub const VT_LAMPORT_TIMESTAMP: flatbuffers::VOffsetT = 8;
 
   #[inline]
   pub fn set_id(&self) -> Option<&'a super::Timestamp> {
@@ -822,10 +820,6 @@ impl<'a> UpdateSelections<'a> {
     self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<flatbuffers::ForwardsUOffset<Selection<'a>>>>>(UpdateSelections::VT_SELECTIONS, None)
   }
   #[inline]
-  pub fn local_timestamp(&self) -> Option<&'a super::Timestamp> {
-    self._tab.get::<super::Timestamp>(UpdateSelections::VT_LOCAL_TIMESTAMP, None)
-  }
-  #[inline]
   pub fn lamport_timestamp(&self) -> Option<&'a super::Timestamp> {
     self._tab.get::<super::Timestamp>(UpdateSelections::VT_LAMPORT_TIMESTAMP, None)
   }
@@ -834,7 +828,6 @@ impl<'a> UpdateSelections<'a> {
 pub struct UpdateSelectionsArgs<'a> {
     pub set_id: Option<&'a  super::Timestamp>,
     pub selections: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a , flatbuffers::ForwardsUOffset<Selection<'a >>>>>,
-    pub local_timestamp: Option<&'a  super::Timestamp>,
     pub lamport_timestamp: Option<&'a  super::Timestamp>,
 }
 impl<'a> Default for UpdateSelectionsArgs<'a> {
@@ -843,7 +836,6 @@ impl<'a> Default for UpdateSelectionsArgs<'a> {
         UpdateSelectionsArgs {
             set_id: None,
             selections: None,
-            local_timestamp: None,
             lamport_timestamp: None,
         }
     }
@@ -860,10 +852,6 @@ impl<'a: 'b, 'b> UpdateSelectionsBuilder<'a, 'b> {
   #[inline]
   pub fn add_selections(&mut self, selections: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Selection<'b >>>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(UpdateSelections::VT_SELECTIONS, selections);
-  }
-  #[inline]
-  pub fn add_local_timestamp(&mut self, local_timestamp: &'b  super::Timestamp) {
-    self.fbb_.push_slot_always::<&super::Timestamp>(UpdateSelections::VT_LOCAL_TIMESTAMP, local_timestamp);
   }
   #[inline]
   pub fn add_lamport_timestamp(&mut self, lamport_timestamp: &'b  super::Timestamp) {

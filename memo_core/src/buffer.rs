@@ -17,7 +17,7 @@ use std::ops::{Add, AddAssign, Range, Sub};
 use std::sync::Arc;
 use std::vec;
 
-pub type SelectionSetId = time::Local;
+pub type SelectionSetId = time::Lamport;
 
 #[derive(Clone)]
 pub struct Buffer {
@@ -28,7 +28,7 @@ pub struct Buffer {
     pub version: time::Global,
     last_edit: time::Local,
     selections: HashMap<SelectionSetId, Vec<Selection>>,
-    selections_last_update: time::Local,
+    pub selections_last_update: time::Lamport,
     deferred_ops: OperationQueue<Operation>,
     deferred_replicas: HashSet<ReplicaId>,
 }
@@ -167,9 +167,8 @@ pub enum Operation {
         lamport_timestamp: time::Lamport,
     },
     UpdateSelections {
-        set_id: time::Local,
+        set_id: SelectionSetId,
         selections: Option<Vec<Selection>>,
-        local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
     },
 }
@@ -233,14 +232,14 @@ impl Buffer {
             version: time::Global::new(),
             last_edit: time::Local::default(),
             selections: HashMap::default(),
-            selections_last_update: time::Local::default(),
+            selections_last_update: time::Lamport::default(),
             deferred_ops: OperationQueue::new(),
             deferred_replicas: HashSet::new(),
         }
     }
 
     pub fn is_modified(&self) -> bool {
-        self.last_edit != time::Local::default()
+        self.version != time::Global::new()
     }
 
     pub fn len(&self) -> usize {
@@ -291,8 +290,8 @@ impl Buffer {
         Iter::at_point(self, point)
     }
 
-    pub fn selections_changed_since(&self, since: &time::Global) -> bool {
-        !since.observed(self.selections_last_update)
+    pub fn selections_changed_since(&self, since: time::Lamport) -> bool {
+        self.selections_last_update != since
     }
 
     pub fn changes_since(&self, since: &time::Global) -> impl Iterator<Item = Change> {
@@ -339,8 +338,15 @@ impl Buffer {
             lamport_clock,
         );
         if let Some(op) = ops.last() {
-            self.last_edit = op.local_timestamp();
-            self.version.observe(op.local_timestamp());
+            if let Operation::Edit {
+                local_timestamp, ..
+            } = op
+            {
+                self.last_edit = *local_timestamp;
+                self.version.observe(*local_timestamp);
+            } else {
+                unreachable!()
+            }
         }
         ops
     }
@@ -370,25 +376,23 @@ impl Buffer {
     pub fn add_selection_set<I>(
         &mut self,
         ranges: I,
-        local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(SelectionSetId, Operation), Error>
     where
         I: IntoIterator<Item = Range<Point>>,
     {
         let selections = self.selections_from_ranges(ranges)?;
-        let set_id = local_clock.tick();
-        self.selections.insert(set_id, selections.clone());
+        let lamport_timestamp = lamport_clock.tick();
+        self.selections
+            .insert(lamport_timestamp, selections.clone());
+        self.selections_last_update = lamport_timestamp;
 
-        let local_timestamp = local_clock.tick();
-        self.version.observe(local_timestamp);
         Ok((
-            set_id,
+            lamport_timestamp,
             Operation::UpdateSelections {
-                set_id,
+                set_id: lamport_timestamp,
                 selections: Some(selections),
-                local_timestamp,
-                lamport_timestamp: lamport_clock.tick(),
+                lamport_timestamp,
             },
         ))
     }
@@ -397,7 +401,6 @@ impl Buffer {
         &mut self,
         set_id: SelectionSetId,
         ranges: I,
-        local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<Operation, Error>
     where
@@ -411,33 +414,30 @@ impl Buffer {
         self.merge_selections(&mut selections);
         self.selections.insert(set_id, selections.clone());
 
-        let local_timestamp = local_clock.tick();
-        self.version.observe(local_timestamp);
+        let lamport_timestamp = lamport_clock.tick();
+        self.selections_last_update = lamport_timestamp;
+
         Ok(Operation::UpdateSelections {
             set_id,
             selections: Some(selections),
-            local_timestamp,
-            lamport_timestamp: lamport_clock.tick(),
+            lamport_timestamp,
         })
     }
 
     pub fn remove_selection_set(
         &mut self,
         set_id: SelectionSetId,
-        local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<Operation, Error> {
         self.selections
             .remove(&set_id)
             .ok_or(Error::InvalidSelectionSet(set_id))?;
-
-        let local_timestamp = local_clock.tick();
-        self.version.observe(local_timestamp);
+        let lamport_timestamp = lamport_clock.tick();
+        self.selections_last_update = lamport_timestamp;
         Ok(Operation::UpdateSelections {
             set_id,
             selections: None,
-            local_timestamp,
-            lamport_timestamp: lamport_clock.tick(),
+            lamport_timestamp,
         })
     }
 
@@ -552,19 +552,18 @@ impl Buffer {
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
-        let local_timestamp = op.local_timestamp();
-        if !self.version.observed(local_timestamp) {
-            match op {
-                Operation::Edit {
-                    start_id,
-                    start_offset,
-                    end_id,
-                    end_offset,
-                    new_text,
-                    version_in_range,
-                    local_timestamp,
-                    lamport_timestamp,
-                } => {
+        match op {
+            Operation::Edit {
+                start_id,
+                start_offset,
+                end_id,
+                end_offset,
+                new_text,
+                version_in_range,
+                local_timestamp,
+                lamport_timestamp,
+            } => {
+                if !self.version.observed(local_timestamp) {
                     self.apply_edit(
                         start_id,
                         start_offset,
@@ -579,25 +578,22 @@ impl Buffer {
                     )?;
                     self.anchor_cache.borrow_mut().clear();
                     self.offset_cache.borrow_mut().clear();
-                    self.last_edit = local_timestamp;
-                }
-                Operation::UpdateSelections {
-                    set_id,
-                    selections,
-                    local_timestamp,
-                    lamport_timestamp,
-                } => {
-                    if let Some(selections) = selections {
-                        self.selections.insert(set_id, selections);
-                    } else {
-                        self.selections.remove(&set_id);
-                    }
-                    local_clock.observe(set_id);
-                    lamport_clock.observe(lamport_timestamp);
-                    self.selections_last_update = local_timestamp;
+                    self.version.observe(local_timestamp);
                 }
             }
-            self.version.observe(local_timestamp);
+            Operation::UpdateSelections {
+                set_id,
+                selections,
+                lamport_timestamp,
+            } => {
+                if let Some(selections) = selections {
+                    self.selections.insert(set_id, selections);
+                } else {
+                    self.selections.remove(&set_id);
+                }
+                lamport_clock.observe(lamport_timestamp);
+                self.selections_last_update = lamport_timestamp;
+            }
         }
         Ok(())
     }
@@ -2309,17 +2305,17 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
 
 impl Operation {
     fn replica_id(&self) -> ReplicaId {
-        self.local_timestamp().replica_id
+        self.lamport_timestamp().replica_id
     }
 
-    fn local_timestamp(&self) -> time::Local {
+    fn lamport_timestamp(&self) -> time::Lamport {
         match self {
             Operation::Edit {
-                local_timestamp, ..
-            } => *local_timestamp,
+                lamport_timestamp, ..
+            } => *lamport_timestamp,
             Operation::UpdateSelections {
-                local_timestamp, ..
-            } => *local_timestamp,
+                lamport_timestamp, ..
+            } => *lamport_timestamp,
         }
     }
 
@@ -2370,7 +2366,6 @@ impl Operation {
             Operation::UpdateSelections {
                 set_id,
                 selections,
-                local_timestamp,
                 lamport_timestamp,
             } => {
                 variant_type = serialization::buffer::OperationVariant::UpdateSelections;
@@ -2386,7 +2381,6 @@ impl Operation {
                     &serialization::buffer::UpdateSelectionsArgs {
                         set_id: Some(&set_id.to_flatbuf()),
                         selections,
-                        local_timestamp: Some(&local_timestamp.to_flatbuf()),
                         lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
                     },
                 )
@@ -2454,15 +2448,10 @@ impl Operation {
                 };
 
                 Ok(Some(Operation::UpdateSelections {
-                    set_id: time::Local::from_flatbuf(
+                    set_id: time::Lamport::from_flatbuf(
                         message.set_id().ok_or(crate::Error::DeserializeError)?,
                     ),
                     selections,
-                    local_timestamp: time::Local::from_flatbuf(
-                        message
-                            .local_timestamp()
-                            .ok_or(crate::Error::DeserializeError)?,
-                    ),
                     lamport_timestamp: time::Lamport::from_flatbuf(
                         message
                             .lamport_timestamp()
@@ -2477,14 +2466,7 @@ impl Operation {
 
 impl operation_queue::Operation for Operation {
     fn timestamp(&self) -> time::Lamport {
-        match self {
-            Operation::Edit {
-                lamport_timestamp, ..
-            } => *lamport_timestamp,
-            Operation::UpdateSelections {
-                lamport_timestamp, ..
-            } => *lamport_timestamp,
-        }
+        self.lamport_timestamp()
     }
 }
 
@@ -3122,7 +3104,7 @@ mod tests {
             let set_id = rng.choose(&replica_selection_sets);
             if set_id.is_some() && rng.gen_weighted_bool(6) {
                 let op = self
-                    .remove_selection_set(*set_id.unwrap(), local_clock, lamport_clock)
+                    .remove_selection_set(*set_id.unwrap(), lamport_clock)
                     .unwrap();
                 operations.push(op);
             } else {
@@ -3136,11 +3118,9 @@ mod tests {
                 }
 
                 let op = if set_id.is_none() || rng.gen_weighted_bool(5) {
-                    self.add_selection_set(ranges, local_clock, lamport_clock)
-                        .unwrap()
-                        .1
+                    self.add_selection_set(ranges, lamport_clock).unwrap().1
                 } else {
-                    self.replace_selection_set(*set_id.unwrap(), ranges, local_clock, lamport_clock)
+                    self.replace_selection_set(*set_id.unwrap(), ranges, lamport_clock)
                         .unwrap()
                 };
                 operations.push(op);

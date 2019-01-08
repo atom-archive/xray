@@ -45,7 +45,6 @@ table Edit {
 table UpdateSelections {
   set_id:Timestamp;
   selections:[Selection];
-  local_timestamp:Timestamp;
   lamport_timestamp:Timestamp;
 }
 
