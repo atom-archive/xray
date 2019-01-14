@@ -10,7 +10,8 @@ mod work_tree;
 pub use crate::buffer::{Buffer, Change, Point};
 pub use crate::epoch::{Cursor, DirEntry, Epoch, FileStatus, FileType, ROOT_FILE_ID};
 pub use crate::work_tree::{
-    BufferId, ChangeObserver, GitProvider, Operation, OperationEnvelope, WorkTree,
+    BufferId, BufferSelectionRanges, ChangeObserver, GitProvider, LocalSelectionSetId, Operation,
+    OperationEnvelope, WorkTree,
 };
 use std::borrow::Cow;
 use std::fmt;
@@ -18,7 +19,6 @@ use std::io;
 use uuid::Uuid;
 
 pub type ReplicaId = Uuid;
-pub type UserId = u64;
 pub type Oid = [u8; 20];
 
 #[derive(Debug)]
@@ -31,6 +31,10 @@ pub enum Error {
     InvalidBufferId,
     InvalidDirEntry,
     InvalidOperation,
+    InvalidSelectionSet(buffer::SelectionSetId),
+    InvalidLocalSelectionSet(LocalSelectionSetId),
+    InvalidAnchor,
+    OffsetOutOfRange,
     CursorExhausted,
 }
 
@@ -85,6 +89,31 @@ impl From<io::Error> for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self, f)
+    }
+}
+
+impl PartialEq for Error {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Error::IoError(err_1), Error::IoError(err_2)) => {
+                err_1.kind() == err_2.kind() && err_1.to_string() == err_2.to_string()
+            }
+            (Error::DeserializeError, Error::DeserializeError) => true,
+            (Error::InvalidPath(err_1), Error::InvalidPath(err_2)) => err_1 == err_2,
+            (Error::InvalidOperations, Error::InvalidOperations) => true,
+            (Error::InvalidFileId(err_1), Error::InvalidFileId(err_2)) => err_1 == err_2,
+            (Error::InvalidBufferId, Error::InvalidBufferId) => true,
+            (Error::InvalidDirEntry, Error::InvalidDirEntry) => true,
+            (Error::InvalidOperation, Error::InvalidOperation) => true,
+            (Error::InvalidSelectionSet(id_1), Error::InvalidSelectionSet(id_2)) => id_1 == id_2,
+            (Error::InvalidLocalSelectionSet(id_1), Error::InvalidLocalSelectionSet(id_2)) => {
+                id_1 == id_2
+            }
+            (Error::InvalidAnchor, Error::InvalidAnchor) => true,
+            (Error::OffsetOutOfRange, Error::OffsetOutOfRange) => true,
+            (Error::CursorExhausted, Error::CursorExhausted) => true,
+            _ => false,
+        }
     }
 }
 

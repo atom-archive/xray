@@ -1,7 +1,9 @@
 export type Tagged<BaseType, TagName> = BaseType & { __tag: TagName };
 export type Oid = string;
 export type Path = string;
+export type ReplicaId = Tagged<string, "ReplicaId">;
 export type BufferId = Tagged<number, "BufferId">;
+export type SelectionSetId = Tagged<number, "SelectionSetId">;
 export type Point = { row: number; column: number };
 export type Range = { start: Point; end: Point };
 export type Change = Range & { text: string };
@@ -20,6 +22,16 @@ export enum FileType {
 export interface GitProvider {
   baseEntries(oid: Oid): AsyncIterable<BaseEntry>;
   baseText(oid: Oid, path: Path): Promise<string>;
+}
+
+export interface SelectionRanges {
+  local: Map<SelectionSetId, Array<Range>>;
+  remote: Map<ReplicaId, Array<Array<Range>>>;
+}
+
+interface MemoSelectionRanges {
+  local: { [setId: number]: Array<Range> };
+  remote: { [replicaId: string]: Array<Array<Range>> };
 }
 
 export class GitProviderWrapper {
@@ -52,7 +64,12 @@ export class AsyncIteratorWrapper<T> {
   }
 }
 
-export type ChangeObserverCallback = (changes: ReadonlyArray<Change>) => void;
+export type ChangeObserverCallback = (
+  change: {
+    textChanges: ReadonlyArray<Change>;
+    selectionRanges: SelectionRanges;
+  }
+) => void;
 
 export class ChangeObserver {
   emitter: Emitter;
@@ -65,9 +82,32 @@ export class ChangeObserver {
     return this.emitter.on(`buffer-${bufferId}-change`, callback);
   }
 
-  textChanged(bufferId: BufferId, changes: Change[]) {
-    this.emitter.emit(`buffer-${bufferId}-change`, changes);
+  changed(
+    bufferId: BufferId,
+    textChanges: Change[],
+    selectionRanges: MemoSelectionRanges
+  ) {
+    this.emitter.emit(`buffer-${bufferId}-change`, {
+      textChanges,
+      selectionRanges: fromMemoSelectionRanges(selectionRanges)
+    });
   }
+}
+
+export function fromMemoSelectionRanges(
+  ranges: MemoSelectionRanges
+): SelectionRanges {
+  const local = new Map();
+  for (const setId in ranges.local) {
+    local.set(setId, ranges.local[setId]);
+  }
+
+  const remote = new Map();
+  for (const replicaId in ranges.remote) {
+    remote.set(replicaId, ranges.remote[replicaId]);
+  }
+
+  return { local, remote };
 }
 
 export interface Disposable {

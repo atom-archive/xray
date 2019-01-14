@@ -12,10 +12,15 @@ Memo allows multiple remote collaborators to share the state of a single Git wor
 Both scenarios are automatically handled when you call `WorkTree.create`:
 
 ```ts
-const replicaId = generateUUID()
+const replicaId = generateUUID();
 const baseCommitOID = "8251a3c491b3884d7f828d2a1c5c565855171a2c";
 const startOps = await fetchInitialOperations();
-const [tree, ops] = await WorkTree.create(replicaId, baseCommitOID, startOps, gitProvider);
+const [tree, ops] = await WorkTree.create(
+  replicaId,
+  baseCommitOID,
+  startOps,
+  gitProvider
+);
 broadcast(ops);
 ```
 
@@ -118,18 +123,47 @@ const editOp2 = buffer.edit(
   [{ start: { row: 0, column: 10 }, end: { row: 0, column: 12 } }],
   "ms"
 );
-broadcast([editOp1, editOp2]);
 console.log(buffer.getText()); // ==> "Hello worms"
+
+const [set, createSetOp] = buffer.addSelectionSet([
+  { start: point(0, 0), end: point(0, 1) }
+]);
+const replaceSetOp = buffer.replaceSelectionSet(set, [
+  { start: point(0, 2), end: point(0, 3) }
+]);
+console.log(buffer.getSelections()); /* => {
+  local: {
+    1: [{ start: { row: 0, column: 2 }, end: { row: 0, column: 3 } }]
+  },
+  remote: {
+    "65242244-9706-4b42-9785-fa5cbe5d5709": [
+      [{ start: { row: 0, column: 2 }, end: { row: 0, column: 3 } }]
+    ]
+  }
+}*/
+
+const removeSetOp = buffer.removeSelectionSet(set);
+broadcast([editOp1, editOp2, createSetOp, replaceSetOp, removeSetOp]);
 ```
 
 As you incorporate operations received from other peers, you may want to use `Buffer.prototype.onChange` to keep an external representation of the buffer up-to-date:
 
 ```ts
-buffer.onChange(changes => {
-  for (const change of changes) {
-    console.log(change); // => { start: { row: 0, column: 0 }, end: { row: 0, column: 5 }, text: "Goodbye" }
-    externalBuffer.edit(change.start, change.end, change.text);
+buffer.onChange(change => {
+  for (const textChange of change.textChanges) {
+    console.log(textChange); // => { start: { row: 0, column: 0 }, end: { row: 0, column: 5 }, text: "Goodbye" }
+    externalBuffer.edit(textChange.start, textChange.end, textChange.text);
   }
+  console.log(change.selectionRanges); /* => {
+    local: {
+      1: [{ start: { row: 0, column: 2 }, end: { row: 0, column: 3 } }]
+    },
+    remote: {
+      "65242244-9706-4b42-9785-fa5cbe5d5709": [
+        [{ start: { row: 0, column: 2 }, end: { row: 0, column: 3 } }]
+      ]
+    }
+  }*/
 });
 ```
 
@@ -141,7 +175,7 @@ If you want to reset the work tree to a different (possibly `null`) base (e.g. a
 const commitOid = "70403cdf91c2e6fbf76167f725935e6b0993eeb1";
 const resetOps = tree.reset(commitOid);
 await broadcast(resetOps);
-console.log(tree.head()) // => 70403cdf91c2e6fbf76167f725935e6b0993eeb1
+console.log(tree.head()); // => 70403cdf91c2e6fbf76167f725935e6b0993eeb1
 ```
 
 This resets you and all the other peers to the new commit. Note that this is an asynchronous action, as the tree needs to perform I/O in order to retrieve the new base entries.
@@ -163,7 +197,7 @@ export interface OperationEnvelope {
 }
 ```
 
-Technically, to synchronize with other peers, you only need to transmit the  operation that is stored inside of the envelope; so, why including those extra timestamp and replica id fields?
+Technically, to synchronize with other peers, you only need to transmit the operation that is stored inside of the envelope; so, why including those extra timestamp and replica id fields?
 
 You may recall the `fetchInitialOperations` function that we called when [creating a new `WorkTree`](#creating-a-worktree). It turns out that, in order to instantiate a new `WorkTree`, you only need operations associated with the _latest_ epoch. By exposing the epoch timestamp and replica id, we allow you to store operations such that they can be efficiently queried later when instantiating new work trees:
 

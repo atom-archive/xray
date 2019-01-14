@@ -2,8 +2,7 @@ use crate::btree::{self, SeekBias};
 use crate::operation_queue::{self, OperationQueue};
 use crate::serialization;
 use crate::time;
-use crate::ReplicaId;
-use crate::UserId;
+use crate::{Error, ReplicaId};
 use difference::{Changeset, Difference};
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use lazy_static::lazy_static;
@@ -18,15 +17,7 @@ use std::ops::{Add, AddAssign, Range, Sub};
 use std::sync::Arc;
 use std::vec;
 
-type SelectionSetVersion = usize;
-
-#[derive(Eq, PartialEq, Debug)]
-pub enum Error {
-    OffsetOutOfRange,
-    InvalidAnchor,
-    InvalidOperation,
-    SelectionSetNotFound,
-}
+pub type SelectionSetId = time::Lamport;
 
 #[derive(Clone)]
 pub struct Buffer {
@@ -35,7 +26,9 @@ pub struct Buffer {
     anchor_cache: RefCell<HashMap<Anchor, (usize, Point)>>,
     offset_cache: RefCell<HashMap<Point, usize>>,
     pub version: time::Global,
-    selections: HashMap<time::Local, SelectionSet>,
+    last_edit: time::Local,
+    selections: HashMap<SelectionSetId, Vec<Selection>>,
+    pub selections_last_update: time::Lamport,
     deferred_ops: OperationQueue<Operation>,
     deferred_replicas: HashSet<ReplicaId>,
 }
@@ -47,10 +40,7 @@ pub struct Point {
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
-pub struct Anchor(AnchorInner);
-
-#[derive(Clone, Eq, PartialEq, Debug, Hash)]
-enum AnchorInner {
+pub enum Anchor {
     Start,
     End,
     Middle {
@@ -61,7 +51,7 @@ enum AnchorInner {
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
-enum AnchorBias {
+pub enum AnchorBias {
     Left,
     Right,
 }
@@ -71,14 +61,6 @@ pub struct Selection {
     pub start: Anchor,
     pub end: Anchor,
     pub reversed: bool,
-    pub goal_column: Option<u32>,
-}
-
-#[derive(Clone)]
-struct SelectionSet {
-    user_id: UserId,
-    selections: Vec<Selection>,
-    version: SelectionSetVersion,
 }
 
 pub struct Iter {
@@ -184,6 +166,11 @@ pub enum Operation {
         local_timestamp: time::Local,
         lamport_timestamp: time::Lamport,
     },
+    UpdateSelections {
+        set_id: SelectionSetId,
+        selections: Option<Vec<Selection>>,
+        lamport_timestamp: time::Lamport,
+    },
 }
 
 impl Buffer {
@@ -243,14 +230,16 @@ impl Buffer {
             anchor_cache: RefCell::new(HashMap::default()),
             offset_cache: RefCell::new(HashMap::default()),
             version: time::Global::new(),
+            last_edit: time::Local::default(),
             selections: HashMap::default(),
+            selections_last_update: time::Lamport::default(),
             deferred_ops: OperationQueue::new(),
             deferred_replicas: HashSet::new(),
         }
     }
 
     pub fn is_modified(&self) -> bool {
-        self.version > time::Global::new()
+        self.version != time::Global::new()
     }
 
     pub fn len(&self) -> usize {
@@ -289,7 +278,6 @@ impl Buffer {
         self.iter().collect::<Vec<u16>>()
     }
 
-    #[cfg(test)]
     pub fn to_string(&self) -> String {
         String::from_utf16_lossy(&self.to_u16_chars())
     }
@@ -302,12 +290,19 @@ impl Buffer {
         Iter::at_point(self, point)
     }
 
-    pub fn changes_since(&self, since: time::Global) -> impl Iterator<Item = Change> {
+    pub fn selections_changed_since(&self, since: time::Lamport) -> bool {
+        self.selections_last_update != since
+    }
+
+    pub fn changes_since(&self, since: &time::Global) -> impl Iterator<Item = Change> {
         let since_2 = since.clone();
         let cursor = self
             .fragments
             .filter(move |summary| summary.max_version.changed_since(&since_2));
-        ChangesIter { cursor, since }
+        ChangesIter {
+            cursor,
+            since: since.clone(),
+        }
     }
 
     pub fn deferred_ops_len(&self) -> usize {
@@ -343,7 +338,15 @@ impl Buffer {
             lamport_clock,
         );
         if let Some(op) = ops.last() {
-            self.version.observe(op.local_timestamp());
+            if let Operation::Edit {
+                local_timestamp, ..
+            } = op
+            {
+                self.last_edit = *local_timestamp;
+                self.version.observe(*local_timestamp);
+            } else {
+                unreachable!()
+            }
         }
         ops
     }
@@ -370,98 +373,103 @@ impl Buffer {
         self.edit(old_1d_ranges, new_text, local_clock, lamport_clock)
     }
 
-    pub fn add_selection_set(
+    pub fn add_selection_set<I>(
         &mut self,
-        user_id: UserId,
-        selections: Vec<Selection>,
-        local_clock: &mut time::Local,
-    ) -> time::Local {
-        let set = SelectionSet {
-            version: 0,
-            selections,
-            user_id,
-        };
-        let id = local_clock.tick();
-        self.selections.insert(id, set);
-        id
-    }
-
-    pub fn remove_selection_set(&mut self, id: time::Local) -> Result<(), Error> {
-        self.selections
-            .remove(&id)
-            .ok_or(Error::SelectionSetNotFound)?;
-        Ok(())
-    }
-
-    pub fn selections(&self, set_id: time::Local) -> Result<&[Selection], Error> {
-        Ok(self
-            .selections
-            .get(&set_id)
-            .ok_or(Error::SelectionSetNotFound)?
-            .selections
-            .as_slice())
-    }
-
-    pub fn insert_selections<F>(&mut self, set_id: time::Local, f: F) -> Result<(), Error>
+        ranges: I,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<(SelectionSetId, Operation), Error>
     where
-        F: FnOnce(&Buffer, &[Selection]) -> Vec<Selection>,
+        I: IntoIterator<Item = Range<Point>>,
     {
-        self.mutate_selections(set_id, |buffer, old_selections| {
-            let mut new_selections = f(buffer, old_selections);
-            new_selections.sort_unstable_by(|a, b| buffer.cmp_anchors(&a.start, &b.start).unwrap());
+        let selections = self.selections_from_ranges(ranges)?;
+        let lamport_timestamp = lamport_clock.tick();
+        self.selections
+            .insert(lamport_timestamp, selections.clone());
+        self.selections_last_update = lamport_timestamp;
 
-            let mut selections = Vec::with_capacity(old_selections.len() + new_selections.len());
-            {
-                let mut old_selections = old_selections.drain(..).peekable();
-                let mut new_selections = new_selections.drain(..).peekable();
-                loop {
-                    if old_selections.peek().is_some() {
-                        if new_selections.peek().is_some() {
-                            match buffer
-                                .cmp_anchors(
-                                    &old_selections.peek().unwrap().start,
-                                    &new_selections.peek().unwrap().start,
-                                )
-                                .unwrap()
-                            {
-                                Ordering::Less => {
-                                    selections.push(old_selections.next().unwrap());
-                                }
-                                Ordering::Equal => {
-                                    selections.push(old_selections.next().unwrap());
-                                    selections.push(new_selections.next().unwrap());
-                                }
-                                Ordering::Greater => {
-                                    selections.push(new_selections.next().unwrap());
-                                }
-                            }
-                        } else {
-                            selections.push(old_selections.next().unwrap());
-                        }
-                    } else if new_selections.peek().is_some() {
-                        selections.push(new_selections.next().unwrap());
-                    } else {
-                        break;
-                    }
-                }
-            }
-            *old_selections = selections;
+        Ok((
+            lamport_timestamp,
+            Operation::UpdateSelections {
+                set_id: lamport_timestamp,
+                selections: Some(selections),
+                lamport_timestamp,
+            },
+        ))
+    }
+
+    pub fn replace_selection_set<I>(
+        &mut self,
+        set_id: SelectionSetId,
+        ranges: I,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<Operation, Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+    {
+        self.selections
+            .remove(&set_id)
+            .ok_or(Error::InvalidSelectionSet(set_id))?;
+
+        let mut selections = self.selections_from_ranges(ranges)?;
+        self.merge_selections(&mut selections);
+        self.selections.insert(set_id, selections.clone());
+
+        let lamport_timestamp = lamport_clock.tick();
+        self.selections_last_update = lamport_timestamp;
+
+        Ok(Operation::UpdateSelections {
+            set_id,
+            selections: Some(selections),
+            lamport_timestamp,
         })
     }
 
-    pub fn mutate_selections<F>(&mut self, set_id: time::Local, f: F) -> Result<(), Error>
-    where
-        F: FnOnce(&Buffer, &mut Vec<Selection>),
-    {
-        let mut set = self
-            .selections
+    pub fn remove_selection_set(
+        &mut self,
+        set_id: SelectionSetId,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<Operation, Error> {
+        self.selections
             .remove(&set_id)
-            .ok_or(Error::SelectionSetNotFound)?;
-        f(self, &mut set.selections);
-        self.merge_selections(&mut set.selections);
-        set.version += 1;
-        self.selections.insert(set_id, set);
-        Ok(())
+            .ok_or(Error::InvalidSelectionSet(set_id))?;
+        let lamport_timestamp = lamport_clock.tick();
+        self.selections_last_update = lamport_timestamp;
+        Ok(Operation::UpdateSelections {
+            set_id,
+            selections: None,
+            lamport_timestamp,
+        })
+    }
+
+    pub fn selection_ranges<'a>(
+        &'a self,
+        set_id: SelectionSetId,
+    ) -> Result<impl Iterator<Item = Range<Point>> + 'a, Error> {
+        let selections = self
+            .selections
+            .get(&set_id)
+            .ok_or(Error::InvalidSelectionSet(set_id))?;
+        Ok(selections.iter().map(move |selection| {
+            let start = self.point_for_anchor(&selection.start).unwrap();
+            let end = self.point_for_anchor(&selection.end).unwrap();
+            if selection.reversed {
+                end..start
+            } else {
+                start..end
+            }
+        }))
+    }
+
+    pub fn all_selections(&self) -> impl Iterator<Item = (&SelectionSetId, &Vec<Selection>)> {
+        self.selections.iter()
+    }
+
+    pub fn all_selection_ranges<'a>(
+        &'a self,
+    ) -> impl 'a + Iterator<Item = (SelectionSetId, Vec<Range<Point>>)> {
+        self.selections
+            .keys()
+            .map(move |set_id| (*set_id, self.selection_ranges(*set_id).unwrap().collect()))
     }
 
     fn merge_selections(&mut self, selections: &mut Vec<Selection>) {
@@ -492,6 +500,32 @@ impl Buffer {
         *selections = new_selections;
     }
 
+    fn selections_from_ranges<I>(&self, ranges: I) -> Result<Vec<Selection>, Error>
+    where
+        I: IntoIterator<Item = Range<Point>>,
+    {
+        let mut ranges = ranges.into_iter().collect::<Vec<_>>();
+        ranges.sort_unstable_by_key(|range| range.start);
+
+        let mut selections = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            if range.start > range.end {
+                selections.push(Selection {
+                    start: self.anchor_before_point(range.end)?,
+                    end: self.anchor_before_point(range.start)?,
+                    reversed: true,
+                });
+            } else {
+                selections.push(Selection {
+                    start: self.anchor_before_point(range.start)?,
+                    end: self.anchor_before_point(range.end)?,
+                    reversed: false,
+                });
+            }
+        }
+        Ok(selections)
+    }
+
     pub fn apply_ops<I: IntoIterator<Item = Operation>>(
         &mut self,
         ops: I,
@@ -503,8 +537,7 @@ impl Buffer {
             if self.can_apply_op(&op) {
                 self.apply_op(op, local_clock, lamport_clock)?;
             } else {
-                self.deferred_replicas
-                    .insert(op.local_timestamp().replica_id);
+                self.deferred_replicas.insert(op.replica_id());
                 deferred_ops.push(op);
             }
         }
@@ -530,20 +563,36 @@ impl Buffer {
                 local_timestamp,
                 lamport_timestamp,
             } => {
-                self.apply_edit(
-                    start_id,
-                    start_offset,
-                    end_id,
-                    end_offset,
-                    new_text.as_ref().cloned(),
-                    &version_in_range,
-                    local_timestamp,
-                    lamport_timestamp,
-                    local_clock,
-                    lamport_clock,
-                )?;
-                self.anchor_cache.borrow_mut().clear();
-                self.offset_cache.borrow_mut().clear();
+                if !self.version.observed(local_timestamp) {
+                    self.apply_edit(
+                        start_id,
+                        start_offset,
+                        end_id,
+                        end_offset,
+                        new_text.as_ref().cloned(),
+                        &version_in_range,
+                        local_timestamp,
+                        lamport_timestamp,
+                        local_clock,
+                        lamport_clock,
+                    )?;
+                    self.anchor_cache.borrow_mut().clear();
+                    self.offset_cache.borrow_mut().clear();
+                    self.version.observe(local_timestamp);
+                }
+            }
+            Operation::UpdateSelections {
+                set_id,
+                selections,
+                lamport_timestamp,
+            } => {
+                if let Some(selections) = selections {
+                    self.selections.insert(set_id, selections);
+                } else {
+                    self.selections.remove(&set_id);
+                }
+                lamport_clock.observe(lamport_timestamp);
+                self.selections_last_update = lamport_timestamp;
             }
         }
         Ok(())
@@ -562,10 +611,6 @@ impl Buffer {
         local_clock: &mut time::Local,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
-        if self.version.observed(local_timestamp) {
-            return Ok(());
-        }
-
         let mut new_text = new_text.as_ref().cloned();
         let start_fragment_id = self.resolve_fragment_id(start_id, start_offset)?;
         let end_fragment_id = self.resolve_fragment_id(end_id, end_offset)?;
@@ -664,7 +709,6 @@ impl Buffer {
 
         new_fragments.push_tree(cursor.slice(&old_fragments.extent::<usize>(), SeekBias::Right));
         self.fragments = new_fragments;
-        self.version.observe(local_timestamp);
         local_clock.observe(local_timestamp);
         lamport_clock.observe(lamport_timestamp);
         Ok(())
@@ -681,8 +725,7 @@ impl Buffer {
             if self.can_apply_op(&op) {
                 self.apply_op(op, local_clock, lamport_clock)?;
             } else {
-                self.deferred_replicas
-                    .insert(op.local_timestamp().replica_id);
+                self.deferred_replicas.insert(op.replica_id());
                 deferred_ops.push(op);
             }
         }
@@ -691,10 +734,7 @@ impl Buffer {
     }
 
     fn can_apply_op(&self, op: &Operation) -> bool {
-        if self
-            .deferred_replicas
-            .contains(&op.local_timestamp().replica_id)
-        {
+        if self.deferred_replicas.contains(&op.replica_id()) {
             false
         } else {
             match op {
@@ -707,6 +747,27 @@ impl Buffer {
                     self.version.observed(*start_id)
                         && self.version.observed(*end_id)
                         && *version_in_range <= self.version
+                }
+                Operation::UpdateSelections { selections, .. } => {
+                    if let Some(selections) = selections {
+                        selections.iter().all(|selection| {
+                            let contains_start = match selection.start {
+                                Anchor::Middle { insertion_id, .. } => {
+                                    self.version.observed(insertion_id)
+                                }
+                                _ => true,
+                            };
+                            let contains_end = match selection.end {
+                                Anchor::Middle { insertion_id, .. } => {
+                                    self.version.observed(insertion_id)
+                                }
+                                _ => true,
+                            };
+                            contains_start && contains_end
+                        })
+                    } else {
+                        true
+                    }
                 }
             }
         }
@@ -1111,14 +1172,14 @@ impl Buffer {
         match bias {
             AnchorBias::Left => {
                 if offset == 0 {
-                    return Ok(Anchor(AnchorInner::Start));
+                    return Ok(Anchor::Start);
                 } else {
                     seek_bias = SeekBias::Left;
                 }
             }
             AnchorBias::Right => {
                 if offset == max_offset {
-                    return Ok(Anchor(AnchorInner::End));
+                    return Ok(Anchor::End);
                 } else {
                     seek_bias = SeekBias::Right;
                 }
@@ -1131,11 +1192,11 @@ impl Buffer {
         let offset_in_fragment = offset - cursor.start::<usize>();
         let offset_in_insertion = fragment.start_offset + offset_in_fragment;
         let point = cursor.start::<Point>() + &fragment.point_for_offset(offset_in_fragment)?;
-        let anchor = Anchor(AnchorInner::Middle {
+        let anchor = Anchor::Middle {
             insertion_id: fragment.insertion.id,
             offset: offset_in_insertion,
             bias,
-        });
+        };
         self.cache_position(Some(anchor.clone()), offset, point);
         Ok(anchor)
     }
@@ -1158,14 +1219,14 @@ impl Buffer {
         match bias {
             AnchorBias::Left => {
                 if point.is_zero() {
-                    return Ok(Anchor(AnchorInner::Start));
+                    return Ok(Anchor::Start);
                 } else {
                     seek_bias = SeekBias::Left;
                 }
             }
             AnchorBias::Right => {
                 if point == max_point {
-                    return Ok(Anchor(AnchorInner::End));
+                    return Ok(Anchor::End);
                 } else {
                     seek_bias = SeekBias::Right;
                 }
@@ -1177,11 +1238,11 @@ impl Buffer {
         let fragment = cursor.item().unwrap();
         let offset_in_fragment = fragment.offset_for_point(point - &cursor.start::<Point>())?;
         let offset_in_insertion = fragment.start_offset + offset_in_fragment;
-        let anchor = Anchor(AnchorInner::Middle {
+        let anchor = Anchor::Middle {
             insertion_id: fragment.insertion.id,
             offset: offset_in_insertion,
             bias,
-        });
+        };
         let offset = cursor.start::<usize>() + offset_in_fragment;
         self.cache_position(Some(anchor.clone()), offset, point);
         Ok(anchor)
@@ -1196,10 +1257,10 @@ impl Buffer {
     }
 
     fn position_for_anchor(&self, anchor: &Anchor) -> Result<(usize, Point), Error> {
-        match &anchor.0 {
-            &AnchorInner::Start => Ok((0, Point { row: 0, column: 0 })),
-            &AnchorInner::End => Ok((self.len(), self.fragments.extent())),
-            &AnchorInner::Middle {
+        match anchor {
+            Anchor::Start => Ok((0, Point { row: 0, column: 0 })),
+            Anchor::End => Ok((self.len(), self.fragments.extent())),
+            Anchor::Middle {
                 ref insertion_id,
                 offset,
                 ref bias,
@@ -1215,8 +1276,8 @@ impl Buffer {
                     Ok(cached_position)
                 } else {
                     let seek_bias = match bias {
-                        &AnchorBias::Left => SeekBias::Left,
-                        &AnchorBias::Right => SeekBias::Right,
+                        AnchorBias::Left => SeekBias::Left,
+                        AnchorBias::Right => SeekBias::Right,
                     };
 
                     let splits = self
@@ -1224,7 +1285,7 @@ impl Buffer {
                         .get(&insertion_id)
                         .ok_or(Error::InvalidAnchor)?;
                     let mut splits_cursor = splits.cursor();
-                    splits_cursor.seek(&offset, seek_bias);
+                    splits_cursor.seek(offset, seek_bias);
                     splits_cursor
                         .item()
                         .ok_or(Error::InvalidAnchor)
@@ -1374,6 +1435,77 @@ impl Ord for Point {
         match self.row.cmp(&other.row) {
             Ordering::Equal => self.column.cmp(&other.column),
             comparison @ _ => comparison,
+        }
+    }
+}
+
+impl Anchor {
+    fn to_flatbuf<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::buffer::Anchor<'fbb>> {
+        match self {
+            Anchor::Start => serialization::buffer::Anchor::create(
+                builder,
+                &serialization::buffer::AnchorArgs {
+                    variant: serialization::buffer::AnchorVariant::Start,
+                    ..serialization::buffer::AnchorArgs::default()
+                },
+            ),
+            Anchor::End => serialization::buffer::Anchor::create(
+                builder,
+                &serialization::buffer::AnchorArgs {
+                    variant: serialization::buffer::AnchorVariant::End,
+                    ..serialization::buffer::AnchorArgs::default()
+                },
+            ),
+            Anchor::Middle {
+                insertion_id,
+                offset,
+                bias,
+            } => serialization::buffer::Anchor::create(
+                builder,
+                &serialization::buffer::AnchorArgs {
+                    variant: serialization::buffer::AnchorVariant::Middle,
+                    insertion_id: Some(&insertion_id.to_flatbuf()),
+                    offset: *offset as u64,
+                    bias: bias.to_flatbuf(),
+                },
+            ),
+        }
+    }
+
+    fn from_flatbuf<'fbb>(
+        message: &serialization::buffer::Anchor<'fbb>,
+    ) -> Result<Self, crate::Error> {
+        match message.variant() {
+            serialization::buffer::AnchorVariant::Start => Ok(Anchor::Start),
+            serialization::buffer::AnchorVariant::End => Ok(Anchor::End),
+            serialization::buffer::AnchorVariant::Middle => Ok(Anchor::Middle {
+                insertion_id: time::Local::from_flatbuf(
+                    message
+                        .insertion_id()
+                        .ok_or(crate::Error::DeserializeError)?,
+                ),
+                offset: message.offset() as usize,
+                bias: AnchorBias::from_flatbuf(message.bias()),
+            }),
+        }
+    }
+}
+
+impl AnchorBias {
+    fn to_flatbuf(&self) -> serialization::buffer::AnchorBias {
+        match self {
+            AnchorBias::Left => serialization::buffer::AnchorBias::Left,
+            AnchorBias::Right => serialization::buffer::AnchorBias::Right,
+        }
+    }
+
+    fn from_flatbuf(message: serialization::buffer::AnchorBias) -> Self {
+        match message {
+            serialization::buffer::AnchorBias::Left => AnchorBias::Left,
+            serialization::buffer::AnchorBias::Right => AnchorBias::Right,
         }
     }
 }
@@ -1626,10 +1758,37 @@ impl Selection {
     pub fn anchor_range(&self) -> Range<Anchor> {
         self.start.clone()..self.end.clone()
     }
+
+    fn to_flatbuf<'fbb>(
+        &self,
+        builder: &mut FlatBufferBuilder<'fbb>,
+    ) -> WIPOffset<serialization::buffer::Selection<'fbb>> {
+        let start = Some(self.start.to_flatbuf(builder));
+        let end = Some(self.end.to_flatbuf(builder));
+
+        serialization::buffer::Selection::create(
+            builder,
+            &serialization::buffer::SelectionArgs {
+                start,
+                end,
+                reversed: self.reversed,
+            },
+        )
+    }
+
+    fn from_flatbuf<'fbb>(
+        message: serialization::buffer::Selection<'fbb>,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            start: Anchor::from_flatbuf(&message.start().ok_or(crate::Error::DeserializeError)?)?,
+            end: Anchor::from_flatbuf(&message.end().ok_or(crate::Error::DeserializeError)?)?,
+            reversed: message.reversed(),
+        })
+    }
 }
 
 impl Text {
-    fn new(code_units: Vec<u16>) -> Self {
+    pub fn new(code_units: Vec<u16>) -> Self {
         fn build_tree(index: usize, line_lengths: &[u32], mut tree: &mut [LineNode]) {
             if line_lengths.is_empty() {
                 return;
@@ -2145,11 +2304,25 @@ impl btree::Dimension<InsertionSplitSummary> for usize {
 }
 
 impl Operation {
-    fn local_timestamp(&self) -> time::Local {
+    fn replica_id(&self) -> ReplicaId {
+        self.lamport_timestamp().replica_id
+    }
+
+    fn lamport_timestamp(&self) -> time::Lamport {
         match self {
             Operation::Edit {
-                local_timestamp, ..
-            } => *local_timestamp,
+                lamport_timestamp, ..
+            } => *lamport_timestamp,
+            Operation::UpdateSelections {
+                lamport_timestamp, ..
+            } => *lamport_timestamp,
+        }
+    }
+
+    pub fn is_edit(&self) -> bool {
+        match self {
+            Operation::Edit { .. } => true,
+            _ => false,
         }
     }
 
@@ -2185,6 +2358,29 @@ impl Operation {
                         version_in_range,
                         new_text,
                         local_timestamp: Some(&local_timestamp.to_flatbuf()),
+                        lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
+                    },
+                )
+                .as_union_value();
+            }
+            Operation::UpdateSelections {
+                set_id,
+                selections,
+                lamport_timestamp,
+            } => {
+                variant_type = serialization::buffer::OperationVariant::UpdateSelections;
+                let selections = selections.as_ref().map(|selections| {
+                    let selection_flatbufs = &selections
+                        .iter()
+                        .map(|s| s.to_flatbuf(builder))
+                        .collect::<Vec<_>>();
+                    builder.create_vector(selection_flatbufs)
+                });
+                variant = serialization::buffer::UpdateSelections::create(
+                    builder,
+                    &serialization::buffer::UpdateSelectionsArgs {
+                        set_id: Some(&set_id.to_flatbuf()),
+                        selections,
                         lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
                     },
                 )
@@ -2236,6 +2432,33 @@ impl Operation {
                     ),
                 }))
             }
+            serialization::buffer::OperationVariant::UpdateSelections => {
+                let message = serialization::buffer::UpdateSelections::init_from_table(
+                    message.variant().ok_or(crate::Error::DeserializeError)?,
+                );
+
+                let selections = if let Some(flatbufs) = message.selections() {
+                    let mut selections = Vec::with_capacity(flatbufs.len());
+                    for i in 0..flatbufs.len() {
+                        selections.push(Selection::from_flatbuf(flatbufs.get(i))?);
+                    }
+                    Some(selections)
+                } else {
+                    None
+                };
+
+                Ok(Some(Operation::UpdateSelections {
+                    set_id: time::Lamport::from_flatbuf(
+                        message.set_id().ok_or(crate::Error::DeserializeError)?,
+                    ),
+                    selections,
+                    lamport_timestamp: time::Lamport::from_flatbuf(
+                        message
+                            .lamport_timestamp()
+                            .ok_or(crate::Error::DeserializeError)?,
+                    ),
+                }))
+            }
             serialization::buffer::OperationVariant::NONE => Ok(None),
         }
     }
@@ -2243,11 +2466,7 @@ impl Operation {
 
 impl operation_queue::Operation for Operation {
     fn timestamp(&self) -> time::Lamport {
-        match self {
-            Operation::Edit {
-                lamport_timestamp, ..
-            } => *lamport_timestamp,
-        }
+        self.lamport_timestamp()
     }
 }
 
@@ -2292,26 +2511,8 @@ mod tests {
             let mut lamport_clock = time::Lamport::new(replica_id);
 
             for _i in 0..10 {
-                let mut old_ranges: Vec<Range<usize>> = Vec::new();
-                for _ in 0..5 {
-                    let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
-                    if last_end > buffer.len() {
-                        break;
-                    }
-                    let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
-                    let start = rng.gen_range::<usize>(last_end, end + 1);
-                    old_ranges.push(start..end);
-                }
-                let new_text = RandomCharIter(rng)
-                    .take(rng.gen_range(0, 10))
-                    .collect::<String>();
-
-                buffer.edit(
-                    old_ranges.iter().cloned(),
-                    new_text.as_str(),
-                    &mut local_clock,
-                    &mut lamport_clock,
-                );
+                let (old_ranges, new_text, _) =
+                    buffer.randomly_mutate(&mut rng, &mut local_clock, &mut lamport_clock);
                 for old_range in old_ranges.iter().rev() {
                     reference_string = [
                         &reference_string[0..old_range.start],
@@ -2328,7 +2529,7 @@ mod tests {
             }
 
             for mut old_buffer in buffer_versions {
-                for change in buffer.changes_since(old_buffer.version.clone()) {
+                for change in buffer.changes_since(&old_buffer.version) {
                     old_buffer.edit_2d(
                         Some(change.range),
                         Text::new(change.code_units),
@@ -2805,36 +3006,17 @@ mod tests {
                 network.add_peer(replica_id);
             }
 
-            let mut edit_count = 10;
+            let mut mutation_count = 10;
             loop {
                 let replica_index = rng.gen_range(0, PEERS);
                 let replica_id = replica_ids[replica_index];
                 let buffer = &mut buffers[replica_index];
                 let local_clock = &mut local_clocks[replica_index];
                 let lamport_clock = &mut lamport_clocks[replica_index];
-                if edit_count > 0 && rng.gen() {
-                    let mut old_ranges: Vec<Range<usize>> = Vec::new();
-                    for _ in 0..5 {
-                        let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
-                        if last_end > buffer.len() {
-                            break;
-                        }
-                        let end = rng.gen_range::<usize>(last_end, buffer.len() + 1);
-                        let start = rng.gen_range::<usize>(last_end, end + 1);
-                        old_ranges.push(start..end);
-                    }
-                    let new_text = RandomCharIter(rng)
-                        .take(rng.gen_range(0, 10))
-                        .collect::<String>();
-
-                    if rng.gen_weighted_bool(5) {
-                        local_clock.tick();
-                    }
-
-                    let ops =
-                        buffer.edit(old_ranges, new_text.as_str(), local_clock, lamport_clock);
+                if mutation_count > 0 && rng.gen() {
+                    let (_, _, ops) = buffer.randomly_mutate(&mut rng, local_clock, lamport_clock);
                     network.broadcast(replica_id, ops, &mut rng);
-                    edit_count -= 1;
+                    mutation_count -= 1;
                 } else if network.has_unreceived(replica_id) {
                     buffer
                         .apply_ops(
@@ -2845,13 +3027,21 @@ mod tests {
                         .unwrap();
                 }
 
-                if edit_count == 0 && network.is_idle() {
+                if mutation_count == 0 && network.is_idle() {
                     break;
                 }
             }
 
             for buffer in &buffers[1..] {
                 assert_eq!(buffer.to_string(), buffers[0].to_string());
+                assert_eq!(
+                    buffer.all_selections().collect::<HashMap<_, _>>(),
+                    buffers[0].all_selections().collect::<HashMap<_, _>>()
+                );
+                assert_eq!(
+                    buffer.all_selection_ranges().collect::<HashMap<_, _>>(),
+                    buffers[0].all_selection_ranges().collect::<HashMap<_, _>>()
+                );
             }
         }
     }
@@ -2867,6 +3057,90 @@ mod tests {
             } else {
                 Some(self.0.gen_range(b'a', b'z' + 1).into())
             }
+        }
+    }
+
+    impl Buffer {
+        pub fn randomly_mutate<T>(
+            &mut self,
+            rng: &mut T,
+            local_clock: &mut time::Local,
+            lamport_clock: &mut time::Lamport,
+        ) -> (Vec<Range<usize>>, String, Vec<Operation>)
+        where
+            T: Rng,
+        {
+            // Randomly mutate text.
+            let mut old_ranges: Vec<Range<usize>> = Vec::new();
+            for _ in 0..5 {
+                let last_end = old_ranges.last().map_or(0, |last_range| last_range.end + 1);
+                if last_end > self.len() {
+                    break;
+                }
+                let end = rng.gen_range::<usize>(last_end, self.len() + 1);
+                let start = rng.gen_range::<usize>(last_end, end + 1);
+                old_ranges.push(start..end);
+            }
+            let new_text_len = rng.gen_range(0, 10);
+            let new_text: String = RandomCharIter(&mut *rng).take(new_text_len).collect();
+
+            if rng.gen_weighted_bool(5) {
+                local_clock.tick();
+            }
+
+            let mut operations = self.edit(
+                old_ranges.iter().cloned(),
+                new_text.as_str(),
+                local_clock,
+                lamport_clock,
+            );
+
+            // Randomly add, remove or mutate selection sets.
+            let replica_selection_sets = &self
+                .all_selections()
+                .map(|(set_id, _)| *set_id)
+                .filter(|set_id| local_clock.replica_id == set_id.replica_id)
+                .collect::<Vec<_>>();
+            let set_id = rng.choose(&replica_selection_sets);
+            if set_id.is_some() && rng.gen_weighted_bool(6) {
+                let op = self
+                    .remove_selection_set(*set_id.unwrap(), lamport_clock)
+                    .unwrap();
+                operations.push(op);
+            } else {
+                let mut ranges = Vec::new();
+                for _ in 0..5 {
+                    let start = rng.gen_range(0, self.len() + 1);
+                    let start_point = self.point_for_offset(start).unwrap();
+                    let end = rng.gen_range(0, self.len() + 1);
+                    let end_point = self.point_for_offset(end).unwrap();
+                    ranges.push(start_point..end_point);
+                }
+
+                let op = if set_id.is_none() || rng.gen_weighted_bool(5) {
+                    self.add_selection_set(ranges, lamport_clock).unwrap().1
+                } else {
+                    self.replace_selection_set(*set_id.unwrap(), ranges, lamport_clock)
+                        .unwrap()
+                };
+                operations.push(op);
+            }
+
+            (old_ranges, new_text, operations)
+        }
+
+        fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
+            let mut fragments_cursor = self.fragments.cursor();
+            fragments_cursor.seek(&offset, SeekBias::Left);
+            fragments_cursor
+                .item()
+                .ok_or(Error::OffsetOutOfRange)
+                .map(|fragment| {
+                    let overshoot = fragment
+                        .point_for_offset(offset - &fragments_cursor.start::<usize>())
+                        .unwrap();
+                    fragments_cursor.start::<Point>() + &overshoot
+                })
         }
     }
 }
