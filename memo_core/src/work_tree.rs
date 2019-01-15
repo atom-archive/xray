@@ -163,6 +163,7 @@ impl WorkTree {
         for op in ops {
             match op {
                 Operation::StartEpoch { epoch_id, head } => {
+                    self.lamport_clock.borrow_mut().observe(epoch_id);
                     epoch_streams.push(self.start_epoch(epoch_id, head));
                 }
                 Operation::EpochOperation {
@@ -1331,20 +1332,7 @@ mod tests {
         assert_eq!(tree_2.text_str(a_2), git.tree(commit_0).text_str(a_base));
 
         let ops_1 = open_envelopes(tree_1.reset(Some(commit_1)).collect().wait().unwrap());
-        assert_eq!(tree_1.head(), Some(commit_1));
-        assert_eq!(tree_1.dir_entries(), git.tree(commit_1).dir_entries());
-        assert_eq!(tree_1.text_str(a_1), git.tree(commit_1).text_str(a_1));
-        assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
-
-        let ops_2 = open_envelopes(tree_2.reset(Some(commit_2)).collect().wait().unwrap());
-        assert_eq!(tree_2.head(), Some(commit_2));
-        assert_eq!(tree_2.dir_entries(), git.tree(commit_2).dir_entries());
-        assert_eq!(tree_2.text_str(a_2), git.tree(commit_2).text_str(a_2));
-        assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
-
-        let fixup_ops_1 = tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
         let fixup_ops_2 = tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
-        assert!(fixup_ops_1.is_empty());
         assert!(fixup_ops_2.is_empty());
         assert_eq!(tree_1.head(), Some(commit_1));
         assert_eq!(tree_2.head(), Some(commit_1));
@@ -1354,6 +1342,41 @@ mod tests {
         assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
         assert_eq!(tree_2.text_str(a_2), git.tree(commit_1).text_str(a_2));
         assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
+
+        let ops_2 = open_envelopes(tree_2.reset(Some(commit_2)).collect().wait().unwrap());
+        let fixup_ops_1 = tree_1
+            .apply_ops(ops_2.clone())
+            .unwrap()
+            .collect()
+            .wait()
+            .unwrap();
+        assert!(fixup_ops_1.is_empty());
+        assert_eq!(tree_1.head(), Some(commit_2));
+        assert_eq!(tree_2.head(), Some(commit_2));
+        assert_eq!(tree_1.entries(), tree_2.entries());
+        assert_eq!(tree_1.dir_entries(), git.tree(commit_2).dir_entries());
+        assert_eq!(tree_1.text_str(a_1), git.tree(commit_2).text_str(a_1));
+        assert_eq!(observer_1.text(a_1), tree_1.text_str(a_1));
+        assert_eq!(tree_2.text_str(a_2), git.tree(commit_2).text_str(a_2));
+        assert_eq!(observer_2.text(a_2), tree_2.text_str(a_2));
+
+        // Reload tree using only ops for the newest epoch.
+        let (mut tree_1, ops_1) = WorkTree::new(
+            Uuid::from_u128(1),
+            Some(commit_0),
+            ops_2,
+            git.clone(),
+            Some(observer_1.clone()),
+        )
+        .unwrap();
+        assert!(ops_1.wait().next().is_none());
+        assert_eq!(tree_1.head(), Some(commit_2));
+
+        let ops_1 = open_envelopes(tree_1.reset(Some(commit_0)).collect().wait().unwrap());
+        let fixup_ops_2 = tree_2.apply_ops(ops_1).unwrap().collect().wait().unwrap();
+        assert!(fixup_ops_2.is_empty());
+        assert_eq!(tree_1.head(), Some(commit_0));
+        assert_eq!(tree_2.head(), Some(commit_0));
     }
 
     #[test]
@@ -1553,11 +1576,11 @@ mod tests {
 
         let ops_1 = open_envelopes(tree_1.reset(Some(commit_1)).collect().wait().unwrap());
         let ops_2 = open_envelopes(tree_2.reset(Some(commit_2)).collect().wait().unwrap());
-        // Even though the two sites haven't exchanged operations yet, it's as if tree_1 has
-        // already observed tree_2's state, since it won't ever go back to an epoch whose Lamport
+        // Even though the two sites haven't exchanged operations yet, it's as if tree_2 has
+        // already observed tree_1's state, since it won't ever go back to an epoch whose Lamport
         // timestamp is smaller.
-        assert!(tree_1.observed(tree_2.version()));
-        assert!(!tree_2.observed(tree_1.version()));
+        assert!(!tree_1.observed(tree_2.version()));
+        assert!(tree_2.observed(tree_1.version()));
 
         tree_1.apply_ops(ops_2).unwrap().collect().wait().unwrap();
         assert!(tree_1.observed(tree_2.version()));
