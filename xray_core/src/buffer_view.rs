@@ -1014,7 +1014,7 @@ impl View for BufferView {
         }
 
         let longest_row = buffer.longest_row();
-        let longest_line = if start.row <= longest_row && longest_row <= end.row {
+        let longest_line = if start.row <= longest_row && longest_row < end.row {
             lines[(longest_row - start.row) as usize].clone()
         } else {
             String::from_utf16_lossy(&buffer.line(buffer.longest_row()).unwrap())
