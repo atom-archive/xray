@@ -1068,9 +1068,10 @@ impl Future for SwitchEpoch {
                 let mut buffer_changes = Vec::new();
                 for (buffer_id, new_file_id) in buffer_mappings {
                     let old_file_id = buffers[&buffer_id];
-                    let old_text = cur_epoch.text(old_file_id)?.into_string();
-                    let new_text = to_assign.text(new_file_id)?.into_string();
-                    let changes = buffer::diff(&old_text, &new_text).collect::<Vec<_>>();
+                    let changes = buffer::diff(
+                        &cur_epoch.text(old_file_id)?.collect::<Vec<_>>(),
+                        &to_assign.text(new_file_id)?.collect::<Vec<_>>(),
+                    );
 
                     // TODO: This is inefficient and somewhat inelegant. We should transform
                     // selections using only spatial coordinates, as opposed to editing the

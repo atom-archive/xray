@@ -5,7 +5,7 @@ authors = ["Antonio Scandurra <as-cii@github.com>", "Nathan Sobo <nathan@github.
 edition = "2018"
 
 [dependencies]
-difference = "2.0"
+diffs = "0.3"
 lazy_static = "1.0"
 flatbuffers = "0.5"
 futures = "0.1"

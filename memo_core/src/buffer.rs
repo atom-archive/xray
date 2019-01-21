@@ -3,7 +3,6 @@ use crate::operation_queue::{self, OperationQueue};
 use crate::serialization;
 use crate::time;
 use crate::{Error, ReplicaId};
-use difference::{Changeset, Difference};
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use lazy_static::lazy_static;
 use serde_derive::{Deserialize, Serialize};
@@ -72,11 +71,6 @@ pub struct Iter {
 struct ChangesIter<F: Fn(&FragmentSummary) -> bool> {
     cursor: btree::FilterCursor<F, Fragment>,
     since: time::Global,
-}
-
-struct DiffIter {
-    position: Point,
-    diff: vec::IntoIter<Difference>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1646,76 +1640,69 @@ impl<F: Fn(&FragmentSummary) -> bool> Iterator for ChangesIter<F> {
     }
 }
 
-pub fn diff(a: &str, b: &str) -> impl Iterator<Item = Change> {
-    DiffIter {
-        position: Point::zero(),
-        diff: Changeset::new(a, b, "").diffs.into_iter(),
+pub fn diff(a: &[u16], b: &[u16]) -> Vec<Change> {
+    struct ChangeCollector<'a> {
+        a: &'a [u16],
+        b: &'a [u16],
+        position: Point,
+        changes: Vec<Change>,
     }
-}
 
-impl Iterator for DiffIter {
-    type Item = Change;
+    impl<'a> diffs::Diff for ChangeCollector<'a> {
+        type Error = ();
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut change: Option<Change> = None;
-
-        while let Some(diff) = self.diff.next() {
-            let code_units;
-            let extent;
-            match &diff {
-                Difference::Same(text) | Difference::Rem(text) | Difference::Add(text) => {
-                    code_units = text.encode_utf16().collect::<Vec<_>>();
-
-                    let mut rows = 0;
-                    let mut last_row_len = 0;
-                    for ch in &code_units {
-                        if *ch == b'\n' as u16 {
-                            rows += 1;
-                            last_row_len = 0;
-                        } else {
-                            last_row_len += 1;
-                        }
-                    }
-                    extent = Point::new(rows, last_row_len);
-                }
-            }
-
-            match diff {
-                Difference::Same(_) => {
-                    self.position += &extent;
-                    if change.is_some() {
-                        break;
-                    }
-                }
-                Difference::Rem(_) => {
-                    if let Some(change) = change.as_mut() {
-                        change.range.end += &extent;
-                    } else {
-                        change = Some(Change {
-                            range: self.position..self.position + &extent,
-                            code_units: Vec::new(),
-                            new_extent: Point::zero(),
-                        });
-                    }
-                }
-                Difference::Add(_) => {
-                    if let Some(change) = change.as_mut() {
-                        change.code_units.extend(code_units);
-                        change.new_extent += &extent;
-                    } else {
-                        change = Some(Change {
-                            range: self.position..self.position,
-                            code_units,
-                            new_extent: extent,
-                        });
-                    }
-                    self.position += &extent;
-                }
-            }
+        fn equal(&mut self, old: usize, _: usize, len: usize) -> Result<(), ()> {
+            self.position += &Text::extent(&self.a[old..old + len]);
+            Ok(())
         }
 
-        change
+        fn delete(&mut self, old: usize, len: usize) -> Result<(), ()> {
+            self.changes.push(Change {
+                range: self.position..self.position + &Text::extent(&self.a[old..old + len]),
+                code_units: Vec::new(),
+                new_extent: Point::zero(),
+            });
+            Ok(())
+        }
+
+        fn insert(&mut self, _: usize, new: usize, new_len: usize) -> Result<(), ()> {
+            let new_extent = Text::extent(&self.b[new..new + new_len]);
+            self.changes.push(Change {
+                range: self.position..self.position,
+                code_units: Vec::from(&self.b[new..new + new_len]),
+                new_extent,
+            });
+            self.position += &new_extent;
+            Ok(())
+        }
+
+        fn replace(
+            &mut self,
+            old: usize,
+            old_len: usize,
+            new: usize,
+            new_len: usize,
+        ) -> Result<(), ()> {
+            let old_extent = Text::extent(&self.a[old..old + old_len]);
+            let new_extent = Text::extent(&self.b[new..new + new_len]);
+            self.changes.push(Change {
+                range: self.position..self.position + &old_extent,
+                code_units: Vec::from(&self.b[new..new + new_len]),
+                new_extent,
+            });
+            self.position += &new_extent;
+            Ok(())
+        }
     }
+
+    let mut collector = diffs::Replace::new(ChangeCollector {
+        a,
+        b,
+        position: Point::zero(),
+        changes: Vec::new(),
+    });
+    diffs::myers::diff(&mut collector, a, 0, a.len(), b, 0, b.len()).unwrap();
+    collector.into_inner().changes
 }
 
 impl Selection {
@@ -1881,6 +1868,20 @@ impl Text {
         build_tree(0, &line_lengths, &mut nodes);
 
         Self { code_units, nodes }
+    }
+
+    fn extent(code_units: &[u16]) -> Point {
+        let mut rows = 0;
+        let mut last_row_len = 0;
+        for ch in code_units {
+            if *ch == b'\n' as u16 {
+                rows += 1;
+                last_row_len = 0;
+            } else {
+                last_row_len += 1;
+            }
+        }
+        Point::new(rows, last_row_len)
     }
 
     fn len(&self) -> usize {
