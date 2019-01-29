@@ -786,18 +786,6 @@ impl OperationEnvelope {
 }
 
 impl Operation {
-    fn stamp<T>(epoch_id: epoch::Id, operations: T) -> impl Iterator<Item = Operation>
-    where
-        T: IntoIterator<Item = epoch::Operation>,
-    {
-        operations
-            .into_iter()
-            .map(move |operation| Operation::EpochOperation {
-                epoch_id,
-                operation,
-            })
-    }
-
     pub fn epoch_id(&self) -> epoch::Id {
         match self {
             Operation::StartEpoch { epoch_id, .. } => *epoch_id,
