@@ -211,7 +211,7 @@ impl Epoch {
         }
     }
 
-    pub fn buffer_selections_last_update(&self, file_id: FileId) -> Result<time::Lamport, Error> {
+    pub fn buffer_selections_last_update(&self, file_id: FileId) -> Result<buffer::SelectionsVersion, Error> {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
             Ok(buffer.selections_last_update)
         } else {
@@ -964,7 +964,7 @@ impl Epoch {
     pub fn selections_changed_since(
         &self,
         file_id: FileId,
-        last_selection_update: time::Lamport,
+        last_selection_update: buffer::SelectionsVersion,
     ) -> Result<bool, Error> {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
             Ok(buffer.selections_changed_since(last_selection_update))
