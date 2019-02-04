@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 bincode = "1.0"
+console_error_panic_hook = "0.1"
 futures = "0.1"
 hex = "0.3"
 js-sys = "0.3"

@@ -126,6 +126,8 @@ impl WorkTree {
         base: JsValue,
         js_start_ops: js_sys::Array,
     ) -> Result<WorkTreeNewResult, JsValue> {
+        console_error_panic_hook::set_once();
+
         let replica_id = replica_id.into_serde().map_err(|e| {
             format!("ReplicaId {:?} must be a valid UUID: {}", replica_id, e).into_js_err()
         })?;
