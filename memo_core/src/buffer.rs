@@ -1274,21 +1274,23 @@ impl Buffer {
                         AnchorBias::Right => SeekBias::Right,
                     };
 
-                    let splits = self
-                        .insertion_splits
-                        .get(&insertion_id)
-                        .ok_or(Error::InvalidAnchor)?;
+                    let splits =
+                        self.insertion_splits
+                            .get(&insertion_id)
+                            .ok_or(Error::InvalidAnchor(
+                                "split does not exist for insertion id".into(),
+                            ))?;
                     let mut splits_cursor = splits.cursor();
                     splits_cursor.seek(offset, seek_bias);
                     splits_cursor
                         .item()
-                        .ok_or(Error::InvalidAnchor)
+                        .ok_or(Error::InvalidAnchor("split offset is out of range".into()))
                         .and_then(|split| {
                             let mut fragments_cursor = self.fragments.cursor();
                             fragments_cursor.seek(&split.fragment_id, SeekBias::Left);
                             fragments_cursor
                                 .item()
-                                .ok_or(Error::InvalidAnchor)
+                                .ok_or(Error::InvalidAnchor("fragment id does not exist".into()))
                                 .and_then(|fragment| {
                                     let overshoot = if fragment.is_visible() {
                                         offset - fragment.start_offset

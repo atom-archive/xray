@@ -33,7 +33,7 @@ pub enum Error {
     InvalidOperation,
     InvalidSelectionSet(buffer::SelectionSetId),
     InvalidLocalSelectionSet(LocalSelectionSetId),
-    InvalidAnchor,
+    InvalidAnchor(Cow<'static, str>),
     OffsetOutOfRange,
     CursorExhausted,
 }
@@ -109,7 +109,7 @@ impl PartialEq for Error {
             (Error::InvalidLocalSelectionSet(id_1), Error::InvalidLocalSelectionSet(id_2)) => {
                 id_1 == id_2
             }
-            (Error::InvalidAnchor, Error::InvalidAnchor) => true,
+            (Error::InvalidAnchor(err_1), Error::InvalidAnchor(err_2)) => err_1 == err_2,
             (Error::OffsetOutOfRange, Error::OffsetOutOfRange) => true,
             (Error::CursorExhausted, Error::CursorExhausted) => true,
             _ => false,
