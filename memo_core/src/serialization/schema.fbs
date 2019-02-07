@@ -92,7 +92,12 @@ table BufferOperation {
   lamport_timestamp:Timestamp;
 }
 
-union Operation { InsertMetadata, UpdateParent, BufferOperation }
+table UpdateActiveLocation {
+  file_id:FileId;
+  lamport_timestamp:Timestamp;
+}
+
+union Operation { InsertMetadata, UpdateParent, BufferOperation, UpdateActiveLocation }
 
 namespace worktree;
 

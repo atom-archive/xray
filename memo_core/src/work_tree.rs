@@ -380,6 +380,30 @@ impl WorkTree {
         ))
     }
 
+    pub fn set_active_location<P>(&self, buffer_id: BufferId) -> Result<OperationEnvelope, Error> {
+        let mut cur_epoch = self.cur_epoch_mut();
+        let file_id = self.buffer_file_id(buffer_id)?;
+        let operation =
+            cur_epoch.set_active_location(file_id, &mut self.lamport_clock.borrow_mut())?;
+
+        Ok(OperationEnvelope::wrap(
+            cur_epoch.id,
+            cur_epoch.head,
+            operation,
+        ))
+    }
+
+    pub fn replica_locations(&self) -> HashMap<ReplicaId, PathBuf> {
+        let epoch = self.cur_epoch();
+        let mut locations = HashMap::new();
+        for (replica_id, file_id) in epoch.replica_locations() {
+            if let Some(path) = epoch.path(file_id) {
+                locations.insert(replica_id, path);
+            }
+        }
+        locations
+    }
+
     pub fn remove<P>(&self, path: P) -> Result<OperationEnvelope, Error>
     where
         P: AsRef<Path>,
@@ -1250,6 +1274,7 @@ mod tests {
                 assert_eq!(tree_1.cur_epoch().id, tree_2.cur_epoch().id);
                 assert_eq!(tree_1.cur_epoch().head, tree_2.cur_epoch().head);
                 assert_eq!(tree_1.entries(), tree_2.entries());
+                assert_eq!(tree_1.replica_locations(), tree_2.replica_locations());
             }
 
             for replica_index in 0..PEERS {
