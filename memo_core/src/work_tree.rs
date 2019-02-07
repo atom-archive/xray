@@ -1207,9 +1207,14 @@ mod tests {
             let mut network = Network::new();
             for i in 0..PEERS {
                 let observer = Rc::new(TestChangeObserver::new());
+                let commit = if rng.gen_weighted_bool(4) {
+                    *rng.choose(&commits).unwrap()
+                } else {
+                    *commits.last().unwrap()
+                };
                 let (tree, ops) = WorkTree::new(
                     Uuid::from_u128((i + 1) as u128),
-                    *rng.choose(&commits).unwrap(),
+                    commit,
                     None,
                     git.clone(),
                     Some(observer.clone()),
