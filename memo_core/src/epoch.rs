@@ -211,7 +211,10 @@ impl Epoch {
         }
     }
 
-    pub fn buffer_selections_last_update(&self, file_id: FileId) -> Result<buffer::SelectionsVersion, Error> {
+    pub fn buffer_selections_last_update(
+        &self,
+        file_id: FileId,
+    ) -> Result<buffer::SelectionsVersion, Error> {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
             Ok(buffer.selections_last_update)
         } else {
