@@ -707,6 +707,12 @@ impl Epoch {
         })
     }
 
+    pub fn replica_location(&self, replica_id: ReplicaId) -> Option<FileId> {
+        self.replica_locations
+            .get(&replica_id)
+            .map(|location| location.file_id)
+    }
+
     pub fn replica_locations<'a>(&'a self) -> impl Iterator<Item = (ReplicaId, FileId)> + 'a {
         self.replica_locations
             .iter()
