@@ -95,7 +95,7 @@ pub enum Operation {
         lamport_timestamp: time::Lamport,
     },
     UpdateActiveLocation {
-        file_id: FileId,
+        file_id: Option<FileId>,
         lamport_timestamp: time::Lamport,
     },
 }
@@ -175,7 +175,7 @@ pub struct ChildRefKey {
 
 #[derive(Clone)]
 struct ReplicaLocation {
-    file_id: FileId,
+    file_id: Option<FileId>,
     lamport_timestamp: time::Lamport,
 }
 
@@ -554,7 +554,9 @@ impl Epoch {
             Operation::InsertMetadata { .. } => true,
             Operation::UpdateParent { child_id, .. } => self.metadata(*child_id).is_ok(),
             Operation::BufferOperation { file_id, .. } => self.metadata(*file_id).is_ok(),
-            Operation::UpdateActiveLocation { file_id, .. } => self.metadata(*file_id).is_ok(),
+            Operation::UpdateActiveLocation { file_id, .. } => {
+                file_id.map_or(true, |file_id| self.metadata(file_id).is_ok())
+            }
         }
     }
 
@@ -688,10 +690,12 @@ impl Epoch {
 
     pub fn set_active_location(
         &mut self,
-        file_id: FileId,
+        file_id: Option<FileId>,
         lamport_clock: &mut time::Lamport,
     ) -> Result<Operation, Error> {
-        self.check_file_id(file_id, Some(FileType::Text))?;
+        if let Some(file_id) = file_id {
+            self.check_file_id(file_id, Some(FileType::Text))?;
+        }
 
         let lamport_timestamp = lamport_clock.tick();
         self.replica_locations.insert(
@@ -710,13 +714,15 @@ impl Epoch {
     pub fn replica_location(&self, replica_id: ReplicaId) -> Option<FileId> {
         self.replica_locations
             .get(&replica_id)
-            .map(|location| location.file_id)
+            .and_then(|location| location.file_id)
     }
 
     pub fn replica_locations<'a>(&'a self) -> impl Iterator<Item = (ReplicaId, FileId)> + 'a {
         self.replica_locations
             .iter()
-            .map(|(replica_id, location)| (*replica_id, location.file_id))
+            .filter_map(|(replica_id, location)| {
+                location.file_id.map(|file_id| (*replica_id, file_id))
+            })
     }
 
     pub fn edit<I, T>(
@@ -1514,14 +1520,24 @@ impl Operation {
                 file_id,
                 lamport_timestamp,
             } => {
-                let (file_id_type, file_id) = file_id.to_flatbuf(builder);
+                let file_id_type;
+                let file_id_buf;
+                if let Some(file_id) = file_id {
+                    let file_id_flatbuf = file_id.to_flatbuf(builder);
+                    file_id_type = file_id_flatbuf.0;
+                    file_id_buf = Some(file_id_flatbuf.1);
+                } else {
+                    file_id_type = FileIdType::NONE;
+                    file_id_buf = None;
+                }
+
                 (
                     OperationType::UpdateActiveLocation,
                     UpdateActiveLocation::create(
                         builder,
                         &UpdateActiveLocationArgs {
                             file_id_type,
-                            file_id: Some(file_id),
+                            file_id: file_id_buf,
                             lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
                         },
                     )
@@ -1613,11 +1629,14 @@ impl Operation {
             }
             serialization::epoch::Operation::UpdateActiveLocation => {
                 let message = serialization::epoch::UpdateActiveLocation::init_from_table(message);
+                let file_id = if let Some(file_id) = message.file_id() {
+                    Some(FileId::from_flatbuf(message.file_id_type(), file_id))
+                } else {
+                    None
+                };
+
                 Ok(Some(Operation::UpdateActiveLocation {
-                    file_id: FileId::from_flatbuf(
-                        message.file_id_type(),
-                        message.file_id().ok_or(Error::DeserializeError)?,
-                    ),
+                    file_id,
                     lamport_timestamp: time::Lamport::from_flatbuf(
                         message.lamport_timestamp().ok_or(Error::DeserializeError)?,
                     ),
@@ -2621,7 +2640,8 @@ mod tests {
                         )
                         .unwrap();
                     ops.push(op);
-                } else if let Some(file_id) = self.select_file(rng, Some(FileType::Text), false) {
+                } else {
+                    let file_id = self.select_file(rng, Some(FileType::Text), false);
                     let op = self.set_active_location(file_id, lamport_clock).unwrap();
                     ops.push(op);
                 }

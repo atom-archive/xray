@@ -380,9 +380,16 @@ impl WorkTree {
         ))
     }
 
-    pub fn set_active_location(&self, buffer_id: BufferId) -> Result<OperationEnvelope, Error> {
+    pub fn set_active_location(
+        &self,
+        buffer_id: Option<BufferId>,
+    ) -> Result<OperationEnvelope, Error> {
         let mut cur_epoch = self.cur_epoch_mut();
-        let file_id = self.buffer_file_id(buffer_id)?;
+        let file_id = if let Some(buffer_id) = buffer_id {
+            Some(self.buffer_file_id(buffer_id)?)
+        } else {
+            None
+        };
         let operation =
             cur_epoch.set_active_location(file_id, &mut self.lamport_clock.borrow_mut())?;
 
@@ -1117,7 +1124,7 @@ impl Future for SwitchEpoch {
 
                     if old_active_location.map_or(false, |location| location == old_file_id) {
                         let op = to_assign
-                            .set_active_location(new_file_id, &mut lamport_clock)
+                            .set_active_location(Some(new_file_id), &mut lamport_clock)
                             .unwrap();
                         fixup_ops.push(OperationEnvelope::wrap(to_assign.id, to_assign.head, op));
                     }
@@ -1564,20 +1571,23 @@ mod tests {
         assert!(ops_2.wait().next().is_none());
 
         let a_1 = tree_1.open_text_file("a").wait().unwrap();
-        let b_2 = tree_2.open_text_file("b").wait().unwrap();
-
+        let tree_1_location_op = tree_1.set_active_location(Some(a_1)).unwrap().operation;
         tree_2
-            .apply_ops(Some(tree_1.set_active_location(a_1).unwrap().operation))
+            .apply_ops(Some(tree_1_location_op))
             .unwrap()
             .collect()
             .wait()
             .unwrap();
+
+        let b_2 = tree_2.open_text_file("b").wait().unwrap();
+        let tree_2_location_op = tree_2.set_active_location(Some(b_2)).unwrap().operation;
         tree_1
-            .apply_ops(Some(tree_2.set_active_location(b_2).unwrap().operation))
+            .apply_ops(Some(tree_2_location_op))
             .unwrap()
             .collect()
             .wait()
             .unwrap();
+
         assert_eq!(tree_1.replica_location(replica_1_id).unwrap(), "a");
         assert_eq!(tree_1.replica_location(replica_2_id).unwrap(), "b");
         assert_eq!(tree_2.replica_location(replica_1_id).unwrap(), "a");
@@ -1597,6 +1607,7 @@ mod tests {
             .collect()
             .wait()
             .unwrap();
+
         assert_eq!(tree_1.replica_location(replica_1_id).unwrap(), "a");
         assert_eq!(tree_1.replica_location(replica_2_id).unwrap(), "b");
         assert_eq!(tree_2.replica_location(replica_1_id).unwrap(), "a");
