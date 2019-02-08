@@ -175,6 +175,15 @@ impl WorkTree {
         JsValue::from_serde(&self.0.head().map(|head| HexOid(head))).unwrap()
     }
 
+    pub fn epoch_id(&self) -> Vec<u8> {
+        let epoch_id = self.0.epoch_id();
+        let timestamp_bytes: [u8; 8] = unsafe { mem::transmute(epoch_id.value.to_be()) };
+        let mut epoch_id_bytes = Vec::with_capacity(24);
+        epoch_id_bytes.extend_from_slice(&timestamp_bytes);
+        epoch_id_bytes.extend_from_slice(epoch_id.replica_id.as_bytes());
+        epoch_id_bytes
+    }
+
     pub fn reset(&mut self, base: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
         let base = base
             .into_serde::<Option<HexOid>>()
