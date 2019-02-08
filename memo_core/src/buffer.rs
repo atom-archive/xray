@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::vec;
 
 pub type SelectionSetId = time::Lamport;
+pub type SelectionsVersion = usize;
 
 #[derive(Clone)]
 pub struct Buffer {
@@ -27,7 +28,7 @@ pub struct Buffer {
     pub version: time::Global,
     last_edit: time::Local,
     selections: HashMap<SelectionSetId, Vec<Selection>>,
-    pub selections_last_update: time::Lamport,
+    pub selections_last_update: SelectionsVersion,
     deferred_ops: OperationQueue<Operation>,
     deferred_replicas: HashSet<ReplicaId>,
 }
@@ -226,7 +227,7 @@ impl Buffer {
             version: time::Global::new(),
             last_edit: time::Local::default(),
             selections: HashMap::default(),
-            selections_last_update: time::Lamport::default(),
+            selections_last_update: 0,
             deferred_ops: OperationQueue::new(),
             deferred_replicas: HashSet::new(),
         }
@@ -284,7 +285,7 @@ impl Buffer {
         Iter::at_point(self, point)
     }
 
-    pub fn selections_changed_since(&self, since: time::Lamport) -> bool {
+    pub fn selections_changed_since(&self, since: SelectionsVersion) -> bool {
         self.selections_last_update != since
     }
 
@@ -379,7 +380,7 @@ impl Buffer {
         let lamport_timestamp = lamport_clock.tick();
         self.selections
             .insert(lamport_timestamp, selections.clone());
-        self.selections_last_update = lamport_timestamp;
+        self.selections_last_update += 1;
 
         Ok((
             lamport_timestamp,
@@ -409,7 +410,7 @@ impl Buffer {
         self.selections.insert(set_id, selections.clone());
 
         let lamport_timestamp = lamport_clock.tick();
-        self.selections_last_update = lamport_timestamp;
+        self.selections_last_update += 1;
 
         Ok(Operation::UpdateSelections {
             set_id,
@@ -427,7 +428,7 @@ impl Buffer {
             .remove(&set_id)
             .ok_or(Error::InvalidSelectionSet(set_id))?;
         let lamport_timestamp = lamport_clock.tick();
-        self.selections_last_update = lamport_timestamp;
+        self.selections_last_update += 1;
         Ok(Operation::UpdateSelections {
             set_id,
             selections: None,
@@ -586,7 +587,7 @@ impl Buffer {
                     self.selections.remove(&set_id);
                 }
                 lamport_clock.observe(lamport_timestamp);
-                self.selections_last_update = lamport_timestamp;
+                self.selections_last_update += 1;
             }
         }
         Ok(())

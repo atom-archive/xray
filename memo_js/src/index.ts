@@ -9,7 +9,7 @@ export {
   Range,
   ReplicaId,
   SelectionRanges,
-  SelectionSetId,
+  SelectionSetId
 } from "./support";
 import {
   BufferId,
@@ -154,10 +154,24 @@ export class WorkTree {
     }
     return buffer;
   }
+
+  setActiveLocation(buffer: Buffer | null): OperationEnvelope {
+    return this.tree.set_active_location(buffer ? buffer.id : null);
+  }
+
+  getReplicaLocations(): Map<ReplicaId, Path> {
+    const locations = this.tree.replica_locations();
+
+    const map = new Map<ReplicaId, Path>();
+    for (const replicaId in locations) {
+      map.set(replicaId as ReplicaId, locations[replicaId] as Path);
+    }
+    return map;
+  }
 }
 
 export class Buffer {
-  private id: BufferId;
+  id: BufferId;
   private tree: any;
   private observer: ChangeObserver;
 
@@ -194,7 +208,7 @@ export class Buffer {
 
   getSelectionRanges(): SelectionRanges {
     const selections = this.tree.selection_ranges(this.id);
-    return fromMemoSelectionRanges(selections)
+    return fromMemoSelectionRanges(selections);
   }
 
   onChange(callback: ChangeObserverCallback): Disposable {

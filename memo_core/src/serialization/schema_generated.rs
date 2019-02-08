@@ -1124,11 +1124,12 @@ pub enum Operation {
   InsertMetadata = 1,
   UpdateParent = 2,
   BufferOperation = 3,
+  UpdateActiveLocation = 4,
 
 }
 
 const ENUM_MIN_OPERATION: u8 = 0;
-const ENUM_MAX_OPERATION: u8 = 3;
+const ENUM_MAX_OPERATION: u8 = 4;
 
 impl<'a> flatbuffers::Follow<'a> for Operation {
   type Inner = Self;
@@ -1162,19 +1163,21 @@ impl flatbuffers::Push for Operation {
 }
 
 #[allow(non_camel_case_types)]
-const ENUM_VALUES_OPERATION:[Operation; 4] = [
+const ENUM_VALUES_OPERATION:[Operation; 5] = [
   Operation::NONE,
   Operation::InsertMetadata,
   Operation::UpdateParent,
-  Operation::BufferOperation
+  Operation::BufferOperation,
+  Operation::UpdateActiveLocation
 ];
 
 #[allow(non_camel_case_types)]
-const ENUM_NAMES_OPERATION:[&'static str; 4] = [
+const ENUM_NAMES_OPERATION:[&'static str; 5] = [
     "NONE",
     "InsertMetadata",
     "UpdateParent",
-    "BufferOperation"
+    "BufferOperation",
+    "UpdateActiveLocation"
 ];
 
 pub fn enum_name_operation(e: Operation) -> &'static str {
@@ -1867,6 +1870,126 @@ impl<'a: 'b, 'b> BufferOperationBuilder<'a, 'b> {
   }
 }
 
+pub enum UpdateActiveLocationOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct UpdateActiveLocation<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for UpdateActiveLocation<'a> {
+    type Inner = UpdateActiveLocation<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> UpdateActiveLocation<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        UpdateActiveLocation {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args UpdateActiveLocationArgs<'args>) -> flatbuffers::WIPOffset<UpdateActiveLocation<'bldr>> {
+      let mut builder = UpdateActiveLocationBuilder::new(_fbb);
+      if let Some(x) = args.lamport_timestamp { builder.add_lamport_timestamp(x); }
+      if let Some(x) = args.file_id { builder.add_file_id(x); }
+      builder.add_file_id_type(args.file_id_type);
+      builder.finish()
+    }
+
+    pub const VT_FILE_ID_TYPE: flatbuffers::VOffsetT = 4;
+    pub const VT_FILE_ID: flatbuffers::VOffsetT = 6;
+    pub const VT_LAMPORT_TIMESTAMP: flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub fn file_id_type(&self) -> FileId {
+    self._tab.get::<FileId>(UpdateActiveLocation::VT_FILE_ID_TYPE, Some(FileId::NONE)).unwrap()
+  }
+  #[inline]
+  pub fn file_id(&self) -> Option<flatbuffers::Table<'a>> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(UpdateActiveLocation::VT_FILE_ID, None)
+  }
+  #[inline]
+  pub fn lamport_timestamp(&self) -> Option<&'a super::Timestamp> {
+    self._tab.get::<super::Timestamp>(UpdateActiveLocation::VT_LAMPORT_TIMESTAMP, None)
+  }
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn file_id_as_base_file_id(&'a self) -> Option<BaseFileId> {
+    if self.file_id_type() == FileId::BaseFileId {
+      self.file_id().map(|u| BaseFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn file_id_as_new_file_id(&'a self) -> Option<NewFileId> {
+    if self.file_id_type() == FileId::NewFileId {
+      self.file_id().map(|u| NewFileId::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+}
+
+pub struct UpdateActiveLocationArgs<'a> {
+    pub file_id_type: FileId,
+    pub file_id: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub lamport_timestamp: Option<&'a  super::Timestamp>,
+}
+impl<'a> Default for UpdateActiveLocationArgs<'a> {
+    #[inline]
+    fn default() -> Self {
+        UpdateActiveLocationArgs {
+            file_id_type: FileId::NONE,
+            file_id: None,
+            lamport_timestamp: None,
+        }
+    }
+}
+pub struct UpdateActiveLocationBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> UpdateActiveLocationBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_file_id_type(&mut self, file_id_type: FileId) {
+    self.fbb_.push_slot::<FileId>(UpdateActiveLocation::VT_FILE_ID_TYPE, file_id_type, FileId::NONE);
+  }
+  #[inline]
+  pub fn add_file_id(&mut self, file_id: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(UpdateActiveLocation::VT_FILE_ID, file_id);
+  }
+  #[inline]
+  pub fn add_lamport_timestamp(&mut self, lamport_timestamp: &'b  super::Timestamp) {
+    self.fbb_.push_slot_always::<&super::Timestamp>(UpdateActiveLocation::VT_LAMPORT_TIMESTAMP, lamport_timestamp);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> UpdateActiveLocationBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    UpdateActiveLocationBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<UpdateActiveLocation<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
 }  // pub mod epoch
 
 pub mod worktree {
@@ -2107,6 +2230,16 @@ impl<'a> EpochOperation<'a> {
   pub fn operation_as_buffer_operation(&'a self) -> Option<super::epoch::BufferOperation> {
     if self.operation_type() == super::epoch::Operation::BufferOperation {
       self.operation().map(|u| super::epoch::BufferOperation::init_from_table(u))
+    } else {
+      None
+    }
+  }
+
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn operation_as_update_active_location(&'a self) -> Option<super::epoch::UpdateActiveLocation> {
+    if self.operation_type() == super::epoch::Operation::UpdateActiveLocation {
+      self.operation().map(|u| super::epoch::UpdateActiveLocation::init_from_table(u))
     } else {
       None
     }

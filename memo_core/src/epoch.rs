@@ -30,6 +30,7 @@ pub struct Epoch {
     metadata: btree::Tree<Metadata>,
     parent_refs: btree::Tree<ParentRefValue>,
     child_refs: btree::Tree<ChildRefValue>,
+    replica_locations: HashMap<ReplicaId, ReplicaLocation>,
     version: time::Global,
     local_clock: time::Local,
     text_files: HashMap<FileId, TextFile>,
@@ -91,6 +92,10 @@ pub enum Operation {
         file_id: FileId,
         operations: Vec<buffer::Operation>,
         local_timestamp: time::Local,
+        lamport_timestamp: time::Lamport,
+    },
+    UpdateActiveLocation {
+        file_id: Option<FileId>,
         lamport_timestamp: time::Lamport,
     },
 }
@@ -169,6 +174,12 @@ pub struct ChildRefKey {
 }
 
 #[derive(Clone)]
+struct ReplicaLocation {
+    file_id: Option<FileId>,
+    lamport_timestamp: time::Lamport,
+}
+
+#[derive(Clone)]
 enum TextFile {
     Deferred(Vec<buffer::Operation>),
     Buffered(Buffer),
@@ -184,6 +195,7 @@ impl Epoch {
             metadata: btree::Tree::new(),
             parent_refs: btree::Tree::new(),
             child_refs: btree::Tree::new(),
+            replica_locations: HashMap::new(),
             version: time::Global::new(),
             local_clock: time::Local::new(replica_id),
             text_files: HashMap::new(),
@@ -199,7 +211,10 @@ impl Epoch {
         }
     }
 
-    pub fn buffer_selections_last_update(&self, file_id: FileId) -> Result<time::Lamport, Error> {
+    pub fn buffer_selections_last_update(
+        &self,
+        file_id: FileId,
+    ) -> Result<buffer::SelectionsVersion, Error> {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
             Ok(buffer.selections_last_update)
         } else {
@@ -370,8 +385,10 @@ impl Epoch {
         op: Operation,
         lamport_clock: &mut time::Lamport,
     ) -> Result<(), Error> {
-        self.version.observe(op.local_timestamp());
-        self.local_clock.observe(op.local_timestamp());
+        if let Some(local_timestamp) = op.local_timestamp() {
+            self.version.observe(local_timestamp);
+            self.local_clock.observe(local_timestamp);
+        }
         lamport_clock.observe(op.lamport_timestamp());
 
         match op {
@@ -509,6 +526,24 @@ impl Epoch {
                         .map_err(|_| Error::InvalidOperation)?;
                 }
             },
+            Operation::UpdateActiveLocation {
+                file_id,
+                lamport_timestamp,
+                ..
+            } => {
+                self.replica_locations
+                    .entry(lamport_timestamp.replica_id)
+                    .and_modify(|location| {
+                        if lamport_timestamp > location.lamport_timestamp {
+                            location.file_id = file_id;
+                            location.lamport_timestamp = lamport_timestamp;
+                        }
+                    })
+                    .or_insert(ReplicaLocation {
+                        file_id,
+                        lamport_timestamp,
+                    });
+            }
         }
 
         Ok(())
@@ -519,6 +554,9 @@ impl Epoch {
             Operation::InsertMetadata { .. } => true,
             Operation::UpdateParent { child_id, .. } => self.metadata(*child_id).is_ok(),
             Operation::BufferOperation { file_id, .. } => self.metadata(*file_id).is_ok(),
+            Operation::UpdateActiveLocation { file_id, .. } => {
+                file_id.map_or(true, |file_id| self.metadata(file_id).is_ok())
+            }
         }
     }
 
@@ -648,6 +686,43 @@ impl Epoch {
         };
         self.apply_op(operation.clone(), lamport_clock).unwrap();
         Ok(operation)
+    }
+
+    pub fn set_active_location(
+        &mut self,
+        file_id: Option<FileId>,
+        lamport_clock: &mut time::Lamport,
+    ) -> Result<Operation, Error> {
+        if let Some(file_id) = file_id {
+            self.check_file_id(file_id, Some(FileType::Text))?;
+        }
+
+        let lamport_timestamp = lamport_clock.tick();
+        self.replica_locations.insert(
+            lamport_timestamp.replica_id,
+            ReplicaLocation {
+                lamport_timestamp,
+                file_id,
+            },
+        );
+        Ok(Operation::UpdateActiveLocation {
+            file_id,
+            lamport_timestamp,
+        })
+    }
+
+    pub fn replica_location(&self, replica_id: ReplicaId) -> Option<FileId> {
+        self.replica_locations
+            .get(&replica_id)
+            .and_then(|location| location.file_id)
+    }
+
+    pub fn replica_locations<'a>(&'a self) -> impl Iterator<Item = (ReplicaId, FileId)> + 'a {
+        self.replica_locations
+            .iter()
+            .filter_map(|(replica_id, location)| {
+                location.file_id.map(|file_id| (*replica_id, file_id))
+            })
     }
 
     pub fn edit<I, T>(
@@ -904,7 +979,7 @@ impl Epoch {
     pub fn selections_changed_since(
         &self,
         file_id: FileId,
-        last_selection_update: time::Lamport,
+        last_selection_update: buffer::SelectionsVersion,
     ) -> Result<bool, Error> {
         if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
             Ok(buffer.selections_changed_since(last_selection_update))
@@ -1295,17 +1370,18 @@ impl<'a> Cursor<'a> {
 }
 
 impl Operation {
-    fn local_timestamp(&self) -> time::Local {
+    fn local_timestamp(&self) -> Option<time::Local> {
         match self {
             Operation::InsertMetadata {
                 local_timestamp, ..
-            } => *local_timestamp,
+            } => Some(*local_timestamp),
             Operation::UpdateParent {
                 local_timestamp, ..
-            } => *local_timestamp,
+            } => Some(*local_timestamp),
             Operation::BufferOperation {
                 local_timestamp, ..
-            } => *local_timestamp,
+            } => Some(*local_timestamp),
+            Operation::UpdateActiveLocation { .. } => None,
         }
     }
 
@@ -1320,6 +1396,9 @@ impl Operation {
             Operation::BufferOperation {
                 lamport_timestamp, ..
             } => *lamport_timestamp,
+            Operation::UpdateActiveLocation {
+                lamport_timestamp, ..
+            } => *lamport_timestamp,
         }
     }
 
@@ -1329,7 +1408,8 @@ impl Operation {
     ) -> (serialization::epoch::Operation, WIPOffset<UnionWIPOffset>) {
         use crate::serialization::epoch::{
             BufferOperation, BufferOperationArgs, FileId as FileIdType, InsertMetadata,
-            InsertMetadataArgs, Operation as OperationType, UpdateParent, UpdateParentArgs,
+            InsertMetadataArgs, Operation as OperationType, UpdateActiveLocation,
+            UpdateActiveLocationArgs, UpdateParent, UpdateParentArgs,
         };
 
         fn parent_to_flatbuf<'a, 'fbb>(
@@ -1436,6 +1516,34 @@ impl Operation {
                     .as_union_value(),
                 )
             }
+            Operation::UpdateActiveLocation {
+                file_id,
+                lamport_timestamp,
+            } => {
+                let file_id_type;
+                let file_id_buf;
+                if let Some(file_id) = file_id {
+                    let file_id_flatbuf = file_id.to_flatbuf(builder);
+                    file_id_type = file_id_flatbuf.0;
+                    file_id_buf = Some(file_id_flatbuf.1);
+                } else {
+                    file_id_type = FileIdType::NONE;
+                    file_id_buf = None;
+                }
+
+                (
+                    OperationType::UpdateActiveLocation,
+                    UpdateActiveLocation::create(
+                        builder,
+                        &UpdateActiveLocationArgs {
+                            file_id_type,
+                            file_id: file_id_buf,
+                            lamport_timestamp: Some(&lamport_timestamp.to_flatbuf()),
+                        },
+                    )
+                    .as_union_value(),
+                )
+            }
         }
     }
 
@@ -1514,6 +1622,21 @@ impl Operation {
                     local_timestamp: time::Local::from_flatbuf(
                         message.local_timestamp().ok_or(Error::DeserializeError)?,
                     ),
+                    lamport_timestamp: time::Lamport::from_flatbuf(
+                        message.lamport_timestamp().ok_or(Error::DeserializeError)?,
+                    ),
+                }))
+            }
+            serialization::epoch::Operation::UpdateActiveLocation => {
+                let message = serialization::epoch::UpdateActiveLocation::init_from_table(message);
+                let file_id = if let Some(file_id) = message.file_id() {
+                    Some(FileId::from_flatbuf(message.file_id_type(), file_id))
+                } else {
+                    None
+                };
+
+                Ok(Some(Operation::UpdateActiveLocation {
+                    file_id,
                     lamport_timestamp: time::Lamport::from_flatbuf(
                         message.lamport_timestamp().ok_or(Error::DeserializeError)?,
                     ),
@@ -2368,6 +2491,10 @@ mod tests {
 
             for i in 0..PEERS - 1 {
                 assert_eq!(epochs[i].entries(), epochs[i + 1].entries());
+                assert_eq!(
+                    epochs[i].replica_locations().collect::<HashMap<_, _>>(),
+                    epochs[i + 1].replica_locations().collect::<HashMap<_, _>>()
+                );
             }
 
             for i in 0..PEERS {
@@ -2442,8 +2569,8 @@ mod tests {
         ) -> Vec<Operation> {
             let mut ops = Vec::new();
             for _ in 0..count {
-                let k = rng.gen_range(0, 4);
-                if self.child_refs.is_empty() || k == 0 {
+                let k = rng.gen_range(0, 10);
+                if self.child_refs.is_empty() || k < 2 {
                     // println!("Random mutation: Creating file");
                     let parent_id = self
                         .select_file(rng, Some(FileType::Directory), true)
@@ -2465,11 +2592,11 @@ mod tests {
                             Err(_) => {}
                         }
                     }
-                } else if k == 1 {
+                } else if k < 4 {
                     let file_id = self.select_file(rng, None, false).unwrap();
                     // println!("Random mutation: Removing {:?}", file_id);
                     ops.push(self.remove(file_id, lamport_clock).unwrap());
-                } else if k == 2 {
+                } else if k < 7 {
                     let file_id = self.select_file(rng, None, false).unwrap();
                     loop {
                         let new_parent_id = self
@@ -2488,7 +2615,7 @@ mod tests {
                             Err(_error) => {}
                         }
                     }
-                } else if k == 3 && self.text_files.values().any(|f| f.is_buffered()) {
+                } else if k < 9 && self.text_files.values().any(|f| f.is_buffered()) {
                     let buffered_file_ids = self
                         .text_files
                         .iter()
@@ -2512,6 +2639,10 @@ mod tests {
                             },
                         )
                         .unwrap();
+                    ops.push(op);
+                } else {
+                    let file_id = self.select_file(rng, Some(FileType::Text), false);
+                    let op = self.set_active_location(file_id, lamport_clock).unwrap();
                     ops.push(op);
                 }
             }

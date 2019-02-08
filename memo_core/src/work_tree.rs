@@ -380,6 +380,37 @@ impl WorkTree {
         ))
     }
 
+    pub fn set_active_location(
+        &self,
+        buffer_id: Option<BufferId>,
+    ) -> Result<OperationEnvelope, Error> {
+        let mut cur_epoch = self.cur_epoch_mut();
+        let file_id = if let Some(buffer_id) = buffer_id {
+            Some(self.buffer_file_id(buffer_id)?)
+        } else {
+            None
+        };
+        let operation =
+            cur_epoch.set_active_location(file_id, &mut self.lamport_clock.borrow_mut())?;
+
+        Ok(OperationEnvelope::wrap(
+            cur_epoch.id,
+            cur_epoch.head,
+            operation,
+        ))
+    }
+
+    pub fn replica_locations(&self) -> HashMap<ReplicaId, PathBuf> {
+        let epoch = self.cur_epoch();
+        let mut locations = HashMap::new();
+        for (replica_id, file_id) in epoch.replica_locations() {
+            if let Some(path) = epoch.path(file_id) {
+                locations.insert(replica_id, path);
+            }
+        }
+        locations
+    }
+
     pub fn remove<P>(&self, path: P) -> Result<OperationEnvelope, Error>
     where
         P: AsRef<Path>,
@@ -1053,6 +1084,7 @@ impl Future for SwitchEpoch {
                 }
                 deferred_ops.retain(|id, _| *id > to_assign.id);
 
+                let old_active_location = cur_epoch.replica_location(lamport_clock.replica_id);
                 let mut buffer_changes = Vec::new();
                 for (buffer_id, new_file_id) in buffer_mappings {
                     let old_file_id = buffers[&buffer_id];
@@ -1088,6 +1120,13 @@ impl Future for SwitchEpoch {
                             ));
                             *set_id = new_set_id;
                         }
+                    }
+
+                    if old_active_location.map_or(false, |location| location == old_file_id) {
+                        let op = to_assign
+                            .set_active_location(Some(new_file_id), &mut lamport_clock)
+                            .unwrap();
+                        fixup_ops.push(OperationEnvelope::wrap(to_assign.id, to_assign.head, op));
                     }
 
                     buffer_changes.push((buffer_id, changes));
@@ -1183,9 +1222,14 @@ mod tests {
             let mut network = Network::new();
             for i in 0..PEERS {
                 let observer = Rc::new(TestChangeObserver::new());
+                let commit = if rng.gen_weighted_bool(4) {
+                    *rng.choose(&commits).unwrap()
+                } else {
+                    *commits.last().unwrap()
+                };
                 let (tree, ops) = WorkTree::new(
                     Uuid::from_u128((i + 1) as u128),
-                    *rng.choose(&commits).unwrap(),
+                    commit,
                     None,
                     git.clone(),
                     Some(observer.clone()),
@@ -1250,6 +1294,7 @@ mod tests {
                 assert_eq!(tree_1.cur_epoch().id, tree_2.cur_epoch().id);
                 assert_eq!(tree_1.cur_epoch().head, tree_2.cur_epoch().head);
                 assert_eq!(tree_1.entries(), tree_2.entries());
+                assert_eq!(tree_1.replica_locations(), tree_2.replica_locations());
             }
 
             for replica_index in 0..PEERS {
@@ -1498,6 +1543,78 @@ mod tests {
     }
 
     #[test]
+    fn test_active_location_across_resets() {
+        let git = Rc::new(TestGitProvider::new());
+        let base_tree = WorkTree::empty();
+        base_tree.create_file("a", FileType::Text).unwrap();
+        base_tree.create_file("b", FileType::Text).unwrap();
+        base_tree.create_file("c", FileType::Text).unwrap();
+        let commit_0 = git.commit(&base_tree);
+
+        base_tree.create_file("d", FileType::Text).unwrap();
+        base_tree.create_file("e", FileType::Text).unwrap();
+        let commit_1 = git.commit(&base_tree);
+
+        let replica_1_id = Uuid::from_u128(1);
+        let (mut tree_1, ops_1) =
+            WorkTree::new(replica_1_id, Some(commit_0), vec![], git.clone(), None).unwrap();
+
+        let replica_2_id = Uuid::from_u128(2);
+        let (mut tree_2, ops_2) = WorkTree::new(
+            replica_2_id,
+            Some(commit_0),
+            open_envelopes(ops_1.collect().wait().unwrap()),
+            git.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(ops_2.wait().next().is_none());
+
+        let a_1 = tree_1.open_text_file("a").wait().unwrap();
+        let tree_1_location_op = tree_1.set_active_location(Some(a_1)).unwrap().operation;
+        tree_2
+            .apply_ops(Some(tree_1_location_op))
+            .unwrap()
+            .collect()
+            .wait()
+            .unwrap();
+
+        let b_2 = tree_2.open_text_file("b").wait().unwrap();
+        let tree_2_location_op = tree_2.set_active_location(Some(b_2)).unwrap().operation;
+        tree_1
+            .apply_ops(Some(tree_2_location_op))
+            .unwrap()
+            .collect()
+            .wait()
+            .unwrap();
+
+        assert_eq!(tree_1.replica_location(replica_1_id).unwrap(), "a");
+        assert_eq!(tree_1.replica_location(replica_2_id).unwrap(), "b");
+        assert_eq!(tree_2.replica_location(replica_1_id).unwrap(), "a");
+        assert_eq!(tree_2.replica_location(replica_2_id).unwrap(), "b");
+
+        let fixup_ops_1 = tree_1.reset(Some(commit_1)).collect().wait().unwrap();
+        assert_eq!(tree_1.replica_location(replica_1_id).unwrap(), "a");
+        let fixup_ops_2 = tree_2
+            .apply_ops(open_envelopes(fixup_ops_1))
+            .unwrap()
+            .collect()
+            .wait()
+            .unwrap();
+        tree_1
+            .apply_ops(open_envelopes(fixup_ops_2))
+            .unwrap()
+            .collect()
+            .wait()
+            .unwrap();
+
+        assert_eq!(tree_1.replica_location(replica_1_id).unwrap(), "a");
+        assert_eq!(tree_1.replica_location(replica_2_id).unwrap(), "b");
+        assert_eq!(tree_2.replica_location(replica_1_id).unwrap(), "a");
+        assert_eq!(tree_2.replica_location(replica_2_id).unwrap(), "b");
+    }
+
+    #[test]
     fn test_exists() {
         let git = Rc::new(TestGitProvider::new());
         let commit = git.commit(&WorkTree::empty());
@@ -1733,6 +1850,12 @@ mod tests {
                     }
                 }
             }
+        }
+
+        fn replica_location(&self, replica_id: ReplicaId) -> Option<String> {
+            self.replica_locations()
+                .get(&replica_id)
+                .map(|path| path.to_string_lossy().into_owned())
         }
     }
 
