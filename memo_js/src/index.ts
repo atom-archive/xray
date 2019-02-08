@@ -9,7 +9,7 @@ export {
   Range,
   ReplicaId,
   SelectionRanges,
-  SelectionSetId,
+  SelectionSetId
 } from "./support";
 import {
   BufferId,
@@ -194,7 +194,7 @@ export class Buffer {
 
   getSelectionRanges(): SelectionRanges {
     const selections = this.tree.selection_ranges(this.id);
-    return fromMemoSelectionRanges(selections)
+    return fromMemoSelectionRanges(selections);
   }
 
   onChange(callback: ChangeObserverCallback): Disposable {
