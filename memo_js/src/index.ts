@@ -154,10 +154,24 @@ export class WorkTree {
     }
     return buffer;
   }
+
+  setActiveLocation(buffer: Buffer | null): OperationEnvelope {
+    return this.tree.set_active_location(buffer ? buffer.id : null);
+  }
+
+  getReplicaLocations(): Map<ReplicaId, Path> {
+    const locations = this.tree.replica_locations();
+
+    const map = new Map<ReplicaId, Path>();
+    for (const replicaId in locations) {
+      map.set(replicaId as ReplicaId, locations[replicaId] as Path);
+    }
+    return map;
+  }
 }
 
 export class Buffer {
-  private id: BufferId;
+  id: BufferId;
   private tree: any;
   private observer: ChangeObserver;
 

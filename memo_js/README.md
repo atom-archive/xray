@@ -167,6 +167,19 @@ buffer.onChange(change => {
 });
 ```
 
+## Changing the active location
+
+Optionally, you can also retrieve the location of other peers and transmit yours using the location API:
+
+```ts
+const operation = tree.setActiveLocation(buffer);
+broadcast([operation]);
+
+console.log(tree.getReplicaLocations()); /* => {
+  "65242244-9706-4b42-9785-fa5cbe5d5709": "foo/qux"
+}*/
+```
+
 ## Resetting to a different base commit
 
 If you want to reset the work tree to a different (possibly `null`) base (e.g. after a commit or a `git reset`), you can use the `reset` method:

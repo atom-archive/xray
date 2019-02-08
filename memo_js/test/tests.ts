@@ -289,6 +289,55 @@ suite("WorkTree", () => {
     assert.deepEqual(last(selection2Changes), buffer2.getSelectionRanges());
   });
 
+  test("active location", async () => {
+    const oid = "0".repeat(40);
+    const git = new TestGitProvider();
+    git.commit(oid, [
+      { depth: 1, name: "a", type: FileType.Text, text: "a" },
+      { depth: 1, name: "b", type: FileType.Text, text: "b" }
+    ]);
+
+    const replicaId1 = uuid();
+    const [tree1, initOps1] = await WorkTree.create(replicaId1, oid, [], git);
+
+    const replicaId2 = uuid();
+    const [tree2, initOps2] = await WorkTree.create(
+      replicaId2,
+      oid,
+      await collectOps(initOps1),
+      git
+    );
+    assert.strictEqual((await collectOps(initOps2)).length, 0);
+
+    const buffer1 = await tree1.openTextFile("a");
+    const buffer2 = await tree2.openTextFile("b");
+
+    await collectOps(
+      tree1.applyOps([tree2.setActiveLocation(buffer2).operation()])
+    );
+    await collectOps(
+      tree2.applyOps([tree1.setActiveLocation(buffer1).operation()])
+    );
+    assert.deepStrictEqual(mapToObject(tree1.getReplicaLocations()), {
+      [replicaId1]: "a",
+      [replicaId2]: "b"
+    });
+    assert.deepStrictEqual(mapToObject(tree2.getReplicaLocations()), {
+      [replicaId1]: "a",
+      [replicaId2]: "b"
+    });
+
+    await collectOps(
+      tree1.applyOps([tree2.setActiveLocation(null).operation()])
+    );
+    assert.deepStrictEqual(mapToObject(tree1.getReplicaLocations()), {
+      [replicaId1]: "a"
+    });
+    assert.deepStrictEqual(mapToObject(tree2.getReplicaLocations()), {
+      [replicaId1]: "a"
+    });
+  });
+
   test("an invalid base commit oid throws an error instead of crashing", async () => {
     assert.rejects(
       () => WorkTree.create(uuid(), "12345678", [], new TestGitProvider()),

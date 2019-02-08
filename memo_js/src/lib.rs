@@ -238,6 +238,18 @@ impl WorkTree {
         self.0.exists(&path)
     }
 
+    pub fn set_active_location(&self, buffer_id: JsValue) -> Result<OperationEnvelope, JsValue> {
+        let buffer_id = buffer_id.into_serde().map_err(|e| e.into_js_err())?;
+        self.0
+            .set_active_location(buffer_id)
+            .map(|operation| OperationEnvelope::new(operation))
+            .map_err(|e| e.into_js_err())
+    }
+
+    pub fn replica_locations(&self) -> JsValue {
+        JsValue::from_serde(&self.0.replica_locations()).unwrap()
+    }
+
     pub fn open_text_file(&mut self, path: String) -> js_sys::Promise {
         future_to_promise(
             self.0
