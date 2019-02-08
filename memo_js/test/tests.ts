@@ -367,7 +367,7 @@ suite("WorkTree", () => {
     assert.strictEqual(envelope3.epochHead(), OID);
   });
 
-  test("epoch id", async () => {
+  test("epoch id on operation envelopes", async () => {
     const git = new TestGitProvider();
     const replicaId = uuid();
     const [tree] = await WorkTree.create(replicaId, null, [], git);
@@ -377,6 +377,16 @@ suite("WorkTree", () => {
     const envelope2EpochId = parseEpochId(envelope2.epochId());
     assert.deepStrictEqual(envelope1EpochId, envelope2EpochId);
     assert.equal(envelope1EpochId.replicaId, replicaId);
+  });
+
+  test("epoch id on WorkTree", async () => {
+    const git = new TestGitProvider();
+    const replicaId = uuid();
+    const [tree] = await WorkTree.create(replicaId, null, [], git);
+    const envelope = tree.createFile("a", FileType.Text);
+    const envelopeEpochId = parseEpochId(envelope.epochId());
+    const treeEpochId = parseEpochId(tree.epochId());
+    assert.deepStrictEqual(envelopeEpochId, treeEpochId);
   });
 
   test("replica id", async () => {
