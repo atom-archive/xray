@@ -7,6 +7,7 @@ use serde::{Deserializer, Serializer};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::{self, Ordering};
 use std::collections::HashMap;
+use std::mem;
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 
@@ -211,5 +212,12 @@ impl Lamport {
             value: message.value(),
             replica_id: ReplicaId::from_flatbuf(message.replica_id()),
         }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 24] {
+        let mut bytes = [0; 24];
+        bytes[0..8].copy_from_slice(unsafe { &mem::transmute::<u64, [u8; 8]>(self.value.to_be()) });
+        bytes[8..24].copy_from_slice(self.replica_id.as_bytes());
+        bytes
     }
 }

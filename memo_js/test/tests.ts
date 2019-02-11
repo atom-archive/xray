@@ -377,6 +377,11 @@ suite("WorkTree", () => {
     const envelope2EpochId = parseEpochId(envelope2.epochId());
     assert.deepStrictEqual(envelope1EpochId, envelope2EpochId);
     assert.equal(envelope1EpochId.replicaId, replicaId);
+
+    const [envelope3] = await collect(tree.reset(null));
+    const envelope3EpochId = parseEpochId(envelope3.epochId());
+    assert.notDeepStrictEqual(envelope3EpochId, envelope2EpochId);
+    assert(envelope3EpochId.timestamp > envelope2EpochId.timestamp);
   });
 
   test("epoch id on WorkTree", async () => {
@@ -562,7 +567,7 @@ function parseEpochId(epochId: Uint8Array): ParsedEpochId {
   // Timestamp is a u64 but JavaScript doesn't support it, so we fail if its
   // high bits are not 0.
   assert.equal(epochIdBuffer.readUInt32BE(0), 0);
-  const timestamp = epochIdBuffer.readUInt32BE(1);
+  const timestamp = epochIdBuffer.readUInt32BE(4);
   const replicaId = uuidParse.unparse(epochIdBuffer.slice(8)) as ReplicaId;
   return { timestamp, replicaId };
 }
