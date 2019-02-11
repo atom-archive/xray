@@ -111,6 +111,10 @@ export class WorkTree {
     return this.tree.head();
   }
 
+  epochId(): EpochId {
+    return this.tree.epoch_id();
+  }
+
   reset(base: Oid | null): AsyncIterable<OperationEnvelope> {
     return this.tree.reset(base);
   }

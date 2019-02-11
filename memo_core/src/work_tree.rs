@@ -138,6 +138,10 @@ impl WorkTree {
         self.epoch.as_ref().and_then(|e| e.borrow().head)
     }
 
+    pub fn epoch_id(&self) -> epoch::Id {
+        self.cur_epoch().id
+    }
+
     pub fn reset(
         &mut self,
         head: Option<Oid>,

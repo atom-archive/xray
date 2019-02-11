@@ -9,7 +9,6 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::marker::PhantomData;
-use std::mem;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -173,6 +172,10 @@ impl WorkTree {
 
     pub fn head(&self) -> JsValue {
         JsValue::from_serde(&self.0.head().map(|head| HexOid(head))).unwrap()
+    }
+
+    pub fn epoch_id(&self) -> Vec<u8> {
+        self.0.epoch_id().to_bytes().to_vec()
     }
 
     pub fn reset(&mut self, base: JsValue) -> Result<StreamToAsyncIterator, JsValue> {
@@ -418,12 +421,7 @@ impl OperationEnvelope {
 
     #[wasm_bindgen(js_name = epochId)]
     pub fn epoch_id(&self) -> Vec<u8> {
-        let epoch_id = self.0.operation.epoch_id();
-        let timestamp_bytes: [u8; 8] = unsafe { mem::transmute(epoch_id.value.to_be()) };
-        let mut epoch_id_bytes = Vec::with_capacity(24);
-        epoch_id_bytes.extend_from_slice(&timestamp_bytes);
-        epoch_id_bytes.extend_from_slice(epoch_id.replica_id.as_bytes());
-        epoch_id_bytes
+        self.0.operation.epoch_id().to_bytes().to_vec()
     }
 
     #[wasm_bindgen(js_name = epochReplicaId)]
