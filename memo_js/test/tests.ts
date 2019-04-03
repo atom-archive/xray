@@ -109,6 +109,7 @@ suite("WorkTree", () => {
         type: FileType.Directory,
         name: "a",
         path: "a",
+        basePath: "a",
         status: FileStatus.Unchanged,
         visible: true
       },
@@ -117,6 +118,7 @@ suite("WorkTree", () => {
         type: FileType.Text,
         name: "e",
         path: "e",
+        basePath: null,
         status: FileStatus.New,
         visible: true
       },
@@ -125,6 +127,7 @@ suite("WorkTree", () => {
         type: FileType.Text,
         name: "f",
         path: "f",
+        basePath: null,
         status: FileStatus.New,
         visible: true
       }
@@ -137,6 +140,7 @@ suite("WorkTree", () => {
           type: FileType.Directory,
           name: "a",
           path: "a",
+          basePath: "a",
           status: FileStatus.Unchanged,
           visible: true
         },
@@ -145,6 +149,7 @@ suite("WorkTree", () => {
           type: FileType.Directory,
           name: "b",
           path: "a/b",
+          basePath: "a/b",
           status: FileStatus.Unchanged,
           visible: true
         },
@@ -153,6 +158,7 @@ suite("WorkTree", () => {
           type: FileType.Text,
           name: "c",
           path: "a/b/c",
+          basePath: "a/b/c",
           status: FileStatus.Modified,
           visible: true
         },
@@ -161,6 +167,7 @@ suite("WorkTree", () => {
           type: FileType.Directory,
           name: "d",
           path: "a/b/d",
+          basePath: "a/b/d",
           status: FileStatus.Removed,
           visible: false
         },
@@ -169,6 +176,7 @@ suite("WorkTree", () => {
           type: FileType.Directory,
           name: "x",
           path: "a/b/x",
+          basePath: null,
           status: FileStatus.New,
           visible: true
         },
@@ -177,6 +185,7 @@ suite("WorkTree", () => {
           type: FileType.Text,
           name: "e",
           path: "e",
+          basePath: null,
           status: FileStatus.New,
           visible: true
         },
@@ -185,6 +194,7 @@ suite("WorkTree", () => {
           type: FileType.Text,
           name: "f",
           path: "f",
+          basePath: null,
           status: FileStatus.New,
           visible: true
         }
@@ -215,6 +225,63 @@ suite("WorkTree", () => {
 
     await collectOps(tree1.reset(null));
     assert.strictEqual(tree1.head(), null);
+  });
+
+  test("base path", async () => {
+    const OID_0 = "0".repeat(40);
+
+    const git = new TestGitProvider();
+    git.commit(OID_0, [
+      { depth: 1, name: "a", type: FileType.Directory },
+      { depth: 2, name: "b", type: FileType.Directory },
+      { depth: 3, name: "c", type: FileType.Text, text: "oid0 base text" },
+      { depth: 3, name: "d", type: FileType.Directory }
+    ]);
+
+    const [tree, initOps] = await WorkTree.create(uuid(), OID_0, [], git);
+    await collectOps(initOps);
+
+    tree.rename("a/b/c", "e");
+    tree.remove("a/b/d");
+    tree.createFile("f", FileType.Text);
+    assert.deepStrictEqual(tree.entries(), [
+      {
+        depth: 1,
+        name: "a",
+        basePath: "a",
+        path: "a",
+        status: FileStatus.Unchanged,
+        type: FileType.Directory,
+        visible: true
+      },
+      {
+        depth: 2,
+        name: "b",
+        path: "a/b",
+        basePath: "a/b",
+        status: FileStatus.Unchanged,
+        type: FileType.Directory,
+        visible: true
+      },
+      {
+        depth: 1,
+        name: "e",
+        path: "e",
+        basePath: "a/b/c",
+        status: FileStatus.Renamed,
+        type: FileType.Text,
+        visible: true
+      },
+      {
+        depth: 1,
+        name: "f",
+        path: "f",
+        basePath: null,
+        status: FileStatus.New,
+        type: FileType.Text,
+        visible: true
+      }
+    ]);
   });
 
   test("selections", async () => {

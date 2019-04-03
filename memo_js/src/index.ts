@@ -65,7 +65,8 @@ export interface Entry {
   readonly depth: number;
   readonly type: FileType;
   readonly name: string;
-  readonly path: string;
+  readonly path: Path;
+  readonly basePath: Path | null;
   readonly status: FileStatus;
   readonly visible: boolean;
 }

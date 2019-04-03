@@ -38,7 +38,7 @@ pub struct Epoch {
 }
 
 pub struct Cursor<'a> {
-    text_files: &'a HashMap<FileId, TextFile>,
+    epoch: &'a Epoch,
     metadata_cursor: btree::Cursor<Metadata>,
     parent_ref_cursor: btree::Cursor<ParentRefValue>,
     child_ref_cursor: btree::Cursor<ChildRefValue>,
@@ -231,7 +231,7 @@ impl Epoch {
         let parent_ref_cursor = self.parent_refs.cursor();
         let child_ref_cursor = self.child_refs.cursor();
         let mut cursor = Cursor {
-            text_files: &self.text_files,
+            epoch: &self,
             metadata_cursor,
             parent_ref_cursor,
             child_ref_cursor,
@@ -1324,6 +1324,11 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    pub fn base_path(&self) -> Result<Option<PathBuf>, Error> {
+        let metadata = self.metadata_cursor.item().ok_or(Error::CursorExhausted)?;
+        Ok(self.epoch.base_path(metadata.file_id))
+    }
+
     fn descend_into(&mut self, parent_visible: bool, dir_id: FileId) -> bool {
         let mut child_ref_cursor = self.child_ref_cursor.clone();
         child_ref_cursor.seek(&dir_id, SeekBias::Left);
@@ -1363,7 +1368,8 @@ impl<'a> Cursor<'a> {
     }
 
     fn is_modified_file(&self, file_id: FileId) -> bool {
-        self.text_files
+        self.epoch
+            .text_files
             .get(&file_id)
             .map_or(false, |f| f.is_modified())
     }
