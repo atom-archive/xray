@@ -72,6 +72,8 @@ struct Entry {
     depth: usize,
     name: String,
     path: String,
+    #[serde(rename = "basePath")]
+    base_path: Option<String>,
     status: memo::FileStatus,
     visible: bool,
 }
@@ -366,11 +368,13 @@ impl WorkTree {
             let mut descend = false;
             if show_deleted || entry.status != memo::FileStatus::Removed {
                 let path = cursor.path().unwrap();
+                let base_path = cursor.base_path().unwrap();
                 entries.push(Entry {
                     file_type: entry.file_type,
                     depth: entry.depth,
                     name: entry.name.to_string_lossy().into_owned(),
                     path: path.to_string_lossy().into_owned(),
+                    base_path: base_path.map(|p| p.to_string_lossy().into_owned()),
                     status: entry.status,
                     visible: entry.visible,
                 });

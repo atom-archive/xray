@@ -87,6 +87,7 @@ Each returned entry has the following fields:
 - `depth`: The length of the path leading to this entry.
 - `name`: The entry's name.
 - `path`: The entry's path.
+- `basePath`: The entry's original path at the beginning of the commit.
 - `type`: The type of this file (`"File"` or `"Directory"`)
 - `status`: How this path has changed since the base commit (`"New"`, `"Renamed"`, `"Removed"`, `"Modified"`, `"RenamedAndModified"`, or `"Unchanged"`)
 - `visible`: Whether or not this file is currently visible (not deleted).
