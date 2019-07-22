@@ -1,3 +1,5 @@
+**Attention:** GitHub has decided not to move forward with any aspect of this project. We'll archive the repository in case anybody finds value here, but we don't expect to actively work on this in the foreseeable future. Thanks to everyone for their interest and support.
+
 # Xray
 
 [![Build Status](https://travis-ci.org/atom/xray.svg?branch=master)](https://travis-ci.org/atom/xray)
