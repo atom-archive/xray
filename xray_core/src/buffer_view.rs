@@ -70,6 +70,10 @@ enum BufferViewAction {
     SelectDown,
     SelectLeft,
     SelectRight,
+    SelectTo {
+        row: u32,
+        column: u32,
+    },
     SelectToBeginningOfWord,
     SelectToEndOfWord,
     SelectToBeginningOfLine,
@@ -84,6 +88,7 @@ enum BufferViewAction {
         row: u32,
         column: u32,
         autoscroll: bool,
+        add: bool
     },
 }
 
@@ -270,13 +275,15 @@ impl BufferView {
         Ok(())
     }
 
-    pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool) {
+    pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool, add: bool) {
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
                 // TODO: Clip point or return a result.
                 let anchor = buffer.anchor_before_point(position).unwrap();
-                selections.clear();
+                if !add {
+                    selections.clear();
+                }
                 selections.push(Selection {
                     start: anchor.clone(),
                     end: anchor,
@@ -510,6 +517,20 @@ impl BufferView {
         self.autoscroll_to_cursor(false);
     }
 
+    pub fn select_to(&mut self, position: Point) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                if let Some(selection) = selections.last_mut() {
+                    let anchor = buffer.anchor_before_point(position).unwrap();
+                    selection.set_head(buffer, anchor);
+                    selection.goal_column = None;
+                }
+            })
+            .unwrap();
+        self.autoscroll_to_cursor(false);
+    }
+
     pub fn move_up(&mut self) {
         self.buffer
             .borrow_mut()
@@ -658,7 +679,7 @@ impl BufferView {
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
+                if let Some(selection) = selections.last_mut() {
                     let old_head = buffer.point_for_anchor(selection.head()).unwrap();
                     let new_start = movement::beginning_of_word(buffer, old_head);
                     let new_end = movement::end_of_word(buffer, new_start);
@@ -744,7 +765,7 @@ impl BufferView {
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
                 let max_point = buffer.max_point();
-                for selection in selections.iter_mut() {
+                if let Some(selection) = selections.last_mut() {
                     let old_head = buffer.point_for_anchor(selection.head()).unwrap();
                     let new_start = movement::beginning_of_line(old_head);
                     let new_end = cmp::min(Point::new(new_start.row + 1, 0), max_point);
@@ -1087,6 +1108,10 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectDown) => self.select_down(),
             Ok(BufferViewAction::SelectLeft) => self.select_left(),
             Ok(BufferViewAction::SelectRight) => self.select_right(),
+            Ok(BufferViewAction::SelectTo {
+                row,
+                column
+            }) => self.select_to(Point::new(row, column)),
             Ok(BufferViewAction::SelectToBeginningOfWord) => self.select_to_beginning_of_word(),
             Ok(BufferViewAction::SelectToEndOfWord) => self.select_to_end_of_word(),
             Ok(BufferViewAction::SelectToBeginningOfLine) => self.select_to_beginning_of_line(),
@@ -1101,7 +1126,8 @@ impl View for BufferView {
                 row,
                 column,
                 autoscroll,
-            }) => self.set_cursor_position(Point::new(row, column), autoscroll),
+                add
+            }) => self.set_cursor_position(Point::new(row, column), autoscroll, add),
             Err(action) => eprintln!("Unrecognized action {:?}", action),
         }
     }
@@ -1301,6 +1327,27 @@ mod tests {
         editor.move_up();
         editor.move_up();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+
+        // Select to a direct point in front of cursor position
+        editor.select_to(Point::new(1, 0));
+        assert_eq!(render_selections(&editor), vec![selection((0, 1), (1, 0))]);
+        editor.move_right(); // cancel selection
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_right();
+        editor.move_right();
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 1)]);
+
+        // Selection can even go to a point before the cursor (with reverse)
+        editor.select_to(Point::new(0, 0));
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 0), (2, 1))]);
+
+        // A selection can switch to a new point and the selection will update
+        editor.select_to(Point::new(0, 3));
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 3), (2, 1))]);
+
+        // A selection can even swing around the cursor without having to unselect
+        editor.select_to(Point::new(2, 3));
+        assert_eq!(render_selections(&editor), vec![selection((2, 1), (2, 3))]);
     }
 
     #[test]
@@ -1481,11 +1528,11 @@ mod tests {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(&[0..0], "abc.def---ghi");
 
-        editor.set_cursor_position(Point::new(0, 5), false);
+        editor.set_cursor_position(Point::new(0, 5), false, false);
         editor.select_word();
         assert_eq!(render_selections(&editor), vec![selection((0, 4), (0, 7))]);
 
-        editor.set_cursor_position(Point::new(0, 8), false);
+        editor.set_cursor_position(Point::new(0, 8), false, false);
         editor.select_word();
         assert_eq!(render_selections(&editor), vec![selection((0, 7), (0, 10))]);
     }
@@ -1495,11 +1542,11 @@ mod tests {
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
 
-        editor.set_cursor_position(Point::new(0, 2), false);
+        editor.set_cursor_position(Point::new(0, 2), false, false);
         editor.select_line();
         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
 
-        editor.set_cursor_position(Point::new(2, 1), false);
+        editor.set_cursor_position(Point::new(2, 1), false, false);
         editor.select_line();
         assert_eq!(render_selections(&editor), vec![selection((2, 0), (2, 3))]);
     }
@@ -1755,8 +1802,56 @@ mod tests {
             ]
         );
 
-        editor.set_cursor_position(Point::new(1, 2), false);
+        editor.set_cursor_position(Point::new(1, 2), false, false);
         assert_eq!(render_selections(&editor), vec![empty_selection(1, 2)]);
+    }
+
+    #[test]
+    fn test_multi_cursor_selections() {
+        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        editor
+            .buffer
+            .borrow_mut()
+            .edit(&[0..0], "abcd\nefgh\nijkl\nmnop");
+        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+        editor.move_right();
+        editor.move_right();
+
+        // Add a second cursor
+        editor.set_cursor_position(Point::new(1, 2), false, true);
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                empty_selection(0, 2),
+                empty_selection(1, 2),
+            ]
+        );
+
+        // Add a third cursor and select the work
+        editor.set_cursor_position(Point::new(2, 2), false, true);
+        editor.select_word();
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                empty_selection(0, 2),
+                empty_selection(1, 2),
+                selection((2, 0), (2, 4)),
+            ]
+        );
+
+        // Add a fourth cursor and select the line
+        editor.set_cursor_position(Point::new(3, 2), false, true);
+        editor.select_line();
+        assert_eq!(
+            render_selections(&editor),
+            vec![
+                empty_selection(0, 2),
+                empty_selection(1, 2),
+                selection((2, 0), (2, 4)),
+                selection((3, 0), (3, 4)),
+            ]
+        );
     }
 
     #[test]
